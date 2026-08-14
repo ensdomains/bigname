@@ -12,7 +12,7 @@ use anyhow::Result;
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput as AdapterBatchInput, DiscoveryRuleInput, ManifestInput,
     RawBlockInput as AdapterRawBlockInput, RawLogInput as AdapterRawLogInput,
-    interpret_schema_v2_batch,
+    interpret_schema_v2_batch, seam::REDO_RESOLVER_EVIDENCE_SELECT_SQL,
 };
 use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, RunMode as InterpretRunMode,
@@ -8224,6 +8224,128 @@ async fn resource_permission_emitter_keeps_existing_pointer_resolver_passthrough
 }
 
 #[tokio::test]
+async fn window_alias_change_denies_resolver_passthrough() -> Result<()> {
+    assert_window_resolver_event_denies_passthrough("alias").await
+}
+
+#[tokio::test]
+async fn window_resolver_change_denies_resolver_passthrough() -> Result<()> {
+    assert_window_resolver_event_denies_passthrough("resolver").await
+}
+
+async fn assert_window_resolver_event_denies_passthrough(event_kind: &str) -> Result<()> {
+    let incremental = ScratchDatabase::create(&format!(
+        "production_project_{event_kind}_denies_passthrough"
+    ))
+    .await?;
+    let fresh = ScratchDatabase::create(&format!(
+        "production_project_{event_kind}_denies_passthrough_fresh"
+    ))
+    .await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_project_fixture(pool).await?;
+        insert_lineage_block(pool, CHAIN, 4).await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    sqlx::query(
+        "UPDATE resolver_current
+         SET declared_summary = declared_summary || '{\"passthrough_guard\":true}'::jsonb
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .execute(incremental.pool())
+    .await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        match event_kind {
+            "alias" => {
+                insert_event(
+                    pool,
+                    CHAIN,
+                    4,
+                    Some("ens:0xalice"),
+                    Some(RESOURCE),
+                    "AliasChanged",
+                    "ens_v2_resolver_l1",
+                    json!({
+                        "resolver":RESOLVER,
+                        "active":true,
+                        "alias_state":"active",
+                        "from_name":"alice.eth",
+                        "from_namehash":"0xalice",
+                        "to_name":"profile.alice.eth",
+                        "to_namehash":"0xprofile-alice",
+                        "to_logical_name_id":"ens:0xprofile-alice",
+                        "to_resource_id":RESOURCE
+                    }),
+                    json!({"emitting_address":RESOLVER}),
+                )
+                .await?;
+                let alias_family: String = sqlx::query_scalar(
+                    "SELECT source_family FROM normalized_events
+                     WHERE chain_id = $1 AND block_number = 4
+                       AND event_kind = 'AliasChanged'",
+                )
+                .bind(CHAIN)
+                .fetch_one(pool)
+                .await?;
+                assert_eq!(
+                    alias_family, "ens_v2_resolver_l1",
+                    "alias denial must exercise the admitted resolver family"
+                );
+            }
+            "resolver" => {
+                insert_event(
+                    pool,
+                    CHAIN,
+                    4,
+                    Some("ens:0xalice"),
+                    Some(RESOURCE),
+                    "ResolverChanged",
+                    "ens_v1_registry_l1",
+                    json!({"resolver":RESOLVER}),
+                    json!({}),
+                )
+                .await?;
+            }
+            unexpected => panic!("unexpected resolver event kind {unexpected}"),
+        }
+    }
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    let incremental_row = resolver_projection_row(incremental.pool(), RESOLVER).await?;
+    let fresh_row = resolver_projection_row(fresh.pool(), RESOLVER).await?;
+    assert!(
+        fresh_row
+            .as_ref()
+            .and_then(|row| row.pointer("/declared_summary/passthrough_guard"))
+            .is_none()
+    );
+    assert_eq!(
+        incremental_row, fresh_row,
+        "window {event_kind} event incorrectly carried the old resolver summary through"
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn record_only_shared_resolver_does_not_republish_permission_history_resources() -> Result<()>
 {
     let scratch = ScratchDatabase::create("production_project_record_only_shared_resolver").await?;
@@ -8982,6 +9104,273 @@ async fn redo_drops_v2_resolver_after_its_final_permission_tie_is_retracted() ->
 }
 
 #[tokio::test]
+async fn interpret_redo_retracts_v2_permission_family_like_fresh_rebuild() -> Result<()> {
+    const SURVIVING_RESOURCE: &str = "00000000-0000-0000-0000-0000000000da";
+
+    let incremental = ScratchDatabase::create("production_project_v2_interpret_redo").await?;
+    let fresh = ScratchDatabase::create("production_project_v2_interpret_redo_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_v2_permission_inverse_fixture(pool).await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 3, 'canonical')",
+        )
+        .bind(Uuid::parse_str(SURVIVING_RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 3))
+        .execute(pool)
+        .await?;
+        for powers in [json!(["resolver_control"]), json!([])] {
+            insert_event(
+                pool,
+                CHAIN,
+                3,
+                None,
+                Some(SURVIVING_RESOURCE),
+                "PermissionChanged",
+                "ens_v2_resolver_l1",
+                json!({
+                    "subject":OWNER,
+                    "scope":{
+                        "kind":"resolver",
+                        "chain_id":CHAIN,
+                        "resolver_address":V2_INVERSE_RESOLVER
+                    },
+                    "effective_powers":powers,
+                    "grant_source":{"kind":"fixture"},
+                    "revocation_source":{"kind":"fixture"},
+                    "inheritance_path":[],
+                    "transfer_behavior":"retain"
+                }),
+                json!({}),
+            )
+            .await?;
+        }
+        run_project(pool, CHAIN, None, RunMode::Normal, 0, 3).await?;
+        let outcome = InterpretEngine::new(pool.clone())
+            .run_batch(InterpretRequest {
+                chain_id: CHAIN.into(),
+                from_block: 1,
+                to_block: 2,
+                resume_current: None,
+                mode: InterpretRunMode::Redo,
+            })
+            .await?;
+        assert!(outcome.complete);
+    }
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        1,
+        2,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        permission_projection_snapshot(incremental.pool()).await?,
+        permission_projection_snapshot(fresh.pool()).await?,
+        "v2-family Interpret redo diverged from fresh permission projections"
+    );
+    let incremental_resolver =
+        resolver_projection_row(incremental.pool(), V2_INVERSE_RESOLVER).await?;
+    let fresh_resolver = resolver_projection_row(fresh.pool(), V2_INVERSE_RESOLVER).await?;
+    assert_eq!(
+        fresh_resolver
+            .as_ref()
+            .and_then(|row| row.pointer("/declared_summary/classification/source_family")),
+        Some(&json!("ens_v2_resolver_l1"))
+    );
+    assert_eq!(
+        incremental_resolver, fresh_resolver,
+        "v2-family redo failed to stage the surviving family representative"
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn full_rebuild_consumes_redo_evidence_before_overlapping_capture() -> Result<()> {
+    const FIRST: &str = "0x00000000000000000000000000000000000000e1";
+    const SECOND: &str = "0x00000000000000000000000000000000000000e2";
+
+    let scratch = ScratchDatabase::create("production_project_full_consumes_redo_evidence").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        None,
+        None,
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        json!({"resolver":FIRST}),
+        json!({}),
+    )
+    .await?;
+    let event_identity: String = sqlx::query_scalar(
+        "SELECT event_identity FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'ResolverChanged'
+           AND lower(after_state ->> 'resolver') = lower($2)
+         ORDER BY normalized_event_id DESC LIMIT 1",
+    )
+    .bind(CHAIN)
+    .bind(FIRST)
+    .fetch_one(scratch.pool())
+    .await?;
+    capture_resolver_redo_evidence(scratch.pool(), CHAIN, 2, 2).await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let consumed_after_full: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS (
+             SELECT 1 FROM project_redo_resolver_evidence
+             WHERE chain_id = $1 AND event_identity = $2
+         )",
+    )
+    .bind(CHAIN)
+    .bind(&event_identity)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = jsonb_build_object('resolver', lower($2))
+         WHERE chain_id = $1 AND event_identity = $3",
+    )
+    .bind(CHAIN)
+    .bind(SECOND)
+    .bind(&event_identity)
+    .execute(scratch.pool())
+    .await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    capture_resolver_redo_evidence(scratch.pool(), CHAIN, 2, 2).await?;
+    let captured_address: Option<String> = sqlx::query_scalar(
+        "SELECT after_resolver_address FROM project_redo_resolver_evidence
+         WHERE chain_id = $1 AND event_identity = $2",
+    )
+    .bind(CHAIN)
+    .bind(&event_identity)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE chain_id = $1 AND event_identity = $2",
+    )
+    .bind(CHAIN)
+    .bind(&event_identity)
+    .execute(scratch.pool())
+    .await?;
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    let second_survived: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)
+         )",
+    )
+    .bind(CHAIN)
+    .bind(SECOND)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        (consumed_after_full, captured_address, second_survived),
+        (true, Some(SECOND.into()), false),
+        "full rebuild left stale redo evidence ahead of an overlapping capture"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn redo_same_identity_different_resolver_retracts_the_losing_address() -> Result<()> {
+    const LOSING: &str = "0x00000000000000000000000000000000000000e3";
+    const WINNING: &str = "0x00000000000000000000000000000000000000e4";
+
+    let incremental = ScratchDatabase::create("production_project_redo_changed_resolver").await?;
+    let fresh = ScratchDatabase::create("production_project_redo_changed_resolver_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_project_fixture(pool).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            2,
+            None,
+            None,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({"resolver":LOSING}),
+            json!({}),
+        )
+        .await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    capture_resolver_redo_evidence(incremental.pool(), CHAIN, 2, 2).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_build_object('resolver', lower($2))
+             WHERE chain_id = $1 AND event_kind = 'ResolverChanged'
+               AND lower(after_state ->> 'resolver') = lower($3)",
+        )
+        .bind(CHAIN)
+        .bind(WINNING)
+        .bind(LOSING)
+        .execute(pool)
+        .await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    let incremental_rows = (
+        resolver_projection_row(incremental.pool(), LOSING).await?,
+        resolver_projection_row(incremental.pool(), WINNING).await?,
+    );
+    let fresh_rows = (
+        resolver_projection_row(fresh.pool(), LOSING).await?,
+        resolver_projection_row(fresh.pool(), WINNING).await?,
+    );
+    assert!(fresh_rows.0.is_none());
+    assert!(fresh_rows.1.is_some());
+    assert_eq!(
+        incremental_rows, fresh_rows,
+        "same-identity resolver replacement kept the losing address published"
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn scoped_v2_permission_revoke_does_not_retain_pre_swap_summary_row() -> Result<()> {
     let incremental = ScratchDatabase::create("production_project_v2_permission_revoke").await?;
     let fresh = ScratchDatabase::create("production_project_v2_permission_revoke_fresh").await?;
@@ -9241,6 +9630,22 @@ async fn projection_counts(pool: &PgPool) -> Result<(i64, i64, i64, i64, i64, i6
             (SELECT count(*) FROM resolver_current),
             (SELECT count(*) FROM address_names_current),
             (SELECT count(*) FROM primary_names_current)",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn permission_projection_snapshot(pool: &PgPool) -> Result<(Value, Value)> {
+    Ok(sqlx::query_as(
+        "SELECT
+             COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row) ORDER BY resource_id, subject, scope)
+                 FROM permissions_current row
+             ), '[]'::jsonb),
+             COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row) ORDER BY resource_id)
+                 FROM permissions_current_resource_summary row
+             ), '[]'::jsonb)",
     )
     .fetch_one(pool)
     .await?)
@@ -11742,64 +12147,21 @@ async fn capture_resolver_redo_evidence(
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
-    sqlx::query(
+    let statement = format!(
         r#"INSERT INTO project_redo_resolver_evidence (
                chain_id, event_identity, block_number, event_kind,
                source_family, resource_id,
                before_resolver_address, after_resolver_address
            )
-           SELECT event.chain_id, event.event_identity, event.block_number, event.event_kind,
-                  event.source_family, event.resource_id,
-                  CASE
-                      WHEN event.event_kind = 'ResolverChanged' THEN
-                          NULLIF(lower(event.before_state ->> 'resolver'), '')
-                      WHEN event.event_kind = 'AliasChanged' THEN
-                          NULLIF(lower(COALESCE(
-                              event.before_state ->> 'resolver',
-                              event.raw_fact_ref ->> 'emitting_address'
-                          )), '')
-                      WHEN event.before_state #>> '{scope,kind}' = 'resolver' THEN
-                          NULLIF(lower(event.before_state #>> '{scope,resolver_address}'), '')
-                  END,
-                  CASE
-                      WHEN event.event_kind = 'ResolverChanged' THEN
-                          NULLIF(lower(event.after_state ->> 'resolver'), '')
-                      WHEN event.event_kind = 'AliasChanged' THEN
-                          NULLIF(lower(COALESCE(
-                              event.after_state ->> 'resolver',
-                              event.raw_fact_ref ->> 'emitting_address'
-                          )), '')
-                      WHEN event.after_state #>> '{scope,kind}' = 'resolver' THEN
-                          NULLIF(lower(event.after_state #>> '{scope,resolver_address}'), '')
-                  END
-           FROM normalized_events event
-           WHERE event.chain_id = $1
-             AND event.block_number BETWEEN $2 AND $3
-             AND event.consumer_visibility = 'activated'
-             AND event.event_kind IN ('PermissionChanged', 'ResolverChanged', 'AliasChanged')
-             AND (
-                 event.before_state ->> 'resolver' IS NOT NULL
-                 OR event.after_state ->> 'resolver' IS NOT NULL
-                 OR (
-                     event.event_kind = 'AliasChanged'
-                     AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
-                 )
-                 OR (
-                     event.before_state #>> '{scope,kind}' = 'resolver'
-                     AND event.before_state #>> '{scope,resolver_address}' IS NOT NULL
-                 )
-                 OR (
-                     event.after_state #>> '{scope,kind}' = 'resolver'
-                     AND event.after_state #>> '{scope,resolver_address}' IS NOT NULL
-                 )
-             )
+           {REDO_RESOLVER_EVIDENCE_SELECT_SQL}
            ON CONFLICT (chain_id, event_identity) DO NOTHING"#,
-    )
-    .bind(chain_id)
-    .bind(from_block)
-    .bind(to_block)
-    .execute(pool)
-    .await?;
+    );
+    sqlx::query(&statement)
+        .bind(chain_id)
+        .bind(from_block)
+        .bind(to_block)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
