@@ -22,7 +22,13 @@ use sqlx::PgPool;
 
 use crate::{budgets::GateBudgets, database};
 
+mod deadline;
 mod publication;
+mod report;
+mod verdict;
+use deadline::{InterpretWalkMetrics, InterpretWalkOutcome};
+use report::{scale_failure_report, walk_failure_report};
+use verdict::{database_instance_identity_failures, projection_scale_failures};
 
 const PROJECTION_NAME_COUNT_SQL: &str = "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1 AND support_status = 'supported'";
 const PROC_SELF_STATUS: &str = "/proc/self/status";
@@ -61,7 +67,11 @@ pub struct IndexingReport {
     pub project_rebuild_max_seconds: u64,
     pub project_rebuild_completed: bool,
     pub project_hydration_updated_rows: usize,
+    pub interpret_walk_completed: bool,
     pub interpret_walk_seconds: f64,
+    pub interpret_walk_deadline_seconds: u64,
+    pub interpret_walk_deadline_multiplier: u64,
+    pub interpret_walk_max_seconds: u64,
     pub interpret_blocks_per_hour: f64,
     pub interpret_min_blocks_per_hour: u64,
     pub interpret_peak_rss_mib: f64,
@@ -125,8 +135,43 @@ pub async fn run(
     .context("published-head re-apply and hydration exceeded twice their budget")??;
     let project_head_reapply_ms = reapply_started.elapsed().as_millis();
 
-    let interpret_walk =
-        run_interpret_walk(pool, input, budgets.interpret_state_cache_entries).await?;
+    let walk_deadline = deadline::from_throughput_floor(
+        walk_blocks,
+        budgets.interpret_min_blocks_per_hour,
+        budgets.interpret_walk_deadline_multiplier,
+        budgets.interpret_walk_max_seconds,
+    );
+    let interpret_walk = run_interpret_walk(
+        pool,
+        input,
+        budgets.interpret_state_cache_entries,
+        walk_deadline,
+        budgets.interpret_min_blocks_per_hour,
+        budgets.interpret_walk_deadline_multiplier,
+        budgets.interpret_walk_max_seconds,
+    )
+    .await?;
+    let interpret_walk = match interpret_walk {
+        InterpretWalkOutcome::Completed(metrics) => metrics,
+        InterpretWalkOutcome::TimedOut { metrics, failure } => {
+            let postflight_database_instance_identity =
+                database::database_instance_identity(pool).await?;
+            return Ok(walk_failure_report(
+                input,
+                budgets,
+                database_instance_identity,
+                postflight_database_instance_identity,
+                name_current_rows,
+                raw_logs,
+                density,
+                project_head_reapply_ms,
+                project_head_reapply_hydration_updated_rows,
+                walk_deadline,
+                metrics,
+                failure,
+            ));
+        }
+    };
     let interpret_walk_seconds = interpret_walk.elapsed_seconds;
     let peak_rss_mib = interpret_walk.budget_peak_rss_mib;
     let interpret_blocks_per_hour =
@@ -214,7 +259,11 @@ pub async fn run(
         project_rebuild_max_seconds: budgets.project_rebuild_max_seconds,
         project_rebuild_completed,
         project_hydration_updated_rows,
+        interpret_walk_completed: true,
         interpret_walk_seconds,
+        interpret_walk_deadline_seconds: walk_deadline.as_secs(),
+        interpret_walk_deadline_multiplier: budgets.interpret_walk_deadline_multiplier,
+        interpret_walk_max_seconds: budgets.interpret_walk_max_seconds,
         interpret_blocks_per_hour,
         interpret_min_blocks_per_hour: budgets.interpret_min_blocks_per_hour,
         interpret_peak_rss_mib: peak_rss_mib,
@@ -225,56 +274,6 @@ pub async fn run(
         green: failures.is_empty(),
         failures,
     })
-}
-
-fn scale_failure_report(
-    input: &IndexingInput,
-    budgets: &GateBudgets,
-    name_current_rows: u64,
-    database_instance_identity: String,
-    postflight_database_instance_identity: String,
-) -> IndexingReport {
-    let mut failures = vec![format!(
-        "name_current has {name_current_rows} rows; release profile requires {} before projection benchmarking",
-        budgets.project_min_name_current_rows
-    )];
-    failures.extend(database_instance_identity_failures(
-        &database_instance_identity,
-        &postflight_database_instance_identity,
-    ));
-    IndexingReport {
-        preflight_passed: false,
-        database_instance_identity,
-        postflight_database_instance_identity,
-        chain_id: input.chain_id.clone(),
-        head_block: input.head_block,
-        walk_from_block: input.walk_from_block,
-        walk_to_block: input.walk_to_block,
-        min_walk_blocks: budgets.interpret_min_walk_blocks,
-        raw_logs: 0,
-        raw_logs_per_1000_blocks: 0.0,
-        min_raw_logs_per_1000_blocks: budgets.dense_min_raw_logs_per_1000_blocks,
-        pre_rebuild_name_current_rows: name_current_rows,
-        post_rebuild_name_current_rows: 0,
-        min_name_current_rows: budgets.project_min_name_current_rows,
-        project_head_reapply_ms: 0,
-        project_head_reapply_max_ms: budgets.project_head_reapply_max_ms,
-        project_head_reapply_hydration_updated_rows: 0,
-        project_rebuild_seconds: 0.0,
-        project_rebuild_max_seconds: budgets.project_rebuild_max_seconds,
-        project_rebuild_completed: false,
-        project_hydration_updated_rows: 0,
-        interpret_walk_seconds: 0.0,
-        interpret_blocks_per_hour: 0.0,
-        interpret_min_blocks_per_hour: budgets.interpret_min_blocks_per_hour,
-        interpret_peak_rss_mib: 0.0,
-        interpret_kernel_hwm_rss_mib: 0.0,
-        interpret_sampled_peak_rss_mib: 0.0,
-        interpret_max_peak_rss_mib: budgets.interpret_max_peak_rss_mib,
-        interpret_state_cache_entries: budgets.interpret_state_cache_entries,
-        green: false,
-        failures,
-    }
 }
 
 async fn run_project_head_reapply(
@@ -341,18 +340,15 @@ fn require_completed_hydration(hydration: bigname_project::HydrationOutcome) -> 
     Ok(hydration.updated_rows)
 }
 
-struct InterpretWalkMetrics {
-    elapsed_seconds: f64,
-    budget_peak_rss_mib: f64,
-    kernel_hwm_rss_mib: f64,
-    sampled_peak_rss_mib: f64,
-}
-
 async fn run_interpret_walk(
     pool: &PgPool,
     input: &IndexingInput,
     state_cache_entries: usize,
-) -> Result<InterpretWalkMetrics> {
+    walk_deadline: Duration,
+    minimum_blocks_per_hour: u64,
+    deadline_multiplier: u64,
+    maximum_seconds: u64,
+) -> Result<InterpretWalkOutcome> {
     let _hwm_reset_guard = HWM_RESET_LOCK.lock().await;
     reset_peak_rss_hwm()?;
     let initial_rss_kib = rss_kib().context(
@@ -377,7 +373,7 @@ async fn run_interpret_walk(
     let engine = InterpretEngine::with_state_cache_capacity(pool.clone(), state_cache_entries);
     let mut resume_current: Option<InterpretMarker> = None;
     let started = Instant::now();
-    let walk_result: Result<()> = async {
+    let walk_result: Option<Result<()>> = deadline::complete_within(walk_deadline, async {
         loop {
             let outcome = engine
                 .run_batch(InterpretRequest {
@@ -395,20 +391,39 @@ async fn run_interpret_walk(
             resume_current = Some(outcome.current);
         }
         Ok(())
-    }
+    })
     .await;
     let elapsed = started.elapsed().as_secs_f64();
     running.store(false, Ordering::Relaxed);
     sampler.await.context("Interpret RSS sampler failed")?;
-    walk_result?;
+    let timed_out = match walk_result {
+        Some(result) => {
+            result?;
+            false
+        }
+        None => true,
+    };
     let sampled_peak_kib = peak_kib.load(Ordering::Relaxed);
     let kernel_hwm_kib = peak_rss_hwm_kib()
         .context("failed to read process VmHWM from /proc/self/status after the Interpret walk")?;
-    Ok(InterpretWalkMetrics {
+    let metrics = InterpretWalkMetrics {
         elapsed_seconds: elapsed,
         budget_peak_rss_mib: sampled_peak_kib.max(kernel_hwm_kib) as f64 / 1_024.0,
         kernel_hwm_rss_mib: kernel_hwm_kib as f64 / 1_024.0,
         sampled_peak_rss_mib: sampled_peak_kib as f64 / 1_024.0,
+    };
+    Ok(if timed_out {
+        InterpretWalkOutcome::TimedOut {
+            metrics,
+            failure: deadline::failure(
+                walk_deadline,
+                minimum_blocks_per_hour,
+                deadline_multiplier,
+                maximum_seconds,
+            ),
+        }
+    } else {
+        InterpretWalkOutcome::Completed(metrics)
     })
 }
 
@@ -511,29 +526,6 @@ async fn projection_name_count(pool: &PgPool, chain_id: &str) -> Result<u64> {
         .await
         .context("failed to count selected-chain names during projection benchmarking")?;
     u64::try_from(count).context("name_current returned a negative row count")
-}
-
-fn projection_scale_failures(pre_rebuild: u64, post_rebuild: u64, minimum: u64) -> Vec<String> {
-    let mut failures = Vec::new();
-    if pre_rebuild < minimum {
-        failures.push(format!(
-            "name_current had {pre_rebuild} supported rows before rebuild; release profile requires {minimum}"
-        ));
-    }
-    if post_rebuild < minimum {
-        failures.push(format!(
-            "name_current has {post_rebuild} supported rows after rebuild; release profile requires {minimum}"
-        ));
-    }
-    failures
-}
-
-fn database_instance_identity_failures(preflight: &str, postflight: &str) -> Vec<String> {
-    if preflight == postflight {
-        Vec::new()
-    } else {
-        vec!["database instance identity changed during the indexing benchmark".to_owned()]
-    }
 }
 
 #[cfg(test)]

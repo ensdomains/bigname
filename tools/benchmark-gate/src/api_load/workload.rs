@@ -17,6 +17,14 @@ pub(super) struct RequestSpec {
     pub(super) body: Option<Value>,
 }
 
+const RESOLVER_INCLUDE_VARIANTS: [Option<&str>; 5] = [
+    None,
+    Some("nodes"),
+    Some("aliases"),
+    Some("roles"),
+    Some("events"),
+];
+
 pub(super) fn request_variants(
     base: &Url,
     corpus: &Corpus,
@@ -42,15 +50,15 @@ pub(super) fn request_variants(
                 } else {
                     "text:avatar,text:description"
                 };
-                requests.push(get(
-                    base,
-                    &["v2", "names", name, "records"],
-                    &[
-                        ("source", "indexed"),
-                        ("keys", keys),
-                        ("namespace", namespace),
-                    ],
-                )?);
+                let mut query = vec![
+                    ("source", "indexed"),
+                    ("keys", keys),
+                    ("namespace", namespace.as_str()),
+                ];
+                if index % 2 == 0 {
+                    query.push(("include", "inventory"));
+                }
+                requests.push(get(base, &["v2", "names", name, "records"], &query)?);
             }
         }
         "subnames" => {
@@ -60,11 +68,14 @@ pub(super) fn request_variants(
                 &corpus.parents
             };
             for (index, (namespace, parent)) in parents.iter().enumerate() {
-                requests.push(get(
-                    base,
-                    &["v2", "names", parent, "subnames"],
-                    &[("page_size", page_size(index)), ("namespace", namespace)],
-                )?);
+                let mut query = vec![
+                    ("page_size", page_size(index)),
+                    ("namespace", namespace.as_str()),
+                ];
+                if index % 2 == 0 {
+                    query.push(("include", "counts"));
+                }
+                requests.push(get(base, &["v2", "names", parent, "subnames"], &query)?);
             }
         }
         "name_history" => {
@@ -135,16 +146,23 @@ pub(super) fn request_variants(
                 "resolver endpoint has no real resolver corpus"
             );
             for (index, target) in corpus.resolvers.iter().enumerate() {
-                requests.push(get(
-                    base,
-                    &[
-                        "v2",
-                        "resolvers",
-                        numeric_chain_id(&target.chain_id)?,
-                        &target.resolver_address,
-                    ],
-                    &[("page_size", page_size(index))],
-                )?);
+                for (variant, include) in RESOLVER_INCLUDE_VARIANTS.into_iter().enumerate() {
+                    let request_index = index * RESOLVER_INCLUDE_VARIANTS.len() + variant;
+                    let mut query = vec![("page_size", page_size(request_index))];
+                    if let Some(include) = include {
+                        query.push(("include", include));
+                    }
+                    requests.push(get(
+                        base,
+                        &[
+                            "v2",
+                            "resolvers",
+                            numeric_chain_id(&target.chain_id)?,
+                            &target.resolver_address,
+                        ],
+                        &query,
+                    )?);
+                }
             }
         }
         "namespace" => {
@@ -224,11 +242,11 @@ fn permission_requests(base: &Url, corpus: &Corpus, requests: &mut Vec<RequestSp
             .collect::<Vec<_>>()
     };
     for (index, address) in subjects.into_iter().enumerate() {
-        requests.push(get(
-            base,
-            &["v2", "permissions"],
-            &[("address", address), ("page_size", page_size(index))],
-        )?);
+        let mut query = vec![("address", address), ("page_size", page_size(index))];
+        if index % 2 == 0 {
+            query.push(("include", "lineage"));
+        }
+        requests.push(get(base, &["v2", "permissions"], &query)?);
     }
     Ok(())
 }
@@ -244,19 +262,16 @@ fn address_name_requests(
             ("namespace", namespace.as_str()),
             ("relation", public_relation(relation)?),
             ("q", query.as_str()),
-            (
-                "sort",
-                if index % 2 == 0 {
-                    "name"
-                } else {
-                    "registered_at"
-                },
-            ),
-            ("order", if index % 3 == 0 { "desc" } else { "asc" }),
+            ("sort", ["name", "expires_at", "registered_at"][index % 3]),
+            ("order", if (index / 3) % 2 == 0 { "asc" } else { "desc" }),
             ("page_size", page_size(index)),
         ];
-        match (index / 2) % 4 {
-            1 => query_pairs.push(("include", "role_summary")),
+        match (index / 6) % 4 {
+            0 => query_pairs.push(("dedupe", "name")),
+            1 => {
+                query_pairs.push(("dedupe", "name"));
+                query_pairs.push(("include", "role_summary"));
+            }
             2 => query_pairs.push(("dedupe", "registration")),
             3 => {
                 query_pairs.push(("include", "role_summary"));

@@ -49,6 +49,8 @@ pub struct GateBudgets {
     pub project_head_reapply_max_ms: u64,
     pub project_rebuild_max_seconds: u64,
     pub interpret_min_blocks_per_hour: u64,
+    pub interpret_walk_deadline_multiplier: u64,
+    pub interpret_walk_max_seconds: u64,
     pub interpret_max_peak_rss_mib: u64,
     pub interpret_state_cache_entries: usize,
     pub interpret_min_walk_blocks: u64,
@@ -130,6 +132,14 @@ impl GateBudgets {
             (
                 "interpret_min_blocks_per_hour",
                 self.interpret_min_blocks_per_hour,
+            ),
+            (
+                "interpret_walk_deadline_multiplier",
+                self.interpret_walk_deadline_multiplier,
+            ),
+            (
+                "interpret_walk_max_seconds",
+                self.interpret_walk_max_seconds,
             ),
             (
                 "interpret_max_peak_rss_mib",
@@ -217,6 +227,8 @@ mod tests {
         let budgets = BudgetsFile::load(&path).expect("checked-in budgets must be valid");
         assert_eq!(budgets.production.api_target_qps, 2_000);
         assert_eq!(budgets.production.project_head_reapply_max_ms, 1_000);
+        assert_eq!(budgets.production.interpret_walk_deadline_multiplier, 2);
+        assert_eq!(budgets.smoke.interpret_walk_max_seconds, 30);
         assert_eq!(budgets.production.project_min_name_current_rows, 3_000_000);
         assert_eq!(budgets.production.api_min_name_current_rows, 3_000_000);
         assert_eq!(

@@ -2,8 +2,10 @@ use super::*;
 
 fn corpus_with_address_names() -> Corpus {
     Corpus {
-        names: vec![("ens".to_owned(), "one.eth".to_owned())],
-        address_names: (0..12)
+        names: (0..4)
+            .map(|index| ("ens".to_owned(), format!("name-{index}.eth")))
+            .collect(),
+        address_names: (0..24)
             .map(|index| {
                 (
                     format!("0x{index:040x}"),
@@ -13,15 +15,82 @@ fn corpus_with_address_names() -> Corpus {
                 )
             })
             .collect(),
-        parents: Vec::new(),
-        permission_subjects: Vec::new(),
+        parents: (0..4)
+            .map(|index| ("ens".to_owned(), format!("parent-{index}.eth")))
+            .collect(),
+        permission_subjects: (0..4).map(|index| format!("0x{index:040x}")).collect(),
         primary_names: Vec::new(),
-        resolvers: Vec::new(),
+        resolvers: vec![ResolverTarget {
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            resolver_address: "0x00000000000000000000000000000000000000ff".to_owned(),
+        }],
         namespaces: vec!["ens".to_owned()],
-        names_by_namespace: [("ens".to_owned(), 1)].into_iter().collect(),
-        parents_by_namespace: Default::default(),
+        names_by_namespace: [("ens".to_owned(), 4)].into_iter().collect(),
+        parents_by_namespace: [("ens".to_owned(), 4)].into_iter().collect(),
         resolver_manifest_coverage: Vec::new(),
     }
+}
+
+fn assert_query_values(endpoint: &str, parameter: &str, expected: &[&str]) {
+    let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+    let corpus = corpus_with_address_names();
+    let requests = request_variants(&base, &corpus, endpoint).unwrap();
+    let actual = requests
+        .iter()
+        .flat_map(|request| request.url.query_pairs())
+        .filter(|(key, _)| key == parameter)
+        .map(|(_, value)| value.into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual,
+        expected.iter().map(|value| (*value).to_owned()).collect(),
+        "{endpoint} must rotate every documented {parameter} value"
+    );
+}
+
+#[test]
+fn records_rotate_inventory_expansion() {
+    assert_query_values("records", "include", &["inventory"]);
+}
+
+#[test]
+fn subnames_rotate_counts_expansion() {
+    assert_query_values("subnames", "include", &["counts"]);
+}
+
+#[test]
+fn permissions_rotate_lineage_expansion() {
+    assert_query_values("permissions", "include", &["lineage"]);
+    let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+    let requests = request_variants(&base, &corpus_with_address_names(), "permissions").unwrap();
+    assert!(
+        requests[0]
+            .url
+            .query_pairs()
+            .any(|(key, value)| key == "include" && value == "lineage")
+    );
+}
+
+#[test]
+fn address_names_rotate_documented_expansion_values() {
+    assert_query_values("address_names", "include", &["role_summary"]);
+    assert_query_values("address_names", "dedupe", &["name", "registration"]);
+    assert_query_values(
+        "address_names",
+        "sort",
+        &["name", "expires_at", "registered_at"],
+    );
+    assert_query_values("address_names", "order", &["asc", "desc"]);
+}
+
+#[test]
+fn resolvers_rotate_every_overview_section() {
+    assert_query_values(
+        "resolver",
+        "include",
+        &["nodes", "aliases", "roles", "events"],
+    );
 }
 
 #[test]
@@ -60,7 +129,10 @@ fn address_name_variants_cover_role_summary_and_registration_dedupe() {
                 .any(|(key, value)| key == "include" && value == "role_summary");
             let dedupe = pairs
                 .iter()
-                .any(|(key, value)| key == "dedupe" && value == "registration");
+                .find(|(key, _)| key == "dedupe")
+                .expect("every address-name request must select a documented dedupe mode")
+                .1
+                .to_string();
             let sort = pairs
                 .iter()
                 .find(|(key, _)| key == "sort")
@@ -70,17 +142,26 @@ fn address_name_variants_cover_role_summary_and_registration_dedupe() {
             ((include, dedupe), sort)
         })
         .collect::<std::collections::BTreeSet<_>>();
-    let expected = [(false, false), (false, true), (true, false), (true, true)]
+    let expected = [
+        (false, "name".to_owned()),
+        (true, "name".to_owned()),
+        (false, "registration".to_owned()),
+        (true, "registration".to_owned()),
+    ]
+    .into_iter()
+    .flat_map(|variant| {
+        [
+            "name".to_owned(),
+            "expires_at".to_owned(),
+            "registered_at".to_owned(),
+        ]
         .into_iter()
-        .flat_map(|variant| {
-            ["name".to_owned(), "registered_at".to_owned()]
-                .into_iter()
-                .map(move |sort| (variant, sort))
-        })
-        .collect();
+        .map(move |sort| (variant.clone(), sort))
+    })
+    .collect();
     assert_eq!(
         variant_sort_pairs, expected,
-        "every address-name enrichment variant must cover both sort paths"
+        "every address-name enrichment variant must cover every documented sort path"
     );
 }
 

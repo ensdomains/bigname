@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, ensure};
 use reqwest::Url;
 
-use super::{RequestSpec, get, numeric_chain_id, page_size, request_variants};
+use super::{RESOLVER_INCLUDE_VARIANTS, RequestSpec, get, numeric_chain_id, request_variants};
 use crate::api_load::{ResolverManifestCoverage, corpus::Corpus};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,7 +37,7 @@ fn record_resolver_request_construction(
     coverage: &mut [ResolverManifestCoverage],
 ) -> Result<()> {
     let mut constructed = BTreeMap::<(&str, &str), usize>::new();
-    for (index, target) in targets.iter().enumerate() {
+    for target in targets {
         let expected = get(
             base,
             &[
@@ -46,24 +46,39 @@ fn record_resolver_request_construction(
                 numeric_chain_id(&target.chain_id)?,
                 &target.resolver_address,
             ],
-            &[("page_size", page_size(index))],
+            &[],
         )?;
-        ensure!(
-            requests.iter().any(|request| request.url == expected.url),
-            "resolver request construction omitted manifest address {} on chain {:?} in family {:?}",
-            target.resolver_address,
-            target.chain_id,
-            target.source_family
-        );
+        for expected_include in RESOLVER_INCLUDE_VARIANTS {
+            ensure!(
+                requests.iter().any(|request| {
+                    request.url.path() == expected.url.path()
+                        && request
+                            .url
+                            .query_pairs()
+                            .find(|(key, _)| key == "include")
+                            .map(|(_, value)| value.into_owned())
+                            .as_deref()
+                            == expected_include
+                }),
+                "resolver request construction omitted include={expected_include:?} for manifest address {} on chain {:?} in family {:?}",
+                target.resolver_address,
+                target.chain_id,
+                target.source_family
+            );
+        }
         *constructed
             .entry((&target.chain_id, &target.source_family))
             .or_default() += 1;
     }
     ensure!(
-        requests.len() == targets.len(),
-        "resolver request construction built {} variants for {} manifest addresses",
+        requests.len()
+            == targets
+                .len()
+                .saturating_mul(RESOLVER_INCLUDE_VARIANTS.len()),
+        "resolver request construction built {} variants for {} manifest addresses and {} include shapes",
         requests.len(),
-        targets.len()
+        targets.len(),
+        RESOLVER_INCLUDE_VARIANTS.len()
     );
     for count in coverage {
         let actual = constructed
@@ -134,7 +149,10 @@ mod tests {
 
         let requests = endpoint_requests(&base, &mut corpus, "resolver").unwrap();
 
-        assert_eq!(requests.len(), corpus.resolvers.len());
+        assert_eq!(
+            requests.len(),
+            corpus.resolvers.len() * RESOLVER_INCLUDE_VARIANTS.len()
+        );
         assert!(
             requests
                 .iter()

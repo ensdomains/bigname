@@ -596,13 +596,16 @@ fn cursor_variants(seed: &RequestSpec, body: &Value) -> Vec<RequestSpec> {
 }
 
 #[cfg(test)]
+mod expansion_cursor_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::budgets::{BudgetProfile, BudgetsFile};
     use serde_json::json;
     use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use workload::{get, post};
+    use workload::get;
 
     mod timing;
 
@@ -611,32 +614,6 @@ mod tests {
         let values = [1, 2, 3, 4, 5];
         assert_eq!(percentile(&values, 50.0), 3.0);
         assert_eq!(percentile(&values, 99.0), 5.0);
-    }
-
-    #[test]
-    fn cursor_variants_cover_lookup_and_nested_resolver_pages() {
-        let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
-        let lookup = post(
-            &base,
-            &["v2", "lookup"],
-            json!({"inputs": [{"address": "0x01"}]}),
-        )
-        .unwrap();
-        let resumed = cursor_variants(
-            &lookup,
-            &json!({"data": [{"page": {"next_cursor": "lookup-next"}}]}),
-        );
-        assert_eq!(
-            resumed[0].body.as_ref().unwrap()["inputs"][0]["cursor"],
-            "lookup-next"
-        );
-
-        let resolver = get(&base, &["v2", "resolvers", "1", "0x01"], &[]).unwrap();
-        let resumed = cursor_variants(
-            &resolver,
-            &json!({"data": {"bound_names": {"page": {"next_cursor": "resolver-next"}}}}),
-        );
-        assert_eq!(resumed[0].url.query(), Some("cursor=resolver-next"));
     }
 
     #[test]

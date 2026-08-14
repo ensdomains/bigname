@@ -73,7 +73,9 @@ database copy because all three operations write derived state:
   window of at least 8 hours, leaving at least 2 hours of headroom; the measured
   wall-clock includes canonical-head record hydration;
 - an Interpret redo over a dense-era range must sustain at least 500,000 blocks
-  per hour;
+  per hour; its wall-clock deadline is the smaller of twice the duration implied
+  by the selected block count and that throughput floor, or the checked-in
+  6-hour cap; smoke uses the same multiplier with a 30-second cap;
 - the dense range must contain at least 100,000 consecutive canonical blocks;
 - that range must contain at least 8,000 retained raw logs per 1,000 blocks;
 - the restored copy must contain at least 3 million supported current name rows
@@ -106,6 +108,13 @@ existing 20 ms RSS sampler peak. The report records both inputs separately for
 diagnosis. It includes the bounded value cache introduced after the 94 GiB
 out-of-memory incident and the smaller protocol-state maps that remain
 resident; it is not merely the cache's estimated JSON size.
+
+If the Interpret walk reaches its wall-clock deadline, the harness stops before
+the full Project rebuild because the cancelled redo may have committed only a
+prefix of its batches. The JSON report records `interpret_walk_completed: false`,
+the effective deadline, its configured multiplier and cap, zero claimed
+throughput, and no rebuild timing. Restore a fresh disposable copy before
+retrying; partial Interpret redo state is not release evidence.
 
 The API half sends each Tier 1 and Tier 2 REST route in
 [`api-v2-routes.md`](../api-v2-routes.md) 2,000 requests per second for 60
@@ -206,6 +215,14 @@ same production-distribution address subjects as the other variants. The search
 workload keeps explicit-namespace requests for every seed and adds bare
 requests for a deterministic half; both forms cover prefix and contains
 matching, and production mode requires a populated bare-search seed response.
+Every documented response expansion rotates through the timed workload:
+record inventory, subname counts, permission lineage, address-name role
+summaries, all three address-name sort fields, both sort orders, both
+deduplication modes, and each resolver overview section.
+Cursor seeding uses those same requests, so a continuation retains its expansion
+parameters. Adding a response expansion to an exercised API route's query
+allowlist requires adding its values to the benchmark workload and coverage
+test in the same change.
 The first production run after the address-name coverage change may show higher
 tails because three quarters of those timed requests now add role-summary work,
 registration deduplication, or both; the earlier workload measured only the
