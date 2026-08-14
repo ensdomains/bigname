@@ -10,72 +10,21 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use reqwest::{Client, Method};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 mod corpus;
 mod preflight;
 mod probes;
+mod report;
 mod workload;
-use corpus::{Corpus, TableScale, load_table_scale};
+use corpus::{Corpus, load_table_scale};
 use preflight::{ApiBoundaryPreflight, load_interpret_redo_snapshot, recheck_api_boundary};
 use probes::require_seed_probe;
+pub use report::{ApiReport, EndpointReport, ResolverManifestCoverage};
+use report::{corpus_failure_report, preflight_failure_report};
 use workload::{RequestSpec, get, normalized_base_url, request_variants};
-#[derive(Clone, Debug, Serialize)]
-pub struct ApiReport {
-    pub api_build_sha: String,
-    pub expected_api_build_sha: Option<String>,
-    pub api_interpreter_content_hash: String,
-    pub api_database_identity: String,
-    pub corpus_database_identity: String,
-    pub postflight_api_build_sha: Option<String>,
-    pub postflight_api_interpreter_content_hash: Option<String>,
-    pub postflight_api_database_identity: Option<String>,
-    pub postflight_corpus_database_identity: Option<String>,
-    pub name_current_rows: u64,
-    pub min_name_current_rows: u64,
-    pub address_names_current_rows: u64,
-    pub min_address_names_current_rows: u64,
-    pub corpus_names: usize,
-    pub corpus_names_by_namespace: BTreeMap<String, usize>,
-    pub corpus_addresses: usize,
-    pub corpus_parents: usize,
-    pub corpus_parents_by_namespace: BTreeMap<String, usize>,
-    pub corpus_permission_subjects: usize,
-    pub corpus_primary_names: usize,
-    pub corpus_resolvers: usize,
-    pub min_corpus_resolvers: usize,
-    pub default_primary_name_probe_requests: usize,
-    pub default_primary_name_probe_outcomes: BTreeMap<String, usize>,
-    pub endpoints: Vec<EndpointReport>,
-    pub green: bool,
-    pub failures: Vec<String>,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct EndpointReport {
-    pub endpoint: String,
-    pub target_qps: u64,
-    pub min_achieved_qps: u64,
-    pub requests: usize,
-    pub successful_requests: usize,
-    pub min_success_percent: f64,
-    pub success_percent: f64,
-    pub populated_responses: Option<usize>,
-    pub min_populated_percent: Option<f64>,
-    pub populated_percent: Option<f64>,
-    pub achieved_qps: f64,
-    pub target_p50_ms: u64,
-    pub p50_ms: f64,
-    pub target_p95_ms: u64,
-    pub p95_ms: f64,
-    pub target_p99_ms: u64,
-    pub p99_ms: f64,
-    pub request_variants: usize,
-    pub outcomes: BTreeMap<String, usize>,
-    pub green: bool,
-    pub failures: Vec<String>,
-}
 #[derive(Debug)]
 struct Sample {
     elapsed_micros: u128,
@@ -180,7 +129,18 @@ pub async fn run(
             preflight_failures,
         ));
     }
-    let corpus = Corpus::load(pool, budgets).await?;
+    let (corpus, resolver_manifest_failures) = Corpus::load(pool, budgets).await?;
+    if !resolver_manifest_failures.is_empty() {
+        return Ok(corpus_failure_report(
+            scale,
+            budgets,
+            identity,
+            database_identity,
+            expected_build_sha,
+            corpus,
+            resolver_manifest_failures,
+        ));
+    }
     let default_primary_name_probe =
         probes::probe_default_primary_name(&client, &base, &corpus, budgets).await?;
     let mut failures = default_primary_name_probe.failures;
@@ -262,52 +222,13 @@ pub async fn run(
         corpus_permission_subjects: corpus.permission_subjects.len(),
         corpus_primary_names: corpus.primary_names.len(),
         corpus_resolvers: corpus.resolvers.len(),
-        min_corpus_resolvers: budgets.api_min_resolver_corpus_size,
+        resolver_manifest_coverage: corpus.resolver_manifest_coverage,
         default_primary_name_probe_requests: default_primary_name_probe.requests_sent,
         default_primary_name_probe_outcomes: default_primary_name_probe.outcomes,
         green: failures.is_empty(),
         failures,
         endpoints: endpoint_reports,
     })
-}
-
-fn preflight_failure_report(
-    scale: TableScale,
-    budgets: &GateBudgets,
-    identity: ApiTargetIdentity,
-    corpus_database_identity: String,
-    expected_build_sha: Option<&str>,
-    failures: Vec<String>,
-) -> ApiReport {
-    ApiReport {
-        api_build_sha: identity.build_sha,
-        expected_api_build_sha: expected_build_sha.map(str::to_owned),
-        api_interpreter_content_hash: identity.interpreter_content_hash,
-        api_database_identity: identity.database_identity,
-        corpus_database_identity,
-        postflight_api_build_sha: None,
-        postflight_api_interpreter_content_hash: None,
-        postflight_api_database_identity: None,
-        postflight_corpus_database_identity: None,
-        name_current_rows: scale.name_current_rows,
-        min_name_current_rows: budgets.api_min_name_current_rows,
-        address_names_current_rows: scale.address_names_current_rows,
-        min_address_names_current_rows: budgets.api_min_address_names_current_rows,
-        corpus_names: 0,
-        corpus_names_by_namespace: BTreeMap::new(),
-        corpus_addresses: 0,
-        corpus_parents: 0,
-        corpus_parents_by_namespace: BTreeMap::new(),
-        corpus_permission_subjects: 0,
-        corpus_primary_names: 0,
-        corpus_resolvers: 0,
-        min_corpus_resolvers: budgets.api_min_resolver_corpus_size,
-        default_primary_name_probe_requests: 0,
-        default_primary_name_probe_outcomes: BTreeMap::new(),
-        endpoints: Vec::new(),
-        green: false,
-        failures,
-    }
 }
 
 async fn load_api_target_identity(

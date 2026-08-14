@@ -405,6 +405,7 @@ mod tests {
             namespaces: vec!["ens".to_owned()],
             names_by_namespace: [("ens".to_owned(), 1)].into_iter().collect(),
             parents_by_namespace: Default::default(),
+            resolver_manifest_coverage: Vec::new(),
         }
     }
 
@@ -483,6 +484,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             parents_by_namespace: Default::default(),
+            resolver_manifest_coverage: Vec::new(),
         };
 
         let namespaces = request_variants(&base, &corpus, "lookup")

@@ -12,7 +12,7 @@ elif [ "$profile" != "release" ]; then
   profile_args=(--profile "$profile")
 fi
 
-for dependency in jq sha256sum; do
+for dependency in jq python3 sha256sum; do
   if ! command -v "$dependency" >/dev/null 2>&1; then
     echo "benchmark wrapper requires $dependency" >&2
     exit 1
@@ -33,19 +33,61 @@ if [ "$profile" = "release" ]; then
     echo "release-profile benchmark builds refuse non-empty CARGO_ENCODED_RUSTFLAGS; clear it before running the gate" >&2
     exit 1
   fi
+  for compiler_override in RUSTC CARGO_BUILD_RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
+    if [ -n "${!compiler_override:-}" ]; then
+      echo "release-profile benchmark builds refuse non-empty $compiler_override; clear it before running the gate" >&2
+      exit 1
+    fi
+  done
+  compiler_config_status="$(python3 - "$ROOT/.cargo/config.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    config = tomllib.load(source)
+build = config.get("build")
+keys = {"rustc", "rustc-wrapper", "rustc-workspace-wrapper"}
+print("present" if isinstance(build, dict) and keys.intersection(build) else "absent")
+PY
+)" || {
+    echo "release-profile benchmark build could not inspect compiler settings in .cargo/config.toml" >&2
+    exit 1
+  }
+  if [ "$compiler_config_status" = "present" ]; then
+    echo "release-profile benchmark builds refuse rustc or rustc-wrapper settings in .cargo/config.toml" >&2
+    exit 1
+  fi
   # Cargo can otherwise reuse path-dependency artifacts from another checkout
   # when both checkouts share a target directory. A clean commit-specific
   # directory binds every linked engine crate to the attested source tree.
   export CARGO_TARGET_DIR="$ROOT/target/benchmark-gate/$source_head"
 fi
 
-rustc_version="$(rustc -Vv)"
+rustc_binary="$(command -v rustc)" || {
+  echo "benchmark wrapper could not resolve rustc from PATH" >&2
+  exit 1
+}
+if [[ "$rustc_binary" != /* ]]; then
+  rustc_binary="$(cd "$(dirname "$rustc_binary")" && pwd -P)/$(basename "$rustc_binary")"
+fi
+if [ ! -x "$rustc_binary" ]; then
+  echo "benchmark wrapper resolved a non-executable rustc path: $rustc_binary" >&2
+  exit 1
+fi
+rustc_version="$("$rustc_binary" -Vv)" || {
+  echo "benchmark wrapper failed to read rustc -Vv from $rustc_binary" >&2
+  exit 1
+}
 captured_rustflags="${RUSTFLAGS:-}"
 captured_cargo_encoded_rustflags="${CARGO_ENCODED_RUSTFLAGS:-}"
 
 build_artifacts=""
 if ! build_artifacts="$(
-  BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
+  env -u CARGO_BUILD_RUSTC \
+    BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
+    RUSTC="$rustc_binary" \
+    RUSTC_WRAPPER= \
+    RUSTC_WORKSPACE_WRAPPER= \
     cargo build "${profile_args[@]}" \
     -p bigname-benchmark-gate \
     -p bigname-api \

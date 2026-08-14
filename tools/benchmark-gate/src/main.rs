@@ -11,11 +11,13 @@ use uuid::Uuid;
 
 mod api_load;
 mod budgets;
+mod compiler_attestation;
 mod database;
 mod indexing;
 mod smoke;
 
 use budgets::{BudgetProfile, BudgetsFile};
+use compiler_attestation::cargo_profile;
 
 const BUDGETS_PATH: &str = "benchmarks/release-gate.toml";
 const COMPILED_HEAD: Option<&str> = option_env!("BIGNAME_BENCHMARK_BUILT_HEAD");
@@ -312,14 +314,6 @@ fn require_compiled_head(compiled_head: Option<&str>) -> Result<&str> {
     Ok(compiled_head)
 }
 
-const fn cargo_profile_for_debug_assertions(debug_assertions: bool) -> &'static str {
-    if debug_assertions { "dev" } else { "release" }
-}
-
-fn cargo_profile() -> String {
-    cargo_profile_for_debug_assertions(cfg!(debug_assertions)).to_owned()
-}
-
 fn require_release_profile() -> Result<()> {
     ensure!(
         cargo_profile() == "release",
@@ -342,6 +336,7 @@ fn require_release_profile() -> Result<()> {
             "production benchmark wrapper reported non-empty {name}"
         );
     }
+    compiler_attestation::require_no_compiler_overrides(|name| std::env::var(name).ok())?;
     Ok(())
 }
 
@@ -484,16 +479,6 @@ mod tests {
             .to_string();
         fs::remove_file(path).unwrap();
         assert!(error.contains("does not match wrapper attestation"));
-    }
-
-    #[test]
-    fn reported_cargo_profile_comes_from_compiled_assertion_mode() {
-        assert_eq!(cargo_profile_for_debug_assertions(true), "dev");
-        assert_eq!(cargo_profile_for_debug_assertions(false), "release");
-        assert_eq!(
-            cargo_profile(),
-            cargo_profile_for_debug_assertions(cfg!(debug_assertions))
-        );
     }
 
     #[test]

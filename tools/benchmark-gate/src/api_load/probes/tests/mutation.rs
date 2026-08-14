@@ -19,6 +19,7 @@ fn empty_corpus() -> Corpus {
         namespaces: vec!["ens".to_owned()],
         names_by_namespace: Default::default(),
         parents_by_namespace: Default::default(),
+        resolver_manifest_coverage: Vec::new(),
     }
 }
 

@@ -60,7 +60,6 @@ pub struct GateBudgets {
     pub api_warmup_seconds: u64,
     pub api_corpus_size: usize,
     pub api_min_specialized_corpus_size: usize,
-    pub api_min_resolver_corpus_size: usize,
     pub api_min_name_current_rows: u64,
     pub api_min_address_names_current_rows: u64,
     pub api_min_success_percent: f64,
@@ -174,11 +173,6 @@ impl GateBudgets {
             "{profile}.api_min_specialized_corpus_size exceeds api_corpus_size"
         );
         ensure!(
-            self.api_min_resolver_corpus_size > 0
-                && self.api_min_resolver_corpus_size <= self.api_corpus_size,
-            "{profile}.api_min_resolver_corpus_size must be positive and no greater than api_corpus_size"
-        );
-        ensure!(
             self.interpret_state_cache_entries > 0,
             "{profile}.interpret_state_cache_entries must be positive"
         );
@@ -226,7 +220,6 @@ mod tests {
             budgets.production.api_min_address_names_current_rows,
             3_000_000
         );
-        assert_eq!(budgets.production.api_min_resolver_corpus_size, 1_000);
         assert_eq!(budgets.production.api_records_min_populated_percent, 1.0);
         assert!(budgets.smoke.api_require_resolver_cursor_variant);
     }

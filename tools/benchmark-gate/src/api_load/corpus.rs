@@ -5,13 +5,15 @@ use bigname_storage::{
     DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
-    DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, DEFAULT_RESOLVER_CURRENT_READ_FILTER,
+    DEFAULT_PERMISSIONS_CURRENT_READ_FILTER,
 };
 use sqlx::PgPool;
 
 use crate::budgets::GateBudgets;
 
+mod resolver_coverage;
 mod stratified;
+use resolver_coverage::load as load_resolver_coverage;
 use stratified::{
     address_corpus_sql, address_namespace_counts, primary_name_corpus_sql,
     primary_namespace_counts, require_active_namespace_coverage,
@@ -104,6 +106,7 @@ pub(super) struct Corpus {
     pub(super) namespaces: Vec<String>,
     pub(super) names_by_namespace: BTreeMap<String, usize>,
     pub(super) parents_by_namespace: BTreeMap<String, usize>,
+    pub(super) resolver_manifest_coverage: Vec<super::ResolverManifestCoverage>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -113,7 +116,7 @@ pub(super) struct TableScale {
 }
 
 impl Corpus {
-    pub(super) async fn load(pool: &PgPool, budgets: &GateBudgets) -> Result<Self> {
+    pub(super) async fn load(pool: &PgPool, budgets: &GateBudgets) -> Result<(Self, Vec<String>)> {
         let limit = i64::try_from(budgets.api_corpus_size)
             .context("API corpus size exceeds PostgreSQL limit")?;
         let namespaces: Vec<String> = sqlx::query_scalar(ACTIVE_NAMESPACES_SQL)
@@ -147,11 +150,7 @@ impl Corpus {
                 .fetch_all(pool)
                 .await
                 .context("failed to load primary-name benchmark corpus")?;
-        let resolvers: Vec<(String, String)> = sqlx::query_as(&resolver_corpus_sql())
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-            .context("failed to load resolver benchmark corpus")?;
+        let resolver_coverage = load_resolver_coverage(pool).await?;
         let names_by_namespace = namespace_counts(&names);
         let parents_by_namespace = namespace_counts(&parents);
         let addresses_by_namespace = address_namespace_counts(&address_names);
@@ -195,35 +194,23 @@ impl Corpus {
             budgets.api_min_specialized_corpus_size,
             &primary_names_by_namespace,
         )?;
-        require_minimum_corpus_size(
-            "resolver",
-            resolvers.len(),
-            budgets.api_min_resolver_corpus_size,
-        )?;
 
-        Ok(Self {
-            names,
-            address_names,
-            parents,
-            permission_subjects,
-            primary_names,
-            resolvers,
-            namespaces,
-            names_by_namespace,
-            parents_by_namespace,
-        })
+        Ok((
+            Self {
+                names,
+                address_names,
+                parents,
+                permission_subjects,
+                primary_names,
+                resolvers: resolver_coverage.resolvers,
+                namespaces,
+                names_by_namespace,
+                parents_by_namespace,
+                resolver_manifest_coverage: resolver_coverage.counts,
+            },
+            resolver_coverage.failures,
+        ))
     }
-}
-
-fn resolver_corpus_sql() -> String {
-    format!(
-        r#"SELECT resolver.chain_id, resolver.resolver_address
-           FROM bigname_phase.resolver_current resolver
-           WHERE resolver.support_status = 'supported'
-             {DEFAULT_RESOLVER_CURRENT_READ_FILTER}
-           ORDER BY resolver.chain_id, resolver.resolver_address
-           LIMIT $1"#
-    )
 }
 
 fn permission_subject_corpus_sql() -> String {
@@ -377,7 +364,7 @@ mod tests {
         for statement in [
             "CREATE SCHEMA bigname_phase",
             "CREATE TYPE bigname_phase.canonicality_state AS ENUM ('canonical', 'safe', 'finalized', 'orphaned')",
-            "CREATE TABLE bigname_phase.manifest_versions (namespace text NOT NULL, rollout_status text NOT NULL)",
+            "CREATE TABLE bigname_phase.manifest_versions (namespace text NOT NULL, rollout_status text NOT NULL, source_family text NOT NULL DEFAULT 'benchmark_non_resolver', chain_id text NOT NULL DEFAULT 'ethereum-mainnet', manifest_payload jsonb NOT NULL DEFAULT '{\"contracts\":[]}'::jsonb)",
             "CREATE TABLE bigname_phase.chain_lineage (chain_id text NOT NULL, block_hash text NOT NULL, canonicality_state bigname_phase.canonicality_state NOT NULL)",
             "CREATE TABLE bigname_phase.name_surfaces (logical_name_id text NOT NULL, chain_id text NOT NULL, block_hash text NOT NULL, canonicality_state bigname_phase.canonicality_state NOT NULL)",
             "CREATE TABLE bigname_phase.resources (resource_id uuid NOT NULL, chain_id text NOT NULL, block_hash text NOT NULL, canonicality_state bigname_phase.canonicality_state NOT NULL)",
@@ -481,12 +468,6 @@ mod tests {
         assert!(query.contains("nc.support_status = 'supported'"));
     }
 
-    #[test]
-    fn resolver_corpus_has_an_independent_floor() {
-        assert!(require_minimum_corpus_size("resolver", 999, 1_000).is_err());
-        assert!(require_minimum_corpus_size("resolver", 1_000, 1_000).is_ok());
-    }
-
     #[tokio::test]
     async fn unsupported_rows_fail_the_supported_scale_preflight() {
         let database = TestDatabase::create(
@@ -536,10 +517,12 @@ mod tests {
         .await
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
-        sqlx::query("INSERT INTO manifest_versions VALUES ('ens', 'active')")
-            .execute(database.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO manifest_versions (namespace, rollout_status) VALUES ('ens', 'active')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
         insert_name_with_visibility(
             database.pool(),
             "ens",
@@ -591,10 +574,12 @@ mod tests {
         .await
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
-        sqlx::query("INSERT INTO manifest_versions VALUES ('ens', 'active')")
-            .execute(database.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO manifest_versions (namespace, rollout_status) VALUES ('ens', 'active')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
         for index in 0..2 {
             insert_name_with_visibility(
                 database.pool(),
@@ -634,10 +619,12 @@ mod tests {
         .await
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
-        sqlx::query("INSERT INTO manifest_versions VALUES ('ens', 'active')")
-            .execute(database.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO manifest_versions (namespace, rollout_status) VALUES ('ens', 'active')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO chain_lineage VALUES
                  ('ethereum-mainnet', 'visible-surface', 'canonical'),
@@ -692,18 +679,11 @@ mod tests {
                 .fetch_all(database.pool())
                 .await
                 .unwrap();
-        let resolvers: Vec<(String, String)> = sqlx::query_as(&resolver_corpus_sql())
-            .bind(10_i64)
-            .fetch_all(database.pool())
-            .await
-            .unwrap();
         let scale = load_table_scale(database.pool()).await.unwrap();
 
         database.cleanup().await.unwrap();
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].1, "visible.eth");
-        assert_eq!(resolvers.len(), 1);
-        assert_eq!(resolvers[0].1, "0x0000000000000000000000000000000000000031");
         assert_eq!(scale.address_names_current_rows, 1);
     }
 
@@ -716,7 +696,7 @@ mod tests {
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
         sqlx::query(
-            "INSERT INTO manifest_versions VALUES
+            "INSERT INTO manifest_versions (namespace, rollout_status) VALUES
                  ('basenames', 'active'), ('ens', 'active')",
         )
         .execute(database.pool())
@@ -818,10 +798,12 @@ mod tests {
         .await
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
-        sqlx::query("INSERT INTO manifest_versions VALUES ('ens', 'active')")
-            .execute(database.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO manifest_versions (namespace, rollout_status) VALUES ('ens', 'active')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
         insert_name_with_visibility(
             database.pool(),
             "ens",
@@ -928,7 +910,7 @@ mod tests {
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
         sqlx::query(
-            "INSERT INTO manifest_versions VALUES
+            "INSERT INTO manifest_versions (namespace, rollout_status) VALUES
                  ('basenames', 'active'), ('ens', 'active')",
         )
         .execute(database.pool())
@@ -984,7 +966,7 @@ mod tests {
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
         sqlx::query(
-            "INSERT INTO manifest_versions VALUES
+            "INSERT INTO manifest_versions (namespace, rollout_status) VALUES
                  ('basenames', 'active'), ('ens', 'active')",
         )
         .execute(database.pool())
@@ -1033,7 +1015,7 @@ mod tests {
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
         sqlx::query(
-            "INSERT INTO manifest_versions VALUES
+            "INSERT INTO manifest_versions (namespace, rollout_status) VALUES
                  ('basenames', 'active'), ('ens', 'active')",
         )
         .execute(database.pool())

@@ -381,6 +381,7 @@ mod tests {
             namespaces: vec!["basenames".to_owned(), "ens".to_owned()],
             names_by_namespace: Default::default(),
             parents_by_namespace: Default::default(),
+            resolver_manifest_coverage: Vec::new(),
         };
 
         let requests = default_primary_name_requests(&base, &corpus).unwrap();
@@ -444,6 +445,7 @@ mod tests {
             namespaces: vec!["ens".to_owned()],
             names_by_namespace: Default::default(),
             parents_by_namespace: Default::default(),
+            resolver_manifest_coverage: Vec::new(),
         };
 
         let report =
@@ -488,6 +490,7 @@ mod tests {
             namespaces: vec!["ens".to_owned()],
             names_by_namespace: Default::default(),
             parents_by_namespace: Default::default(),
+            resolver_manifest_coverage: Vec::new(),
         };
 
         let requests = default_primary_name_requests(&base, &corpus).unwrap();
@@ -513,6 +516,7 @@ mod tests {
             namespaces: vec!["ens".to_owned()],
             names_by_namespace: Default::default(),
             parents_by_namespace: Default::default(),
+            resolver_manifest_coverage: Vec::new(),
         };
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
         let budgets = BudgetsFile::load(&path).unwrap();
@@ -557,6 +561,7 @@ mod tests {
             namespaces: Vec::new(),
             names_by_namespace: Default::default(),
             parents_by_namespace: Default::default(),
+            resolver_manifest_coverage: Vec::new(),
         };
 
         let report =

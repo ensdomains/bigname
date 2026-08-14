@@ -17,8 +17,8 @@ build, passes the captured commit into the binary, and the binary rechecks it
 before and after measurement. The binary derives the reported Cargo build
 profile from its compiled assertion mode, while production commands also
 require the wrapper to attest that it selected the release Cargo build profile.
-The wrapper requires `jq` and `sha256sum`, resolves both executables from
-Cargo's JSON artifact output, and copies them to digest-addressed snapshots
+The wrapper requires `jq`, Python 3 with its standard-library TOML parser, and
+`sha256sum`, resolves both executables from Cargo's JSON artifact output, and copies them to digest-addressed snapshots
 before launching the harness or smoke API. The report digests therefore name
 the stable snapshot paths the wrapper actually executes, not Cargo artifact
 paths that a concurrent build can replace. For a release Cargo build, it
@@ -40,12 +40,16 @@ Each report records `rustc_version`, `rustflags`,
 `cargo_encoded_rustflags`, `benchmark_binary_sha256`, and
 `locally_built_api_binary_sha256`. The release wrapper refuses non-empty
 `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`; clear either variable instead of
-measuring custom code generation. The harness does not inspect
-`CARGO_BUILD_RUSTFLAGS`, target-specific Cargo flag settings, custom `RUSTC`
-drivers, or Cargo configuration such as `[profile.release]`; capturing every
-effective compiler and Cargo build-profile input is release-infrastructure work
-beyond this harness. The recorded executable digests distinguish the resulting local
-binary bytes. Smoke always runs the locally built API binary named by its
+measuring custom code generation. It also refuses non-empty `RUSTC`,
+`CARGO_BUILD_RUSTC`, `RUSTC_WRAPPER`, or `RUSTC_WORKSPACE_WRAPPER`, and refuses
+compiler or compiler-wrapper keys in the workspace `.cargo/config.toml`. The
+wrapper resolves an absolute `rustc` path, records that executable's `-Vv`
+output, and supplies the same path to Cargo. The harness does not inspect
+`CARGO_BUILD_RUSTFLAGS`, target-specific Cargo flag settings, or Cargo
+configuration such as `[profile.release]`; capturing every effective compiler
+and Cargo build-profile input beyond these checks is release-infrastructure
+work. The recorded executable digests distinguish the resulting local binary
+bytes. Smoke always runs the locally built API binary named by its
 digest. For a production API run, that digest is a companion build artifact;
 the remote target remains bound to the clean source commit through `/healthz`,
 not to the local executable digest.
@@ -91,7 +95,18 @@ The API half sends each Tier 1 and Tier 2 REST route in
 seconds after a 10-second warmup. It loads 10,000 names and 10,000 distinct
 address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary
-name claims, plus at least 1,000 supported resolver rows. Name, parent,
+name claims. The resolver corpus is instead the exact set of concrete resolver
+contract addresses declared by the copy's stored active resolver
+[source-family](../glossary.md) manifests:
+`ens_v1_resolver_l1`, `ens_v2_resolver_l1`, and
+`basenames_base_resolver`. An active family with no concrete contract
+declaration is reported with zero declared and exercised addresses. Every
+declared address must have a
+supported, API-visible `resolver_current` row; a missing, unsupported, or
+canonically hidden declaration makes the run red and names its chain and source
+family. Request volume supplies resolver load scale, so there is no unrelated
+resolver row-count floor. The report records declared and exercised resolver
+counts for each chain and [source family](../glossary.md). Name, parent,
 address/name/relation, and successful primary-name samples are divided
 deterministically across every active public namespace. An active namespace
 with no seed of any one of those kinds makes the run red instead of letting
@@ -359,9 +374,12 @@ For indexing, every timing, density, throughput, and memory assertion must pass.
 For API load, every listed route must sustain at least 1,950 completed requests
 per second, return 100 percent successful HTTP responses, and meet all three
 latency percentiles. The records route must also meet its 1-percent populated
-response floor. Missing corpus cardinality, a missing active namespace, or an
-undersized resolver corpus is red rather than silently reducing request
-variety.
+response floor. Missing corpus cardinality or a missing active namespace is red
+rather than silently reducing request variety. Resolver coverage is red when a
+stored active declaration is missing, unsupported, or canonically hidden, or
+when the active resolver families contribute no concrete contract address. The
+red JSON report retains the per-chain and per-family resolver counts and the
+named refusal.
 
 Attach both reports and the recorded environment facts to the release record.
 Each report includes the database name and the database server address observed
