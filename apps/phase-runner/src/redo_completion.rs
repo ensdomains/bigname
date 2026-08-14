@@ -88,6 +88,7 @@ pub(crate) async fn lock_completion_coverage(
              redo_current_block_hash = NULL,
              redo_target_block_number = NULL,
              redo_target_block_hash = NULL,
+             redo_source_boundary_markers = NULL,
              last_error = CASE
                  WHEN last_error LIKE $3 THEN $4
                       || substring(last_error FROM char_length($5) + 1)

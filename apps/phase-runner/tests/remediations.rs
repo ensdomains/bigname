@@ -1543,6 +1543,7 @@ async fn multi_source_ingest_completion_requires_every_configured_source() -> Re
                     source_key: "bulk".to_owned(),
                     current: Some(marker.clone()),
                     target: Some(marker.clone()),
+                    redo_loaded_boundary: None,
                 }],
                 ..PhaseProgress::default()
             }))
@@ -1745,11 +1746,13 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
                         source_key: "bulk".to_owned(),
                         current: Some(BlockMarker::new(19, "redo-cursor-block-19")?),
                         target: Some(BlockMarker::new(19, "redo-cursor-block-19")?),
+                        redo_loaded_boundary: None,
                     },
                     SourceProgress {
                         source_key: "rpc".to_owned(),
                         current: Some(BlockMarker::new(29, "redo-cursor-block-29")?),
                         target: Some(BlockMarker::new(40, "redo-cursor-block-40")?),
+                        redo_loaded_boundary: None,
                     },
                 ],
                 ..PhaseProgress::default()
@@ -1912,6 +1915,7 @@ async fn ingest_cursor_constraint_violations_are_terminal_data_integrity() -> Re
                     source_key: update_source.source_key.clone(),
                     current: Some(BlockMarker::new(10, "cursor-constraint-block-10")?),
                     target: Some(BlockMarker::new(11, "cursor-constraint-block-11")?),
+                    redo_loaded_boundary: None,
                 }],
                 ..PhaseProgress::default()
             },
@@ -2006,6 +2010,7 @@ async fn verify_phase_cannot_complete_without_a_verification_level() -> Result<(
                     source_key: "source".to_owned(),
                     current: Some(marker.clone()),
                     target: Some(marker.clone()),
+                    redo_loaded_boundary: None,
                 }],
                 ..PhaseProgress::default()
             }))

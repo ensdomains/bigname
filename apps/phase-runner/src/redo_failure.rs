@@ -30,6 +30,9 @@ pub(crate) async fn record(
             redo_current_block_hash = CASE WHEN $8 THEN NULL ELSE redo_current_block_hash END,
             redo_target_block_number = CASE WHEN $8 THEN NULL ELSE redo_target_block_number END,
             redo_target_block_hash = CASE WHEN $8 THEN NULL ELSE redo_target_block_hash END,
+            redo_source_boundary_markers = CASE
+                WHEN $8 THEN NULL ELSE redo_source_boundary_markers
+            END,
             updated_at = now()
         WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress
         ",

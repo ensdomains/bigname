@@ -157,6 +157,9 @@ pub(crate) async fn begin(
             redo_current_block_hash = CASE WHEN $6 THEN redo_current_block_hash END,
             redo_target_block_number = CASE WHEN $6 THEN redo_target_block_number END,
             redo_target_block_hash = CASE WHEN $6 THEN redo_target_block_hash END,
+            redo_source_boundary_markers = CASE
+                WHEN $6 THEN redo_source_boundary_markers
+            END,
             input_content_hash = CASE WHEN $8 THEN $9 ELSE input_content_hash END,
             last_error = CASE
                 WHEN last_error LIKE $10
@@ -478,6 +481,7 @@ pub(crate) async fn finish(
             redo_current_block_hash = NULL,
             redo_target_block_number = NULL,
             redo_target_block_hash = NULL,
+            redo_source_boundary_markers = NULL,
             live_handoff_block_number = $10,
             live_handoff_block_hash = $11,
             last_error = CASE

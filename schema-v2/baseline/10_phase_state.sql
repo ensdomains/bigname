@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     redo_current_block_hash text,
     redo_target_block_number bigint,
     redo_target_block_hash text,
+    redo_source_boundary_markers jsonb,
     live_handoff_block_number bigint,
     live_handoff_block_hash text,
     last_error text,
@@ -130,6 +131,15 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     CHECK (
         (redo_target_block_number IS NULL)
         = (redo_target_block_hash IS NULL)
+    ),
+    CONSTRAINT chain_phase_state_ingest_redo_source_boundaries_check CHECK (
+        redo_source_boundary_markers IS NULL
+        OR (
+            phase_name = 'ingest'
+            AND redo_in_progress
+            AND jsonb_typeof(redo_source_boundary_markers) = 'object'
+            AND redo_source_boundary_markers <> '{}'::jsonb
+        )
     ),
     CHECK (
         (
@@ -323,6 +333,8 @@ COMMENT ON COLUMN chain_phase_state.redo_target_block_number IS
     'This value is the current target block only for the active redo.';
 COMMENT ON COLUMN chain_phase_state.redo_target_block_hash IS
     'This value identifies the current target block only for the active redo.';
+COMMENT ON COLUMN chain_phase_state.redo_source_boundary_markers IS
+    'This object maps each Ingest source key to a block number and hash returned by a boundary load during the active redo.';
 COMMENT ON COLUMN chain_phase_state.live_handoff_block_number IS
     'This value is the first live block height.';
 COMMENT ON COLUMN chain_phase_state.live_handoff_block_hash IS

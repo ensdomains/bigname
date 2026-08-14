@@ -1,6 +1,42 @@
+use std::{future::Future, pin::Pin};
+
 use sqlx::PgPool;
 
-use crate::{IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result, SourceProgress};
+use crate::{
+    IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result, SourceProgress,
+    engine::{Engine, LoadedWindow, SourceDescriptor},
+};
+
+pub(super) type RedoLoadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<LoadedWindow>> + Send + 'a>>;
+
+pub(super) trait RedoWindowLoader: Send + Sync {
+    fn load<'a>(
+        &'a self,
+        engine: &'a Engine,
+        chain_id: &'a str,
+        source: &'a SourceDescriptor,
+        all_sources: &'a [SourceDescriptor],
+        from: i64,
+        to: i64,
+    ) -> RedoLoadFuture<'a>;
+}
+
+pub(super) struct ProductionRedoWindowLoader;
+
+impl RedoWindowLoader for ProductionRedoWindowLoader {
+    fn load<'a>(
+        &'a self,
+        engine: &'a Engine,
+        chain_id: &'a str,
+        source: &'a SourceDescriptor,
+        all_sources: &'a [SourceDescriptor],
+        from: i64,
+        to: i64,
+    ) -> RedoLoadFuture<'a> {
+        Box::pin(engine.load_window(chain_id, source, all_sources, from, to))
+    }
+}
 
 pub(super) fn must_reload_completed_source_boundary(
     completing: bool,
@@ -36,6 +72,27 @@ pub(super) fn adopt_loaded_boundary(
 ) -> Result<Marker> {
     require_loaded_boundary(chain_id, &loaded, pre_load_target)?;
     Ok(loaded)
+}
+
+pub(super) fn adopt_persisted_loaded_boundary(
+    chain_id: &str,
+    source_key: &str,
+    loaded: Option<&Marker>,
+    fresh_target: &Marker,
+) -> Result<Marker> {
+    let Some(loaded) = loaded else {
+        return Err(IngestError::data_integrity(format!(
+            "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {chain_id} source {source_key} at block {}: no load-derived boundary marker was persisted; rerun the Ingest redo so it starts fresh and reloads this boundary under the current watch plan",
+            fresh_target.number
+        )));
+    };
+    if loaded.number != fresh_target.number || loaded.hash != fresh_target.hash {
+        return Err(IngestError::data_integrity(format!(
+            "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {chain_id} source {source_key} at block {}: load-derived boundary hash {}, freshly observed hash {}; rerun the Ingest redo so it starts fresh and reloads this boundary under the current watch plan",
+            fresh_target.number, loaded.hash, fresh_target.hash
+        )));
+    }
+    Ok(loaded.clone())
 }
 
 pub(super) fn completing_summary_from_boundary(
@@ -190,6 +247,28 @@ mod tests {
     }
 
     #[test]
+    fn an_equal_height_resume_requires_its_persisted_loaded_boundary() {
+        let loaded = marker(100);
+        assert_eq!(
+            adopt_persisted_loaded_boundary("test-chain", "bulk", Some(&loaded), &loaded)
+                .expect("matching load-derived evidence must be adopted"),
+            loaded
+        );
+
+        let divergent = marker(101);
+        for evidence in [None, Some(&divergent)] {
+            let error =
+                adopt_persisted_loaded_boundary("test-chain", "bulk", evidence, &marker(100))
+                    .expect_err("missing or divergent load-derived evidence must fail closed");
+            assert_eq!(error.kind(), crate::ErrorKind::DataIntegrity);
+            assert!(
+                error.to_string().contains(REDO_BOUNDARY_DIVERGENCE_PREFIX),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn completing_summary_uses_the_source_that_owns_the_range_end() {
         let range_end = marker(200);
         let later_source_start = marker(300);
@@ -200,11 +279,13 @@ mod tests {
                     key: "base-coinbase".to_owned(),
                     current: Some(range_end.clone()),
                     target: range_end.clone(),
+                    loaded_boundary: Some(range_end.clone()),
                 },
                 SourceProgress {
                     key: "base-rpc".to_owned(),
                     current: Some(later_source_start.clone()),
                     target: later_source_start,
+                    loaded_boundary: None,
                 },
             ],
             range_end.number,
@@ -221,6 +302,7 @@ mod tests {
             key: "base-coinbase".to_owned(),
             current: Some(boundary.clone()),
             target: boundary.clone(),
+            loaded_boundary: Some(boundary.clone()),
         };
         let summary = completing_summary_from_boundary(
             "base-mainnet",
@@ -230,6 +312,7 @@ mod tests {
                     key: "base-rpc".to_owned(),
                     current: Some(boundary.clone()),
                     target: boundary.clone(),
+                    loaded_boundary: Some(boundary.clone()),
                 },
             ],
             boundary.number,
@@ -249,6 +332,7 @@ mod tests {
                     key: "base-rpc".to_owned(),
                     current: Some(divergent.clone()),
                     target: divergent,
+                    loaded_boundary: None,
                 },
             ],
             boundary.number,
@@ -270,6 +354,7 @@ mod tests {
                     key: "future-rpc".to_owned(),
                     current: None,
                     target: marker(300),
+                    loaded_boundary: None,
                 }],
                 200,
             )

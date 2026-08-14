@@ -53,6 +53,7 @@ pub struct SourceCursor {
     pub next_block: i64,
     pub target_block: Option<i64>,
     pub last_processed: Option<Marker>,
+    pub redo_loaded_boundary: Option<Marker>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,6 +61,7 @@ pub struct SourceProgress {
     pub key: String,
     pub current: Option<Marker>,
     pub target: Marker,
+    pub loaded_boundary: Option<Marker>,
 }
 
 #[derive(Clone, Debug)]
@@ -233,13 +235,23 @@ impl Engine {
                     key: state.source.key.clone(),
                     current: state.current,
                     target: state.target,
+                    loaded_boundary: None,
                 })
                 .collect(),
             estimated_write_bytes: written_bytes,
         })
     }
 
-    async fn run_redo_batch(&self, mut request: BatchRequest) -> Result<BatchOutcome> {
+    async fn run_redo_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
+        self.run_redo_batch_with_loader(&redo::ProductionRedoWindowLoader, request)
+            .await
+    }
+
+    async fn run_redo_batch_with_loader(
+        &self,
+        loader: &dyn redo::RedoWindowLoader,
+        mut request: BatchRequest,
+    ) -> Result<BatchOutcome> {
         sort_sources(&mut request.sources);
         self.enforce_source_floors(&request).await?;
         let (range_from, range_to) = request.redo_range.expect("redo range is present");
@@ -261,11 +273,12 @@ impl Engine {
             let source_target = resolve_marker(&resolver, source_target_number).await?;
             let window =
                 from.map(|from| (from.max(source.start_block), to.min(source_target_number)));
-            let current = if let Some((window_from, window_to)) = window
+            let (current, loaded_boundary) = if let Some((window_from, window_to)) = window
                 && window_from <= window_to
             {
-                let loaded = self
-                    .load_window(
+                let loaded = loader
+                    .load(
+                        self,
                         &request.chain_id,
                         source,
                         &request.sources,
@@ -274,12 +287,14 @@ impl Engine {
                     )
                     .await?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
-                let marker = if window_to == source_target_number {
+                let at_boundary = window_to == source_target_number;
+                let marker = if at_boundary {
                     redo::adopt_loaded_boundary(&request.chain_id, loaded.marker, &source_target)?
                 } else {
                     loaded.marker
                 };
-                Some(marker)
+                let loaded_boundary = at_boundary.then(|| marker.clone());
+                (Some(marker), loaded_boundary)
             } else if to >= source_target_number
                 && redo::must_reload_completed_source_boundary(
                     complete,
@@ -289,8 +304,9 @@ impl Engine {
                     source_target_number,
                 )
             {
-                let loaded = self
-                    .load_window(
+                let loaded = loader
+                    .load(
+                        self,
                         &request.chain_id,
                         source,
                         &request.sources,
@@ -299,31 +315,53 @@ impl Engine {
                     )
                     .await?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
-                Some(redo::adopt_loaded_boundary(
-                    &request.chain_id,
-                    loaded.marker,
-                    &source_target,
-                )?)
+                let marker =
+                    redo::adopt_loaded_boundary(&request.chain_id, loaded.marker, &source_target)?;
+                (Some(marker.clone()), Some(marker))
             } else if to >= source_target_number {
-                redo::reject_lineage_backed_boundary_change(
-                    &self.pool,
-                    &request.chain_id,
-                    request.resume_current.as_ref(),
-                    &source_target,
-                )
-                .await?;
-                Some(source_target.clone())
+                let current = if source_target_number < range_to
+                    && request
+                        .resume_current
+                        .as_ref()
+                        .is_some_and(|resume| resume.number == source_target_number)
+                {
+                    let durable = request
+                        .cursors
+                        .iter()
+                        .find(|cursor| cursor.key == source.key)
+                        .and_then(|cursor| cursor.redo_loaded_boundary.as_ref());
+                    redo::adopt_persisted_loaded_boundary(
+                        &request.chain_id,
+                        &source.key,
+                        durable,
+                        &source_target,
+                    )?
+                } else {
+                    redo::reject_lineage_backed_boundary_change(
+                        &self.pool,
+                        &request.chain_id,
+                        request.resume_current.as_ref(),
+                        &source_target,
+                    )
+                    .await?;
+                    source_target.clone()
+                };
+                (Some(current), None)
             } else {
-                request
-                    .cursors
-                    .iter()
-                    .find(|cursor| cursor.key == source.key)
-                    .and_then(|cursor| cursor.last_processed.clone())
+                (
+                    request
+                        .cursors
+                        .iter()
+                        .find(|cursor| cursor.key == source.key)
+                        .and_then(|cursor| cursor.last_processed.clone()),
+                    None,
+                )
             };
             progress.push(SourceProgress {
                 key: source.key.clone(),
                 current,
                 target: source_target,
+                loaded_boundary,
             });
         }
         let guarded_summary = if complete {
@@ -515,9 +553,9 @@ struct NormalSourceState<'a> {
     target: Marker,
 }
 
-struct LoadedWindow {
-    marker: Marker,
-    estimated_write_bytes: u64,
+pub(super) struct LoadedWindow {
+    pub(super) marker: Marker,
+    pub(super) estimated_write_bytes: u64,
 }
 
 async fn resolve_marker(provider: &ChainProvider, number: i64) -> Result<Marker> {

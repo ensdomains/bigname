@@ -25,6 +25,7 @@ use phase_runner::{
     runner::{PhaseRunner, RedoPhase},
     state::{PhaseStatus, PhaseStore, StartDisposition},
 };
+use serde_json::json;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -1101,6 +1102,7 @@ async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
             source_key: "source".to_owned(),
             current: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
             target: Some(BlockMarker::new(3, format!("{chain_id}-block-3"))?),
+            redo_loaded_boundary: None,
         }],
         ..PhaseProgress::default()
     };
@@ -1160,6 +1162,7 @@ async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
                                 source_key: "source".to_owned(),
                                 current: Some(marker.clone()),
                                 target: Some(marker),
+                                redo_loaded_boundary: None,
                             }],
                             ..PhaseProgress::default()
                         }
@@ -1273,6 +1276,7 @@ async fn readding_chain_restarts_after_legacy_torn_ingest_progress() -> Result<(
             source_key: "source".to_owned(),
             current: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
             target: Some(BlockMarker::new(3, format!("{chain_id}-block-3"))?),
+            redo_loaded_boundary: None,
         }],
         ..PhaseProgress::default()
     };
@@ -1356,6 +1360,7 @@ async fn readding_chain_restarts_verify_settled_without_level() -> Result<()> {
             source_key: "source".to_owned(),
             current: Some(marker.clone()),
             target: Some(marker.clone()),
+            redo_loaded_boundary: None,
         }],
         ..PhaseProgress::default()
     };
@@ -1511,6 +1516,7 @@ async fn readding_chain_restarts_verify_settled_before_target_with_level() -> Re
             source_key: "source".to_owned(),
             current: Some(target.clone()),
             target: Some(target.clone()),
+            redo_loaded_boundary: None,
         }],
         ..PhaseProgress::default()
     };
@@ -2783,6 +2789,76 @@ async fn ingest_cursor_records_the_distinct_source_target() -> Result<()> {
 }
 
 #[tokio::test]
+async fn intermediate_ingest_redo_persists_its_loaded_source_boundary() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_loaded_source_boundary").await?;
+    let chain_id = "redo-loaded-source-boundary-chain";
+    let configured_chain = chain(chain_id)?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store
+        .ensure_ingest_sources(chain_id, &configured_chain.sources)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+             redo_previous_phase_status = 'idle',
+             redo_from_block_number = 0, redo_to_block_number = 300,
+             started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    let loaded = BlockMarker::new(255, format!("{chain_id}-loaded-block-255"))?;
+    let summary = BlockMarker::new(255, format!("{chain_id}-summary-block-255"))?;
+    let target = BlockMarker::new(300, format!("{chain_id}-block-300"))?;
+    store
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Redo(BlockRange::new(0, 300)?),
+            &PhaseProgress {
+                current: Some(summary),
+                target: Some(target.clone()),
+                source_progress: vec![SourceProgress {
+                    source_key: "source".to_owned(),
+                    current: Some(loaded.clone()),
+                    target: Some(loaded.clone()),
+                    redo_loaded_boundary: Some(loaded.clone()),
+                }],
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
+
+    let stored: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT redo_source_boundary_markers
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        stored,
+        Some(json!({
+            "source": {"number": loaded.number, "hash": loaded.hash}
+        })),
+        "the load-derived source boundary must be committed with intermediate redo progress"
+    );
+    let resume = store
+        .phase_resume(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Redo(BlockRange::new(0, 300)?),
+        )
+        .await?;
+    assert_eq!(resume.ingest_cursors[0].redo_loaded_boundary, Some(loaded));
+    assert_eq!(resume.target, Some(target));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn missing_mid_run_ingest_cursor_is_not_recreated_over_durable_data() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_missing_mid_run_cursor").await?;
     let chain_id = "missing-mid-run-cursor-chain";
@@ -2867,6 +2943,7 @@ async fn ingest_redo_does_not_rewrite_a_cursor_past_its_range() -> Result<()> {
             source_key: "source".to_owned(),
             current: Some(redo_boundary.clone()),
             target: Some(redo_boundary),
+            redo_loaded_boundary: None,
         }],
         ..PhaseProgress::default()
     };
@@ -2933,6 +3010,7 @@ async fn ingest_redo_does_not_reconcile_incomplete_source_progress() -> Result<(
             source_key: "source".to_owned(),
             current: Some(unverified_block_1),
             target: Some(block_2),
+            redo_loaded_boundary: None,
         }],
         ..PhaseProgress::default()
     };
@@ -2997,6 +3075,7 @@ async fn seed_completed_ingest_cursor(
             source_key: "source".to_owned(),
             current: Some(source_current),
             target: Some(source_target),
+            redo_loaded_boundary: None,
         }],
         ..PhaseProgress::default()
     };
@@ -3072,11 +3151,13 @@ async fn ingest_cursors_record_independent_source_progress() -> Result<()> {
                         source_key: "bulk".to_owned(),
                         current: Some(BlockMarker::new(1, "source-cursors-block-1")?),
                         target: Some(BlockMarker::new(5, "source-cursors-block-5")?),
+                        redo_loaded_boundary: None,
                     },
                     SourceProgress {
                         source_key: "rpc".to_owned(),
                         current: Some(BlockMarker::new(3, "source-cursors-block-3")?),
                         target: Some(BlockMarker::new(9, "source-cursors-block-9")?),
+                        redo_loaded_boundary: None,
                     },
                 ],
                 ..PhaseProgress::default()
@@ -3265,6 +3346,7 @@ async fn ingest_summary_rolls_back_when_cursor_persistence_fails() -> Result<()>
             source_key: "source".to_owned(),
             current: Some(current),
             target: Some(target),
+            redo_loaded_boundary: None,
         }],
         ..PhaseProgress::default()
     };

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -14,6 +14,15 @@ type StoredPhasePosition = (
     Option<i64>,
     Option<String>,
     Option<String>,
+);
+
+type StoredRedoPosition = (
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<serde_json::Value>,
 );
 
 pub(crate) async fn update_progress(
@@ -109,6 +118,7 @@ pub(crate) async fn update_redo_progress(
     progress: &PhaseProgress,
 ) -> RunnerResult<()> {
     validate_progress(phase, progress, false)?;
+    let loaded_boundaries = loaded_redo_boundaries(phase, progress)?;
     let result = sqlx::query(
         "
         UPDATE chain_phase_state
@@ -116,6 +126,10 @@ pub(crate) async fn update_redo_progress(
             redo_current_block_hash = $4,
             redo_target_block_number = $5,
             redo_target_block_hash = $6,
+            redo_source_boundary_markers = CASE
+                WHEN $7::jsonb IS NULL THEN redo_source_boundary_markers
+                ELSE COALESCE(redo_source_boundary_markers, '{}'::jsonb) || $7::jsonb
+            END,
             updated_at = now()
         WHERE chain_id = $1
           AND phase_name = $2
@@ -128,6 +142,7 @@ pub(crate) async fn update_redo_progress(
     .bind(progress.current.as_ref().map(|marker| marker.hash.as_str()))
     .bind(progress.target.as_ref().map(|marker| marker.number))
     .bind(progress.target.as_ref().map(|marker| marker.hash.as_str()))
+    .bind(loaded_boundaries)
     .execute(pool)
     .await
     .map_err(|error| {
@@ -142,6 +157,28 @@ pub(crate) async fn update_redo_progress(
         )));
     }
     Ok(())
+}
+
+fn loaded_redo_boundaries(
+    phase: PhaseName,
+    progress: &PhaseProgress,
+) -> RunnerResult<Option<serde_json::Value>> {
+    let mut boundaries = serde_json::Map::new();
+    for source in &progress.source_progress {
+        let Some(marker) = &source.redo_loaded_boundary else {
+            continue;
+        };
+        if phase != PhaseName::Ingest {
+            return Err(RunnerError::data_integrity(format!(
+                "phase {phase} reported an Ingest redo source boundary"
+            )));
+        }
+        boundaries.insert(
+            source.source_key.clone(),
+            serde_json::json!({"number": marker.number, "hash": marker.hash}),
+        );
+    }
+    Ok((!boundaries.is_empty()).then_some(serde_json::Value::Object(boundaries)))
 }
 
 pub(crate) fn validate_progress(
@@ -258,7 +295,7 @@ pub(crate) async fn load_phase_resume(
     let current = marker_from_pair(current_number, current_hash);
     let target = marker_from_pair(target_number, target_hash);
     let ingest_cursors = if phase == PhaseName::Ingest {
-        load_ingest_cursors(pool, chain_id).await?
+        load_ingest_cursors(pool, chain_id, &BTreeMap::new()).await?
     } else {
         Vec::new()
     };
@@ -275,13 +312,14 @@ pub(crate) async fn load_redo_resume(
     chain_id: &str,
     phase: PhaseName,
 ) -> RunnerResult<PhaseResume> {
-    let position: Option<StoredPhasePosition> = sqlx::query_as(
+    let position: Option<StoredRedoPosition> = sqlx::query_as(
         "
         SELECT redo_current_block_number,
                redo_current_block_hash,
                redo_target_block_number,
                redo_target_block_hash,
-               verification_level
+               verification_level,
+               redo_source_boundary_markers
         FROM chain_phase_state
         WHERE chain_id = $1
           AND phase_name = $2
@@ -297,14 +335,21 @@ pub(crate) async fn load_redo_resume(
             "failed to load redo resume position for chain {chain_id} phase {phase}: {error}"
         ))
     })?;
-    let (current_number, current_hash, target_number, target_hash, verification_level) =
-        position.ok_or_else(|| {
-            RunnerError::data_integrity(format!(
-                "active redo state is missing for chain {chain_id} phase {phase}"
-            ))
-        })?;
+    let (
+        current_number,
+        current_hash,
+        target_number,
+        target_hash,
+        verification_level,
+        redo_source_boundary_markers,
+    ) = position.ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "active redo state is missing for chain {chain_id} phase {phase}"
+        ))
+    })?;
+    let redo_source_boundaries = parse_redo_source_boundaries(redo_source_boundary_markers)?;
     let ingest_cursors = if phase == PhaseName::Ingest {
-        load_ingest_cursors(pool, chain_id).await?
+        load_ingest_cursors(pool, chain_id, &redo_source_boundaries).await?
     } else {
         Vec::new()
     };
@@ -329,7 +374,34 @@ fn parse_verification_level(value: Option<&str>) -> RunnerResult<Option<Verifica
         .transpose()
 }
 
-async fn load_ingest_cursors(pool: &PgPool, chain_id: &str) -> RunnerResult<Vec<IngestCursor>> {
+fn parse_redo_source_boundaries(
+    value: Option<serde_json::Value>,
+) -> RunnerResult<BTreeMap<String, BlockMarker>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let object = value.as_object().ok_or_else(|| {
+        RunnerError::data_integrity("redo source boundary markers must be a JSON object")
+    })?;
+    let mut boundaries = BTreeMap::new();
+    for (source_key, value) in object {
+        let number = value.get("number").and_then(serde_json::Value::as_i64);
+        let hash = value.get("hash").and_then(serde_json::Value::as_str);
+        let marker = number.zip(hash).ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "redo source boundary marker for source {source_key} is malformed"
+            ))
+        })?;
+        boundaries.insert(source_key.clone(), BlockMarker::new(marker.0, marker.1)?);
+    }
+    Ok(boundaries)
+}
+
+async fn load_ingest_cursors(
+    pool: &PgPool,
+    chain_id: &str,
+    redo_source_boundaries: &BTreeMap<String, BlockMarker>,
+) -> RunnerResult<Vec<IngestCursor>> {
     let rows = sqlx::query_as::<_, (String, i64, Option<i64>, Option<i64>, Option<String>)>(
         "
         SELECT source_key,
@@ -353,11 +425,15 @@ async fn load_ingest_cursors(pool: &PgPool, chain_id: &str) -> RunnerResult<Vec<
     Ok(rows
         .into_iter()
         .map(
-            |(source_key, next_block_number, target_block_number, number, hash)| IngestCursor {
-                source_key,
-                next_block_number,
-                target_block_number,
-                last_processed: marker_from_pair(number, hash),
+            |(source_key, next_block_number, target_block_number, number, hash)| {
+                let redo_loaded_boundary = redo_source_boundaries.get(&source_key).cloned();
+                IngestCursor {
+                    source_key,
+                    next_block_number,
+                    target_block_number,
+                    last_processed: marker_from_pair(number, hash),
+                    redo_loaded_boundary,
+                }
             },
         )
         .collect())

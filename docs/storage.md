@@ -145,14 +145,17 @@ The same incomplete Verify row with a NULL marker follows completed-evidence
 validation and is recorded as failed with its diagnosis. Existing rows remain
 NULL and therefore retain their ordinary phase-start behavior. Only
 unconfigured-chain startup settlement writes the marker. It remains present
-through a resumed attempt or retry. Genuine normal completion, accepted
-completed-state revalidation, or a successful redo that leaves complete
-retained phase evidence clears it, so the recovered row is indistinguishable
-from an ordinary completion. These clearing writes use the phase advisory-lock
-connection, so losing phase ownership aborts the write. While any phase marker
-is present, that chain is not eligible for `ready` on the status endpoint and
-reports `degraded` unless a stronger `stale` condition applies, such as a
-genuinely failed phase or an expired heartbeat. Interpret and Project do not
+through a resumed attempt or retry. A failed completed-state validation leaves
+it present with the diagnosis. Recovery clears it only after the same current
+configuration and retained phase evidence that ordinary completed-state
+revalidation requires have been accepted. Genuine normal completion or a
+successful redo that leaves complete retained phase evidence also clears it, so
+the recovered row is indistinguishable from an ordinary completion. These
+clearing writes use the phase advisory-lock connection, so losing phase
+ownership aborts the write. While any phase marker is present, that chain is not
+eligible for `ready` on the status endpoint and reports `degraded` unless a
+stronger `stale` condition applies, such as a genuinely failed phase or an
+expired heartbeat. Interpret and Project do not
 run a separate completed-state revalidation pass. For those phases, the
 phase-start check is the revalidation: their retained current block must match
 the canonical head's height and hash before `AlreadyCompleted` authorizes the
@@ -394,14 +397,20 @@ In a multi-source redo, the final batch reloads an in-range source boundary belo
 the overall redo end when durable phase progress has passed it, so its completion
 evidence also comes from the current
 [watch plan](glossary.md#watch-plan--watched-tuple). An equal-height
-durable marker is not intercepted by that reload: it remains the evidence used
-to reject a lineage-backed fork change and require a fresh redo of the full
-range. When the per-source progress proves that boundary was inside the
-completed redo range, redo completion updates the source cursor only when
-matching block lineage already records that height and hash. The cursor update
-and phase summary share one transaction. The previous live handoff remains in
-place until the next normal Ingest pass confirms the reconciled cursor and
-publishes the replacement handoff.
+durable phase marker is not intercepted by that reload. Each non-completing
+batch also stores a map from source key to the boundary marker returned by an
+actual source load during the active redo. At an earlier source boundary where
+the durable phase marker is exactly that height, the completing batch accepts
+only the stored load-derived marker: it must exist at that height and equal the
+fresh source target. A missing marker or different hash fails closed and
+requires a fresh redo of the full range. When this per-source evidence proves
+that the boundary was inside the completed redo range, redo completion updates
+the source cursor only when matching block lineage already records that height
+and hash. The map is cleared with the other resumable redo progress on
+completion or boundary divergence. The cursor update and phase summary share
+one transaction. The previous live handoff remains in place until the next
+normal Ingest pass confirms the reconciled cursor and publishes the replacement
+handoff.
 
 Retained lineage alone does not authorize that reconciliation when an
 interrupted redo has already advanced past its last boundary. If the provider

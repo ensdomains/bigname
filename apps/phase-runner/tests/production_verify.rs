@@ -891,7 +891,9 @@ async fn failed_completed_sepolia_revalidation_records_failure_and_recovers() ->
 
     sqlx::query(
         "UPDATE chain_phase_state
-         SET target_block_hash = 'corrupted-completion-target'
+         SET current_block_hash = 'corrupted-completion-target',
+             target_block_hash = 'corrupted-completion-target',
+             settled_while_unconfigured = TRUE
          WHERE chain_id = $1 AND phase_name = 'verify'",
     )
     .bind(SEPOLIA)
@@ -910,10 +912,20 @@ async fn failed_completed_sepolia_revalidation_records_failure_and_recovers() ->
     assert_eq!(error.kind(), ErrorKind::DataIntegrity);
     assert_eq!(restart_live_calls.load(Ordering::SeqCst), 0);
     drop(restarted);
-    let failed_state: (String, String, i64, String, i64, String, Option<String>) = sqlx::query_as(
+    let failed_state: (
+        String,
+        String,
+        i64,
+        String,
+        i64,
+        String,
+        Option<bool>,
+        Option<String>,
+    ) = sqlx::query_as(
         "SELECT phase_status, verification_level,
                 current_block_number, current_block_hash,
-                target_block_number, target_block_hash, last_error
+                target_block_number, target_block_hash,
+                settled_while_unconfigured, last_error
          FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name = 'verify'",
     )
@@ -923,10 +935,15 @@ async fn failed_completed_sepolia_revalidation_records_failure_and_recovers() ->
     assert_eq!(failed_state.0, "failed");
     assert_eq!(failed_state.1, "quick_synced");
     assert_eq!((failed_state.2, failed_state.4), (5, 5));
-    assert_eq!(failed_state.3, block_hash(SEPOLIA, 5));
+    assert_eq!(failed_state.3, "corrupted-completion-target");
     assert_eq!(failed_state.5, "corrupted-completion-target");
+    assert_eq!(
+        failed_state.6,
+        Some(true),
+        "failed completed-state validation must retain settlement provenance"
+    );
     assert!(
-        failed_state.6.as_deref().is_some_and(|error| {
+        failed_state.7.as_deref().is_some_and(|error| {
             error.starts_with("completed phase validation failed: ")
                 && error.contains("finalized lineage")
         }),
@@ -935,7 +952,7 @@ async fn failed_completed_sepolia_revalidation_records_failure_and_recovers() ->
 
     sqlx::query(
         "UPDATE chain_phase_state
-         SET target_block_hash = $2
+         SET current_block_hash = $2, target_block_hash = $2
          WHERE chain_id = $1 AND phase_name = 'verify'",
     )
     .bind(SEPOLIA)
@@ -955,6 +972,18 @@ async fn failed_completed_sepolia_revalidation_records_failure_and_recovers() ->
     assert_eq!(
         verify_state(scratch.pool()).await?,
         ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
+    );
+    let recovered_settlement: Option<bool> = sqlx::query_scalar(
+        "SELECT settled_while_unconfigured
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        recovered_settlement, None,
+        "accepted completed-state recovery must clear settlement provenance"
     );
 
     drop(recovered);
@@ -3274,6 +3303,7 @@ impl Phase for PartialThenStopIngestPhase {
                     source_key: context.sources[0].source_key.clone(),
                     current: Some(current),
                     target: Some(target),
+                    redo_loaded_boundary: None,
                 }],
                 ..PhaseProgress::default()
             }))
@@ -3307,6 +3337,7 @@ impl Phase for ResumingIngestPhase {
                     source_key: context.sources[0].source_key.clone(),
                     current: Some(end.clone()),
                     target: Some(end),
+                    redo_loaded_boundary: None,
                 }],
                 ..PhaseProgress::default()
             }))

@@ -277,6 +277,7 @@ async fn run_lane(lane: RestartLane) -> Result<LaneSnapshot> {
                         next_block: LATER_BLOCK,
                         target_block: None,
                         last_processed: Some(first_ingest.current),
+                        redo_loaded_boundary: None,
                     }],
                     redo_range: None,
                     resume_current: None,

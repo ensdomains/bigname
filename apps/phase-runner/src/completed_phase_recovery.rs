@@ -167,7 +167,8 @@ impl PhaseStore {
         })?;
         sqlx::query(
             "UPDATE chain_phase_state
-             SET phase_status = 'completed', finished_at = now(), updated_at = now()
+             SET phase_status = 'completed', settled_while_unconfigured = NULL,
+                 finished_at = now(), updated_at = now()
              WHERE chain_id = $1 AND phase_name = $2",
         )
         .bind(chain_id)

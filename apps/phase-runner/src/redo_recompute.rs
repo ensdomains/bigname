@@ -144,6 +144,7 @@ pub(crate) async fn clear_staged_project_refresh(
              redo_current_block_hash = NULL,
              redo_target_block_number = NULL,
              redo_target_block_hash = NULL,
+             redo_source_boundary_markers = NULL,
              updated_at = now()
          WHERE chain_id = $1
            AND phase_name = 'project'
@@ -192,6 +193,7 @@ pub(crate) async fn stage_project_refresh(
              redo_current_block_hash = NULL,
              redo_target_block_number = NULL,
              redo_target_block_hash = NULL,
+             redo_source_boundary_markers = NULL,
              last_error = $11,
              updated_at = now()
          WHERE chain_id = $1

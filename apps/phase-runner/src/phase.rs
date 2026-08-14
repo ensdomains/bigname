@@ -148,6 +148,7 @@ pub struct IngestCursor {
     pub next_block_number: i64,
     pub target_block_number: Option<i64>,
     pub last_processed: Option<crate::heads::BlockMarker>,
+    pub redo_loaded_boundary: Option<crate::heads::BlockMarker>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -155,6 +156,7 @@ pub struct SourceProgress {
     pub source_key: String,
     pub current: Option<crate::heads::BlockMarker>,
     pub target: Option<crate::heads::BlockMarker>,
+    pub redo_loaded_boundary: Option<crate::heads::BlockMarker>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -269,6 +271,7 @@ impl Phase for LoopbackPhase {
                         source_key: source.source_key.clone(),
                         current: marker.clone(),
                         target: marker.clone(),
+                        redo_loaded_boundary: None,
                     })
                     .collect()
             } else {

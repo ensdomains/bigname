@@ -157,7 +157,8 @@ for migration_file in \
     "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
     "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
-    "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql"
+    "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
+    "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -448,6 +449,70 @@ SQL
 } | run_psql)"
 if [[ "$verify_settlement_upgrade_check" != *verify_settlement_upgrade_exact* ]]; then
     printf '%s\n' "Verify settlement provenance upgrade was not applied exactly" >&2
+    exit 1
+fi
+
+# Exercise the initialized-schema Ingest redo boundary-marker upgrade from its
+# preceding shape, then verify baseline and schema-migration parity.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "ALTER TABLE chain_phase_state" \
+        "    DROP CONSTRAINT chain_phase_state_ingest_redo_source_boundaries_check," \
+        "    DROP COLUMN redo_source_boundary_markers;"
+} | run_psql
+for ignored in 1 2; do
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
+        | run_psql
+done
+redo_source_boundary_upgrade_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT CASE WHEN
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'chain_phase_state'
+          AND column_name = 'redo_source_boundary_markers'
+          AND data_type = 'jsonb'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname = 'chain_phase_state_ingest_redo_source_boundaries_check'
+          AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%phase_name = ''ingest''%'
+          AND pg_get_constraintdef(oid) LIKE '%redo_in_progress%'
+          AND pg_get_constraintdef(oid) LIKE '%jsonb_typeof%'
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname <> 'chain_phase_state_ingest_redo_source_boundaries_check'
+          AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%redo_previous_phase_status%'
+          AND pg_get_constraintdef(oid) LIKE '%redo_from_block_number%'
+    )
+    AND col_description(
+        'chain_phase_state'::regclass,
+        (SELECT attnum
+         FROM pg_attribute
+         WHERE attrelid = 'chain_phase_state'::regclass
+           AND attname = 'redo_source_boundary_markers'
+           AND NOT attisdropped)
+    ) = 'This object maps each Ingest source key to a block number and hash returned by a boundary load during the active redo.'
+THEN 'redo_source_boundary_upgrade_ok'
+ELSE 'redo_source_boundary_upgrade_wrong' END;
+SQL
+} | run_psql)"
+if [[ "$redo_source_boundary_upgrade_check" != *redo_source_boundary_upgrade_ok* ]]; then
+    printf '%s\n' "Ingest redo source-boundary upgrade was not applied" >&2
     exit 1
 fi
 
