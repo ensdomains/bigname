@@ -6508,6 +6508,69 @@ async fn manifest_admission_reclassifies_v2_resolver_inline_without_a_queue() ->
 }
 
 #[tokio::test]
+async fn interim_recency_representative_pending_authority_selection() -> Result<()> {
+    for (database_prefix, chain, v2_block, expected_arms) in [
+        (
+            "production_project_interim_recency_v2_older",
+            "project-interim-recency-v2-older",
+            1,
+            ["ens_v2", "ens_v1"],
+        ),
+        (
+            "production_project_interim_recency_v2_newer",
+            "project-interim-recency-v2-newer",
+            4,
+            ["ens_v1", "ens_v2"],
+        ),
+    ] {
+        let scratch = ScratchDatabase::create(database_prefix).await?;
+        let logical_name_id = seed_interim_recency_fixture(scratch.pool(), chain, v2_block).await?;
+        InterpretEngine::new(scratch.pool().clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: 0,
+                to_block: 5,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+
+        let open_bindings: Vec<(Uuid, String, time::OffsetDateTime)> = sqlx::query_as(
+            "SELECT surface_binding_id, authority_arm, active_from
+             FROM surface_bindings
+             WHERE chain_id = $1 AND logical_name_id = $2 AND active_to IS NULL
+             ORDER BY active_from, surface_binding_id",
+        )
+        .bind(chain)
+        .bind(&logical_name_id)
+        .fetch_all(scratch.pool())
+        .await?;
+        assert_eq!(
+            open_bindings
+                .iter()
+                .map(|(_, arm, _)| arm.as_str())
+                .collect::<Vec<_>>(),
+            expected_arms,
+            "production Interpret must retain both authority arms"
+        );
+        assert!(open_bindings[0].2 < open_bindings[1].2);
+
+        run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+        let projected_binding: Uuid = sqlx::query_scalar(
+            "SELECT surface_binding_id FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(&logical_name_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        // Slice 2C (docs/consumer-capabilities.md) must consciously replace this recency pin.
+        assert_eq!(projected_binding, open_bindings[1].0);
+
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn raw_ingest_fixture_flows_through_interpret_then_project() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_raw_flow").await?;
     let chain = "project-raw-flow";
@@ -11835,6 +11898,83 @@ async fn seed_raw_registration_fixture(pool: &PgPool, chain: &str) -> Result<()>
     Ok(())
 }
 
+async fn seed_interim_recency_fixture(pool: &PgPool, chain: &str, v2_block: i64) -> Result<String> {
+    const V2_REGISTRY: &str = "0x0000000000000000000000000000000000000047";
+
+    seed_raw_registration_fixture(pool, chain).await?;
+    // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L25 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L35-L38 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7-L17 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L423-L468 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629-L648 @ ens_v2@ccaeb58)
+    insert_declared_source_manifest_events(
+        pool,
+        "ens",
+        chain,
+        "ens_v2_registry_l1",
+        "registry",
+        V2_REGISTRY,
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["registry"],
+                &["TokenResourceLinked"],
+            ),
+        ],
+    )
+    .await?;
+
+    let label = "alice";
+    let mut token_bytes = *keccak256(label.as_bytes());
+    token_bytes[28..].copy_from_slice(&0_u32.to_be_bytes());
+    let token_id = U256::from_be_bytes(token_bytes);
+    let registered = LabelRegistered {
+        tokenId: token_id,
+        labelHash: keccak256(label.as_bytes()),
+        label: label.into(),
+        owner: OWNER.parse()?,
+        expiry: 4_000_000_000,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        pool,
+        chain,
+        v2_block,
+        1,
+        1,
+        V2_REGISTRY,
+        registered.topics(),
+        registered.data.as_ref(),
+    )
+    .await?;
+    let linked = TokenResource {
+        tokenId: token_id,
+        resource: token_id,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        pool,
+        chain,
+        v2_block,
+        1,
+        2,
+        V2_REGISTRY,
+        linked.topics(),
+        linked.data.as_ref(),
+    )
+    .await?;
+
+    Ok(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"])))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_declared_source_manifest_events(
     pool: &PgPool,
@@ -12054,7 +12194,8 @@ async fn insert_raw_event_at(
         "INSERT INTO raw_transactions (
              chain_id, block_hash, block_number, transaction_hash,
              transaction_index, from_address, to_address
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT DO NOTHING",
     )
     .bind(chain)
     .bind(block_hash(chain, block_number))
