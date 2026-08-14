@@ -159,7 +159,8 @@ for migration_file in \
     "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
     "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
     "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
-    "$ROOT/migrations/20260814124000_redo_attempt_generation.sql"
+    "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
+    "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -567,6 +568,89 @@ SQL
 } | run_psql)"
 if [[ "$redo_attempt_generation_upgrade_check" != *redo_attempt_generation_upgrade_ok* ]]; then
     printf '%s\n' "Redo attempt generation upgrade was not applied" >&2
+    exit 1
+fi
+
+# Exercise the initialized-schema Ingest redo manifest-fingerprint upgrade from
+# its preceding shape, then verify baseline and schema-migration parity.
+baseline_redo_manifest_authority_constraint="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'chain_phase_state'::regclass
+  AND conname = 'chain_phase_state_ingest_redo_manifest_authority_check'
+  AND convalidated;
+SQL
+} | run_psql)"
+if [[ -z "$baseline_redo_manifest_authority_constraint" ]]; then
+    printf '%s\n' "Baseline is missing the Ingest redo manifest-fingerprint constraint" >&2
+    exit 1
+fi
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "ALTER TABLE chain_phase_state" \
+        "    DROP CONSTRAINT chain_phase_state_ingest_redo_manifest_authority_check," \
+        "    DROP COLUMN redo_manifest_authority_fingerprint;"
+} | run_psql
+for ignored in 1 2; do
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql" \
+        | run_psql
+done
+migration_redo_manifest_authority_constraint="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'chain_phase_state'::regclass
+  AND conname = 'chain_phase_state_ingest_redo_manifest_authority_check'
+  AND convalidated;
+SQL
+} | run_psql)"
+if [[ "$migration_redo_manifest_authority_constraint" != "$baseline_redo_manifest_authority_constraint" ]]; then
+    printf '%s\n' "Baseline and schema-migration Ingest redo evidence constraints differ" >&2
+    exit 1
+fi
+redo_manifest_authority_upgrade_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT CASE WHEN
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'chain_phase_state'
+          AND column_name = 'redo_manifest_authority_fingerprint'
+          AND data_type = 'text'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname = 'chain_phase_state_ingest_redo_manifest_authority_check'
+          AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%phase_name = ''ingest''%'
+          AND pg_get_constraintdef(oid) LIKE '%redo_in_progress%'
+          AND pg_get_constraintdef(oid) LIKE '%redo_manifest_authority_fingerprint ~%'
+    )
+    AND col_description(
+        'chain_phase_state'::regclass,
+        (SELECT attnum
+         FROM pg_attribute
+         WHERE attrelid = 'chain_phase_state'::regclass
+           AND attname = 'redo_manifest_authority_fingerprint'
+           AND NOT attisdropped)
+    ) = 'For an active Ingest redo, this value binds resumable numeric and per-source boundary evidence to the chain''s active manifest rows, excluding normalizer_version.'
+THEN 'redo_manifest_authority_upgrade_ok'
+ELSE 'redo_manifest_authority_upgrade_wrong' END;
+SQL
+} | run_psql)"
+if [[ "$redo_manifest_authority_upgrade_check" != *redo_manifest_authority_upgrade_ok* ]]; then
+    printf '%s\n' "Ingest redo manifest-fingerprint upgrade was not applied" >&2
     exit 1
 fi
 

@@ -18,7 +18,7 @@ use phase_runner::{
     heads::{BlockMarker, HeadMarkers, publish_heads},
     phase::{
         BlockRange, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress,
-        PhaseSet, RunMode, SourceProgress, VerificationLevel,
+        PhaseSet, RedoAttemptFence, RunMode, SourceProgress, VerificationLevel,
     },
     runner::{PhaseRunner, RedoPhase},
     state::{PhaseStore, StartDisposition},
@@ -2144,7 +2144,7 @@ async fn non_verify_phase_rejects_a_verification_level() -> Result<()> {
 }
 
 #[tokio::test]
-async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
+async fn ingest_redo_round_trips_two_source_markers_and_fences_manifest_changes() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_ingest_redo_cursors").await?;
     let chain_id = "ingest-redo-cursor-chain";
     let store = PhaseStore::new(scratch.runner().pool().clone());
@@ -2190,6 +2190,23 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
             redo_current_block_hash = 'redo-cursor-block-15',
             redo_target_block_number = 40,
             redo_target_block_hash = 'redo-cursor-block-40',
+            redo_manifest_authority_fingerprint = (
+                SELECT encode(
+                    public.digest(
+                        COALESCE(
+                            jsonb_agg(
+                                manifest_payload - 'normalizer_version'
+                                ORDER BY namespace, source_family
+                            )::text,
+                            '[]'
+                        ),
+                        'sha256'
+                    ),
+                    'hex'
+                )
+                FROM manifest_versions
+                WHERE chain_id = $1 AND rollout_status = 'active'
+            ),
             started_at = now()
         WHERE chain_id = $1
           AND phase_name = 'ingest'
@@ -2198,6 +2215,38 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
     .bind(chain_id)
     .execute(scratch.pool())
     .await?;
+    let bulk_boundary = BlockMarker::new(19, "redo-cursor-block-19")?;
+    let rpc_boundary = BlockMarker::new(29, "redo-cursor-block-29")?;
+    store
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Redo(BlockRange::new(10, 40)?),
+            Some(RedoAttemptFence {
+                generation: 0,
+                execution_range: BlockRange::new(10, 40)?,
+            }),
+            &PhaseProgress {
+                current: Some(BlockMarker::new(15, "redo-cursor-block-15")?),
+                target: Some(BlockMarker::new(40, "redo-cursor-block-40")?),
+                source_progress: vec![
+                    SourceProgress {
+                        source_key: "bulk".to_owned(),
+                        current: None,
+                        target: None,
+                        redo_loaded_boundary: Some(bulk_boundary.clone()),
+                    },
+                    SourceProgress {
+                        source_key: "rpc".to_owned(),
+                        current: None,
+                        target: None,
+                        redo_loaded_boundary: Some(rpc_boundary.clone()),
+                    },
+                ],
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
 
     let resume = store
         .phase_resume(
@@ -2211,6 +2260,10 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
     assert_eq!(resume.ingest_cursors[0].next_block_number, 20);
     assert_eq!(resume.ingest_cursors[0].target_block_number, Some(19));
     assert_eq!(
+        resume.ingest_cursors[0].redo_loaded_boundary.as_ref(),
+        Some(&bulk_boundary)
+    );
+    assert_eq!(
         resume.ingest_cursors[0]
             .last_processed
             .as_ref()
@@ -2220,6 +2273,68 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
     assert_eq!(resume.ingest_cursors[1].source_key, "rpc");
     assert_eq!(resume.ingest_cursors[1].next_block_number, 30);
     assert_eq!(resume.ingest_cursors[1].target_block_number, Some(40));
+    assert_eq!(
+        resume.ingest_cursors[1].redo_loaded_boundary.as_ref(),
+        Some(&rpc_boundary)
+    );
+
+    sqlx::query(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload
+         ) VALUES (
+             1, 'test', 'redo_authority', $1, 'test', 'active', 'test',
+             'tests/redo-authority.toml',
+             '{\"normalizer_version\":\"test\",\"roots\":[{\"address\":\"0x1\"}]}'::jsonb
+         )",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    let stale_progress_error = store
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Redo(BlockRange::new(10, 40)?),
+            Some(RedoAttemptFence {
+                generation: 0,
+                execution_range: BlockRange::new(10, 40)?,
+            }),
+            &PhaseProgress {
+                current: Some(BlockMarker::new(16, "redo-cursor-block-16")?),
+                target: Some(BlockMarker::new(40, "redo-cursor-block-40")?),
+                source_progress: vec![SourceProgress {
+                    source_key: "rpc".to_owned(),
+                    current: None,
+                    target: None,
+                    redo_loaded_boundary: Some(BlockMarker::new(30, "stale-authority-block-30")?),
+                }],
+                ..PhaseProgress::default()
+            },
+        )
+        .await
+        .expect_err("progress from the prior manifest/watch-plan fingerprint must be fenced");
+    assert_eq!(stale_progress_error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        stale_progress_error
+            .to_string()
+            .contains("redo attempt superseded; progress not recorded")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT redo_source_boundary_markers
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'ingest'",
+        )
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?,
+        Some(serde_json::json!({
+            "bulk": {"number": 19, "hash": "redo-cursor-block-19"},
+            "rpc": {"number": 29, "hash": "redo-cursor-block-29"}
+        })),
+        "the fenced write must not merge a stale per-source marker"
+    );
     scratch.cleanup().await
 }
 

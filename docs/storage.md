@@ -401,7 +401,8 @@ durable phase marker is not intercepted by that reload. Each non-completing
 batch also stores a map from source key to the boundary marker returned by an
 actual source load during the active redo. At any source boundary where the
 durable phase marker is exactly that height, including the overall redo range
-end, the completing batch accepts only the stored load-derived marker: it must
+end, a later batch resuming exactly there accepts only the stored load-derived
+marker, which must
 exist at that height and equal the fresh source target. A missing marker, such
 as an active checkpoint written before this map existed, or a different hash
 fails closed and requires a fresh redo of the full range. When this per-source
@@ -412,6 +413,18 @@ progress on completion or boundary divergence. The cursor update and phase
 summary share one transaction. The previous live handoff remains in place until
 the next normal Ingest pass confirms the reconciled cursor and publishes the
 replacement handoff.
+
+`chain_phase_state.redo_manifest_authority_fingerprint` binds the numeric
+Ingest redo checkpoint and its per-source marker map to the chain's active
+manifest payloads, excluding `normalizer_version`. Those payloads include the
+roots, contracts, addresses, and watched block ranges that determine the raw
+facts Ingest must load. An exact-range resume preserves evidence only when the
+stored fingerprint matches the fingerprint of the current active payloads. A
+missing or different fingerprint clears the resumable evidence and reports
+that the active manifest/watch-plan inputs changed; rerunning the redo then
+loads the full range under those inputs. Existing active redo rows receive no
+backfill, so their first post-upgrade resume fails closed and requires that
+full-range reload.
 
 `chain_phase_state.redo_attempt_generation` is a nonnegative, row-local counter
 that increments whenever an explicit redo begins. A batch carries that
@@ -439,8 +452,10 @@ before cursor reconciliation can proceed. If that fresh hash has no retained
 lineage, the equal-height evidence requirement still applies: the phase summary
 cannot adopt the fresh resolution without a matching per-source marker returned
 by a load during that redo.
-This closes the last-boundary case; binding watch-plan evidence to facts at
-interior range heights remains tracked by issue #376.
+Together with the per-chain manifest/watch-plan fingerprint, this closes the
+last-boundary case when active inputs change between attempts. Binding
+watch-plan evidence to facts at interior range heights remains tracked by
+issue #376.
 
 ## Interpretation replay
 

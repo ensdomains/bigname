@@ -136,8 +136,21 @@ pub(crate) async fn begin(
     let same_active_audit = attestation_audit
         .as_ref()
         .is_some_and(ManifestAuthorityAttestationAudit::replayed);
+    let (current_ingest_authority, ingest_authority_changed) =
+        crate::redo_manifest_authority::for_redo_begin(
+            &mut transaction,
+            chain_id,
+            phase,
+            same_active_redo,
+            previous.redo_manifest_authority_fingerprint.as_deref(),
+        )
+        .await?;
     let resume_same_epoch = same_active_redo
-        && (!phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash));
+        && if phase == PhaseName::Ingest {
+            !ingest_authority_changed
+        } else {
+            !phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash)
+        };
     let preserve_started_at = resume_same_epoch || same_active_audit;
     let attempt_generation = sqlx::query_scalar::<_, i64>(
         "
@@ -171,6 +184,9 @@ pub(crate) async fn begin(
             redo_source_boundary_markers = CASE
                 WHEN $6 THEN redo_source_boundary_markers
             END,
+            redo_manifest_authority_fingerprint = CASE
+                WHEN phase_name = 'ingest' THEN $13
+            END,
             input_content_hash = CASE WHEN $8 THEN $9 ELSE input_content_hash END,
             last_error = CASE
                 WHEN last_error LIKE $10
@@ -197,6 +213,7 @@ pub(crate) async fn begin(
     .bind(format!("{}%", crate::redo_stamp::REQUIRED_REDO_PREFIX))
     .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
     .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
+    .bind(current_ingest_authority.as_deref())
     .fetch_one(&mut *transaction)
     .await
     .map_err(|error| {
@@ -211,6 +228,11 @@ pub(crate) async fn begin(
             error,
         )
     })?;
+    crate::redo_manifest_authority::reject_changed(
+        ingest_authority_changed,
+        chain_id,
+        execution_range,
+    )?;
     Ok(RedoSession {
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
         previous,
@@ -495,6 +517,7 @@ pub(crate) async fn finish(
             redo_target_block_number = NULL,
             redo_target_block_hash = NULL,
             redo_source_boundary_markers = NULL,
+            redo_manifest_authority_fingerprint = NULL,
             live_handoff_block_number = $10,
             live_handoff_block_hash = $11,
             last_error = CASE

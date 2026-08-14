@@ -163,7 +163,7 @@ pub(crate) async fn update_redo_progress(
     // Fence this pool-backed progress write to the exact redo begin. This closes the
     // redo-progress instance of https://github.com/ensdomains/bigname/issues/452;
     // holistic connection routing remains there.
-    let result = sqlx::query(
+    let query = format!(
         "
         UPDATE chain_phase_state
         SET redo_current_block_number = $3,
@@ -172,7 +172,7 @@ pub(crate) async fn update_redo_progress(
             redo_target_block_hash = $6,
             redo_source_boundary_markers = CASE
                 WHEN $7::jsonb IS NULL THEN redo_source_boundary_markers
-                ELSE COALESCE(redo_source_boundary_markers, '{}'::jsonb) || $7::jsonb
+                ELSE COALESCE(redo_source_boundary_markers, '{{}}'::jsonb) || $7::jsonb
             END,
             updated_at = now()
         WHERE chain_id = $1
@@ -182,27 +182,33 @@ pub(crate) async fn update_redo_progress(
           AND redo_mode = $9
           AND redo_from_block_number = $10
           AND redo_to_block_number = $11
+          AND (
+              phase_name != 'ingest'
+              OR redo_manifest_authority_fingerprint = {}
+          )
         ",
-    )
-    .bind(chain_id)
-    .bind(phase.as_str())
-    .bind(progress.current.as_ref().map(|marker| marker.number))
-    .bind(progress.current.as_ref().map(|marker| marker.hash.as_str()))
-    .bind(progress.target.as_ref().map(|marker| marker.number))
-    .bind(progress.target.as_ref().map(|marker| marker.hash.as_str()))
-    .bind(loaded_boundaries)
-    .bind(attempt.generation)
-    .bind(expected_mode)
-    .bind(attempt.execution_range.from)
-    .bind(attempt.execution_range.to)
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!("failed to record redo progress for chain {chain_id} phase {phase}"),
-            error,
-        )
-    })?;
+        crate::redo_manifest_authority::FINGERPRINT_SQL
+    );
+    let result = sqlx::query(&query)
+        .bind(chain_id)
+        .bind(phase.as_str())
+        .bind(progress.current.as_ref().map(|marker| marker.number))
+        .bind(progress.current.as_ref().map(|marker| marker.hash.as_str()))
+        .bind(progress.target.as_ref().map(|marker| marker.number))
+        .bind(progress.target.as_ref().map(|marker| marker.hash.as_str()))
+        .bind(loaded_boundaries)
+        .bind(attempt.generation)
+        .bind(expected_mode)
+        .bind(attempt.execution_range.from)
+        .bind(attempt.execution_range.to)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!("failed to record redo progress for chain {chain_id} phase {phase}"),
+                error,
+            )
+        })?;
     if result.rows_affected() != 1 {
         return Err(RunnerError::redo_attempt_superseded(format!(
             "redo attempt superseded; progress not recorded for chain {chain_id} phase {phase} \

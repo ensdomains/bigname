@@ -1489,6 +1489,8 @@ async fn locked_begin_rejects_an_audit_created_after_tokenless_preflight() -> Re
     });
 
     let mut waiting_on_locked_begin = false;
+    // PostgreSQL may truncate the tracked query before its trailing FOR UPDATE as
+    // the locked state-row projection grows, so identify this wait by its SELECT.
     for _ in 0..200 {
         waiting_on_locked_begin = sqlx::query_scalar(
             "SELECT EXISTS (
@@ -1498,7 +1500,6 @@ async fn locked_begin_rejects_an_audit_created_after_tokenless_preflight() -> Re
                    AND wait_event_type = 'Lock'
                    AND query LIKE '%SELECT phase_name%'
                    AND query LIKE '%FROM chain_phase_state%'
-                   AND query LIKE '%FOR UPDATE%'
              )",
         )
         .fetch_one(scratch.pool())

@@ -2826,6 +2826,23 @@ async fn intermediate_ingest_redo_persists_its_loaded_source_boundary() -> Resul
          SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
              redo_previous_phase_status = 'idle',
              redo_from_block_number = 0, redo_to_block_number = 300,
+             redo_manifest_authority_fingerprint = (
+                 SELECT encode(
+                     public.digest(
+                         COALESCE(
+                             jsonb_agg(
+                                 manifest_payload - 'normalizer_version'
+                                 ORDER BY namespace, source_family
+                             )::text,
+                             '[]'
+                         ),
+                         'sha256'
+                     ),
+                     'hex'
+                 )
+                 FROM manifest_versions
+                 WHERE chain_id = $1 AND rollout_status = 'active'
+             ),
              started_at = now(), finished_at = NULL, updated_at = now()
          WHERE chain_id = $1 AND phase_name = 'ingest'",
     )

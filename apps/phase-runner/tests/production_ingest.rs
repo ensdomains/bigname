@@ -3,6 +3,8 @@ mod support;
 
 use std::{
     collections::VecDeque,
+    fs,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
@@ -18,6 +20,7 @@ use bigname_ingest::{
     BatchRequest, Engine, ErrorKind as IngestErrorKind, SourceDescriptor, VerificationBatch,
     WatchFilter,
 };
+use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use phase_runner::{
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
@@ -804,6 +807,7 @@ async fn pre_upgrade_range_end_redo_checkpoint_requires_loaded_boundary_evidence
              redo_target_block_number = 1,
              redo_target_block_hash = $2,
              redo_source_boundary_markers = NULL,
+             redo_manifest_authority_fingerprint = $3,
              last_error = NULL,
              finished_at = NULL,
              updated_at = now()
@@ -811,6 +815,7 @@ async fn pre_upgrade_range_end_redo_checkpoint_requires_loaded_boundary_evidence
     )
     .bind(chain_id)
     .bind(BLOCK_1_SECOND_REORG)
+    .bind(active_manifest_watch_plan_fingerprint(scratch.pool(), chain_id).await?)
     .execute(scratch.pool())
     .await?;
     assert_eq!(
@@ -824,16 +829,18 @@ async fn pre_upgrade_range_end_redo_checkpoint_requires_loaded_boundary_evidence
         "the seeded checkpoint must match the format written before source markers existed"
     );
     assert_eq!(
-        sqlx::query_as::<_, (bool, i64)>(
-            "SELECT redo_source_boundary_markers IS NULL, redo_attempt_generation
+        sqlx::query_as::<_, (bool, i64, bool)>(
+            "SELECT redo_source_boundary_markers IS NULL, redo_attempt_generation,
+                    redo_manifest_authority_fingerprint = $2
              FROM chain_phase_state
              WHERE chain_id = $1 AND phase_name = 'ingest'",
         )
         .bind(chain_id)
+        .bind(active_manifest_watch_plan_fingerprint(scratch.pool(), chain_id).await?)
         .fetch_one(scratch.pool())
         .await?,
-        (true, 0),
-        "the migrated checkpoint must have no source-marker map and the generation default"
+        (true, 0, true),
+        "the source-marker checkpoint must retain the current manifest/watch-plan fingerprint and the generation default"
     );
 
     rpc_state.hash_epoch.store(2, Ordering::SeqCst);
@@ -923,6 +930,222 @@ async fn pre_upgrade_range_end_redo_checkpoint_requires_loaded_boundary_evidence
             Some(1),
             Some(BLOCK_1_SECOND_REORG.to_owned()),
         )
+    );
+    server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn ingest_redo_checkpoint_does_not_cross_a_manifest_authority_change() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_redo_manifest_authority").await?;
+    let chain_id = "rpc-ingest-redo-manifest-authority";
+    let manifests = IngestWatchManifestFixture::new(chain_id)?;
+    manifests.write(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let w0_fingerprint = active_manifest_watch_plan_fingerprint(scratch.pool(), chain_id).await?;
+    let (endpoint, rpc_state, server) = spawn_watch_plan_boundary_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "redo-manifest-authority-runner")?;
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1,
+    )
+    .await?;
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1, CONTRACT).await?,
+        1
+    );
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1, SIBLING_CONTRACT).await?,
+        0
+    );
+
+    let interrupting_ingest = Arc::new(InterruptAfterCompletedIngestBatch {
+        inner: IngestPhase::new(scratch.pool().clone()),
+        interrupt_next_batch: AtomicBool::new(false),
+    });
+    let interrupted_runner = production_ingest_runner_with_phase(
+        scratch.runner(),
+        "redo-manifest-authority-interrupted-runner",
+        interrupting_ingest,
+    )?;
+    for expected_interruption in 1..=2 {
+        let interruption = interrupted_runner
+            .redo(
+                &configured_chain,
+                RedoPhase::Phase(PhaseName::Ingest),
+                BlockRange::new(1, 1)?,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("the wrapper must interrupt after durable final-batch progress");
+        assert!(interruption.to_string().contains("forced interruption"));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*)
+                 FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'ingest'
+                   AND redo_in_progress
+                   AND redo_current_block_number = 1
+                   AND redo_current_block_hash = $2
+                   AND redo_source_boundary_markers -> 'rpc' ->> 'hash' = $2
+                   AND redo_manifest_authority_fingerprint = $3",
+            )
+            .bind(chain_id)
+            .bind(BLOCK_1)
+            .bind(&w0_fingerprint)
+            .fetch_one(scratch.pool())
+            .await?,
+            1,
+            "interruption {expected_interruption} must persist numeric and per-source evidence"
+        );
+
+        rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+        if expected_interruption == 1 {
+            runner
+                .redo(
+                    &configured_chain,
+                    RedoPhase::Phase(PhaseName::Ingest),
+                    BlockRange::new(1, 1)?,
+                    CancellationToken::new(),
+                )
+                .await?;
+            assert_eq!(
+                rpc_state.boundary_log_calls.load(Ordering::SeqCst),
+                0,
+                "unchanged active manifest/watch-plan inputs must resume the durable checkpoint"
+            );
+        }
+    }
+
+    manifests.write(true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let w1_fingerprint = active_manifest_watch_plan_fingerprint(scratch.pool(), chain_id).await?;
+    assert_ne!(
+        w0_fingerprint, w1_fingerprint,
+        "adding a watched root must change the per-chain manifest/watch-plan fingerprint"
+    );
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    let changed_authority_result = runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await;
+    let boundary_calls = rpc_state.boundary_log_calls.load(Ordering::SeqCst);
+    let widened_fact = raw_log_count(scratch.pool(), chain_id, BLOCK_1, SIBLING_CONTRACT).await?;
+    let authority_error = changed_authority_result.expect_err(&format!(
+        "W0 evidence crossed the W1 manifest/watch-plan change: boundary_get_logs={boundary_calls}, \
+         widened_raw_logs={widened_fact}, state={:?}",
+        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?
+    ));
+    assert_eq!(authority_error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        authority_error
+            .to_string()
+            .contains("redo authority changed")
+    );
+    assert!(
+        authority_error
+            .to_string()
+            .contains("rerun the Ingest redo")
+    );
+    assert_eq!(boundary_calls, 0);
+    assert_eq!(widened_fact, 0);
+    assert_eq!(
+        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?,
+        (true, None, None, Some(BLOCK_1.to_owned()))
+    );
+
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert!(rpc_state.boundary_log_calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1, SIBLING_CONTRACT).await?,
+        1,
+        "completion under W1 must follow a real W1 boundary load"
+    );
+
+    let missing_stamp_interruption = interrupted_runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the wrapper must persist another completed-batch checkpoint");
+    assert!(
+        missing_stamp_interruption
+            .to_string()
+            .contains("forced interruption")
+    );
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET redo_manifest_authority_fingerprint = NULL
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    let missing_stamp_error = runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an active checkpoint without an authority fingerprint must fail closed");
+    assert_eq!(missing_stamp_error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        missing_stamp_error
+            .to_string()
+            .contains("redo authority changed")
+    );
+    assert_eq!(rpc_state.boundary_log_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?,
+        (true, None, None, Some(BLOCK_1.to_owned())),
+        "a pre-fingerprint active redo must discard resumable evidence and preserve its cursor"
+    );
+
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert!(rpc_state.boundary_log_calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1, SIBLING_CONTRACT).await?,
+        1
     );
     server.abort();
     scratch.cleanup().await
@@ -1201,6 +1424,77 @@ struct InterruptAfterCompletedIngestBatch {
     interrupt_next_batch: AtomicBool,
 }
 
+struct IngestWatchManifestFixture {
+    root: PathBuf,
+    chain: String,
+}
+
+impl IngestWatchManifestFixture {
+    fn new(chain: &str) -> Result<Self> {
+        let root = std::env::temp_dir().join(format!(
+            "bigname-ingest-manifest-authority-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join("test/test_events"))?;
+        Ok(Self {
+            root,
+            chain: chain.to_owned(),
+        })
+    }
+
+    fn write(&self, include_widened_address: bool) -> Result<()> {
+        let widened_root = if include_widened_address {
+            format!(
+                r#"
+[[roots]]
+name = "source_b"
+address = "{SIBLING_CONTRACT}"
+start_block = 0
+"#,
+            )
+        } else {
+            "roots = []\n".to_owned()
+        };
+        let manifest = format!(
+            r#"
+manifest_version = 1
+namespace = "test"
+source_family = "test_events"
+chain = "{}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "{NORMALIZER}"
+discovery_rules = []
+{widened_root}
+
+[capability_flags]
+
+[[contracts]]
+role = "source_a"
+address = "{CONTRACT}"
+proxy_kind = "none"
+start_block = 0
+
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
+emitter_roles = ["source_a"]
+normalized_events = []
+status = "supported"
+"#,
+            self.chain
+        );
+        fs::write(self.root.join("test/test_events/v1.toml"), manifest)?;
+        Ok(())
+    }
+}
+
+impl Drop for IngestWatchManifestFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 impl Phase for InterruptAfterCompletedIngestBatch {
     fn name(&self) -> PhaseName {
         PhaseName::Ingest
@@ -1377,6 +1671,32 @@ async fn load_redo_and_cursor_hashes(
          WHERE phase.chain_id = $1
            AND phase.phase_name = 'ingest'
            AND cursor.source_key = 'rpc'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn active_manifest_watch_plan_fingerprint(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT encode(
+             public.digest(
+                 COALESCE(
+                     jsonb_agg(
+                         manifest_payload - 'normalizer_version'
+                         ORDER BY namespace, source_family
+                     )::text,
+                     '[]'
+                 ),
+                 'sha256'
+             ),
+             'hex'
+         )
+         FROM manifest_versions
+         WHERE chain_id = $1 AND rollout_status = 'active'",
     )
     .bind(chain_id)
     .fetch_one(pool)
