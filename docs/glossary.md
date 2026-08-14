@@ -54,7 +54,10 @@ backs a name at a given time, scoped per namespace: for `ens` names the value
 is `ens_v1` or `ens_v2` per name and time, while `basenames` authority lives in
 the registry/registrar/resolver system on Base
 (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
-and has no ENSv1/ENSv2 era split. The related `AuthorityEpochChanged`
+and has no ENSv1/ENSv2 era split. `surface_bindings.authority_arm` stores the
+corresponding closed value (`ens_v1`, `ens_v2`, or `basenames`) on each binding;
+it makes ordinary interval conflicts arm-specific and is supplied by adapters,
+never inferred in SQL. The related `AuthorityEpochChanged`
 normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
@@ -314,9 +317,13 @@ name can stop taking current registration and control from ENSv1 and start
 taking them from its ENSv2 resource. Slice 1 records that position as a
 candidate with `consumer_visibility=candidate`; it does not close the current
 ENSv1 `SurfaceBinding` or make the ENSv2 binding eligible for current
-selection. Slice 2 re-derives the candidate with
+selection. Slice 2A defines the explicit activated transition operation and
+tests it through a code-only injection seam, but production still emits only
+candidates. A future activation re-derives the candidate with
 `consumer_visibility=activated` and performs that deferred binding transition
-at the recorded position without deleting ENSv1 history. A candidate or
+at the recorded position without deleting ENSv1 history. The transition carries
+the exact name, full block/transaction/log position, an `ens_v1` predecessor
+selector, and the concrete `ens_v2` successor binding and resource. A candidate or
 activated boundary is derived only from the complete admitted successful
 ENSv1→ENSv2 migration shape for that name, never from family coexistence or a
 transaction hash alone. Descendants keep their own authority until they reach
@@ -331,6 +338,19 @@ registration.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58).
+
+At an activated `.eth` second-level boundary, Interpret locks the current
+matching ENSv1 predecessor and changes the predecessor and successor binding
+ranges in one transaction. Zero or multiple matching predecessors are integrity
+errors; it never ranks candidates. The zero case is corruption because both the
+registrar-token and wrapper-token migration entries require a transferable live
+ENSv1 token. This rule does not cover emancipated children: their transfer gate
+uses wrapper expiry rather than the parent's registrar grace boundary, so slice
+3A must define its own predecessor rule.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L103 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L48-L55 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L835 @ ens_v1@91c966f)
 
 **Migration correlation group** — a deterministic set of raw evidence and
 derived effects for one operation admitted through the ENSv1→ENSv2 migration
@@ -370,13 +390,13 @@ normalized, identity, topology, permission, registration, and renewal effects
 remain candidate and are invisible to Project and product history but available
 to diagnostics. The association alone cannot reclassify output that the existing
 registry family derives from the ordinary edge and raw event without migration
-correlation; that output remains ordinary. Slice 2 re-derives the same groups with
+correlation; that output remains ordinary. A future activation re-derives the same groups with
 `consumer_visibility=activated`; independently admitted event and announcement
-rows remain unchanged. Replay under a fixed manifest set and [interpreter
+rows remain unchanged. Slice 2A leaves those production rows candidate. Replay under a fixed manifest set and [interpreter
 content hash](#interpreter-content-hash) produces the same group IDs, event
 identities, and payloads.
 
-The separately reviewed slice-1 and slice-2 implementations deploy together
+The separately reviewed slice-1, slice-2A, slice-2B, and slice-2C implementations deploy together
 with [PR #391](https://github.com/ensdomains/bigname/pull/391) at one planned
 [re-derivation boundary](#re-derivation-boundary). That boundary adopts one
 interpreter content hash,

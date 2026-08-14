@@ -53,7 +53,7 @@ consume that selected current registration for a supported migrated name, but
 they acquire no row-local coverage status or unsupported-reason vocabulary;
 callers inspect the exact-name or lookup result for coverage. An explicit
 `registration_id` permission query may inspect a superseded ENSv1 registration
-as historical/audit data. Once slice 2 is activated, every permission row
+as historical/audit data. Once slice 2C is activated, every permission row
 carries `authority_context`. `current_for_name` means a `name` filter selected
 the row's current registration for that requested name. A row admitted without
 a `name` filter, including an explicit-`registration_id` or address-filtered
@@ -68,23 +68,25 @@ name-scoped view.
 
 Slice 1 admits the facts and records `MigrationApplied` as a candidate
 interpreter-owned authority boundary. It deliberately defers the ENSv1→ENSv2
-`SurfaceBinding` close/open to slice 2. Every effect whose existence depends on
+`SurfaceBinding` close/open to an activated transition. Every effect whose existence depends on
 the per-name
 [migration correlation group](glossary.md#migration-correlation-group) carries
 `consumer_visibility=candidate` and is excluded from Project staging and all
 product event/history reads, even when the effect uses an existing source
 family. An independently admitted existing-family event remains byte-for-byte
 activated and product-visible; only its correlation association is candidate
-and diagnostics-only. Diagnostics may expose both forms. Until slice 2 is
-activated, product row membership and DTO fields remain unchanged and exact-name
+and diagnostics-only. Diagnostics may expose both forms. Slice 2A makes
+ordinary binding changes arm-scoped and adds the exact-name activated transition
+writer, but production continues to emit candidate transitions only. Until
+slice 2C is activated, product row membership and DTO fields remain unchanged and exact-name
 reads over a corpus containing both families retain the existing
-`mixed_exact_name_corpus` public reason. Slice 2 activates the group, performs
+`mixed_exact_name_corpus` public reason. Slice 2C activates the group, performs
 the deferred binding transition, enables the correlation-dependent event/history
 rows, and replaces that blanket refusal with the per-name exact-name rule. It
 also activates non-boundary correlation groups; those groups never perform a
 binding transition or change an authority epoch.
 
-Slice 3 activates direct-subname ownership per child. A child that has not
+Slice 3B activates direct-subname ownership per child. A child that has not
 migrated can remain ENSv1-authoritative below a migrated parent. Once that
 child migrates or otherwise obtains a current ENSv2 registration, the ENSv2
 parent-child binding replaces the ENSv1 binding. A later release leaves the
@@ -98,7 +100,7 @@ child registration in the admitted migration registry below a proven migrated
 parent, follows the same per-name or per-child selection rule. Sepolia overlap
 without either proof is instead an expected property of independent test
 deployments and remains unsupported under its own reason until a caller or
-[deployment profile](glossary.md#deployment-profile) selects one system. Until slice 3 is activated, existing
+[deployment profile](glossary.md#deployment-profile) selects one system. Until slice 3B is activated, existing
 direct-child projection behavior remains in force.
 
 The Mainnet dual-current assertion runs only after transaction- and block-level
@@ -108,8 +110,8 @@ aborts before `publish::swap`, publishes no partial output, fails readiness for
 that Project publication, and returns structured failure evidence. After the
 Project transaction rolls back, the phase runner persists that evidence in the
 append-only `project_generation_failures` diagnostic audit described in
-[`storage.md`](storage.md#projection-publication). Slice 2 introduces that audit
-path for the exact-name invariant; slice 3 reuses it for the child invariant and
+[`storage.md`](storage.md#projection-publication). Slice 2C introduces that audit
+path for the exact-name invariant; slice 3B reuses it for the child invariant and
 replaces the existing child recency tie-break. It does not layer the authority
 rule on top of that ranking. The Sepolia distinction above is unchanged.
 
@@ -122,10 +124,13 @@ files, and docs are not included.
 | Slice | Coherent capability | Estimated production files |
 | --- | --- | ---: |
 | 1. Schema vocabulary, candidate ENSv1→ENSv2 intake, and replay with no product-visible change | Extend the closed schema-v2 event/derivation vocabulary through a reviewed in-place schema upgrade; admit fixed ENSv1→ENSv2 migration contracts; ratify [migration-registry](glossary.md#migration-registry-wrapperregistry) discovery; keep the independently admitted `registry_announcement` indexability edge ordinary and traversable by the watch plan while attaching candidate correlation provenance; interpret only controller-mediated second-level correlation-dependent identity, topology, role, registration, renewal, and normalized effects as candidate while leaving independently derivable existing-family output ordinary; exclude candidate groups and association/effect tables from Project staging and product event/history reads; defer every ENSv1→ENSv2 migration-driven `SurfaceBinding` transition; and add production provider-trusted Verify support plus declared-level guard fixtures for `ethereum-sepolia`. Child-migration derivation through a parent `WrapperRegistry` is deferred to the direct-child authority slice and tracked on issue #318. Restart, full-replay, and live-follow fixtures prove later proxy facts remain retained without changing product behavior. | At least 22 (3 manifest TOML, up to 11 adapter/manifest Rust files, 2 schema contract/check files, at least 1 reviewed versioned schema-migration file, 1 phase-runner Verify module, and up to 4 Project/API/storage visibility modules) |
-| 2. Exact-name current authority and boundary-gated consumer activation | Re-derive every candidate [migration correlation group](glossary.md#migration-correlation-group) as activated and enable its correlation-dependent normalized rows for product event/history reads. Only `authority_transition` groups perform the deferred predecessor-binding close and successor-binding open. Consume that activated boundary, plus a current child registration in an admitted migration registry below a proven migrated parent, to publish one current registration, expiry, resolver, control, address relation, permission summary, and exact-name coverage result while preserving both eras in history. Name detail, lookup, resolver-record, and verified-primary paths expose explicit unsupported reasons; address-name, search, and resolver-bound-name collections, plus name-filtered permission reads, publish only the selected registration and omit a name whose authority cannot be proven. Explicit-`registration_id` and address-filtered permission reads remain resource-centric audit views and carry `authority_context=resource_audit`. Introduce the post-rollback generation-failure audit for the exact-name invariant. The child-registration path does not invent a migration boundary. This separately reviewed PR deploys with slice 1 at the shared boundary described below. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) | At least 13 (up to 4 Project builders, 6 API reason/read modules, 1 phase-runner persistence module, 1 storage diagnostic module, and 1 reviewed schema upgrade file) |
-| 3. Direct-subname authority and publication invariant | Derive the deferred parent-`WrapperRegistry` child-migration shapes before activating their correlation-dependent effects; replace the recency tie-break with per-child authority; retain legitimate unmigrated ENSv1 children; fail Project publication when both ENSv1 and ENSv2 bindings remain current for one Mainnet pair; reuse the slice-2 post-rollback generation-failure audit; and cover same-transaction parent/child ENSv1→ENSv2 migration through the public subnames behavior. | At least 4 (up to 3 Project scope/builder files and 1 API mapping module) |
+| 2A. Explicit migration authority transition and arm-scoped ordinary bindings | Add a required `authority_arm` to every binding and closure draft; scope ordinary close, predecessor, and successor behavior to chain, exact logical name, and arm; preserve coexisting ENSv1 and ENSv2 bindings; represent the exact-name cross-arm transition explicitly; and exercise its locked zero/one/multiple predecessor behavior through a code-only activated test seam. Production remains candidate-only and Project behavior does not change. | 3 production modules plus one reviewed schema-migration file |
+| 2B. Graveyard, reservation, and renewal semantics | Classify Graveyard cleanup and production reservation seeding without reading cleanup registrations as user leases; establish the remaining renewal rules from deployment evidence. | To be scoped |
+| 2C. Exact-name current authority and boundary-gated consumer activation | Re-derive every candidate [migration correlation group](glossary.md#migration-correlation-group) as activated and enable its correlation-dependent normalized rows for product event/history reads. Only `authority_transition` groups perform the deferred predecessor-binding close and successor-binding open. Consume that activated boundary to publish one current registration, expiry, resolver, control, address relation, permission summary, and exact-name coverage result while preserving both eras in history. Name detail, lookup, resolver-record, and verified-primary paths expose explicit unsupported reasons; collections publish only the selected registration. Explicit resource reads remain audit views. | To be scoped |
+| 3A. Direct-child correlation | Derive the deferred parent-`WrapperRegistry` child-migration shapes, including a separately evidenced predecessor rule, without inheriting the `.eth` second-level rule. | To be scoped |
+| 3B. Children publication invariant | Replace the child recency tie-break with per-child authority, retain legitimate unmigrated ENSv1 children, and block publication on unresolved dual-current Mainnet pairs. | To be scoped |
 
-Slices 1 and 2 are separately reviewed and separately merged implementation
+Slices 1, 2A, 2B, and 2C are separately reviewed and separately merged implementation
 PRs, but deploy together at the same planned [re-derivation
 boundary](glossary.md#re-derivation-boundary), which also carries
 [PR #391](https://github.com/ensdomains/bigname/pull/391). The boundary
@@ -181,13 +186,13 @@ The comparison runs over the complete planned re-walk, so a unit fixture that
 filters only `ens_v2_migration_l1` cannot satisfy this gate.
 
 A separate shared-boundary integration gate exercises the final combined
-slice-1, slice-2, and PR-#391 artifact. It inspects the actual widened watch
+slice-1, slice-2A, slice-2B, slice-2C, and PR-#391 artifact. It inspects the actual widened watch
 plan, performs the boundary's mandatory historical fetch and full re-walk, and
 compares the published DTOs, pages, summaries, and cursor continuation with the
 pre-boundary Project publication. PR #391's exact allowed wire delta is that an
 existing Basenames `transport.contract_address` becomes lowercase and remains
 `0x`-prefixed; no other PR-#391 product DTO field may change. The other allowed
-differences are the slice-2 authority and event/history
+differences are the slice-2C authority and event/history
 activation contracted here, and the planned diagnostic, manifest, provenance,
 and content-hash changes. Product cursors issued before this combined boundary
 must remain valid, although their non-snapshot remaining rows and fields may

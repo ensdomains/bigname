@@ -100,9 +100,21 @@ Two layers separate public names from backing authority:
 
 `SurfaceBinding` records how a public surface binds to a backing [resource](glossary.md) through time — each row is a [surface binding](glossary.md):
 
-- `surface_binding_id`, `logical_name_id`, `resource_id`, `binding_kind`, `active_from`, `active_to`, provenance, [canonicality](glossary.md) state.
+- `surface_binding_id`, `logical_name_id`, `resource_id`, `binding_kind`,
+  `authority_arm`, `active_from`, `active_to`, chain, provenance, and
+  [canonicality](glossary.md) state.
 
 Binding kinds: `declared_registry_path`, `linked_subregistry_path`, `resolver_alias_path`, `observed_wildcard_path`, `observed_only`.
+
+`authority_arm` is the storage discriminator for the name's
+[authority epoch](glossary.md#authority-epoch): `ens_v1`, `ens_v2`, or
+`basenames`. Adapters assign it explicitly when they create binding and closure
+drafts; SQL never infers it from `binding_kind`, a source-family string, or
+provenance JSON. An ordinary binding open, unbind, or predecessor cap conflicts
+only with rows in the same `(chain_id, logical_name_id, authority_arm)` domain.
+Consequently ordinary ENSv1 and ENSv2 bindings for one logical name can coexist.
+Only an activated [migration boundary](glossary.md#migration-boundary) may close
+an ENSv1 row while retaining or opening the concrete ENSv2 successor.
 
 Resolver-family normalized events attach `logical_name_id` and `resource_id` only when their node has a materialized active or deactivated-shadow `NameSurface`. Without that row, both identity fields remain null and only `raw_fact_ref.interpreter_state_key` relates successive state for the same record.
 
@@ -167,11 +179,25 @@ product event/history reads exclude correlation-dependent candidate events and
 all candidate association/effect tables, not the independently admitted ordinary event;
 diagnostics may expose both.
 
-Slice 2 re-derives that group with `consumer_visibility=activated`, activates
-the diagnostic associations without rewriting their independently admitted
-events, changes the name's `authority_epoch` from `ens_v1` to `ens_v2`, closes
-the current ENSv1 binding at the recorded boundary position, and opens the
-ENSv2 binding. Only then do later ENSv1 facts for the same migrated name become history that cannot
+Slice 2A makes this cross-era operation explicit and makes every ordinary
+binding close/open arm-scoped. Its transition value carries the exact
+`logical_name_id`; block number, transaction index, and log index of the
+successful ENSv2 registration; a selector for the expected `ens_v1`
+predecessor; and the concrete `ens_v2` successor binding and resource. The
+writer resolves the predecessor from current bindings under lock and closes or
+retains the two rows in the same transaction. Block timestamp and transaction
+membership alone are never boundary ordering. The production interpreter in
+slice 2A still emits only candidates, so those candidates remain diagnostic
+rows and cannot change `surface_bindings`, active ranges, current authority, or
+Project input. A code-controlled test-only seam exercises the activated
+transition writer; there is no runtime or manifest activation flag.
+
+When the later consumer-activation slice re-derives that group with
+`consumer_visibility=activated`, it activates the diagnostic associations
+without rewriting their independently admitted events, changes the name's
+`authority_epoch` from `ens_v1` to `ens_v2`, closes the selected ENSv1 binding
+at the recorded boundary position, and retains or opens the concrete ENSv2
+binding. Only then do later ENSv1 facts for the same migrated name become history that cannot
 reopen current authority, and an ENSv2 release or unregister does not fall back
 to the
 [ENSv1 husk](glossary.md#ensv1-husk). The unlocked controller transfers the
@@ -180,7 +206,7 @@ the reserved ENSv2 registration; the locked path instead parks the wrapper
 token in the Graveyard and registers the name in ENSv2 while NameWrapper can
 remain the ENSv1 registry owner. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58)
 
-Slices 1 and 2 remain separately reviewed and merged implementation units but
+Slices 1, 2A, 2B, and 2C remain separately reviewed and merged implementation units but
 deploy together at one planned [re-derivation
 boundary](glossary.md#re-derivation-boundary) with
 [PR #391](https://github.com/ensdomains/bigname/pull/391): one
@@ -195,7 +221,7 @@ For a second-level `.eth` name, both claim paths request an expiry of zero,
 which tells the ENSv2 registry to retain the
 [premigration reservation's](glossary.md#premigration-reservation)
 expiry. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L164 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L109 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L444 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L445 @ ens_v2@ccaeb58) At the boundary, the selected current `expires_at` therefore changes
-from the ENSv1 expiry to the stored ENSv2 reservation expiry only when slice 2
+from the ENSv1 expiry to the stored ENSv2 reservation expiry only when slice 2C
 activates the boundary. Interpretation
 must use the emitted value rather than reconstructing a fixed delta: the
 pinned premigration tool converts a configurable whole-day value to seconds,
@@ -214,7 +240,7 @@ parent; the [migration registry](glossary.md#migration-registry-wrapperregistry)
 returns the ENSv1 fallback resolver for a
 protected child until that child migrates. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58) When a child obtains a current ENSv2 registration, its
 ENSv2 parent-child row is current and the retained ENSv1 row for the same
-parent and child is historical residue. Consumer slice 3 explicitly replaces
+parent and child is historical residue. Consumer slice 3B explicitly replaces
 the existing child recency tie-break: the children projection selects the
 parent-child binding established by the child's current authority rather than
 ranking the ENSv1 and ENSv2 bindings by latest block or using ENSv2 as a
@@ -227,7 +253,7 @@ that slice is activated, the existing projection
 behavior remains in force and this paragraph is the contract for its
 replacement.
 
-Consumer slice 2 activates the same ownership rule for exact-name coverage. A
+Consumer slice 2C activates the same ownership rule for exact-name coverage. A
 name with a canonical migration boundary, or a current ENSv2 child
 registration in an admitted migration registry below a proven migrated parent,
 is then not unsupported merely because its history contains both ENSv1 and
@@ -260,7 +286,7 @@ the Mainnet anomaly assertion: its ENSv1 and ENSv2 test deployments are
 independent even though they share the `ens` namespace. An overlapping Sepolia
 corpus without a migration boundary is explicit `unsupported` with
 `independent_ens_deployments_overlap`; it is not evidence of a missed
-ENSv1→ENSv2 migration. Until slice 2 is activated, a corpus containing both
+ENSv1→ENSv2 migration. Until slice 2C is activated, a corpus containing both
 families retains the existing `mixed_exact_name_corpus` product reason. The
 per-name rule and its two new reasons are the contracted replacement for that
 blanket refusal, not behavior claimed by ENSv1→ENSv2 migration-family intake alone.
@@ -280,7 +306,7 @@ ENS:
 - `ens_v2_registry_l1`
 - `ens_v2_registrar_l1`
 - `ens_v2_resolver_l1`
-- `ens_v2_migration_l1` (candidate-only until slice-2 consumer activation)
+- `ens_v2_migration_l1` (candidate-only until slice-2C consumer activation)
 - `ens_execution`
 
 Basenames:
@@ -478,7 +504,7 @@ Permissions and control are anchored to `resource_id`, never to surface text. Th
 
 Identity, preimage, discovery: `PreimageObserved`, `NameClassified`, `SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `MetadataChanged`, `SourceManifestUpdated`.
 
-Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied` (schema-admitted as candidate-only until slice 2), `PricingPolicyChanged`.
+Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied` (schema-admitted as candidate-only until consumer activation), `PricingPolicyChanged`.
 
 Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`, `ResolutionEpochChanged`.
 
@@ -521,9 +547,9 @@ ENSv2 mappings:
   exactly one event per authority transition. Duplicate companion logs do not
   create another boundary, and replay under one fixed manifest set and
   interpreter content hash reproduces the same event identity and payload. A
-  candidate event performs no
-  `SurfaceBinding` transition; slice 2 re-derives it as activated and performs
-  the deferred predecessor close and successor open.
+  candidate event performs no `SurfaceBinding` transition. Slice 2A defines and
+  tests the explicit activated transition operation, but production activation
+  remains deferred.
 - Synchronized renewal interpretation preserves separate bridge, ENSv1
   registrar, and ENSv2 registry normalized rows at their own resource anchors.
   It never collapses a transaction into one synthetic renewal.
