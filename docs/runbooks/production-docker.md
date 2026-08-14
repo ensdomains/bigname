@@ -75,6 +75,11 @@ publication and readiness remain per chain rather than cross-chain atomic; keep
 traffic drained for each affected chain until its own full re-walk, acceptance
 checks, publication, and Verify phase succeed.
 
+Before restoring traffic, run the separate
+[production-scale benchmark gate](benchmark-gate.md) against a disposable
+production-shaped copy and the drained new API generation. A small test database
+run is not release evidence.
+
 A phase-runner restart during a re-walk rebuilds its session cache with a full
 ranked scan over all interpreted events. That scan is expensive at production
 scale. Avoid restart loops; investigate the first interruption before restarting
@@ -219,9 +224,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS permissions_current_resource_wrapper_exp
 ```
 
 Record this manual index step, its start/end times, validity check, and the
-pre/post Project tick measurements in the release record for the shared
-re-derivation boundary, alongside the complete artifact set. These indexes are
-additive; rollback may leave them in place.
+pre/post published-head Project re-apply measurements in the release record for
+the shared re-derivation boundary, alongside the complete artifact set. These
+indexes are additive; rollback may leave them in place.
 
 1. stop the API and phase runner;
 2. take and verify a database backup;

@@ -164,6 +164,7 @@ jobs:
               -p bigname-ingest
               -p bigname-interpret
               -p bigname-content-hash
+              -p bigname-benchmark-gate
               -p bigname-lookup
               -p bigname-project
               -p bigname-metrics

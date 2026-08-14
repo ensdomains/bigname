@@ -37,6 +37,7 @@ pub use address_names::{
     AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
     AddressNamesCurrentSortedPage, AddressNamesCurrentSummary,
+    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     count_address_names_current_for_app_filter, load_address_names_current,
     load_address_names_current_for_relations, load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
@@ -44,6 +45,7 @@ pub use address_names::{
 };
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
+    DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     load_children_current, load_children_current_including_noncanonical,
     load_children_current_page, load_children_current_summaries,
 };
@@ -87,38 +89,40 @@ pub use lineage::{
     load_highest_canonical_chain_lineage_block,
 };
 pub use name_current::{
-    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER, DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
-    DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentAddressFilter, NameCurrentAddressRelationFilter,
-    NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
-    NameCurrentListPage, NameCurrentListRow, NameCurrentListSort, NameCurrentRow,
-    count_name_current_list, load_current_names_by_resource_ids, load_name_current,
-    load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
-    load_name_current_list_page, load_name_current_list_page_offset,
-    load_name_current_list_row_by_name, load_name_current_list_row_by_namehash,
-    name_current_list_cursor_from_row,
+    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
+    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentAddressFilter,
+    NameCurrentAddressRelationFilter, NameCurrentListCursor, NameCurrentListCursorValue,
+    NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListRow,
+    NameCurrentListSort, NameCurrentRow, count_name_current_list,
+    load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,
+    load_name_current_for_snapshot, load_name_current_list_page,
+    load_name_current_list_page_offset, load_name_current_list_row_by_name,
+    load_name_current_list_row_by_namehash, name_current_list_cursor_from_row,
 };
 pub use normalized_events::*;
 pub use permissions::{
-    PermissionCoverageExhaustiveness, PermissionCoverageStatus,
-    PermissionCoverageUnsupportedReason, PermissionScope, PermissionsCurrentAccountResourceCursor,
-    PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
-    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentResourceSummary,
-    PermissionsCurrentRow, ResourcePermissionCoverage, load_permissions_current,
-    load_permissions_current_account_resource_page,
+    DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, PermissionCoverageExhaustiveness,
+    PermissionCoverageStatus, PermissionCoverageUnsupportedReason, PermissionScope,
+    PermissionsCurrentAccountResourceCursor, PermissionsCurrentAccountResourcePage,
+    PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor, PermissionsCurrentPage,
+    PermissionsCurrentResourceSummary, PermissionsCurrentRow, ResourcePermissionCoverage,
+    load_permissions_current, load_permissions_current_account_resource_page,
     load_permissions_current_account_resource_page_count_summary,
     load_permissions_current_by_resource_ids, load_permissions_current_for_resolver_scope,
     load_permissions_current_page, load_permissions_current_resolver_targets,
     load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
 };
 pub use phase_projection_reads::{
-    PHASE_EXPECTED_CHAIN_IDS_SELECT, load_phase_expected_status_chain_ids,
-    load_phase_identity_name_feed_records_by_ids, load_phase_identity_records_by_ids,
-    load_phase_indexing_status, load_phase_name_current_rows_by_ids,
-    load_phase_resolver_bound_name_rows, load_phase_resolver_current,
+    DEFAULT_RESOLVER_CURRENT_READ_FILTER, PHASE_EXPECTED_CHAIN_IDS_SELECT,
+    load_phase_expected_status_chain_ids, load_phase_identity_name_feed_records_by_ids,
+    load_phase_identity_records_by_ids, load_phase_indexing_status,
+    load_phase_name_current_rows_by_ids, load_phase_resolver_bound_name_rows,
+    load_phase_resolver_current,
 };
 pub use primary_name::{
-    PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
-    load_primary_name_current, load_primary_name_current_snapshot, normalized_claim_name,
+    DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER, PrimaryNameClaimStatus, PrimaryNameCurrentRow,
+    PrimaryNameCurrentSnapshot, load_primary_name_current, load_primary_name_current_snapshot,
+    normalized_claim_name,
 };
 pub use record_inventory::{
     RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER, RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,
@@ -146,11 +150,11 @@ pub use resolution_support::{
 };
 pub use resolver::ResolverCurrentRow;
 pub use snapshot_selection::{
-    ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,
-    SnapshotPositionRequirement, SnapshotProjectionRead, SnapshotSelectionError,
-    SnapshotSelectionErrorKind, SnapshotSelectionResult, SnapshotSelectionScope,
-    SnapshotSelectorInput, ensure_projection_chain_positions_match, parse_rfc3339_utc_timestamp,
-    resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
+    CURRENT_PROJECT_PUBLICATION_JOIN, ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt,
+    SnapshotConsistency, SnapshotPositionRequirement, SnapshotProjectionRead,
+    SnapshotSelectionError, SnapshotSelectionErrorKind, SnapshotSelectionResult,
+    SnapshotSelectionScope, SnapshotSelectorInput, ensure_projection_chain_positions_match,
+    parse_rfc3339_utc_timestamp, resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 
 /// Checked-in migrations retained for migration validation and test database construction.

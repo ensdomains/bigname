@@ -174,6 +174,16 @@ all reports `not_started`. A standalone API therefore reports
 `status="degraded"` with `api_status="ready"`; current heartbeats on every
 expected chain make the aggregate ready. The server compose healthcheck tests
 `api_status` so API liveness does not depend on an indexing loop restart.
+When the readiness query succeeds, `database.identity` is a one-way token scoped
+to the currently running PostgreSQL postmaster, database OID, and server
+listener used by the connection. It changes after a PostgreSQL restart or when
+the connection reaches a different listener. The raw credentials, database
+name, and network address are not exposed. Alternate access paths to the same
+postmaster, such as a Unix socket and TCP or different listen addresses, can
+produce different tokens. It is `null` when the database cannot be reached or
+when bounded probes of the serving and readiness pools produce different
+tokens. These audit failures do not change `api_status`; the benchmark gate
+requires a populated identity and fails closed.
 
 Expected chains are the same set `/v2/status` reports: every chain with a
 stored head or any phase state. Three consequences worth knowing before paging

@@ -1,0 +1,229 @@
+version = 1
+
+# Production release policy. These values are the release gate, not examples.
+# Changing one requires the same review as changing the harness that enforces it.
+[production]
+project_head_reapply_max_ms = 1000
+project_rebuild_max_seconds = 21600
+interpret_min_blocks_per_hour = 500000
+interpret_walk_deadline_multiplier = 2
+interpret_walk_max_seconds = 21600
+interpret_max_peak_rss_mib = 32768
+interpret_state_cache_entries = 65536
+interpret_min_walk_blocks = 100000
+dense_min_raw_logs_per_1000_blocks = 8000
+project_min_name_current_rows = 3000000
+api_target_qps = 2000
+api_min_achieved_qps = 1950
+api_duration_seconds = 60
+api_warmup_seconds = 10
+api_corpus_size = 10000
+api_min_specialized_corpus_size = 1000
+api_min_name_current_rows = 3000000
+api_min_address_names_current_rows = 3000000
+api_min_success_percent = 100.0
+api_records_min_populated_percent = 1.0
+api_cursor_seed_count = 128
+api_cursor_weight_percent = 10
+api_validation_sample_every = 100
+api_require_populated_probes = true
+api_require_cursor_variants = true
+api_require_resolver_cursor_variant = true
+
+[[production.endpoints]]
+name = "lookup"
+p50_ms = 5
+p95_ms = 10
+p99_ms = 25
+
+[[production.endpoints]]
+name = "status"
+p50_ms = 5
+p95_ms = 10
+p99_ms = 25
+
+[[production.endpoints]]
+name = "name"
+p50_ms = 25
+p95_ms = 75
+p99_ms = 150
+
+[[production.endpoints]]
+name = "records"
+p50_ms = 25
+p95_ms = 75
+p99_ms = 150
+
+[[production.endpoints]]
+name = "subnames"
+p50_ms = 50
+p95_ms = 150
+p99_ms = 300
+
+[[production.endpoints]]
+name = "name_history"
+p50_ms = 50
+p95_ms = 150
+p99_ms = 300
+
+[[production.endpoints]]
+name = "permissions"
+p50_ms = 50
+p95_ms = 150
+p99_ms = 300
+
+[[production.endpoints]]
+name = "address_names"
+p50_ms = 25
+p95_ms = 75
+p99_ms = 150
+
+[[production.endpoints]]
+name = "primary_name"
+p50_ms = 10
+p95_ms = 25
+p99_ms = 50
+
+[[production.endpoints]]
+name = "address_history"
+p50_ms = 50
+p95_ms = 150
+p99_ms = 300
+
+[[production.endpoints]]
+name = "search"
+p50_ms = 25
+p95_ms = 75
+p99_ms = 150
+
+[[production.endpoints]]
+name = "events"
+p50_ms = 50
+p95_ms = 150
+p99_ms = 300
+
+[[production.endpoints]]
+name = "resolver"
+p50_ms = 50
+p95_ms = 150
+p99_ms = 300
+
+[[production.endpoints]]
+name = "namespace"
+p50_ms = 5
+p95_ms = 10
+p99_ms = 25
+
+# The smoke profile checks the production harness end to end against an isolated
+# database created inside scripts/test-db. It is not production performance evidence.
+[smoke]
+project_head_reapply_max_ms = 5000
+project_rebuild_max_seconds = 30
+interpret_min_blocks_per_hour = 1
+interpret_walk_deadline_multiplier = 2
+interpret_walk_max_seconds = 30
+interpret_max_peak_rss_mib = 2048
+interpret_state_cache_entries = 65536
+interpret_min_walk_blocks = 16
+dense_min_raw_logs_per_1000_blocks = 1
+project_min_name_current_rows = 8
+api_target_qps = 5
+api_min_achieved_qps = 4
+api_duration_seconds = 1
+api_warmup_seconds = 1
+api_corpus_size = 32
+api_min_specialized_corpus_size = 0
+api_min_name_current_rows = 8
+api_min_address_names_current_rows = 8
+api_min_success_percent = 100.0
+api_records_min_populated_percent = 0.0
+api_cursor_seed_count = 4
+api_cursor_weight_percent = 10
+api_validation_sample_every = 1
+api_require_populated_probes = false
+api_require_cursor_variants = false
+api_require_resolver_cursor_variant = true
+
+[[smoke.endpoints]]
+name = "lookup"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "status"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "name"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "records"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "subnames"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "name_history"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "permissions"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "address_names"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "primary_name"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "address_history"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "search"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "events"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "resolver"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "namespace"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000

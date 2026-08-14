@@ -700,7 +700,14 @@ Rules:
   exhaustion therefore do not queue the probe; a failed or timed-out readiness
   connection reports the database as unreachable. The status routes retain
   global admission because their aggregate database query is not a liveness
-  probe.
+  probe. A successful `/healthz` database check also returns a one-way identity
+  token scoped to the currently running PostgreSQL postmaster, database OID,
+  and server listener used by the connection, without exposing their raw
+  values. The token changes when PostgreSQL restarts or the connection reaches
+  a different listener. Alternate paths to the same postmaster, such as a Unix
+  socket and TCP or different listen addresses, can therefore produce different
+  tokens. It is populated only when bounded probes of the serving and
+  reserved-readiness pools identify the same token.
 - The verified-execution rate limit, when enabled, and all in-flight ceilings
   reject work before it waits for execution capacity. The rate-limit key is an
   IPv4 address or IPv6 `/64`; `/healthz` passes only through the health-specific

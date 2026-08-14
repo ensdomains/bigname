@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+profile="${BIGNAME_BENCHMARK_CARGO_PROFILE:-release}"
+profile_args=(--release)
+if [ "$profile" = "dev" ]; then
+  profile_args=()
+elif [ "$profile" != "release" ]; then
+  profile_args=(--profile "$profile")
+fi
+
+for dependency in jq python3 sha256sum; do
+  if ! command -v "$dependency" >/dev/null 2>&1; then
+    echo "benchmark wrapper requires $dependency" >&2
+    exit 1
+  fi
+done
+
+source_head="$(git rev-parse HEAD)"
+release_rustflags_env=()
+if [ "$profile" = "release" ]; then
+  if [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
+    echo "release-profile benchmark commands require a clean worktree before build" >&2
+    exit 1
+  fi
+  if [ -n "${RUSTFLAGS:-}" ]; then
+    echo "release-profile benchmark builds refuse non-empty RUSTFLAGS; clear it before running the gate" >&2
+    exit 1
+  fi
+  if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
+    echo "release-profile benchmark builds refuse non-empty CARGO_ENCODED_RUSTFLAGS; clear it before running the gate" >&2
+    exit 1
+  fi
+  while IFS= read -r profile_override; do
+    if [ -n "${!profile_override:-}" ]; then
+      echo "release-profile benchmark builds refuse non-empty $profile_override; clear it before running the gate" >&2
+      exit 1
+    fi
+  done < <(compgen -e CARGO_PROFILE_)
+  release_rustflags_env=(RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS=)
+  for compiler_override in RUSTC CARGO_BUILD_RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
+    if [ -n "${!compiler_override:-}" ]; then
+      echo "release-profile benchmark builds refuse non-empty $compiler_override; clear it before running the gate" >&2
+      exit 1
+    fi
+  done
+  compiler_config_status="$(python3 - "$ROOT/.cargo/config.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    config = tomllib.load(source)
+build = config.get("build")
+keys = {"rustc", "rustc-wrapper", "rustc-workspace-wrapper"}
+print("present" if isinstance(build, dict) and keys.intersection(build) else "absent")
+PY
+)" || {
+    echo "release-profile benchmark build could not inspect compiler settings in .cargo/config.toml" >&2
+    exit 1
+  }
+  if [ "$compiler_config_status" = "present" ]; then
+    echo "release-profile benchmark builds refuse rustc or rustc-wrapper settings in .cargo/config.toml" >&2
+    exit 1
+  fi
+  # Cargo can otherwise reuse path-dependency artifacts from another checkout
+  # when both checkouts share a target directory. A clean commit-specific
+  # directory binds every linked engine crate to the attested source tree.
+  export CARGO_TARGET_DIR="$ROOT/target/benchmark-gate/$source_head"
+fi
+
+rustc_binary="$(command -v rustc)" || {
+  echo "benchmark wrapper could not resolve rustc from PATH" >&2
+  exit 1
+}
+if [[ "$rustc_binary" != /* ]]; then
+  rustc_binary="$(cd "$(dirname "$rustc_binary")" && pwd -P)/$(basename "$rustc_binary")"
+fi
+if [ ! -x "$rustc_binary" ]; then
+  echo "benchmark wrapper resolved a non-executable rustc path: $rustc_binary" >&2
+  exit 1
+fi
+rustc_version="$("$rustc_binary" -Vv)" || {
+  echo "benchmark wrapper failed to read rustc -Vv from $rustc_binary" >&2
+  exit 1
+}
+captured_rustflags="${RUSTFLAGS:-}"
+captured_cargo_encoded_rustflags="${CARGO_ENCODED_RUSTFLAGS:-}"
+
+build_artifacts=""
+if ! build_artifacts="$(
+  env -u CARGO_BUILD_RUSTC \
+    "${release_rustflags_env[@]}" \
+    BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
+    RUSTC="$rustc_binary" \
+    RUSTC_WRAPPER= \
+    RUSTC_WORKSPACE_WRAPPER= \
+    cargo build "${profile_args[@]}" \
+    -p bigname-benchmark-gate \
+    -p bigname-api \
+    --message-format=json
+)"; then
+  jq -r '
+    select(.reason == "compiler-message")
+    | .message.rendered // empty
+  ' <<<"$build_artifacts" >&2
+  exit 1
+fi
+
+artifact_path() {
+  local target="$1"
+  local paths=()
+  mapfile -t paths < <(
+    jq -r --arg target "$target" '
+      select(
+        .reason == "compiler-artifact"
+        and (.target.kind | index("bin"))
+        and .target.name == $target
+        and .executable != null
+      )
+      | .executable
+    ' <<<"$build_artifacts"
+  )
+  if [ "${#paths[@]}" -ne 1 ] || [ ! -x "${paths[0]:-}" ]; then
+    echo "cargo did not report exactly one executable for $target" >&2
+    exit 1
+  fi
+  printf '%s\n' "${paths[0]}"
+}
+
+benchmark_binary="$(artifact_path bigname-benchmark-gate)"
+api_binary="$(artifact_path bigname-api)"
+
+snapshot_binary() {
+  local source="$1"
+  local name="$2"
+  local store
+  local temporary
+  local source_digest
+  local copied_digest
+  local installed_digest
+  local snapshot
+  if ! source_digest="$(sha256sum -- "$source")"; then
+    echo "failed to hash source binary for $name" >&2
+    exit 1
+  fi
+  source_digest="${source_digest%% *}"
+  if [[ ! "$source_digest" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "source binary for $name produced an invalid SHA-256 digest" >&2
+    exit 1
+  fi
+  store="$(dirname "$source")/benchmark-gate-artifacts"
+  mkdir -p "$store" || {
+    echo "failed to create snapshot store for $name" >&2
+    exit 1
+  }
+  temporary="$(mktemp "$store/.${name}.XXXXXX")" || {
+    echo "failed to create temporary snapshot for $name" >&2
+    exit 1
+  }
+  cp -- "$source" "$temporary" || {
+    echo "failed to copy source binary into snapshot for $name" >&2
+    rm -f -- "$temporary" || true
+    exit 1
+  }
+  chmod 0555 "$temporary" || {
+    echo "failed to make temporary snapshot executable for $name" >&2
+    rm -f -- "$temporary" || true
+    exit 1
+  }
+  copied_digest="$(sha256sum -- "$temporary")" || {
+    echo "failed to hash copied snapshot for $name" >&2
+    rm -f -- "$temporary" || true
+    exit 1
+  }
+  copied_digest="${copied_digest%% *}"
+  if [ "$copied_digest" != "$source_digest" ]; then
+    echo "copied snapshot for $name does not match the source binary" >&2
+    rm -f -- "$temporary" || true
+    exit 1
+  fi
+  snapshot="$store/${name}-${source_digest}"
+  if [ -e "$snapshot" ]; then
+    installed_digest="$(sha256sum -- "$snapshot")" || {
+      echo "failed to hash existing snapshot for $name" >&2
+      rm -f -- "$temporary" || true
+      exit 1
+    }
+    installed_digest="${installed_digest%% *}"
+    if [ "$installed_digest" != "$source_digest" ]; then
+      echo "existing digest-addressed snapshot for $name has unexpected bytes" >&2
+      rm -f -- "$temporary" || true
+      exit 1
+    fi
+    rm -f -- "$temporary" || {
+      echo "failed to remove redundant temporary snapshot for $name" >&2
+      exit 1
+    }
+  else
+    mv -- "$temporary" "$snapshot" || {
+      echo "failed to install digest-addressed snapshot for $name" >&2
+      rm -f -- "$temporary" || true
+      exit 1
+    }
+  fi
+  installed_digest="$(sha256sum -- "$snapshot")" || {
+    echo "failed to verify installed snapshot for $name" >&2
+    exit 1
+  }
+  installed_digest="${installed_digest%% *}"
+  if [ "$installed_digest" != "$source_digest" ]; then
+    echo "installed snapshot for $name does not match the source binary" >&2
+    exit 1
+  fi
+  printf '%s\n' "$snapshot"
+}
+
+benchmark_binary="$(snapshot_binary "$benchmark_binary" bigname-benchmark-gate)"
+api_binary="$(snapshot_binary "$api_binary" bigname-api)"
+benchmark_binary_sha256="$(sha256sum "$benchmark_binary" | awk '{print $1}')"
+api_binary_sha256="$(sha256sum "$api_binary" | awk '{print $1}')"
+if [ "$profile" = "release" ]; then
+  if [ "$(git rev-parse HEAD)" != "$source_head" ] || \
+     [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
+    echo "benchmark source changed while the release binary was building" >&2
+    exit 1
+  fi
+fi
+exec env BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
+  BIGNAME_BENCHMARK_CARGO_PROFILE="$profile" \
+  BIGNAME_BENCHMARK_RUSTC_VERSION="$rustc_version" \
+  BIGNAME_BENCHMARK_RUSTFLAGS="$captured_rustflags" \
+  BIGNAME_BENCHMARK_CARGO_ENCODED_RUSTFLAGS="$captured_cargo_encoded_rustflags" \
+  BIGNAME_BENCHMARK_BINARY_SHA256="$benchmark_binary_sha256" \
+  BIGNAME_BENCHMARK_API_BINARY_SHA256="$api_binary_sha256" \
+  BIGNAME_BENCHMARK_API_BINARY="$api_binary" \
+  "$benchmark_binary" "$@"

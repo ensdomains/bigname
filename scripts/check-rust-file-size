@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BASELINE = REPO_ROOT / "scripts" / "rust-file-size-baseline.toml"
 DEFAULT_BASELINE_GIT_PATH = "scripts/rust-file-size-baseline.toml"
 
-PRODUCTION_ROOTS = {"apps", "crates"}
+PRODUCTION_ROOTS = {"apps", "crates", "tools"}
 EXCLUDED_CRATES = {"test-support"}
 EXCLUDED_COMPONENTS = {
     "bench",
@@ -116,7 +116,7 @@ def exclusion_reason(path: Path) -> str | None:
 
     root = parts[0]
     if root not in PRODUCTION_ROOTS:
-        return "outside apps/ and crates/"
+        return "outside apps/, crates/, and tools/"
 
     if root == "crates" and len(parts) > 1 and parts[1] in EXCLUDED_CRATES:
         return "test support crate"

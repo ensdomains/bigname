@@ -7,6 +7,12 @@ use crate::{AppState, BUILD_SHA, SOFTWARE_VERSION, v2::format_timestamp};
 
 pub(crate) const HEALTH_DATABASE_CHECK_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(2);
+const DATABASE_IDENTITY_SQL: &str = "SELECT database.oid::text,
+            extract(epoch FROM pg_postmaster_start_time())::text,
+            COALESCE(inet_server_addr()::text, 'local-socket'),
+            COALESCE(inet_server_port()::text, 'local-socket')
+     FROM pg_database database
+     WHERE database.datname = current_database()";
 
 #[derive(Clone)]
 pub(crate) struct HealthDatabasePool(pub(crate) PgPool);
@@ -40,6 +46,7 @@ pub(crate) struct HealthDatabaseResponse {
     pub(crate) reachable: bool,
     pub(crate) check: &'static str,
     pub(crate) error: Option<&'static str>,
+    pub(crate) identity: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -61,13 +68,18 @@ pub(crate) async fn health(
     State(state): State<AppState>,
     axum::Extension(health_pool): axum::Extension<HealthDatabasePool>,
 ) -> (StatusCode, Json<HealthResponse>) {
-    let database_reachable = match tokio::time::timeout(
-        HEALTH_DATABASE_CHECK_TIMEOUT,
-        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&health_pool.0),
-    )
-    .await
-    {
-        Ok(Ok(_)) => true,
+    let (readiness_probe, serving_probe) = tokio::join!(
+        tokio::time::timeout(
+            HEALTH_DATABASE_CHECK_TIMEOUT,
+            load_database_instance_identity(&health_pool.0),
+        ),
+        tokio::time::timeout(
+            HEALTH_DATABASE_CHECK_TIMEOUT,
+            load_database_instance_identity(&state.pool),
+        ),
+    );
+    let readiness_identity = match readiness_probe {
+        Ok(Ok(identity)) => Some(identity),
         Ok(Err(error)) => {
             warn!(
                 service = "api",
@@ -75,7 +87,7 @@ pub(crate) async fn health(
                 ?error,
                 "database readiness probe failed"
             );
-            false
+            None
         }
         Err(_) => {
             warn!(
@@ -84,27 +96,61 @@ pub(crate) async fn health(
                 timeout_ms = HEALTH_DATABASE_CHECK_TIMEOUT.as_millis(),
                 "database readiness probe timed out"
             );
-            false
+            None
         }
     };
+    let serving_identity = match serving_probe {
+        Ok(Ok(identity)) => Some(identity),
+        Ok(Err(error)) => {
+            warn!(
+                service = "api",
+                build_sha = BUILD_SHA,
+                ?error,
+                "serving database identity probe failed"
+            );
+            None
+        }
+        Err(_) => {
+            warn!(
+                service = "api",
+                build_sha = BUILD_SHA,
+                timeout_ms = HEALTH_DATABASE_CHECK_TIMEOUT.as_millis(),
+                "serving database identity probe timed out"
+            );
+            None
+        }
+    };
+    let database_identity = readiness_identity
+        .as_ref()
+        .filter(|identity| serving_identity.as_ref() == Some(*identity))
+        .cloned();
+    if readiness_identity.is_some() && database_identity.is_none() {
+        warn!(
+            service = "api",
+            build_sha = BUILD_SHA,
+            "serving and readiness database identities could not be matched"
+        );
+    }
 
-    let database = if database_reachable {
+    let database = if readiness_identity.is_some() {
         HealthDatabaseResponse {
             status: "reachable",
             reachable: true,
-            check: "select_1",
+            check: "database_identity",
             error: None,
+            identity: database_identity,
         }
     } else {
         HealthDatabaseResponse {
             status: "unreachable",
             reachable: false,
-            check: "select_1",
+            check: "database_identity",
             error: Some("database readiness query failed"),
+            identity: None,
         }
     };
 
-    let phase_runner = if database_reachable {
+    let phase_runner = if database.reachable {
         match load_phase_runner_health(&health_pool.0, state.phase_heartbeat_max_age_secs).await {
             Ok(health) => health,
             Err(error) => {
@@ -145,6 +191,38 @@ pub(crate) async fn health(
             loops: HealthLoopsResponse { phase_runner },
         }),
     )
+}
+
+async fn load_database_instance_identity(pool: &PgPool) -> anyhow::Result<String> {
+    let (database_oid, postmaster_started_at, server_address, server_port): (
+        String,
+        String,
+        String,
+        String,
+    ) = sqlx::query_as(DATABASE_IDENTITY_SQL)
+        .fetch_one(pool)
+        .await?;
+    Ok(database_instance_identity(
+        &database_oid,
+        &postmaster_started_at,
+        &server_address,
+        &server_port,
+    ))
+}
+
+fn database_instance_identity(
+    database_oid: &str,
+    postmaster_started_at: &str,
+    server_address: &str,
+    server_port: &str,
+) -> String {
+    format!(
+        "keccak256:{:#x}",
+        alloy_primitives::keccak256(format!(
+            "{database_oid}:{postmaster_started_at}:{server_address}:{server_port}"
+        ))
+    )
+    .replace("keccak256:0x", "keccak256:")
 }
 
 /// Judge the phase runner by its worst expected chain, not by the single freshest heartbeat row.

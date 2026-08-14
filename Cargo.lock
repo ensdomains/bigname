@@ -1707,6 +1707,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bigname-benchmark-gate"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "anyhow",
+ "bigname-content-hash",
+ "bigname-interpret",
+ "bigname-lookup",
+ "bigname-project",
+ "bigname-storage",
+ "bigname-test-support",
+ "clap",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "toml 0.8.23",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "bigname-content-hash"
 version = "0.1.0"
 dependencies = [
