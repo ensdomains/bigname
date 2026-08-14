@@ -83,12 +83,14 @@ database copy because all three operations write derived state:
   configured 65,536-entry interpreter-state cache.
 
 The published-head re-apply starts from a copy whose selected head is already
-published, then measures Project deleting and rebuilding that head's affected
-projection rows. It is not a live head-minus-one to head transition. It does
-not observe first-time row insertion, newly affected-row discovery, or
-publication advancement; [issue #467](https://github.com/ensdomains/bigname/issues/467)
-tracks the missing production rewind capability needed to measure those costs.
-The checked-in budget remains attached to this narrower, reproducible quantity.
+published under the current
+[interpreter content hash](../glossary.md#interpreter-content-hash), then
+measures Project deleting and rebuilding that head's affected projection rows.
+It is not a live head-minus-one to head transition. It does not observe
+first-time row insertion, newly affected-row discovery, or publication advancement;
+[issue #467](https://github.com/ensdomains/bigname/issues/467) tracks the missing
+production rewind capability needed to measure those costs. The checked-in
+budget remains attached to this narrower, reproducible quantity.
 
 The density check prevents a sparse historical range from producing a false
 green throughput result. The current-name floor prevents a staging-sized copy
@@ -196,7 +198,12 @@ production dataset while excluding staging-sized databases. The JSON report
 records both API-visible supported-row totals and both floors. It varies names, addresses,
 search text, relations, history scopes, sort order, page size, and any cursors
 returned by seed requests, and uses the real resolver and namespace rows. The
-search workload keeps explicit-namespace requests for every seed and adds bare
+address-name rotation retains the base listing request and deterministically
+mixes `include=role_summary`, `dedupe=registration`, and their combination into
+the timed requests. The sampled corpus does not identify addresses known to
+span repeated registrations, so registration-deduplicated variants use the
+same production-distribution address subjects as the other variants. The search
+workload keeps explicit-namespace requests for every seed and adds bare
 requests for a deterministic half; both forms cover prefix and contains
 matching, and production mode requires a populated bare-search seed response.
 Bare requests are a minority of the mixed search pool, so a regression limited
@@ -205,9 +212,11 @@ run after this coverage was added may also show higher search tails: bare search
 derives the public namespace set for each request and revalidates it after the
 read, while the earlier workload measured explicit-namespace requests only.
 The lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
-batches weighted toward the tail. Each timing starts at its intended dispatch,
-before the request task is spawned, so executor queue delay is included. It ends
-only after the complete response body has been read. The report contains
+batches weighted toward the tail. Each timing starts at dispatch, immediately
+before the request task is spawned, so executor queue delay after spawn is
+included. Time spent in the single dispatcher before that point is excluded and
+is bounded separately by the achieved-throughput floor. Timing ends only after
+the complete response body has been read. The report contains
 achieved throughput, success rate, and p50, p95, and p99 for each route.
 Diagnostics, GraphQL compatibility, health, and documentation routes are
 outside this traffic gate; they retain their ordinary functional checks.
@@ -222,7 +231,9 @@ file is authoritative for the exact route mapping.
 Record the release commit, [interpreter content hash](../glossary.md#interpreter-content-hash), host CPU and memory,
 PostgreSQL version and settings, database size, selected chain and head, dense
 Interpret range, and whether the API target is host-local or reached over a
-network. Keep those facts with both JSON reports.
+network. Keep those facts with both JSON reports. The API report records the
+normalized base URL without username or password userinfo. Database and chain
+RPC URLs are never included in either report.
 
 Use two targets:
 

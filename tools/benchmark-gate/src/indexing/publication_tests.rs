@@ -89,5 +89,22 @@ async fn published_head_reapply_refuses_a_copy_projected_only_through_head_minus
     )
     .await
     .expect("an already-published current-generation head must be accepted");
+
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET input_content_hash = 'keccak256:prior'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let error = validate_input(
+        database.pool(),
+        &input,
+        budgets.profile(crate::budgets::BudgetProfile::Smoke),
+    )
+    .await
+    .expect_err("a prior interpreter generation must not qualify as the published head")
+    .to_string();
+    assert!(error.contains("current interpreter content hash"));
     database.cleanup().await.unwrap();
 }

@@ -237,24 +237,34 @@ fn address_name_requests(
 ) -> Result<()> {
     for (index, (address, name, namespace, relation)) in corpus.address_names.iter().enumerate() {
         let query = search_term(name);
+        let mut query_pairs = vec![
+            ("namespace", namespace.as_str()),
+            ("relation", public_relation(relation)?),
+            ("q", query.as_str()),
+            (
+                "sort",
+                if index % 2 == 0 {
+                    "name"
+                } else {
+                    "registered_at"
+                },
+            ),
+            ("order", if index % 3 == 0 { "desc" } else { "asc" }),
+            ("page_size", page_size(index)),
+        ];
+        match index % 4 {
+            1 => query_pairs.push(("include", "role_summary")),
+            2 => query_pairs.push(("dedupe", "registration")),
+            3 => {
+                query_pairs.push(("include", "role_summary"));
+                query_pairs.push(("dedupe", "registration"));
+            }
+            _ => {}
+        }
         requests.push(get(
             base,
             &["v2", "addresses", address, "names"],
-            &[
-                ("namespace", namespace),
-                ("relation", public_relation(relation)?),
-                ("q", &query),
-                (
-                    "sort",
-                    if index % 2 == 0 {
-                        "name"
-                    } else {
-                        "registered_at"
-                    },
-                ),
-                ("order", if index % 3 == 0 { "desc" } else { "asc" }),
-                ("page_size", page_size(index)),
-            ],
+            &query_pairs,
         )?);
     }
     Ok(())
@@ -324,6 +334,15 @@ pub(super) fn normalized_base_url(value: &str) -> Result<Url> {
         url.set_path(&format!("{}/", url.path()));
     }
     Ok(url)
+}
+
+pub(crate) fn report_base_url(value: &str) -> Result<String> {
+    let mut url = normalized_base_url(value)?;
+    ensure!(
+        url.set_username("").is_ok() && url.set_password(None).is_ok(),
+        "API base URL credentials could not be removed for the benchmark report"
+    );
+    Ok(url.to_string())
 }
 
 pub(super) fn get(base: &Url, segments: &[&str], query: &[(&str, &str)]) -> Result<RequestSpec> {
@@ -567,3 +586,7 @@ mod tests {
         }));
     }
 }
+
+#[cfg(test)]
+#[path = "workload/coverage_tests.rs"]
+mod coverage_tests;

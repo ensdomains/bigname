@@ -192,6 +192,7 @@ async fn main() -> Result<()> {
         Command::Api(args) => {
             let head_sha = begin_release_run()?;
             require_release_profile()?;
+            let report_base_url = api_load::workload::report_base_url(&args.api_base_url)?;
             let profile = budgets.profile(BudgetProfile::Production);
             let pool = database::connect_read_only(&args.database_url, 8).await?;
             let database_name = database::database_identity(&pool).await?;
@@ -215,7 +216,7 @@ async fn main() -> Result<()> {
                 budget_profile: "production",
                 database: database_name,
                 database_host,
-                api_base_url: Some(args.api_base_url),
+                api_base_url: Some(report_base_url),
                 green: results.green,
                 results,
             };
@@ -478,5 +479,13 @@ mod tests {
         assert!(require_compiled_head(None).is_err());
         assert!(require_compiled_head(Some("")).is_err());
         assert_eq!(require_compiled_head(Some("abc123")).unwrap(), "abc123");
+    }
+
+    #[test]
+    fn api_report_uses_the_credential_free_base_url() {
+        let source = include_str!("main.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        assert!(production.contains("api_base_url: Some(report_base_url)"));
+        assert!(!production.contains("api_base_url: Some(args.api_base_url)"));
     }
 }

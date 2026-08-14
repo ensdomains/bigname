@@ -18,7 +18,7 @@ mod corpus;
 mod preflight;
 mod probes;
 mod report;
-mod workload;
+pub(crate) mod workload;
 use corpus::{Corpus, load_table_scale};
 use preflight::{ApiBoundaryPreflight, load_interpret_redo_snapshot, recheck_api_boundary};
 use probes::require_seed_probe;

@@ -50,3 +50,25 @@ async fn response_timing_includes_pre_poll_queue_delay() {
         sample.elapsed_micros
     );
 }
+
+#[test]
+fn execute_window_captures_dispatch_time_before_spawning_the_request_task() {
+    let source = include_str!("../../api_load.rs");
+    let execute_window = source
+        .split_once("async fn execute_window")
+        .unwrap()
+        .1
+        .split_once("fn build_endpoint_report")
+        .unwrap()
+        .0;
+    let capture = execute_window
+        .find("let scheduled_start = Instant::now()")
+        .unwrap();
+    let spawn = execute_window.find("tasks.spawn(async move").unwrap();
+
+    assert!(
+        capture < spawn,
+        "dispatch time must be captured before the request task enters the executor queue"
+    );
+    assert!(execute_window.contains("sample_request(&client, &request, scheduled_start)"));
+}
