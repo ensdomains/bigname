@@ -33,6 +33,11 @@ justification = "Production-scale corpus queries, their shared API-visibility fi
 review_justification = "Reviewed as non-serving release tooling: the file remains below the 1200 LOC ceiling, production query assembly is compact, and most of its size is database-backed coverage proving every sampled corpus family follows its serving-read visibility predicate."
 
 [[files]]
+path = "tools/benchmark-gate/src/api_load/corpus/resolver_coverage.rs"
+loc = 666
+justification = "Resolver manifest reconciliation, schema-v2 projection-phase admission, projected-row evidence binding, and the resulting operator failures remain together so the gate's expectation set is auditable as one query and verdict path."
+
+[[files]]
 path = "tools/benchmark-gate/src/database.rs"
 loc = 1046
 justification = "Read-only and disposable-copy connection preflights, per-connection instance pinning, marker authorization, and their database-backed safety tests remain co-located for one reviewable connection boundary."

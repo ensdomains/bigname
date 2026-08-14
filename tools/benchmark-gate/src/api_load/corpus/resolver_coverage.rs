@@ -17,11 +17,14 @@ pub(super) struct ResolverCoverage {
 struct ResolverCoverageRow {
     chain_id: String,
     source_family: String,
-    manifest_version: i64,
+    manifest_id: i64,
+    stored_manifest_version: Option<i64>,
+    event_manifest_version: Option<i64>,
     manifest_event_id: Option<i64>,
     resolver_address: Option<String>,
     target_block_number: Option<i64>,
     applicable: bool,
+    project_admits_without_stored_active: bool,
     manifest_binding_problem: Option<String>,
     manifest_problem: Option<String>,
     support_status: Option<String>,
@@ -34,10 +37,57 @@ fn resolver_manifest_coverage_sql() -> String {
     // `latest_upgrades` arm in crates/project/src/builders/resolver.rs.
     format!(
         r#"
-WITH active_families AS (
-    SELECT DISTINCT manifest.chain_id,
-           manifest.source_family,
-           manifest.manifest_id,
+WITH current_projects AS (
+    SELECT head.chain_id, project.current_block_number,
+           project.current_block_hash
+    FROM bigname_phase.chain_heads head
+    {CURRENT_PROJECT_PUBLICATION_JOIN}
+    WHERE project.input_content_hash = $1
+), stored_resolver_manifests AS (
+    SELECT manifest.*
+    FROM bigname_phase.manifest_versions manifest
+    WHERE manifest.source_family IN (
+        'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
+        'basenames_base_resolver'
+    )
+), latest_project_manifest_events AS (
+    -- Mirror the Project phase's latest-per-manifest selection before applying its
+    -- rollout-status and non-null-payload admission filter; see docs/glossary.md#projection.
+    SELECT DISTINCT ON (event.source_manifest_id)
+           event.source_manifest_id AS manifest_id,
+           event.namespace,
+           event.chain_id,
+           event.source_family,
+           event.manifest_version,
+           event.after_state ->> 'rollout_status' AS rollout_status,
+           event.after_state ->> 'normalizer_version' AS normalizer_version,
+           event.after_state -> 'manifest_payload' AS manifest_payload,
+           event.normalized_event_id
+    FROM bigname_phase.normalized_events event
+    LEFT JOIN current_projects current_project
+      ON current_project.chain_id = event.chain_id
+    LEFT JOIN bigname_phase.chain_lineage event_lineage
+      ON event_lineage.chain_id = event.chain_id
+     AND event_lineage.block_hash = event.block_hash
+     AND event_lineage.block_number = event.block_number
+    WHERE event.event_kind = 'SourceManifestUpdated'
+      AND event.source_manifest_id IS NOT NULL
+      AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND (
+          event.block_hash IS NULL
+          OR event_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+      )
+      AND (
+          event.block_number IS NULL
+          OR event.block_number <= current_project.current_block_number
+      )
+    ORDER BY event.source_manifest_id, event.normalized_event_id DESC
+), active_families AS (
+    SELECT DISTINCT COALESCE(latest.chain_id, manifest.chain_id) AS chain_id,
+           COALESCE(latest.source_family, manifest.source_family) AS source_family,
+           COALESCE(latest.manifest_id, manifest.manifest_id) AS manifest_id,
+           manifest.manifest_version AS stored_manifest_version,
+           latest.manifest_version AS event_manifest_version,
            COALESCE(latest.manifest_version, manifest.manifest_version)
                AS manifest_version,
            COALESCE(latest.manifest_payload, manifest.manifest_payload)
@@ -45,26 +95,48 @@ WITH active_families AS (
            latest.normalized_event_id AS manifest_event_id,
            current_project.current_block_number AS target_block_number,
            current_project.current_block_hash AS target_block_hash,
+           latest.rollout_status = 'active'
+               AND latest.manifest_payload IS NOT NULL
+               AND manifest.rollout_status IS DISTINCT FROM 'active'
+               AS project_admits_without_stored_active,
            CASE
+               WHEN latest.rollout_status = 'active'
+                AND latest.manifest_payload IS NOT NULL
+                AND manifest.rollout_status IS DISTINCT FROM 'active'
+                   THEN 'Project admits the family from its latest manifest event but the stored manifest row is missing/not active'
                WHEN latest.normalized_event_id IS NULL
                    THEN 'no latest canonical SourceManifestUpdated event exists at the current Project head'
                WHEN latest.rollout_status IS DISTINCT FROM 'active'
                    THEN 'the latest projected manifest event is not active'
+               WHEN latest.manifest_payload IS NULL
+                   THEN 'the latest projected manifest event has no manifest payload'
+               WHEN latest.namespace IS DISTINCT FROM manifest.namespace
+                 OR latest.chain_id IS DISTINCT FROM manifest.chain_id
+                 OR latest.source_family IS DISTINCT FROM manifest.source_family
+                   THEN format(
+                       'stored active manifest identity diverges from the latest Project event: stored namespace/chain/family=(%s, %s, %s), event=(%s, %s, %s)',
+                       manifest.namespace, manifest.chain_id, manifest.source_family,
+                       latest.namespace, latest.chain_id, latest.source_family
+                   )
                WHEN latest.manifest_version IS DISTINCT FROM manifest.manifest_version
                    THEN 'the stored active version diverges from the latest projected manifest event'
+               WHEN latest.normalizer_version IS DISTINCT FROM manifest.normalizer_version
+                   THEN 'stored active normalizer_version diverges from the latest projected manifest event'
                WHEN latest.manifest_payload IS DISTINCT FROM manifest.manifest_payload
                    THEN 'stored active payload diverges from the latest projected manifest event'
                ELSE NULL
            END AS manifest_binding_problem,
-           manifest.source_family = 'ens_v2_resolver_l1'
+           COALESCE(latest.source_family, manifest.source_family) = 'ens_v2_resolver_l1'
                AS uses_implementation_admission,
            CASE
-               WHEN manifest.source_family = 'ens_v2_resolver_l1'
+               WHEN COALESCE(latest.source_family, manifest.source_family)
+                    = 'ens_v2_resolver_l1'
                 AND jsonb_typeof(COALESCE(
                     latest.manifest_payload, manifest.manifest_payload
                 ) -> 'resolver_implementations') IS DISTINCT FROM 'array'
                    THEN 'resolver_implementations is absent or is not an array'
-               WHEN manifest.source_family = 'ens_v2_resolver_l1'
+               WHEN COALESCE(latest.source_family, manifest.source_family)
+                    = 'ens_v2_resolver_l1'
                 AND jsonb_typeof(COALESCE(
                     latest.manifest_payload, manifest.manifest_payload
                 ) -> 'resolver_implementations') = 'array'
@@ -76,7 +148,8 @@ WITH active_families AS (
                     WHERE entry ->> 'address' IS NULL
                        OR btrim(entry ->> 'address') = ''
                 ) THEN 'a resolver_implementations entry has no address'
-               WHEN manifest.source_family = 'ens_v2_resolver_l1'
+               WHEN COALESCE(latest.source_family, manifest.source_family)
+                    = 'ens_v2_resolver_l1'
                    THEN NULL
                WHEN jsonb_typeof(COALESCE(
                     latest.manifest_payload, manifest.manifest_payload
@@ -107,45 +180,25 @@ WITH active_families AS (
                ) THEN 'a contract entry has an invalid start_block'
                ELSE NULL
            END AS manifest_problem
-    FROM bigname_phase.manifest_versions manifest
-    LEFT JOIN (
-        SELECT head.chain_id, project.current_block_number,
-               project.current_block_hash
-        FROM bigname_phase.chain_heads head
-        {CURRENT_PROJECT_PUBLICATION_JOIN}
-        WHERE project.input_content_hash = $1
-    ) current_project
-      ON current_project.chain_id = manifest.chain_id
-    LEFT JOIN LATERAL (
-        SELECT event.normalized_event_id,
-               event.manifest_version,
-               event.after_state ->> 'rollout_status' AS rollout_status,
-               event.after_state -> 'manifest_payload' AS manifest_payload
-        FROM bigname_phase.normalized_events event
-        LEFT JOIN bigname_phase.chain_lineage event_lineage
-          ON event_lineage.chain_id = event.chain_id
-         AND event_lineage.block_hash = event.block_hash
-         AND event_lineage.block_number = event.block_number
-        WHERE event.source_manifest_id = manifest.manifest_id
-          AND event.chain_id = manifest.chain_id
-          AND event.event_kind = 'SourceManifestUpdated'
-          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND (
-              event.block_hash IS NULL
-              OR event_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+    FROM stored_resolver_manifests manifest
+    FULL OUTER JOIN latest_project_manifest_events latest
+      ON latest.manifest_id = manifest.manifest_id
+    LEFT JOIN current_projects current_project
+      ON current_project.chain_id = COALESCE(latest.chain_id, manifest.chain_id)
+    WHERE (
+              manifest.manifest_id IS NOT NULL
+              OR latest.source_family IN (
+                  'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
+                  'basenames_base_resolver'
+              )
           )
-          AND (
-              event.block_number IS NULL
-              OR event.block_number <= current_project.current_block_number
+      AND (
+              manifest.rollout_status = 'active'
+              OR (
+                  latest.rollout_status = 'active'
+                  AND latest.manifest_payload IS NOT NULL
+              )
           )
-        ORDER BY event.normalized_event_id DESC
-        LIMIT 1
-    ) latest ON TRUE
-    WHERE manifest.rollout_status = 'active'
-      AND manifest.source_family IN (
-          'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
-          'basenames_base_resolver'
-      )
 ), declaration_rows AS (
     SELECT active.chain_id,
            active.source_family,
@@ -329,11 +382,14 @@ WITH active_families AS (
 )
 SELECT expected.chain_id,
        expected.source_family,
-       expected.manifest_version,
+       expected.manifest_id,
+       active.stored_manifest_version,
+       active.event_manifest_version,
        expected.manifest_event_id,
        expected.resolver_address,
        expected.target_block_number,
        expected.applicable,
+       active.project_admits_without_stored_active,
        expected.manifest_binding_problem,
        expected.manifest_problem,
        candidate.support_status,
@@ -405,6 +461,8 @@ SELECT expected.chain_id,
            )
        END AS api_visible
 FROM expected
+JOIN active_families active
+  ON active.manifest_id = expected.manifest_id
 LEFT JOIN bigname_phase.resolver_current candidate
   ON candidate.chain_id = expected.chain_id
  AND lower(candidate.resolver_address) = expected.resolver_address
@@ -421,7 +479,7 @@ pub(super) async fn load(pool: &PgPool) -> Result<ResolverCoverage> {
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
         .fetch_all(pool)
         .await
-        .context("failed to compare the resolver corpus with active stored manifests")?;
+        .context("failed to reconcile the resolver corpus with Project and stored manifests")?;
     let mut failures = Vec::new();
     let mut resolvers = Vec::with_capacity(rows.len());
     let mut counts = BTreeMap::<(String, String), (usize, usize, usize)>::new();
@@ -433,30 +491,44 @@ pub(super) async fn load(pool: &PgPool) -> Result<ResolverCoverage> {
         let ResolverCoverageRow {
             chain_id,
             source_family,
-            manifest_version,
+            manifest_id,
+            stored_manifest_version,
+            event_manifest_version,
             manifest_event_id,
             resolver_address,
             target_block_number,
             applicable,
+            project_admits_without_stored_active,
             manifest_binding_problem,
             manifest_problem,
             support_status,
             manifest_event_bound,
             api_visible,
         } = row;
+        let stored_version_label = stored_manifest_version
+            .map_or_else(|| "missing".to_owned(), |version| version.to_string());
+        let event_version_label = event_manifest_version
+            .map_or_else(|| "missing".to_owned(), |version| version.to_string());
         let count = counts
             .entry((chain_id.clone(), source_family.clone()))
             .or_insert((0, 0, 0));
         if let Some(problem) = manifest_binding_problem
             && manifest_binding_problems.insert((
+                manifest_id,
                 chain_id.clone(),
                 source_family.clone(),
                 problem.clone(),
             ))
         {
-            failures.push(format!(
-                "active stored resolver manifest version {manifest_version} on chain {chain_id:?} in family {source_family:?} failed projected-event binding: {problem}; repair manifest/event consistency, rebuild Project, and rerun the gate"
-            ));
+            if project_admits_without_stored_active {
+                failures.push(format!(
+                    "Project admits {source_family:?} from its latest manifest event on chain {chain_id:?}, but stored manifest row {manifest_id} is missing/not active (stored version {stored_version_label}, latest event version {event_version_label}); repair manifest/event consistency, rebuild Project, and rerun the gate"
+                ));
+            } else {
+                failures.push(format!(
+                    "active stored resolver manifest version {stored_version_label} on chain {chain_id:?} in family {source_family:?} failed projected-event binding against latest Project event version {event_version_label}: {problem}; repair manifest/event consistency, rebuild Project, and rerun the gate"
+                ));
+            }
         }
         if let Some(problem) = manifest_problem
             && manifest_problems.insert((chain_id.clone(), source_family.clone(), problem.clone()))
@@ -489,7 +561,7 @@ pub(super) async fn load(pool: &PgPool) -> Result<ResolverCoverage> {
                 "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} is {status:?}, not supported, in resolver_current; rebuild Project from the stored active manifests and rerun the gate"
             )),
             Some(_) if !manifest_event_bound => failures.push(format!(
-                "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} does not cite latest projected manifest event {manifest_event_id:?}; rebuild Project from the latest canonical manifest event and rerun the gate"
+                "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} for manifest {manifest_id} (stored version {stored_version_label}, latest event version {event_version_label}) does not cite latest projected manifest event {manifest_event_id:?}; rebuild Project from the latest canonical manifest event and rerun the gate"
             )),
             Some(_) if !api_visible => failures.push(format!(
                 "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} fails the resolver benchmark's canonical-read or chain-anchor integrity checks at the copy's current Project head; repair or rebuild Project and rerun the gate"
@@ -563,7 +635,16 @@ mod tests {
         assert!(query.contains("event.event_kind = 'SourceManifestUpdated'"));
         assert!(query.contains("event.event_kind = 'Upgraded'"));
         assert!(query.contains("upgrade.manifest_payload -> 'resolver_implementations'"));
-        assert!(query.contains("manifest.source_family = 'ens_v2_resolver_l1'"));
+        assert!(query.contains("= 'ens_v2_resolver_l1'"));
+        assert!(query.contains("SELECT DISTINCT ON (event.source_manifest_id)"));
+        assert!(query.contains("FULL OUTER JOIN latest_project_manifest_events"));
+        assert!(query.contains("manifest.rollout_status IS DISTINCT FROM 'active'"));
+        assert!(query.contains("latest.chain_id IS DISTINCT FROM manifest.chain_id"));
+        assert!(query.contains("latest.source_family IS DISTINCT FROM manifest.source_family"));
+        assert!(
+            query
+                .contains("latest.normalizer_version IS DISTINCT FROM manifest.normalizer_version")
+        );
         assert!(query.contains("event.block_number AS upgrade_block_number"));
         assert!(query.contains("event.block_hash AS upgrade_block_hash"));
         assert!(query.contains("resolver.chain_positions -> 'block_number'"));

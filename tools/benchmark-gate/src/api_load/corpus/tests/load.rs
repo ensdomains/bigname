@@ -173,6 +173,7 @@ async fn insert_manifest_event(
                  'finalized', jsonb_build_object(
                      'rollout_status', 'active',
                      'manifest_version', 1,
+                     'normalizer_version', 'ensip15@ens-normalize-0.1.1',
                      'manifest_payload', $6::jsonb
                  ))
          RETURNING normalized_event_id",
@@ -824,6 +825,212 @@ async fn stored_payload_must_match_the_latest_projected_manifest_event() {
 }
 
 #[tokio::test]
+async fn manifest_binding_reports_stored_and_event_versions_accurately() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_manifest_event_version_binding").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": [{"address": resolver}]}),
+        addresses: vec![resolver.to_owned()],
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    sqlx::query("UPDATE manifest_versions SET manifest_version = 2")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE normalized_events
+         SET manifest_version = 3,
+             after_state = jsonb_set(after_state, '{manifest_version}', '3'::jsonb)",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        coverage.failures.iter().any(|failure| {
+            failure.contains("active stored resolver manifest version 2")
+                && failure.contains("latest Project event version 3")
+        }),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn manifest_normalizer_version_must_match_the_latest_projected_event() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_manifest_normalizer_binding").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": [{"address": resolver}]}),
+        addresses: vec![resolver.to_owned()],
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    insert_resolver_row(
+        database.pool(),
+        &manifest.chain_id,
+        resolver,
+        "supported",
+        1,
+    )
+    .await;
+    let matching = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+    assert!(matching.failures.is_empty(), "{:?}", matching.failures);
+
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = jsonb_set(
+             after_state,
+             '{normalizer_version}',
+             to_jsonb('ensip15@future-normalizer'::text)
+         )",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let divergent = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+    assert!(
+        divergent
+            .failures
+            .iter()
+            .any(|failure| { failure.contains("stored active normalizer_version diverges") }),
+        "{:?}",
+        divergent.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn manifest_event_chain_and_family_must_match_the_stored_manifest() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_manifest_event_identity_binding")
+            .pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    insert_project_head(database.pool(), "base-mainnet", 100).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": [{"address": resolver}]}),
+        addresses: vec![resolver.to_owned()],
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET namespace = 'basenames',
+             chain_id = 'base-mainnet',
+             source_family = 'basenames_base_resolver'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        coverage
+            .failures
+            .iter()
+            .any(|failure| failure.contains("stored active manifest identity diverges")),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn latest_manifest_event_is_selected_before_resolver_family_scoping() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_manifest_latest_event_family").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": [{"address": resolver}]}),
+        addresses: vec![resolver.to_owned()],
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    insert_resolver_row(
+        database.pool(),
+        &manifest.chain_id,
+        resolver,
+        "supported",
+        1,
+    )
+    .await;
+    let manifest_id: i64 =
+        sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE source_family = $1")
+            .bind(&manifest.source_family)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let newer_non_resolver = CheckedInResolverManifest {
+        source_family: "ens_v1_registry_l1".to_owned(),
+        ..manifest.clone()
+    };
+    insert_manifest_event(
+        database.pool(),
+        manifest_id,
+        &newer_non_resolver,
+        &newer_non_resolver.payload,
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        coverage
+            .failures
+            .iter()
+            .any(|failure| failure.contains("stored active manifest identity diverges")),
+        "the resolver-family filter selected an older event than the projection phase: {:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
 async fn resolver_rows_bind_to_the_latest_manifest_event() {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("benchmark_resolver_manifest_event_binding")
@@ -842,6 +1049,12 @@ async fn resolver_rows_bind_to_the_latest_manifest_event() {
         addresses: vec![resolver.to_owned()],
     };
     insert_resolver_manifest(database.pool(), &manifest).await;
+    let manifest_id: i64 =
+        sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE source_family = $1")
+            .bind(&manifest.source_family)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
     insert_resolver_row(
         database.pool(),
         &manifest.chain_id,
@@ -866,10 +1079,12 @@ async fn resolver_rows_bind_to_the_latest_manifest_event() {
         .await
         .unwrap();
     assert!(
-        mismatched
-            .failures
-            .iter()
-            .any(|failure| failure.contains("does not cite latest projected manifest event")),
+        mismatched.failures.iter().any(|failure| {
+            failure.contains("does not cite latest projected manifest event")
+                && failure.contains(&format!("manifest {manifest_id}"))
+                && failure.contains("stored version 1")
+                && failure.contains("latest event version 1")
+        }),
         "{:?}",
         mismatched.failures
     );

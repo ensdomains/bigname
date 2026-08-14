@@ -51,10 +51,12 @@ compiler-wrapper keys in the workspace `.cargo/config.toml` remain a named
 refusal. The wrapper also refuses every non-empty ambient `CARGO_PROFILE_*`
 variable, so environment overrides cannot change the release profile selected
 from the workspace manifest. The wrapper records the selected compiler's `-Vv`
-output. Other Cargo configuration, notably linker selection, remains
-uninspected; capturing every effective Cargo build input is release-infrastructure
-work. The recorded executable digests distinguish the resulting local binary
-bytes. Smoke always runs the locally built API binary
+output. User-level `~/.cargo/config.toml` `[profile.*]` overrides remain
+uninspected because the release wrapper does not isolate `CARGO_HOME`;
+[issue #465](https://github.com/ensdomains/bigname/issues/465) tracks closing
+that release-infrastructure gap. Other Cargo configuration,
+notably linker selection, also remains uninspected. The recorded executable
+digests distinguish the resulting local binary bytes. Smoke always runs the locally built API binary
 named by its digest. For a production API run, that digest is a companion build
 artifact; the remote target remains bound to the clean source commit through
 `/healthz`, not to the local executable digest.
@@ -103,13 +105,19 @@ address/name/relation combinations from the target projections, plus at least
 name claims. The resolver corpus is instead derived from the copy's active
 resolver [source-family](../glossary.md) manifests:
 `ens_v1_resolver_l1`, `ens_v2_resolver_l1`, and
-`basenames_base_resolver`. Before constructing requests, the gate requires each
-stored active payload to equal the payload in the latest canonical
-`SourceManifestUpdated` event that Project could consume at the copy's current
-head. Each projected resolver row must cite that exact event through
-`provenance.manifest_event_id`. A payload or event-ID mismatch is red and names
-the chain, source family, and version; this detects a manifest synchronization
-event/payload split without changing manifest synchronization behavior.
+`basenames_base_resolver`. Before constructing requests, the gate independently
+selects the latest canonical `SourceManifestUpdated` event that Project could
+consume for each of those families at the copy's current head. It reconciles
+that event set in both directions with stored active manifest rows. A family
+that Project admits from its latest event but whose stored row is missing or not
+active is red; a family deprecated in both places remains outside the workload.
+For every stored active row, the version, normalizer version, and payload must
+equal the latest Project-eligible event. Each projected resolver row must cite
+that exact event through `provenance.manifest_event_id`. A reconciliation or
+event-ID mismatch is red and names the manifest, chain, source family, and both
+stored and event versions where available; this detects a manifest
+event that disagrees with its stored manifest row without changing manifest
+synchronization behavior.
 
 ENSv1 and Basenames families use currently applicable concrete `contracts`
 declarations. ENSv2 families that declare `resolver_implementations` instead use

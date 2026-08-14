@@ -218,13 +218,14 @@ mod tests {
                 .any(|line| line.trim_start().starts_with("CARGO_ENCODED_RUSTFLAGS="))
         );
     }
-}
-#[test]
-fn reported_cargo_profile_comes_from_compiled_assertion_mode() {
-    assert_eq!(cargo_profile_for_debug_assertions(true), "dev");
-    assert_eq!(cargo_profile_for_debug_assertions(false), "release");
-    assert_eq!(
-        cargo_profile(),
-        cargo_profile_for_debug_assertions(cfg!(debug_assertions))
-    );
+
+    #[test]
+    fn reported_cargo_profile_comes_from_compiled_assertion_mode() {
+        assert_eq!(cargo_profile_for_debug_assertions(true), "dev");
+        assert_eq!(cargo_profile_for_debug_assertions(false), "release");
+        assert_eq!(
+            cargo_profile(),
+            cargo_profile_for_debug_assertions(cfg!(debug_assertions))
+        );
+    }
 }
