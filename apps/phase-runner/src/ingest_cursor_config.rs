@@ -137,11 +137,6 @@ pub(crate) fn validate_source_keys(
     )))
 }
 
-pub(crate) async fn ensure(pool: &PgPool, source: &SourceConfig) -> RunnerResult<()> {
-    let stored = initialize(pool, source).await?;
-    validate(source, stored)
-}
-
 async fn initialize(pool: &PgPool, source: &SourceConfig) -> RunnerResult<StoredSourceConfig> {
     if let Some(stored) = load(pool, source).await? {
         return Ok(stored);

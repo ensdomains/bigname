@@ -1,3 +1,5 @@
+use sqlx::{Connection, PgConnection};
+
 use crate::{
     error::{COMPLETED_VALIDATION_FAILURE_PREFIX, RunnerError, RunnerResult},
     phase::PhaseName,
@@ -123,10 +125,11 @@ impl PhaseStore {
 
     pub(crate) async fn complete_revalidated_phase(
         &self,
+        lock_connection: &mut PgConnection,
         chain_id: &str,
         phase: PhaseName,
     ) -> RunnerResult<()> {
-        let mut transaction = self.pool().begin().await.map_err(|error| {
+        let mut transaction = lock_connection.begin().await.map_err(|error| {
             RunnerError::database(
                 format!(
                     "failed to begin revalidated phase completion for chain {chain_id} phase \
@@ -164,7 +167,8 @@ impl PhaseStore {
         })?;
         sqlx::query(
             "UPDATE chain_phase_state
-             SET phase_status = 'completed', finished_at = now(), updated_at = now()
+             SET phase_status = 'completed', settled_while_unconfigured = NULL,
+                 finished_at = now(), updated_at = now()
              WHERE chain_id = $1 AND phase_name = $2",
         )
         .bind(chain_id)

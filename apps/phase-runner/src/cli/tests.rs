@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn run_cli_accepts_a_metrics_listener_address() {
+    let cli = Cli::try_parse_from([
+        "phase-runner",
+        "run",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--verification-database-url",
+        "postgres://phase-runner.invalid/verification",
+        "--chain",
+        "ethereum-mainnet",
+        "--metrics-bind-addr",
+        "0.0.0.0:19465",
+        "--heartbeat-stale-after-secs",
+        "1200",
+    ])
+    .expect("run metrics listener option must parse");
+
+    let Command::Run(args) = cli.command else {
+        panic!("expected run command");
+    };
+    assert_eq!(args.metrics_bind_addr, "0.0.0.0:19465".parse().unwrap());
+    assert_eq!(args.heartbeat_stale_after_secs, 1200);
+}
+
+#[test]
+fn run_cli_rejects_a_nonpositive_heartbeat_threshold() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "run",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--verification-database-url",
+        "postgres://phase-runner.invalid/verification",
+        "--chain",
+        "ethereum-mainnet",
+        "--heartbeat-stale-after-secs",
+        "0",
+    ])
+    .expect("zero threshold parses before semantic validation");
+    let error = command
+        .resolve()
+        .err()
+        .expect("zero threshold must be rejected");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("threshold must be positive"));
+}
+
+#[test]
 fn redo_cli_carries_canonical_head_hydration_rpc() {
     let command = Cli::try_parse_from([
         "phase-runner",

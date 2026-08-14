@@ -72,13 +72,16 @@ impl PhaseRunner {
     }
 
     pub(super) async fn recover_stopped_live(&self, chain: &ChainConfig) -> RunnerResult<()> {
-        let live_lock = PhaseLock::acquire(
+        let mut live_lock = PhaseLock::acquire(
             self.database.connect_options(),
             &chain.chain_id,
             PhaseName::Live,
         )
         .await?;
-        let result = self.store.complete_stopped_live(&chain.chain_id).await;
+        let result = self
+            .store
+            .complete_stopped_live(live_lock.connection(), &chain.chain_id)
+            .await;
         let release = live_lock.release().await;
         match (result, release) {
             (Ok(()), Ok(())) => Ok(()),

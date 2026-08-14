@@ -1,17 +1,16 @@
 use std::{fmt, str::FromStr};
 
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
 use crate::{
     config::SourceConfig,
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
     phase::{PhaseName, PhaseProgress, PhaseResume, RunMode},
+    phase_lock::PhaseLock,
     redo_state::{self, RedoOutcome, RedoSession},
-    state_persistence::{
-        load_phase_resume, load_redo_resume, update_ingest_cursors, update_progress,
-        update_redo_progress,
-    },
+    state_ingest_progress::{update_ingest_cursors, update_ingest_progress},
+    state_persistence::{load_phase_resume, load_redo_resume, update_progress_in_transaction},
     transitions::{invalid_transition, lock_chain_phase_state, require_start, row_for},
 };
 
@@ -139,14 +138,20 @@ impl PhaseStore {
         let status = row.status()?;
         let recovering_completed = status == PhaseStatus::Failed
             && crate::completed_phase_recovery::locked_completed_validation_recovery(row, phase);
-        let restarts_completed = if phase == PhaseName::Live {
-            true
-        } else if status == PhaseStatus::Completed
-            && matches!(phase, PhaseName::Interpret | PhaseName::Project)
-        {
-            completed_phase_is_behind(&mut transaction, chain_id, phase, row).await?
-        } else {
-            false
+        let restarts_completed = match (status, phase) {
+            (_, PhaseName::Live) => true,
+            (PhaseStatus::Completed, PhaseName::Ingest) => row.ingest_completion_is_incomplete(),
+            (PhaseStatus::Completed, PhaseName::Interpret | PhaseName::Project) => {
+                completed_phase_is_behind(&mut transaction, chain_id, phase, row).await?
+            }
+            (PhaseStatus::Completed, PhaseName::Verify) => {
+                row.settled_while_unconfigured == Some(true)
+                    && (row.verification_level.is_none()
+                        || row.current_block_number.is_none()
+                        || row.current_block_number != row.target_block_number
+                        || row.current_block_hash != row.target_block_hash)
+            }
+            _ => false,
         };
         if status == PhaseStatus::Completed && !restarts_completed {
             transaction.commit().await.map_err(|error| {
@@ -247,12 +252,13 @@ impl PhaseStore {
 
     pub(crate) async fn finish_redo(
         &self,
+        lock_connection: &mut PgConnection,
         chain_id: &str,
         phase: PhaseName,
         session: RedoSession,
         outcome: RedoOutcome<'_>,
     ) -> RunnerResult<()> {
-        redo_state::finish(&self.pool, chain_id, phase, session, outcome).await
+        redo_state::finish(lock_connection, chain_id, phase, session, outcome).await
     }
 
     pub(crate) async fn required_redo_range(
@@ -308,27 +314,33 @@ impl PhaseStore {
         Ok(())
     }
 
-    pub async fn record_progress(
+    pub async fn complete_phase_with_lock(
         &self,
+        phase_lock: &mut PhaseLock,
         chain_id: &str,
         phase: PhaseName,
-        mode: &RunMode,
         progress: &PhaseProgress,
     ) -> RunnerResult<()> {
-        if mode.is_redo() {
-            update_redo_progress(&self.pool, chain_id, phase, progress).await
-        } else {
-            update_progress(&self.pool, chain_id, phase, progress, "updated_at = now()").await
-        }
+        let connection = phase_lock.connection_for(chain_id, phase)?;
+        self.complete_phase_on_connection(connection, chain_id, phase, progress)
+            .await
     }
 
-    pub async fn complete_phase(
+    pub(crate) async fn complete_phase_on_connection(
         &self,
+        lock_connection: &mut PgConnection,
         chain_id: &str,
         phase: PhaseName,
         progress: &PhaseProgress,
     ) -> RunnerResult<()> {
-        let current = self.status(chain_id, phase).await?;
+        let mut transaction = lock_connection.begin().await.map_err(|error| {
+            RunnerError::database(
+                format!("failed to begin completion for chain {chain_id} phase {phase}"),
+                error,
+            )
+        })?;
+        let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
+        let current = row_for(&rows, phase)?.status()?;
         if !current.can_transition_to(PhaseStatus::Completed, false) {
             return Err(invalid_transition(
                 chain_id,
@@ -338,35 +350,21 @@ impl PhaseStore {
             ));
         }
         crate::state_persistence::validate_progress(phase, progress, true)?;
-        update_progress(
-            &self.pool,
+        update_progress_in_transaction(
+            &mut transaction,
             chain_id,
             phase,
             progress,
-            "phase_status = 'completed', finished_at = now(), updated_at = now()",
+            "phase_status = 'completed', settled_while_unconfigured = NULL, \
+             finished_at = now(), updated_at = now()",
         )
-        .await
-    }
-
-    pub(crate) async fn complete_stopped_live(&self, chain_id: &str) -> RunnerResult<()> {
-        sqlx::query(
-            "UPDATE chain_phase_state
-             SET phase_status = 'completed', last_error = NULL,
-                 finished_at = now(), updated_at = now()
-             WHERE chain_id = $1 AND phase_name = 'live'
-               AND phase_status IN ('running', 'paused')
-               AND NOT redo_in_progress",
-        )
-        .bind(chain_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| {
+        .await?;
+        transaction.commit().await.map_err(|error| {
             RunnerError::database(
-                format!("failed to complete stopped live phase for chain {chain_id}"),
+                format!("failed to commit completion for chain {chain_id} phase {phase}"),
                 error,
             )
-        })?;
-        Ok(())
+        })
     }
 
     pub async fn fail_phase(
@@ -478,6 +476,15 @@ impl PhaseStore {
         update_ingest_cursors(&self.pool, sources, progress).await
     }
 
+    pub async fn record_ingest_progress(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+        progress: &PhaseProgress,
+    ) -> RunnerResult<()> {
+        update_ingest_progress(&self.pool, chain_id, sources, progress).await
+    }
+
     pub async fn ensure_ingest_sources(
         &self,
         chain_id: &str,
@@ -501,6 +508,24 @@ impl PhaseStore {
     ) -> RunnerResult<()> {
         crate::ingest_cursor_config::validate_completed(&self.pool, chain_id, sources).await
     }
+
+    pub async fn completed_ingest_requires_restart(&self, chain_id: &str) -> RunnerResult<bool> {
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            RunnerError::transient(format!(
+                "failed to begin completed Ingest check for chain {chain_id}: {error}"
+            ))
+        })?;
+        let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
+        let row = row_for(&rows, PhaseName::Ingest)?;
+        let requires_restart =
+            row.status()? == PhaseStatus::Completed && row.ingest_completion_is_incomplete();
+        transaction.commit().await.map_err(|error| {
+            RunnerError::transient(format!(
+                "failed to finish completed Ingest check for chain {chain_id}: {error}"
+            ))
+        })?;
+        Ok(requires_restart)
+    }
 }
 
 async fn completed_phase_is_behind(
@@ -523,6 +548,11 @@ async fn completed_phase_is_behind(
         )
     })?;
     let Some((head_number, head_hash)) = head else {
+        if row.settled_while_unconfigured == Some(true) {
+            return Err(RunnerError::data_integrity(format!(
+                "cannot revalidate settlement-marked phase {phase} for chain {chain_id} without a canonical head"
+            )));
+        }
         return Ok(false);
     };
     let Some(current_number) = row.current_block_number else {

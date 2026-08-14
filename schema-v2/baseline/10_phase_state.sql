@@ -53,12 +53,14 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     phase_name text NOT NULL,
     phase_status text NOT NULL DEFAULT 'idle',
     verification_level text,
+    settled_while_unconfigured boolean,
     current_block_number bigint,
     current_block_hash text,
     target_block_number bigint,
     target_block_hash text,
     input_content_hash text,
     redo_in_progress boolean NOT NULL DEFAULT false,
+    redo_attempt_generation bigint NOT NULL DEFAULT 0,
     redo_mode text,
     redo_previous_phase_status text,
     redo_previous_last_error text,
@@ -70,6 +72,8 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     redo_current_block_hash text,
     redo_target_block_number bigint,
     redo_target_block_hash text,
+    redo_source_boundary_markers jsonb,
+    redo_manifest_authority_fingerprint text,
     live_handoff_block_number bigint,
     live_handoff_block_hash text,
     last_error text,
@@ -100,6 +104,10 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     ),
     CONSTRAINT chain_phase_state_verification_phase_check
         CHECK (verification_level IS NULL OR phase_name = 'verify'),
+    CONSTRAINT chain_phase_state_unconfigured_settlement_check CHECK (
+        settled_while_unconfigured IS NULL
+        OR settled_while_unconfigured
+    ),
     CHECK (
         (current_block_number IS NULL)
         = (current_block_hash IS NULL)
@@ -118,6 +126,8 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
         redo_mode IS NULL
         OR redo_mode IN ('redo', 'recompute_flags')
     ),
+    CONSTRAINT chain_phase_state_redo_attempt_generation_check
+        CHECK (redo_attempt_generation >= 0),
     CHECK (
         (redo_current_block_number IS NULL)
         = (redo_current_block_hash IS NULL)
@@ -125,6 +135,23 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     CHECK (
         (redo_target_block_number IS NULL)
         = (redo_target_block_hash IS NULL)
+    ),
+    CONSTRAINT chain_phase_state_ingest_redo_source_boundaries_check CHECK (
+        redo_source_boundary_markers IS NULL
+        OR (
+            phase_name = 'ingest'
+            AND redo_in_progress
+            AND jsonb_typeof(redo_source_boundary_markers) = 'object'
+            AND redo_source_boundary_markers <> '{}'::jsonb
+        )
+    ),
+    CONSTRAINT chain_phase_state_ingest_redo_manifest_authority_check CHECK (
+        redo_manifest_authority_fingerprint IS NULL
+        OR (
+            phase_name = 'ingest'
+            AND redo_in_progress
+            AND redo_manifest_authority_fingerprint ~ '^[0-9a-f]{64}$'
+        )
     ),
     CHECK (
         (
@@ -282,6 +309,8 @@ COMMENT ON COLUMN chain_phase_state.phase_status IS
     'This value states the current phase state, including capacity pauses.';
 COMMENT ON COLUMN chain_phase_state.verification_level IS
     'This value states how source data was checked.';
+COMMENT ON COLUMN chain_phase_state.settled_while_unconfigured IS
+    'True only when startup settled an active phase row for a chain absent from runtime configuration; NULL identifies ordinary phase state.';
 COMMENT ON COLUMN chain_phase_state.current_block_number IS
     'This value is the latest phase block height.';
 COMMENT ON COLUMN chain_phase_state.current_block_hash IS
@@ -294,6 +323,8 @@ COMMENT ON COLUMN chain_phase_state.input_content_hash IS
     'This value identifies the interpretation inputs.';
 COMMENT ON COLUMN chain_phase_state.redo_in_progress IS
     'This value records an unfinished explicit redo.';
+COMMENT ON COLUMN chain_phase_state.redo_attempt_generation IS
+    'This nonnegative counter increments whenever an explicit redo begins and fences its progress writes to that attempt.';
 COMMENT ON COLUMN chain_phase_state.redo_mode IS
     'This value identifies the explicit redo operation.';
 COMMENT ON COLUMN chain_phase_state.redo_previous_phase_status IS
@@ -316,6 +347,10 @@ COMMENT ON COLUMN chain_phase_state.redo_target_block_number IS
     'This value is the current target block only for the active redo.';
 COMMENT ON COLUMN chain_phase_state.redo_target_block_hash IS
     'This value identifies the current target block only for the active redo.';
+COMMENT ON COLUMN chain_phase_state.redo_source_boundary_markers IS
+    'This object maps each Ingest source key to a block number and hash returned by a boundary load during the active redo.';
+COMMENT ON COLUMN chain_phase_state.redo_manifest_authority_fingerprint IS
+    'For an active Ingest redo, this value binds resumable numeric and per-source boundary evidence to the chain''s active manifest rows, excluding normalizer_version.';
 COMMENT ON COLUMN chain_phase_state.live_handoff_block_number IS
     'This value is the first live block height.';
 COMMENT ON COLUMN chain_phase_state.live_handoff_block_hash IS

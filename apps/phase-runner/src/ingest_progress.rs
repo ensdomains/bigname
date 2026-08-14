@@ -121,8 +121,8 @@ fn require_source_completion(
     }
     if current.hash != target.hash {
         return Err(RunnerError::data_integrity(format!(
-            "ingest source {} cannot complete with different current and target hashes at block {}",
-            source.source_key, current.number
+            "ingest source {} cannot complete with different current and target hashes at block {}; complete an Ingest redo covering that block with the source completed at that boundary to reconcile the cursor, then restart normal processing",
+            source.source_key, current.number,
         )));
     }
     Ok(())

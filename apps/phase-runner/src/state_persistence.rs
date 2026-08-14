@@ -1,16 +1,15 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
-    config::SourceConfig,
     error::{RunnerError, RunnerResult},
     heads::BlockMarker,
-    ingest_cursor_config,
-    phase::{IngestCursor, PhaseName, PhaseProgress, PhaseResume, VerificationLevel},
+    phase::{
+        IngestCursor, PhaseName, PhaseProgress, PhaseResume, RedoAttemptFence, RunMode,
+        VerificationLevel,
+    },
+    state::PhaseStore,
 };
 
 type StoredPhasePosition = (
@@ -21,6 +20,41 @@ type StoredPhasePosition = (
     Option<String>,
 );
 
+type StoredRedoPosition = (
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<serde_json::Value>,
+);
+
+impl PhaseStore {
+    pub async fn record_progress(
+        &self,
+        chain_id: &str,
+        phase: PhaseName,
+        mode: &RunMode,
+        redo_attempt: Option<RedoAttemptFence>,
+        progress: &PhaseProgress,
+    ) -> RunnerResult<()> {
+        match (mode.is_redo(), redo_attempt) {
+            (true, Some(attempt)) => {
+                update_redo_progress(self.pool(), chain_id, phase, mode, attempt, progress).await
+            }
+            (true, None) => Err(RunnerError::data_integrity(format!(
+                "redo progress is missing its attempt fence for chain {chain_id} phase {phase}"
+            ))),
+            (false, None) => {
+                update_progress(self.pool(), chain_id, phase, progress, "updated_at = now()").await
+            }
+            (false, Some(_)) => Err(RunnerError::data_integrity(format!(
+                "normal progress carries a redo attempt fence for chain {chain_id} phase {phase}"
+            ))),
+        }
+    }
+}
+
 pub(crate) async fn update_progress(
     pool: &PgPool,
     chain_id: &str,
@@ -29,6 +63,35 @@ pub(crate) async fn update_progress(
     status_assignment: &str,
 ) -> RunnerResult<()> {
     validate_progress(phase, progress, false)?;
+    let mut transaction = pool.begin().await.map_err(|error| {
+        RunnerError::database(
+            format!("failed to begin progress update for chain {chain_id} phase {phase}"),
+            error,
+        )
+    })?;
+    update_progress_in_transaction(
+        &mut transaction,
+        chain_id,
+        phase,
+        progress,
+        status_assignment,
+    )
+    .await?;
+    transaction.commit().await.map_err(|error| {
+        RunnerError::database(
+            format!("failed to commit progress for chain {chain_id} phase {phase}"),
+            error,
+        )
+    })
+}
+
+pub(crate) async fn update_progress_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    phase: PhaseName,
+    progress: &PhaseProgress,
+    status_assignment: &str,
+) -> RunnerResult<()> {
     let query = format!(
         "
         UPDATE chain_phase_state
@@ -67,7 +130,7 @@ pub(crate) async fn update_progress(
                 .flatten(),
         )
         .bind(progress.verification_level.map(|level| level.as_str()))
-        .execute(pool)
+        .execute(&mut **transaction)
         .await
         .map_err(|error| {
             RunnerError::database(
@@ -82,42 +145,100 @@ pub(crate) async fn update_redo_progress(
     pool: &PgPool,
     chain_id: &str,
     phase: PhaseName,
+    mode: &RunMode,
+    attempt: RedoAttemptFence,
     progress: &PhaseProgress,
 ) -> RunnerResult<()> {
     validate_progress(phase, progress, false)?;
-    let result = sqlx::query(
+    let loaded_boundaries = loaded_redo_boundaries(phase, progress)?;
+    let expected_mode = match mode {
+        RunMode::Redo(_) => "redo",
+        RunMode::RecomputeFlags(_) => "recompute_flags",
+        RunMode::Normal => {
+            return Err(RunnerError::data_integrity(
+                "normal mode cannot record redo progress",
+            ));
+        }
+    };
+    // Fence this pool-backed progress write to the exact redo begin. This closes the
+    // redo-progress instance of https://github.com/ensdomains/bigname/issues/452;
+    // holistic connection routing remains there.
+    let query = format!(
         "
         UPDATE chain_phase_state
         SET redo_current_block_number = $3,
             redo_current_block_hash = $4,
             redo_target_block_number = $5,
             redo_target_block_hash = $6,
+            redo_source_boundary_markers = CASE
+                WHEN $7::jsonb IS NULL THEN redo_source_boundary_markers
+                ELSE COALESCE(redo_source_boundary_markers, '{{}}'::jsonb) || $7::jsonb
+            END,
             updated_at = now()
         WHERE chain_id = $1
           AND phase_name = $2
           AND redo_in_progress
+          AND redo_attempt_generation = $8
+          AND redo_mode = $9
+          AND redo_from_block_number = $10
+          AND redo_to_block_number = $11
+          AND (
+              phase_name != 'ingest'
+              OR redo_manifest_authority_fingerprint = {}
+          )
         ",
-    )
-    .bind(chain_id)
-    .bind(phase.as_str())
-    .bind(progress.current.as_ref().map(|marker| marker.number))
-    .bind(progress.current.as_ref().map(|marker| marker.hash.as_str()))
-    .bind(progress.target.as_ref().map(|marker| marker.number))
-    .bind(progress.target.as_ref().map(|marker| marker.hash.as_str()))
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!("failed to record redo progress for chain {chain_id} phase {phase}"),
-            error,
-        )
-    })?;
+        crate::redo_manifest_authority::FINGERPRINT_SQL
+    );
+    let result = sqlx::query(&query)
+        .bind(chain_id)
+        .bind(phase.as_str())
+        .bind(progress.current.as_ref().map(|marker| marker.number))
+        .bind(progress.current.as_ref().map(|marker| marker.hash.as_str()))
+        .bind(progress.target.as_ref().map(|marker| marker.number))
+        .bind(progress.target.as_ref().map(|marker| marker.hash.as_str()))
+        .bind(loaded_boundaries)
+        .bind(attempt.generation)
+        .bind(expected_mode)
+        .bind(attempt.execution_range.from)
+        .bind(attempt.execution_range.to)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!("failed to record redo progress for chain {chain_id} phase {phase}"),
+                error,
+            )
+        })?;
     if result.rows_affected() != 1 {
-        return Err(RunnerError::data_integrity(format!(
-            "redo progress requires an active redo for chain {chain_id} phase {phase}"
+        return Err(RunnerError::redo_attempt_superseded(format!(
+            "redo attempt superseded; progress not recorded for chain {chain_id} phase {phase} \
+             generation {} mode {expected_mode} range {}..={}",
+            attempt.generation, attempt.execution_range.from, attempt.execution_range.to
         )));
     }
     Ok(())
+}
+
+fn loaded_redo_boundaries(
+    phase: PhaseName,
+    progress: &PhaseProgress,
+) -> RunnerResult<Option<serde_json::Value>> {
+    let mut boundaries = serde_json::Map::new();
+    for source in &progress.source_progress {
+        let Some(marker) = &source.redo_loaded_boundary else {
+            continue;
+        };
+        if phase != PhaseName::Ingest {
+            return Err(RunnerError::data_integrity(format!(
+                "phase {phase} reported an Ingest redo source boundary"
+            )));
+        }
+        boundaries.insert(
+            source.source_key.clone(),
+            serde_json::json!({"number": marker.number, "hash": marker.hash}),
+        );
+    }
+    Ok((!boundaries.is_empty()).then_some(serde_json::Value::Object(boundaries)))
 }
 
 pub(crate) fn validate_progress(
@@ -199,145 +320,6 @@ pub(crate) async fn record_live_verification_mismatch(
     Ok(result.rows_affected() == 1)
 }
 
-pub(crate) async fn update_ingest_cursors(
-    pool: &PgPool,
-    sources: &[SourceConfig],
-    progress: &PhaseProgress,
-) -> RunnerResult<()> {
-    crate::ingest_progress::validate(sources, progress, false)?;
-    let sources_by_key = sources
-        .iter()
-        .map(|source| (source.source_key.as_str(), source))
-        .collect::<BTreeMap<_, _>>();
-    for source in sources {
-        ingest_cursor_config::ensure(pool, source).await?;
-    }
-    if progress.source_progress.is_empty() {
-        for source in sources {
-            upsert_ingest_cursor(
-                pool,
-                source,
-                progress.current.as_ref(),
-                progress.target.as_ref(),
-            )
-            .await?;
-        }
-        return Ok(());
-    }
-
-    let mut seen = BTreeSet::new();
-    for source_progress in &progress.source_progress {
-        if !seen.insert(source_progress.source_key.as_str()) {
-            return Err(RunnerError::data_integrity(format!(
-                "ingest phase reported source {} more than once in one batch",
-                source_progress.source_key
-            )));
-        }
-        let source = sources_by_key
-            .get(source_progress.source_key.as_str())
-            .ok_or_else(|| {
-                RunnerError::data_integrity(format!(
-                    "ingest phase reported unconfigured source {}",
-                    source_progress.source_key
-                ))
-            })?;
-        upsert_ingest_cursor(
-            pool,
-            source,
-            source_progress.current.as_ref(),
-            source_progress.target.as_ref(),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-pub(crate) async fn upsert_ingest_cursor(
-    pool: &PgPool,
-    source: &SourceConfig,
-    current: Option<&BlockMarker>,
-    target: Option<&BlockMarker>,
-) -> RunnerResult<()> {
-    let processed = current.filter(|marker| marker.number >= source.start_block_number);
-    let target = target.filter(|marker| marker.number >= source.start_block_number);
-    if processed
-        .zip(target)
-        .is_some_and(|(current, target)| current.number > target.number)
-    {
-        return Err(RunnerError::data_integrity(format!(
-            "ingest source {} current block is above its target",
-            source.source_key
-        )));
-    }
-    let next = processed
-        .map(|marker| {
-            marker
-                .number
-                .checked_add(1)
-                .ok_or_else(|| RunnerError::data_integrity("ingest cursor block number overflowed"))
-        })
-        .transpose()?
-        .unwrap_or(source.start_block_number);
-    sqlx::query(
-        "
-        INSERT INTO ingest_cursors (
-            chain_id,
-            source_key,
-            source_kind,
-            seed_basis,
-            start_block_number,
-            next_block_number,
-            target_block_number,
-            last_processed_block_number,
-            last_processed_block_hash
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (chain_id, source_key) DO UPDATE
-        SET next_block_number = GREATEST(
-                ingest_cursors.next_block_number,
-                EXCLUDED.next_block_number
-            ),
-            target_block_number = EXCLUDED.target_block_number,
-            last_processed_block_number = CASE
-                WHEN ingest_cursors.last_processed_block_number IS NULL
-                  OR EXCLUDED.last_processed_block_number
-                     >= ingest_cursors.last_processed_block_number
-                THEN EXCLUDED.last_processed_block_number
-                ELSE ingest_cursors.last_processed_block_number
-            END,
-            last_processed_block_hash = CASE
-                WHEN ingest_cursors.last_processed_block_number IS NULL
-                  OR EXCLUDED.last_processed_block_number
-                     >= ingest_cursors.last_processed_block_number
-                THEN EXCLUDED.last_processed_block_hash
-                ELSE ingest_cursors.last_processed_block_hash
-            END,
-            updated_at = now()
-        ",
-    )
-    .bind(&source.chain_id)
-    .bind(&source.source_key)
-    .bind(&source.source_kind)
-    .bind(source.seed_basis.as_str())
-    .bind(source.start_block_number)
-    .bind(next)
-    .bind(target.map(|marker| marker.number))
-    .bind(processed.map(|marker| marker.number))
-    .bind(processed.map(|marker| marker.hash.as_str()))
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!(
-                "failed to update ingest cursor {} for chain {}",
-                source.source_key, source.chain_id
-            ),
-            error,
-        )
-    })?;
-    Ok(())
-}
-
 pub(crate) async fn load_phase_resume(
     pool: &PgPool,
     chain_id: &str,
@@ -373,7 +355,7 @@ pub(crate) async fn load_phase_resume(
     let current = marker_from_pair(current_number, current_hash);
     let target = marker_from_pair(target_number, target_hash);
     let ingest_cursors = if phase == PhaseName::Ingest {
-        load_ingest_cursors(pool, chain_id).await?
+        load_ingest_cursors(pool, chain_id, &BTreeMap::new()).await?
     } else {
         Vec::new()
     };
@@ -390,13 +372,14 @@ pub(crate) async fn load_redo_resume(
     chain_id: &str,
     phase: PhaseName,
 ) -> RunnerResult<PhaseResume> {
-    let position: Option<StoredPhasePosition> = sqlx::query_as(
+    let position: Option<StoredRedoPosition> = sqlx::query_as(
         "
         SELECT redo_current_block_number,
                redo_current_block_hash,
                redo_target_block_number,
                redo_target_block_hash,
-               verification_level
+               verification_level,
+               redo_source_boundary_markers
         FROM chain_phase_state
         WHERE chain_id = $1
           AND phase_name = $2
@@ -412,14 +395,21 @@ pub(crate) async fn load_redo_resume(
             "failed to load redo resume position for chain {chain_id} phase {phase}: {error}"
         ))
     })?;
-    let (current_number, current_hash, target_number, target_hash, verification_level) =
-        position.ok_or_else(|| {
-            RunnerError::data_integrity(format!(
-                "active redo state is missing for chain {chain_id} phase {phase}"
-            ))
-        })?;
+    let (
+        current_number,
+        current_hash,
+        target_number,
+        target_hash,
+        verification_level,
+        redo_source_boundary_markers,
+    ) = position.ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "active redo state is missing for chain {chain_id} phase {phase}"
+        ))
+    })?;
+    let redo_source_boundaries = parse_redo_source_boundaries(redo_source_boundary_markers)?;
     let ingest_cursors = if phase == PhaseName::Ingest {
-        load_ingest_cursors(pool, chain_id).await?
+        load_ingest_cursors(pool, chain_id, &redo_source_boundaries).await?
     } else {
         Vec::new()
     };
@@ -444,7 +434,34 @@ fn parse_verification_level(value: Option<&str>) -> RunnerResult<Option<Verifica
         .transpose()
 }
 
-async fn load_ingest_cursors(pool: &PgPool, chain_id: &str) -> RunnerResult<Vec<IngestCursor>> {
+fn parse_redo_source_boundaries(
+    value: Option<serde_json::Value>,
+) -> RunnerResult<BTreeMap<String, BlockMarker>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let object = value.as_object().ok_or_else(|| {
+        RunnerError::data_integrity("redo source boundary markers must be a JSON object")
+    })?;
+    let mut boundaries = BTreeMap::new();
+    for (source_key, value) in object {
+        let number = value.get("number").and_then(serde_json::Value::as_i64);
+        let hash = value.get("hash").and_then(serde_json::Value::as_str);
+        let marker = number.zip(hash).ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "redo source boundary marker for source {source_key} is malformed"
+            ))
+        })?;
+        boundaries.insert(source_key.clone(), BlockMarker::new(marker.0, marker.1)?);
+    }
+    Ok(boundaries)
+}
+
+async fn load_ingest_cursors(
+    pool: &PgPool,
+    chain_id: &str,
+    redo_source_boundaries: &BTreeMap<String, BlockMarker>,
+) -> RunnerResult<Vec<IngestCursor>> {
     let rows = sqlx::query_as::<_, (String, i64, Option<i64>, Option<i64>, Option<String>)>(
         "
         SELECT source_key,
@@ -468,11 +485,15 @@ async fn load_ingest_cursors(pool: &PgPool, chain_id: &str) -> RunnerResult<Vec<
     Ok(rows
         .into_iter()
         .map(
-            |(source_key, next_block_number, target_block_number, number, hash)| IngestCursor {
-                source_key,
-                next_block_number,
-                target_block_number,
-                last_processed: marker_from_pair(number, hash),
+            |(source_key, next_block_number, target_block_number, number, hash)| {
+                let redo_loaded_boundary = redo_source_boundaries.get(&source_key).cloned();
+                IngestCursor {
+                    source_key,
+                    next_block_number,
+                    target_block_number,
+                    last_processed: marker_from_pair(number, hash),
+                    redo_loaded_boundary,
+                }
             },
         )
         .collect())

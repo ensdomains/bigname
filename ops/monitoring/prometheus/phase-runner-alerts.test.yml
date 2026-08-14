@@ -1,0 +1,604 @@
+rule_files:
+  - phase-runner-alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: terminal phase failure pages
+    interval: 15s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="interpret",status="failed"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: BignamePhaseFailed
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              phase: interpret
+              severity: page
+              status: failed
+            exp_annotations:
+              threshold: "A phase reports status=failed on one evaluation."
+              meaning: "The named chain phase stored an error; it may be retrying or may have stopped."
+
+  - name: inactive one-hot phase states do not page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="interpret",status="failed"}'
+        values: '0x20'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live",status="paused"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BignamePhaseFailed
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BignamePhaseRunnerCapacityPaused
+        exp_alerts: []
+
+  - name: healthy long batch stays below its configured stale threshold
+    interval: 15s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '180x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts: []
+
+  - name: stalled live batch pages on stale heartbeat
+    interval: 15s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '1200x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
+
+  - name: capacity-paused phase pages while liveness stays fresh
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live",status="paused"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '5x20'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="phase-runner:9465",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BignamePhaseRunnerCapacityPaused
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              status: paused
+            exp_annotations:
+              threshold: "A phase remains continuously capacity-paused for 15 minutes."
+              meaning: "Storage capacity has prevented the named chain phase from doing pipeline work."
+      - eval_time: 15m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BignamePhaseRunnerLoopStale
+        exp_alerts: []
+
+  - name: short capacity pause does not page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live",status="paused"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '5x20'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="phase-runner:9465",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: BignamePhaseRunnerCapacityPaused
+        exp_alerts: []
+
+  - name: capacity probe wedged after pausing pages on stale liveness
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live",status="paused"}'
+        values: '1x12'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '1200x12'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet"}'
+        values: '1200x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="phase-runner:9465",threshold_seconds="900"}'
+        values: '900x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "The runner loop for the named chain makes no observable progress for the configured 900 seconds, plus 2 minutes."
+              meaning: "The runner is scrapeable, but its loop for the named chain is wedged between phase work opportunities."
+
+  - name: running phase with no recorded heartbeat pages
+    interval: 15s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '-1x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
+
+  - name: two runner instances retain phase and loop staleness paging
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x12'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '1200x12'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet"}'
+        values: '1200x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="runner-a:9465",threshold_seconds="900"}'
+        values: '900x12'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="runner-b:9465",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x12'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="runner-b:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '2400x12'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="runner-b:9465",chain="ethereum-mainnet"}'
+        values: '2400x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="runner-b:9465",threshold_seconds="1800"}'
+        values: '1800x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: runner-a:9465
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: runner-b:9465
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              threshold_seconds: "1800"
+            exp_annotations:
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 1800 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: runner-a:9465
+              job: bigname-phase-runner
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "The runner loop for the named chain makes no observable progress for the configured 900 seconds, plus 2 minutes."
+              meaning: "The runner is scrapeable, but its loop for the named chain is wedged between phase work opportunities."
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: runner-b:9465
+              job: bigname-phase-runner
+              severity: page
+              threshold_seconds: "1800"
+            exp_annotations:
+              threshold: "The runner loop for the named chain makes no observable progress for the configured 1800 seconds, plus 2 minutes."
+              meaning: "The runner is scrapeable, but its loop for the named chain is wedged between phase work opportunities."
+
+  - name: retained threshold values on one runner retain staleness paging
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x12'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '2400x12'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet"}'
+        values: '2400x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="runner-a:9465",threshold_seconds="900"}'
+        values: '900x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="runner-a:9465",threshold_seconds="1800"}'
+        values: '1800x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: runner-a:9465
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              threshold_seconds: "1800"
+            exp_annotations:
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 1800 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: runner-a:9465
+              job: bigname-phase-runner
+              severity: page
+              threshold_seconds: "1800"
+            exp_annotations:
+              threshold: "The runner loop for the named chain makes no observable progress for the configured 1800 seconds, plus 2 minutes."
+              meaning: "The runner is scrapeable, but its loop for the named chain is wedged between phase work opportunities."
+
+  - name: phase status from one runner instance cannot activate another instance
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="live",status="completed"}'
+        values: '1x15'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '1200x15'
+      - series: 'phase_runner_head_lag_blocks{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '100x15'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="runner-a:9465",threshold_seconds="900"}'
+        values: '900x15'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="runner-b:9465",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x15'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="runner-b:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '30x15'
+      - series: 'phase_runner_head_lag_blocks{job="bigname-phase-runner",instance="runner-b:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '0x15'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="runner-b:9465",threshold_seconds="900"}'
+        values: '900x15'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BignamePhaseRunnerHeadLagHigh
+        exp_alerts: []
+
+  - name: oscillating but persistent live head lag pages
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_head_lag_blocks{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '100 0 100 0 100 0 100 0 100 0 100 0 100 0 100'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0 1 0 1'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="completed"}'
+        values: '0 1 0 1 0 1 0 1 0 1 0 1 0 1 0'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BignamePhaseRunnerHeadLagHigh
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+            exp_annotations:
+              threshold: "Live lag exceeds 30 blocks and Live is observed running at least once in every 2-minute window for 10 minutes."
+              meaning: "The named chain is persistently falling behind new blocks."
+
+  - name: genuinely caught-up live processing does not page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_head_lag_blocks{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '0x15'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="completed"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BignamePhaseRunnerHeadLagHigh
+        exp_alerts: []
+
+  - name: retained live lag after a failed batch does not page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_head_lag_blocks{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '100x15'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="failed"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BignamePhaseRunnerHeadLagHigh
+        exp_alerts: []
+
+  - name: runner orchestration stalls with every phase resting
+    interval: 30s
+    input_series:
+      - series: 'up{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '1x12'
+      - series: 'phase_runner_metrics_refresh_success{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '1x12'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet"}'
+        values: '2000x12'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '2000x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+        values: '900x12'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="completed"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "The runner loop for the named chain makes no observable progress for the configured 900 seconds, plus 2 minutes."
+              meaning: "The runner is scrapeable, but its loop for the named chain is wedged between phase work opportunities."
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopHeartbeatMissing
+        exp_alerts: []
+
+  - name: missing heartbeat threshold pages instead of disabling liveness rules
+    interval: 30s
+    input_series:
+      - series: 'up{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '1x12'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x12'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '5000x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatThresholdMissing
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The configured heartbeat threshold metric is absent for 2 minutes."
+              meaning: "The runner image and alert rules are incompatible, so heartbeat-age paging cannot be evaluated safely."
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopHeartbeatMissing
+        exp_alerts: []
+
+  - name: missing runner-loop heartbeat pages when the threshold metric exists
+    interval: 30s
+    input_series:
+      - series: 'up{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '1x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="phase-runner:9465",threshold_seconds="900"}'
+        values: '900x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopHeartbeatMissing
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The runner-loop heartbeat metric is absent for 2 minutes."
+              meaning: "The runner image predates the loop-liveness rule, so between-phase stalls cannot be evaluated safely."
+
+  - name: runner outage does not claim heartbeat threshold incompatibility
+    interval: 30s
+    input_series:
+      - series: 'up{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatThresholdMissing
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopHeartbeatMissing
+        exp_alerts: []
+
+  - name: active runner loop stays healthy while phases rest
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet"}'
+        values: '30x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+        values: '900x12'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="completed"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopStale
+        exp_alerts: []
+
+  - name: runner target down pages
+    interval: 30s
+    input_series:
+      - series: 'up{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerDown
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "Prometheus cannot scrape the runner for 2 minutes."
+              meaning: "The runner target, process, or metrics listener has remained continuously unavailable; brief successful scrapes reset this alert."
+
+  - name: missing runner target pages
+    interval: 30s
+    input_series:
+      - series: 'up{job="another-job",instance="another-service:9090"}'
+        values: '1x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerDown
+        exp_alerts:
+          - exp_labels:
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "Prometheus cannot scrape the runner for 2 minutes."
+              meaning: "The runner target, process, or metrics listener has remained continuously unavailable; brief successful scrapes reset this alert."
+
+  - name: phase runner container crash loop pages
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_process_start_timestamp_milliseconds{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '1000 stale 2000 stale 3000 stale 4000 4000'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BignamePhaseRunnerContainerRestarting
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The runner process-start value changes at least 3 times within 10 minutes."
+              meaning: "The runner is repeatedly restarting, including failures that happen before phase state can be recorded."
+
+  - name: two phase runner container restarts do not page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_process_start_timestamp_milliseconds{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '1000 stale 2000 stale 3000 3000'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BignamePhaseRunnerContainerRestarting
+        exp_alerts: []
+
+  - name: more than three phase runner restarts still page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_process_start_timestamp_milliseconds{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '1000 stale 2000 stale 3000 stale 4000 5000'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: BignamePhaseRunnerContainerRestarting
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The runner process-start value changes at least 3 times within 10 minutes."
+              meaning: "The runner is repeatedly restarting, including failures that happen before phase state can be recorded."
+
+  - name: stale database refresh pages
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_metrics_refresh_success{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x6'
+      - series: 'phase_runner_metrics_last_refresh_timestamp_seconds{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerMetricsRefreshStale
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The metrics database read fails, or no successful refresh occurs for 60 seconds, for 2 minutes."
+              meaning: "The endpoint is reachable but its view of pipeline state is no longer current."
+
+  - name: failed database refresh pages even when the last success is current
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_metrics_refresh_success{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x12'
+      - series: 'phase_runner_metrics_last_refresh_timestamp_seconds{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0+30x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerMetricsRefreshStale
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The metrics database read fails, or no successful refresh occurs for 60 seconds, for 2 minutes."
+              meaning: "The endpoint is reachable but its view of pipeline state is no longer current."
+
+  - name: old refresh timestamp pages even when the latest refresh result says success
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_metrics_refresh_success{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '1x12'
+      - series: 'phase_runner_metrics_last_refresh_timestamp_seconds{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: BignamePhaseRunnerMetricsRefreshStale
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The metrics database read fails, or no successful refresh occurs for 60 seconds, for 2 minutes."
+              meaning: "The endpoint is reachable but its view of pipeline state is no longer current."

@@ -128,10 +128,17 @@ pub struct PhaseContext {
     pub chain_id: String,
     pub phase: PhaseName,
     pub mode: RunMode,
+    pub redo_attempt: Option<RedoAttemptFence>,
     pub sources: Arc<[SourceConfig]>,
     pub available_heads: Option<HeadMarkers>,
     pub live_handoff: Option<crate::heads::BlockMarker>,
     pub resume: PhaseResume,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RedoAttemptFence {
+    pub generation: i64,
+    pub execution_range: BlockRange,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -148,6 +155,7 @@ pub struct IngestCursor {
     pub next_block_number: i64,
     pub target_block_number: Option<i64>,
     pub last_processed: Option<crate::heads::BlockMarker>,
+    pub redo_loaded_boundary: Option<crate::heads::BlockMarker>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -155,6 +163,7 @@ pub struct SourceProgress {
     pub source_key: String,
     pub current: Option<crate::heads::BlockMarker>,
     pub target: Option<crate::heads::BlockMarker>,
+    pub redo_loaded_boundary: Option<crate::heads::BlockMarker>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -269,6 +278,7 @@ impl Phase for LoopbackPhase {
                         source_key: source.source_key.clone(),
                         current: marker.clone(),
                         target: marker.clone(),
+                        redo_loaded_boundary: None,
                     })
                     .collect()
             } else {
@@ -439,6 +449,7 @@ mod tests {
             chain_id: "test-chain".to_owned(),
             phase: PhaseName::Interpret,
             mode: RunMode::Normal,
+            redo_attempt: None,
             sources: Arc::from([]),
             available_heads: None,
             live_handoff: None,

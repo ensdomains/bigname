@@ -134,6 +134,8 @@ pub struct IndexingStatusChainRow {
     pub project_phase_status: Option<String>,
     pub verify_phase_status: Option<String>,
     pub verify_verification_level: Option<String>,
+    pub verify_settled_while_unconfigured: bool,
+    pub any_phase_settled_while_unconfigured: bool,
     pub provider_trusted_verification_required: bool,
     pub project_generation_current: bool,
     pub project_redo_in_progress: bool,

@@ -53,6 +53,43 @@ run_psql() {
     esac
 }
 
+assert_unconfigured_settlement_constraint() {
+    local provenance="$1"
+    local false_error
+
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "INSERT INTO chain_phase_state (" \
+            "    chain_id, phase_name, settled_while_unconfigured" \
+            ") VALUES (" \
+            "    'phase-settlement-${provenance}-true', 'ingest', TRUE" \
+            ");"
+    } | run_psql
+
+    if false_error="$({
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "INSERT INTO chain_phase_state (" \
+            "    chain_id, phase_name, settled_while_unconfigured" \
+            ") VALUES (" \
+            "    'phase-settlement-${provenance}-false', 'project', FALSE" \
+            ");"
+    } | run_psql 2>&1)"; then
+        printf '%s\n' \
+            "$provenance settlement constraint accepted a FALSE marker" >&2
+        exit 1
+    fi
+    if [[ "$false_error" != *chain_phase_state_unconfigured_settlement_check* ]]; then
+        printf '%s\n' \
+            "$provenance FALSE marker failed without the named settlement constraint" >&2
+        printf '%s\n' "$false_error" >&2
+        exit 1
+    fi
+    printf '%s\n' \
+        "$provenance settlement constraint accepts non-Verify TRUE and rejects FALSE"
+}
+
 wait_for_schema_v2_race_session() {
     local application_name="$1"
     local status
@@ -120,7 +157,10 @@ for migration_file in \
     "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
     "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
-    "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql"
+    "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
+    "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
+    "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
+    "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -150,6 +190,10 @@ END
 $$;
 SQL
 } | run_psql
+# Comment-only upgrades must also tolerate SQLx running before init-schema.
+sed "s/bigname_phase/$scratch_schema/g" \
+    "$ROOT/migrations/20260814121000_phase_heartbeat_liveness_comment.sql" \
+    | run_psql
 
 apply_baseline
 apply_baseline
@@ -314,6 +358,301 @@ DELETE FROM normalized_events
 WHERE event_identity = 'redo-handoff-upgrade-sentinel';
 SQL
 } | run_psql
+
+# Exercise and verify the in-place comment upgrade on an initialized schema.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "COMMENT ON COLUMN service_heartbeats.heartbeat_at IS" \
+        "    'This time records the latest completed work unit.';"
+} | run_psql
+for ignored in 1 2; do
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814121000_phase_heartbeat_liveness_comment.sql" \
+        | run_psql
+done
+heartbeat_comment_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "SELECT CASE WHEN col_description('service_heartbeats'::regclass," \
+        "    (SELECT attnum FROM pg_attribute" \
+        "     WHERE attrelid = 'service_heartbeats'::regclass" \
+        "       AND attname = 'heartbeat_at')) =" \
+        "    'This time records runner liveness, including refreshes during storage-capacity waits.'" \
+        "THEN 'heartbeat_liveness_comment_exact'" \
+        "ELSE 'heartbeat_liveness_comment_wrong' END;"
+} | run_psql)"
+if [[ "$heartbeat_comment_check" != *heartbeat_liveness_comment_exact* ]]; then
+    printf '%s\n' "heartbeat liveness comment upgrade was not applied" >&2
+    exit 1
+fi
+
+# Exercise the initialized-schema unconfigured-settlement upgrade from its preceding
+# shape. The existing row must stay NULL, and both additive migrations must be
+# idempotent after the constraint has been validated.
+assert_unconfigured_settlement_constraint baseline
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "INSERT INTO chain_phase_state (chain_id, phase_name)" \
+        "VALUES ('verify-settlement-upgrade-check', 'verify');" \
+        "ALTER TABLE chain_phase_state" \
+        "    DROP CONSTRAINT chain_phase_state_unconfigured_settlement_check," \
+        "    DROP COLUMN settled_while_unconfigured;"
+} | run_psql
+for ignored in 1 2; do
+    for migration_file in \
+        "$ROOT/migrations/20260814122000_verify_unconfigured_settlement.sql" \
+        "$ROOT/migrations/20260814122100_verify_unconfigured_settlement_validate.sql"
+    do
+        sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
+    done
+done
+assert_unconfigured_settlement_constraint migration
+verify_settlement_upgrade_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT CASE WHEN
+    (SELECT settled_while_unconfigured IS NULL
+     FROM chain_phase_state
+     WHERE chain_id = 'verify-settlement-upgrade-check'
+       AND phase_name = 'verify')
+    AND (SELECT settled_while_unconfigured IS TRUE
+         FROM chain_phase_state
+         WHERE chain_id = 'phase-settlement-migration-true'
+           AND phase_name = 'ingest')
+    AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'chain_phase_state'
+          AND column_name = 'settled_while_unconfigured'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    )
+    AND col_description(
+        'chain_phase_state'::regclass,
+        (SELECT attnum
+         FROM pg_attribute
+         WHERE attrelid = 'chain_phase_state'::regclass
+           AND attname = 'settled_while_unconfigured'
+           AND NOT attisdropped)
+    ) = 'True only when startup settled an active phase row for a chain absent from runtime configuration; NULL identifies ordinary phase state.'
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname = 'chain_phase_state_unconfigured_settlement_check'
+          AND convalidated
+    )
+THEN 'verify_settlement_upgrade_exact'
+ELSE 'verify_settlement_upgrade_wrong' END;
+SQL
+} | run_psql)"
+if [[ "$verify_settlement_upgrade_check" != *verify_settlement_upgrade_exact* ]]; then
+    printf '%s\n' "Verify settlement provenance upgrade was not applied exactly" >&2
+    exit 1
+fi
+
+# Exercise the initialized-schema Ingest redo boundary-marker upgrade from its
+# preceding shape, then verify baseline and schema-migration parity.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "ALTER TABLE chain_phase_state" \
+        "    DROP CONSTRAINT chain_phase_state_ingest_redo_source_boundaries_check," \
+        "    DROP COLUMN redo_source_boundary_markers;"
+} | run_psql
+for ignored in 1 2; do
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
+        | run_psql
+done
+redo_source_boundary_upgrade_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT CASE WHEN
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'chain_phase_state'
+          AND column_name = 'redo_source_boundary_markers'
+          AND data_type = 'jsonb'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname = 'chain_phase_state_ingest_redo_source_boundaries_check'
+          AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%phase_name = ''ingest''%'
+          AND pg_get_constraintdef(oid) LIKE '%redo_in_progress%'
+          AND pg_get_constraintdef(oid) LIKE '%jsonb_typeof%'
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname <> 'chain_phase_state_ingest_redo_source_boundaries_check'
+          AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%redo_previous_phase_status%'
+          AND pg_get_constraintdef(oid) LIKE '%redo_from_block_number%'
+    )
+    AND col_description(
+        'chain_phase_state'::regclass,
+        (SELECT attnum
+         FROM pg_attribute
+         WHERE attrelid = 'chain_phase_state'::regclass
+           AND attname = 'redo_source_boundary_markers'
+           AND NOT attisdropped)
+    ) = 'This object maps each Ingest source key to a block number and hash returned by a boundary load during the active redo.'
+THEN 'redo_source_boundary_upgrade_ok'
+ELSE 'redo_source_boundary_upgrade_wrong' END;
+SQL
+} | run_psql)"
+if [[ "$redo_source_boundary_upgrade_check" != *redo_source_boundary_upgrade_ok* ]]; then
+    printf '%s\n' "Ingest redo source-boundary upgrade was not applied" >&2
+    exit 1
+fi
+
+# Exercise the initialized-schema redo-attempt generation upgrade from its
+# preceding shape, then verify baseline and schema-migration parity.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "ALTER TABLE chain_phase_state" \
+        "    DROP CONSTRAINT chain_phase_state_redo_attempt_generation_check," \
+        "    DROP COLUMN redo_attempt_generation;"
+} | run_psql
+for ignored in 1 2; do
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
+        | run_psql
+done
+redo_attempt_generation_upgrade_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT CASE WHEN
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'chain_phase_state'
+          AND column_name = 'redo_attempt_generation'
+          AND data_type = 'bigint'
+          AND is_nullable = 'NO'
+          AND column_default = '0'
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname = 'chain_phase_state_redo_attempt_generation_check'
+          AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%redo_attempt_generation >= 0%'
+    )
+    AND col_description(
+        'chain_phase_state'::regclass,
+        (SELECT attnum
+         FROM pg_attribute
+         WHERE attrelid = 'chain_phase_state'::regclass
+           AND attname = 'redo_attempt_generation'
+           AND NOT attisdropped)
+    ) = 'This nonnegative counter increments whenever an explicit redo begins and fences its progress writes to that attempt.'
+THEN 'redo_attempt_generation_upgrade_ok'
+ELSE 'redo_attempt_generation_upgrade_wrong' END;
+SQL
+} | run_psql)"
+if [[ "$redo_attempt_generation_upgrade_check" != *redo_attempt_generation_upgrade_ok* ]]; then
+    printf '%s\n' "Redo attempt generation upgrade was not applied" >&2
+    exit 1
+fi
+
+# Exercise the initialized-schema Ingest redo manifest-fingerprint upgrade from
+# its preceding shape, then verify baseline and schema-migration parity.
+baseline_redo_manifest_authority_constraint="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'chain_phase_state'::regclass
+  AND conname = 'chain_phase_state_ingest_redo_manifest_authority_check'
+  AND convalidated;
+SQL
+} | run_psql)"
+if [[ -z "$baseline_redo_manifest_authority_constraint" ]]; then
+    printf '%s\n' "Baseline is missing the Ingest redo manifest-fingerprint constraint" >&2
+    exit 1
+fi
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "ALTER TABLE chain_phase_state" \
+        "    DROP CONSTRAINT chain_phase_state_ingest_redo_manifest_authority_check," \
+        "    DROP COLUMN redo_manifest_authority_fingerprint;"
+} | run_psql
+for ignored in 1 2; do
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql" \
+        | run_psql
+done
+migration_redo_manifest_authority_constraint="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'chain_phase_state'::regclass
+  AND conname = 'chain_phase_state_ingest_redo_manifest_authority_check'
+  AND convalidated;
+SQL
+} | run_psql)"
+if [[ "$migration_redo_manifest_authority_constraint" != "$baseline_redo_manifest_authority_constraint" ]]; then
+    printf '%s\n' "Baseline and schema-migration Ingest redo evidence constraints differ" >&2
+    exit 1
+fi
+redo_manifest_authority_upgrade_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT CASE WHEN
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'chain_phase_state'
+          AND column_name = 'redo_manifest_authority_fingerprint'
+          AND data_type = 'text'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname = 'chain_phase_state_ingest_redo_manifest_authority_check'
+          AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%phase_name = ''ingest''%'
+          AND pg_get_constraintdef(oid) LIKE '%redo_in_progress%'
+          AND pg_get_constraintdef(oid) LIKE '%redo_manifest_authority_fingerprint ~%'
+    )
+    AND col_description(
+        'chain_phase_state'::regclass,
+        (SELECT attnum
+         FROM pg_attribute
+         WHERE attrelid = 'chain_phase_state'::regclass
+           AND attname = 'redo_manifest_authority_fingerprint'
+           AND NOT attisdropped)
+    ) = 'For an active Ingest redo, this value binds resumable numeric and per-source boundary evidence to the chain''s active manifest rows, excluding normalizer_version.'
+THEN 'redo_manifest_authority_upgrade_ok'
+ELSE 'redo_manifest_authority_upgrade_wrong' END;
+SQL
+} | run_psql)"
+if [[ "$redo_manifest_authority_upgrade_check" != *redo_manifest_authority_upgrade_ok* ]]; then
+    printf '%s\n' "Ingest redo manifest-fingerprint upgrade was not applied" >&2
+    exit 1
+fi
 
 # Exercise the initialized-schema upgrade against the preceding closed
 # vocabularies. Rewrite only the qualified schema name so the checked-in
@@ -723,7 +1062,8 @@ BEGIN
     WITH maintainer_authorized_allowlist(table_name, column_name) AS (
         VALUES
             ('chain_heads', 'lineage_orphaning_epoch'),
-            ('manifest_authority_attestations', 'generation_token')
+            ('manifest_authority_attestations', 'generation_token'),
+            ('chain_phase_state', 'redo_attempt_generation')
     )
     SELECT string_agg(
         format('%I.%I', actual.table_name, actual.column_name),

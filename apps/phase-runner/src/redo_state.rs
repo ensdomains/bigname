@@ -1,9 +1,9 @@
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
 use crate::{
     config::SourceConfig,
     error::{RunnerError, RunnerResult},
-    phase::{BlockRange, PhaseName, PhaseProgress, RunMode},
+    phase::{BlockRange, PhaseName, PhaseProgress, RedoAttemptFence, RunMode},
     redo_manifest_audit::{ManifestAuthorityAttestationAudit, matches_active_redo},
     state::PhaseStatus,
     transitions::{
@@ -16,9 +16,19 @@ pub(crate) struct RedoSession {
     previous: PhaseStateRow,
     interrupted_before_redo: bool,
     range: BlockRange,
+    attempt_generation: i64,
     recompute_flags: bool,
     stage_project_refresh_on_completion: bool,
     pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
+}
+
+impl RedoSession {
+    pub(crate) const fn attempt_fence(&self) -> RedoAttemptFence {
+        RedoAttemptFence {
+            generation: self.attempt_generation,
+            execution_range: self.range,
+        }
+    }
 }
 pub(crate) enum RedoOutcome<'a> {
     Completed(&'a PhaseProgress),
@@ -126,14 +136,28 @@ pub(crate) async fn begin(
     let same_active_audit = attestation_audit
         .as_ref()
         .is_some_and(ManifestAuthorityAttestationAudit::replayed);
+    let (current_ingest_authority, ingest_authority_changed) =
+        crate::redo_manifest_authority::for_redo_begin(
+            &mut transaction,
+            chain_id,
+            phase,
+            same_active_redo,
+            previous.redo_manifest_authority_fingerprint.as_deref(),
+        )
+        .await?;
     let resume_same_epoch = same_active_redo
-        && (!phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash));
+        && if phase == PhaseName::Ingest {
+            !ingest_authority_changed
+        } else {
+            !phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash)
+        };
     let preserve_started_at = resume_same_epoch || same_active_audit;
-    sqlx::query(
+    let attempt_generation = sqlx::query_scalar::<_, i64>(
         "
         UPDATE chain_phase_state
         SET phase_status = 'running',
             redo_in_progress = true,
+            redo_attempt_generation = redo_attempt_generation + 1,
             redo_mode = $3,
             redo_previous_phase_status = CASE
                 WHEN redo_in_progress THEN redo_previous_phase_status
@@ -157,6 +181,12 @@ pub(crate) async fn begin(
             redo_current_block_hash = CASE WHEN $6 THEN redo_current_block_hash END,
             redo_target_block_number = CASE WHEN $6 THEN redo_target_block_number END,
             redo_target_block_hash = CASE WHEN $6 THEN redo_target_block_hash END,
+            redo_source_boundary_markers = CASE
+                WHEN $6 THEN redo_source_boundary_markers
+            END,
+            redo_manifest_authority_fingerprint = CASE
+                WHEN phase_name = 'ingest' THEN $13
+            END,
             input_content_hash = CASE WHEN $8 THEN $9 ELSE input_content_hash END,
             last_error = CASE
                 WHEN last_error LIKE $10
@@ -168,6 +198,7 @@ pub(crate) async fn begin(
             updated_at = now()
         WHERE chain_id = $1
           AND phase_name = $2
+        RETURNING redo_attempt_generation
         ",
     )
     .bind(chain_id)
@@ -182,7 +213,8 @@ pub(crate) async fn begin(
     .bind(format!("{}%", crate::redo_stamp::REQUIRED_REDO_PREFIX))
     .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
     .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
-    .execute(&mut *transaction)
+    .bind(current_ingest_authority.as_deref())
+    .fetch_one(&mut *transaction)
     .await
     .map_err(|error| {
         RunnerError::database(
@@ -196,10 +228,16 @@ pub(crate) async fn begin(
             error,
         )
     })?;
+    crate::redo_manifest_authority::reject_changed(
+        ingest_authority_changed,
+        chain_id,
+        execution_range,
+    )?;
     Ok(RedoSession {
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
         previous,
         range: execution_range,
+        attempt_generation,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         stage_project_refresh_on_completion,
         manifest_authority_audit: attestation_audit,
@@ -350,7 +388,7 @@ async fn require_full_hash_redo(
 }
 
 pub(crate) async fn finish(
-    pool: &PgPool,
+    lock_connection: &mut PgConnection,
     chain_id: &str,
     phase: PhaseName,
     session: RedoSession,
@@ -359,49 +397,7 @@ pub(crate) async fn finish(
     let progress = match outcome {
         RedoOutcome::Completed(progress) => progress,
         RedoOutcome::Failed(error) => {
-            // A partial redo may already have committed derived writes. Keep its marker and redo
-            // cursor durable so normal execution cannot cross that mixed epoch.
-            let result = sqlx::query(
-                "
-                UPDATE chain_phase_state
-                SET last_error = CASE
-                        WHEN last_error LIKE $4
-                            THEN $5
-                                 || substring(last_error FROM char_length($6) + 1)
-                                 || '; last attempt failed: ' || $3
-                        WHEN last_error LIKE $7
-                            THEN last_error || '; last attempt failed: ' || $3
-                        ELSE $3
-                    END,
-                    updated_at = now()
-                WHERE chain_id = $1
-                  AND phase_name = $2
-                  AND redo_in_progress
-                ",
-            )
-            .bind(chain_id)
-            .bind(phase.as_str())
-            .bind(error.to_string())
-            .bind(format!(
-                "{}%",
-                crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX
-            ))
-            .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
-            .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
-            .bind(crate::redo_stamp::required_redo_owner_pattern())
-            .execute(pool)
-            .await
-            .map_err(|database_error| {
-                RunnerError::database(
-                    format!("failed to record redo failure for chain {chain_id} phase {phase}"),
-                    database_error,
-                )
-            })?;
-            if result.rows_affected() != 1 {
-                return Err(RunnerError::data_integrity(format!(
-                    "redo failure requires an active redo for chain {chain_id} phase {phase}"
-                )));
-            }
+            crate::redo_failure::record(lock_connection, chain_id, phase, error).await?;
             return Ok(());
         }
     };
@@ -426,17 +422,17 @@ pub(crate) async fn finish(
     } else {
         previous.input_content_hash.as_deref()
     };
-    let restored_current_hash = replacement_hash(
+    let restored_current_hash = crate::redo_completion::replacement_hash(
         previous.current_block_number,
         previous.current_block_hash.as_deref(),
         progress.current.as_ref(),
     );
-    let restored_target_hash = replacement_hash(
+    let restored_target_hash = crate::redo_completion::replacement_hash(
         previous.target_block_number,
         previous.target_block_hash.as_deref(),
         progress.target.as_ref(),
     );
-    let mut transaction = pool.begin().await.map_err(|error| {
+    let mut transaction = lock_connection.begin().await.map_err(|error| {
         RunnerError::database(
             format!("failed to begin redo completion for chain {chain_id} phase {phase}"),
             error,
@@ -502,6 +498,7 @@ pub(crate) async fn finish(
         UPDATE chain_phase_state
         SET phase_status = CASE WHEN $15 THEN 'failed' ELSE $3 END,
             verification_level = $4,
+            settled_while_unconfigured = CASE WHEN NOT $15 AND $5 IS NOT NULL AND $7 IS NOT NULL AND $5 = $7 AND $6 IS NOT NULL AND $8 IS NOT NULL AND $6 = $8 AND (phase_name != 'verify' OR $4 IS NOT NULL) AND (phase_name != 'ingest' OR ($10 IS NOT NULL AND $11 IS NOT NULL AND $10 = $5 AND $11 = $6)) THEN NULL ELSE settled_while_unconfigured END,
             current_block_number = $5,
             current_block_hash = $6,
             target_block_number = $7,
@@ -519,6 +516,8 @@ pub(crate) async fn finish(
             redo_current_block_hash = NULL,
             redo_target_block_number = NULL,
             redo_target_block_hash = NULL,
+            redo_source_boundary_markers = NULL,
+            redo_manifest_authority_fingerprint = NULL,
             live_handoff_block_number = $10,
             live_handoff_block_hash = $11,
             last_error = CASE
@@ -560,6 +559,15 @@ pub(crate) async fn finish(
             "redo completion requires phase state for chain {chain_id} phase {phase}"
         )));
     }
+    if phase == PhaseName::Ingest {
+        crate::state_ingest_progress::reconcile_redo_boundary_cursors(
+            &mut transaction,
+            chain_id,
+            range,
+            progress,
+        )
+        .await?;
+    }
     if phase == PhaseName::Interpret && !recompute_flags {
         crate::redo_stamp::stamp_required_in_transaction(
             &mut transaction,
@@ -587,14 +595,4 @@ pub(crate) async fn finish(
     })?;
     crate::redo_recompute::report(chain_id, recompute_summary, &stamped_ranges);
     Ok(())
-}
-
-fn replacement_hash<'a>(
-    recorded_number: Option<i64>,
-    recorded_hash: Option<&'a str>,
-    progress: Option<&'a crate::heads::BlockMarker>,
-) -> Option<&'a str> {
-    progress
-        .filter(|marker| Some(marker.number) == recorded_number)
-        .map_or(recorded_hash, |marker| Some(marker.hash.as_str()))
 }

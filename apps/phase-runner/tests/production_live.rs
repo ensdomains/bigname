@@ -1489,6 +1489,8 @@ async fn locked_begin_rejects_an_audit_created_after_tokenless_preflight() -> Re
     });
 
     let mut waiting_on_locked_begin = false;
+    // PostgreSQL may truncate the tracked query before its trailing FOR UPDATE as
+    // the locked state-row projection grows, so identify this wait by its SELECT.
     for _ in 0..200 {
         waiting_on_locked_begin = sqlx::query_scalar(
             "SELECT EXISTS (
@@ -1498,7 +1500,6 @@ async fn locked_begin_rejects_an_audit_created_after_tokenless_preflight() -> Re
                    AND wait_event_type = 'Lock'
                    AND query LIKE '%SELECT phase_name%'
                    AND query LIKE '%FROM chain_phase_state%'
-                   AND query LIKE '%FOR UPDATE%'
              )",
         )
         .fetch_one(scratch.pool())
@@ -3253,6 +3254,7 @@ async fn missing_hydration_rpc_fails_before_retracting_existing_values() -> Resu
             chain_id: ETHEREUM.to_owned(),
             phase: PhaseName::Project,
             mode: RunMode::Normal,
+            redo_attempt: None,
             sources: Arc::from([]),
             available_heads: Some(HeadMarkers {
                 latest: BlockMarker::new(1, block_hash(1, 1))?,
@@ -3302,6 +3304,7 @@ async fn project_redo_behind_the_canonical_head_defers_hydration() -> Result<()>
             chain_id: ETHEREUM.to_owned(),
             phase: PhaseName::Project,
             mode: RunMode::Redo(BlockRange::new(1, 1)?),
+            redo_attempt: None,
             sources: Arc::from([]),
             available_heads: Some(HeadMarkers {
                 latest: BlockMarker::new(1, block_hash(1, 1))?,
@@ -3879,6 +3882,7 @@ fn live_context(
         chain_id: chain.to_owned(),
         phase: PhaseName::Live,
         mode: RunMode::Normal,
+        redo_attempt: None,
         sources: Arc::from([SourceConfig::new(
             chain,
             "rpc",

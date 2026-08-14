@@ -56,6 +56,10 @@ impl Phase for IngestPhase {
                         next_block: cursor.next_block_number,
                         target_block: cursor.target_block_number,
                         last_processed: cursor.last_processed.as_ref().map(ingest_marker),
+                        redo_loaded_boundary: cursor
+                            .redo_loaded_boundary
+                            .as_ref()
+                            .map(ingest_marker),
                     })
                     .collect(),
                 redo_range: match context.mode {
@@ -80,6 +84,10 @@ impl Phase for IngestPhase {
                             source_key: source.key,
                             current: source.current.map(runner_marker).transpose()?,
                             target: Some(runner_marker(source.target)?),
+                            redo_loaded_boundary: source
+                                .loaded_boundary
+                                .map(runner_marker)
+                                .transpose()?,
                         })
                     })
                     .collect::<RunnerResult<Vec<_>>>()?,

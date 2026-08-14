@@ -4,7 +4,7 @@ use crate::{
     config::ChainConfig,
     error::{RunnerError, RunnerResult},
     heads::{HeadMarkers, load_available_heads, load_marker},
-    phase::{Phase, PhaseContext, PhaseName, RunMode},
+    phase::{Phase, PhaseContext, PhaseName, RedoAttemptFence, RunMode},
     phase_lock::PhaseLock,
     state::{PhaseStatus, StartDisposition},
     state_persistence::validate_progress,
@@ -36,8 +36,13 @@ impl PhaseRunner {
         }
         if phase == PhaseName::Ingest {
             let status = self.store.status(&chain.chain_id, phase).await?;
+            let completed_phase_restarts = status == crate::state::PhaseStatus::Completed
+                && self
+                    .store
+                    .completed_ingest_requires_restart(&chain.chain_id)
+                    .await?;
             let validates_retained_completion = matches!(mode, RunMode::Normal)
-                && (status == crate::state::PhaseStatus::Completed
+                && ((status == crate::state::PhaseStatus::Completed && !completed_phase_restarts)
                     || self
                         .store
                         .pending_completed_validation(&chain.chain_id, phase)
@@ -87,7 +92,20 @@ impl PhaseRunner {
             if recovering {
                 phase_lock.check_alive().await?;
                 self.store
-                    .complete_revalidated_phase(&chain.chain_id, phase_name)
+                    .complete_revalidated_phase(
+                        phase_lock.connection(),
+                        &chain.chain_id,
+                        phase_name,
+                    )
+                    .await?;
+            } else {
+                phase_lock.check_alive().await?;
+                self.store
+                    .clear_unconfigured_settlement(
+                        phase_lock.connection(),
+                        &chain.chain_id,
+                        phase_name,
+                    )
                     .await?;
             }
             Ok(())
@@ -205,7 +223,7 @@ impl PhaseRunner {
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
         let context = self
-            .phase_context(chain, phase_name, RunMode::Normal)
+            .phase_context(chain, phase_name, RunMode::Normal, None)
             .await?;
         let progress = phase_lock
             .run_while_alive(
@@ -232,7 +250,13 @@ impl PhaseRunner {
         }
         phase_lock.check_alive().await?;
         self.store
-            .record_progress(&chain.chain_id, phase_name, &RunMode::Normal, &progress)
+            .record_progress(
+                &chain.chain_id,
+                phase_name,
+                &RunMode::Normal,
+                None,
+                &progress,
+            )
             .await
     }
 
@@ -241,6 +265,7 @@ impl PhaseRunner {
         chain: &ChainConfig,
         phase: PhaseName,
         mode: RunMode,
+        redo_attempt: Option<RedoAttemptFence>,
     ) -> RunnerResult<PhaseContext> {
         let available_heads = match mode.range() {
             Some(_) if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) => {
@@ -275,6 +300,7 @@ impl PhaseRunner {
             chain_id: chain.chain_id.clone(),
             phase,
             mode,
+            redo_attempt,
             sources: Arc::clone(&chain.sources),
             available_heads,
             live_handoff,

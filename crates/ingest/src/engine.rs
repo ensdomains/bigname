@@ -20,6 +20,7 @@ use crate::{
 
 mod live;
 mod query;
+mod redo;
 mod source_floor;
 
 const BLOCKS_PER_BATCH: i64 = 256;
@@ -52,6 +53,7 @@ pub struct SourceCursor {
     pub next_block: i64,
     pub target_block: Option<i64>,
     pub last_processed: Option<Marker>,
+    pub redo_loaded_boundary: Option<Marker>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,6 +61,7 @@ pub struct SourceProgress {
     pub key: String,
     pub current: Option<Marker>,
     pub target: Marker,
+    pub loaded_boundary: Option<Marker>,
 }
 
 #[derive(Clone, Debug)]
@@ -232,13 +235,23 @@ impl Engine {
                     key: state.source.key.clone(),
                     current: state.current,
                     target: state.target,
+                    loaded_boundary: None,
                 })
                 .collect(),
             estimated_write_bytes: written_bytes,
         })
     }
 
-    async fn run_redo_batch(&self, mut request: BatchRequest) -> Result<BatchOutcome> {
+    async fn run_redo_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
+        self.run_redo_batch_with_loader(&redo::ProductionRedoWindowLoader, request)
+            .await
+    }
+
+    async fn run_redo_batch_with_loader(
+        &self,
+        loader: &dyn redo::RedoWindowLoader,
+        mut request: BatchRequest,
+    ) -> Result<BatchOutcome> {
         sort_sources(&mut request.sources);
         self.enforce_source_floors(&request).await?;
         let (range_from, range_to) = request.redo_range.expect("redo range is present");
@@ -248,6 +261,7 @@ impl Engine {
         let to = from.map_or(range_to, |from| {
             from.saturating_add(BLOCKS_PER_BATCH - 1).min(range_to)
         });
+        let complete = to >= range_to;
         let mut written_bytes = 0u64;
         let mut progress = Vec::with_capacity(request.sources.len());
 
@@ -259,11 +273,12 @@ impl Engine {
             let source_target = resolve_marker(&resolver, source_target_number).await?;
             let window =
                 from.map(|from| (from.max(source.start_block), to.min(source_target_number)));
-            let current = if let Some((window_from, window_to)) = window
+            let (current, loaded_boundary) = if let Some((window_from, window_to)) = window
                 && window_from <= window_to
             {
-                let loaded = self
-                    .load_window(
+                let loaded = loader
+                    .load(
+                        self,
                         &request.chain_id,
                         source,
                         &request.sources,
@@ -272,32 +287,114 @@ impl Engine {
                     )
                     .await?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
-                Some(loaded.marker)
+                let at_boundary = window_to == source_target_number;
+                let marker = if at_boundary {
+                    redo::adopt_loaded_boundary(&request.chain_id, loaded.marker, &source_target)?
+                } else {
+                    loaded.marker
+                };
+                let loaded_boundary = at_boundary.then(|| marker.clone());
+                (Some(marker), loaded_boundary)
+            } else if to >= source_target_number
+                && redo::must_reload_completed_source_boundary(
+                    complete,
+                    range_from,
+                    range_to,
+                    request.resume_current.as_ref(),
+                    source_target_number,
+                )
+            {
+                let loaded = loader
+                    .load(
+                        self,
+                        &request.chain_id,
+                        source,
+                        &request.sources,
+                        source_target_number,
+                        source_target_number,
+                    )
+                    .await?;
+                written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
+                let marker =
+                    redo::adopt_loaded_boundary(&request.chain_id, loaded.marker, &source_target)?;
+                (Some(marker.clone()), Some(marker))
             } else if to >= source_target_number {
-                Some(source_target.clone())
+                let current = if request
+                    .resume_current
+                    .as_ref()
+                    .is_some_and(|resume| resume.number == source_target_number)
+                {
+                    if source_target_number == range_to {
+                        redo::reject_lineage_backed_boundary_change(
+                            &self.pool,
+                            &request.chain_id,
+                            request.resume_current.as_ref(),
+                            &source_target,
+                        )
+                        .await?;
+                    }
+                    let durable = request
+                        .cursors
+                        .iter()
+                        .find(|cursor| cursor.key == source.key)
+                        .and_then(|cursor| cursor.redo_loaded_boundary.as_ref());
+                    redo::adopt_persisted_loaded_boundary(
+                        &request.chain_id,
+                        &source.key,
+                        durable,
+                        &source_target,
+                    )?
+                } else {
+                    redo::reject_lineage_backed_boundary_change(
+                        &self.pool,
+                        &request.chain_id,
+                        request.resume_current.as_ref(),
+                        &source_target,
+                    )
+                    .await?;
+                    source_target.clone()
+                };
+                (Some(current), None)
             } else {
-                request
-                    .cursors
-                    .iter()
-                    .find(|cursor| cursor.key == source.key)
-                    .and_then(|cursor| cursor.last_processed.clone())
+                (
+                    request
+                        .cursors
+                        .iter()
+                        .find(|cursor| cursor.key == source.key)
+                        .and_then(|cursor| cursor.last_processed.clone()),
+                    None,
+                )
             };
             progress.push(SourceProgress {
                 key: source.key.clone(),
                 current,
                 target: source_target,
+                loaded_boundary,
             });
         }
-        let complete = to >= range_to;
+        let guarded_summary = if complete {
+            redo::completing_summary_from_boundary(&request.chain_id, &progress, range_to)?
+        } else {
+            None
+        };
         let primary = primary_source(&request.sources)?;
-        let provider = self.provider(&request.chain_id, primary).await?;
-        let current = resolve_marker(&provider, to).await?;
-        let target = resolve_marker(&provider, range_to).await?;
-        if complete {
-            for source in &mut progress {
-                source.current = Some(source.target.clone());
+        let (current, target) = if let Some(summary) = guarded_summary {
+            summary
+        } else {
+            let provider = self.provider(&request.chain_id, primary).await?;
+            if complete {
+                // Library callers can supply a valid range that ends below every
+                // source's declared start block. The phase-runner admission path
+                // requires a source that owns the range end, so it cannot reach this.
+                let marker = resolve_marker(&provider, range_to).await?;
+                (marker.clone(), marker)
+            } else {
+                (
+                    resolve_marker(&provider, to).await?,
+                    resolve_marker(&provider, range_to).await?,
+                )
             }
-        }
+        };
         Ok(BatchOutcome {
             complete,
             current,
@@ -464,9 +561,9 @@ struct NormalSourceState<'a> {
     target: Marker,
 }
 
-struct LoadedWindow {
-    marker: Marker,
-    estimated_write_bytes: u64,
+pub(super) struct LoadedWindow {
+    pub(super) marker: Marker,
+    pub(super) estimated_write_bytes: u64,
 }
 
 async fn resolve_marker(provider: &ChainProvider, number: i64) -> Result<Marker> {

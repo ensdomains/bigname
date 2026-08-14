@@ -1,4 +1,10 @@
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use anyhow::Result as AnyResult;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -6,7 +12,57 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
-use crate::{ErrorKind, engine::LiveBatchRequest, provider::ChainProvider};
+use crate::{ErrorKind, SourceCursor, engine::LiveBatchRequest, provider::ChainProvider};
+
+#[derive(Clone)]
+struct ScriptedRedoWindowLoader {
+    windows: Arc<Mutex<VecDeque<ScriptedWindow>>>,
+    loaded: Arc<Mutex<Vec<(String, Marker)>>>,
+}
+
+type ScriptedWindow = (String, i64, i64, Marker);
+
+impl ScriptedRedoWindowLoader {
+    fn new(windows: impl IntoIterator<Item = ScriptedWindow>) -> Self {
+        Self {
+            windows: Arc::new(Mutex::new(windows.into_iter().collect())),
+            loaded: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl crate::engine::redo::RedoWindowLoader for ScriptedRedoWindowLoader {
+    fn load<'a>(
+        &'a self,
+        _engine: &'a Engine,
+        _chain_id: &'a str,
+        source: &'a SourceDescriptor,
+        _all_sources: &'a [SourceDescriptor],
+        from: i64,
+        to: i64,
+    ) -> crate::engine::redo::RedoLoadFuture<'a> {
+        Box::pin(async move {
+            let (expected_source, expected_from, expected_to, marker) = self
+                .windows
+                .lock()
+                .expect("scripted redo windows lock")
+                .pop_front()
+                .expect("scripted redo window");
+            assert_eq!(
+                (source.key.as_str(), from, to),
+                (expected_source.as_str(), expected_from, expected_to)
+            );
+            self.loaded
+                .lock()
+                .expect("loaded redo windows lock")
+                .push((source.key.clone(), marker.clone()));
+            Ok(crate::engine::LoadedWindow {
+                marker,
+                estimated_write_bytes: 0,
+            })
+        })
+    }
+}
 
 // Each test owns its endpoint: the injected floor is keyed by endpoint, and CI runs
 // these as threads in one process.
@@ -197,7 +253,8 @@ async fn an_out_of_range_resume_marker_fails_the_batch_before_any_network_use() 
 #[tokio::test]
 async fn a_marker_at_the_top_of_the_block_space_completes_without_loading() -> AnyResult<()> {
     let database = single_block_database("ingest_redo_resume_top").await?;
-    // The chain serves marker resolution only: a finished redo must not fetch a window.
+    // The chain serves marker resolution only: a finished redo with durable evidence from
+    // its completed boundary load must not fetch the window again.
     let node = test_floors::pruning_node(0, 0);
     let endpoint = single_block_chain_endpoint(node).await?;
     let engine = Engine::new(database.pool().clone());
@@ -211,7 +268,16 @@ async fn a_marker_at_the_top_of_the_block_space_completes_without_loading() -> A
                 start_block: 0,
                 endpoint,
             }],
-            cursors: Vec::new(),
+            cursors: vec![SourceCursor {
+                key: "redo-rpc".to_owned(),
+                next_block: i64::MAX,
+                target_block: Some(i64::MAX),
+                last_processed: None,
+                redo_loaded_boundary: Some(Marker {
+                    number: i64::MAX,
+                    hash: TOP_BLOCK_HASH.to_owned(),
+                }),
+            }],
             redo_range: Some((i64::MAX, i64::MAX)),
             resume_current: Some(Marker {
                 number: i64::MAX,
@@ -285,6 +351,380 @@ async fn a_warehouse_source_is_planned_without_asking_it_for_a_floor() -> AnyRes
             resume_current: None,
         })
         .await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> AnyResult<()> {
+    let database = intake_database("ingest_redo_earlier_source_boundary", "base-mainnet").await?;
+    let endpoint = marker_resolution_endpoint().await?;
+    let engine = Engine::new(database.pool().clone());
+    let seam = crate::BASE_COINBASE_SEAM_BLOCK;
+
+    let error = engine
+        .run_batch(BatchRequest {
+            chain_id: "base-mainnet".to_owned(),
+            sources: vec![
+                SourceDescriptor {
+                    key: "base-coinbase".to_owned(),
+                    kind: "coinbase-sql".to_owned(),
+                    start_block: 0,
+                    endpoint: "coinbase-sql://must-be-reloaded".to_owned(),
+                },
+                SourceDescriptor {
+                    key: "base-rpc".to_owned(),
+                    kind: "rpc".to_owned(),
+                    start_block: seam,
+                    endpoint,
+                },
+            ],
+            cursors: Vec::new(),
+            redo_range: Some((seam - 255, seam + 1)),
+            resume_current: Some(Marker {
+                number: seam + 1,
+                hash: marker_hash(seam + 1),
+            }),
+        })
+        .await
+        .expect_err("the final batch must attempt to reload the earlier Coinbase boundary");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(
+        error
+            .to_string()
+            .contains("failed to configure Coinbase SQL source"),
+        "the observed error must come from entering the boundary load: {error}"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn an_equal_height_source_boundary_uses_loaded_evidence_without_reloading() -> AnyResult<()> {
+    let database = intake_database("ingest_redo_equal_source_boundary", "base-mainnet").await?;
+    let endpoint = marker_resolution_endpoint().await?;
+    let engine = Engine::new(database.pool().clone());
+    let seam = crate::BASE_COINBASE_SEAM_BLOCK;
+
+    let outcome = engine
+        .run_batch(BatchRequest {
+            chain_id: "base-mainnet".to_owned(),
+            sources: vec![
+                SourceDescriptor {
+                    key: "base-coinbase".to_owned(),
+                    kind: "coinbase-sql".to_owned(),
+                    start_block: 0,
+                    endpoint: "coinbase-sql://must-not-be-reloaded".to_owned(),
+                },
+                SourceDescriptor {
+                    key: "base-rpc".to_owned(),
+                    kind: "rpc".to_owned(),
+                    start_block: seam,
+                    endpoint,
+                },
+            ],
+            cursors: vec![SourceCursor {
+                key: "base-coinbase".to_owned(),
+                next_block: seam + 1,
+                target_block: Some(seam),
+                last_processed: None,
+                redo_loaded_boundary: Some(Marker {
+                    number: seam,
+                    hash: marker_hash(seam),
+                }),
+            }],
+            redo_range: Some((seam - 255, seam + 1)),
+            resume_current: Some(Marker {
+                number: seam,
+                hash: marker_hash(seam),
+            }),
+        })
+        .await?;
+
+    let range_end = Marker {
+        number: seam + 1,
+        hash: marker_hash(seam + 1),
+    };
+    assert!(outcome.complete);
+    assert_eq!(outcome.current, range_end);
+    assert_eq!(outcome.target, range_end);
+    assert_eq!(
+        outcome.sources[0].current,
+        Some(Marker {
+            number: seam,
+            hash: marker_hash(seam),
+        })
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summary() -> AnyResult<()>
+{
+    let database =
+        intake_database("ingest_redo_intermediate_source_boundary", "base-mainnet").await?;
+    let seam = crate::BASE_COINBASE_SEAM_BLOCK;
+    let loaded_fork = Marker {
+        number: seam,
+        hash: marker_hash(seam + 10),
+    };
+    let summary_fork = Marker {
+        number: seam,
+        hash: marker_hash(seam + 20),
+    };
+    let endpoint = scripted_marker_endpoint(BTreeMap::from([(
+        seam,
+        vec![
+            loaded_fork.hash.clone(),
+            summary_fork.hash.clone(),
+            summary_fork.hash.clone(),
+        ],
+    )]))
+    .await?;
+    let range_end = Marker {
+        number: seam + 1,
+        hash: marker_hash(seam + 1),
+    };
+    let loader = ScriptedRedoWindowLoader::new([
+        (
+            "base-coinbase".to_owned(),
+            seam - 255,
+            seam,
+            loaded_fork.clone(),
+        ),
+        ("base-rpc".to_owned(), seam, seam, summary_fork.clone()),
+        ("base-rpc".to_owned(), seam + 1, seam + 1, range_end.clone()),
+    ]);
+    let sources = vec![
+        SourceDescriptor {
+            key: "base-coinbase".to_owned(),
+            kind: "coinbase-sql".to_owned(),
+            start_block: 0,
+            endpoint: "https://unused.invalid/".to_owned(),
+        },
+        SourceDescriptor {
+            key: "base-rpc".to_owned(),
+            kind: "rpc".to_owned(),
+            start_block: seam,
+            endpoint,
+        },
+    ];
+    let engine = Engine::new(database.pool().clone());
+    let first = engine
+        .run_redo_batch_with_loader(
+            &loader,
+            BatchRequest {
+                chain_id: "base-mainnet".to_owned(),
+                sources: sources.clone(),
+                cursors: Vec::new(),
+                redo_range: Some((seam - 255, seam + 1)),
+                resume_current: None,
+            },
+        )
+        .await?;
+    assert!(!first.complete);
+    assert_eq!(first.current, summary_fork);
+    assert_eq!(first.sources[0].current, Some(loaded_fork.clone()));
+
+    let error = engine
+        .run_redo_batch_with_loader(
+            &loader,
+            BatchRequest {
+                chain_id: "base-mainnet".to_owned(),
+                sources,
+                cursors: vec![SourceCursor {
+                    key: "base-coinbase".to_owned(),
+                    next_block: seam + 1,
+                    target_block: Some(seam),
+                    last_processed: None,
+                    redo_loaded_boundary: first.sources[0].loaded_boundary.clone(),
+                }],
+                redo_range: Some((seam - 255, seam + 1)),
+                resume_current: Some(first.current),
+            },
+        )
+        .await
+        .expect_err("batch two must reject a fresh fork that differs from its loaded boundary");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains(crate::REDO_BOUNDARY_DIVERGENCE_PREFIX)
+            && error.to_string().contains(&seam.to_string())
+            && error.to_string().contains(&loaded_fork.hash)
+            && error.to_string().contains(&summary_fork.hash),
+        "{error}"
+    );
+    assert_eq!(
+        loader
+            .loaded
+            .lock()
+            .expect("loaded redo windows lock")
+            .iter()
+            .filter(|(source, _)| source == "base-coinbase")
+            .count(),
+        1,
+        "batch two silently substituted the fresh phase summary without reloading Coinbase"
+    );
+
+    let consistent_endpoint = scripted_marker_endpoint(BTreeMap::from([(
+        seam,
+        vec![
+            loaded_fork.hash.clone(),
+            loaded_fork.hash.clone(),
+            loaded_fork.hash.clone(),
+        ],
+    )]))
+    .await?;
+    let consistent_loader = ScriptedRedoWindowLoader::new([
+        (
+            "base-coinbase".to_owned(),
+            seam - 255,
+            seam,
+            loaded_fork.clone(),
+        ),
+        ("base-rpc".to_owned(), seam, seam, loaded_fork.clone()),
+        ("base-rpc".to_owned(), seam + 1, seam + 1, range_end.clone()),
+    ]);
+    let consistent_sources = vec![
+        SourceDescriptor {
+            key: "base-coinbase".to_owned(),
+            kind: "coinbase-sql".to_owned(),
+            start_block: 0,
+            endpoint: "https://unused.invalid/".to_owned(),
+        },
+        SourceDescriptor {
+            key: "base-rpc".to_owned(),
+            kind: "rpc".to_owned(),
+            start_block: seam,
+            endpoint: consistent_endpoint,
+        },
+    ];
+    let retry_first = engine
+        .run_redo_batch_with_loader(
+            &consistent_loader,
+            BatchRequest {
+                chain_id: "base-mainnet".to_owned(),
+                sources: consistent_sources.clone(),
+                cursors: Vec::new(),
+                redo_range: Some((seam - 255, seam + 1)),
+                resume_current: None,
+            },
+        )
+        .await?;
+    let retry = engine
+        .run_redo_batch_with_loader(
+            &consistent_loader,
+            BatchRequest {
+                chain_id: "base-mainnet".to_owned(),
+                sources: consistent_sources,
+                cursors: vec![SourceCursor {
+                    key: "base-coinbase".to_owned(),
+                    next_block: seam + 1,
+                    target_block: Some(seam),
+                    last_processed: None,
+                    redo_loaded_boundary: retry_first.sources[0].loaded_boundary.clone(),
+                }],
+                redo_range: Some((seam - 255, seam + 1)),
+                resume_current: Some(retry_first.current),
+            },
+        )
+        .await?;
+    assert!(retry.complete);
+    assert_eq!(retry.sources[0].current, Some(loaded_fork.clone()));
+    assert!(
+        consistent_loader
+            .loaded
+            .lock()
+            .expect("loaded redo windows lock")
+            .contains(&("base-coinbase".to_owned(), loaded_fork)),
+        "the consistent rerun must retain the fork returned by the source load"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_completed_range_below_every_source_start_resolves_its_summary_once() -> AnyResult<()> {
+    let chain_id = "ingest-redo-no-range-end-owner";
+    let database = intake_database("ingest_redo_no_range_end_owner", chain_id).await?;
+    let (endpoint, range_end_resolutions) = changing_marker_endpoint(1).await?;
+    let engine = Engine::new(database.pool().clone());
+
+    let outcome = engine
+        .run_batch(BatchRequest {
+            chain_id: chain_id.to_owned(),
+            sources: vec![SourceDescriptor {
+                key: "future-rpc".to_owned(),
+                kind: "rpc".to_owned(),
+                start_block: 2,
+                endpoint,
+            }],
+            cursors: Vec::new(),
+            redo_range: Some((0, 1)),
+            resume_current: None,
+        })
+        .await?;
+
+    assert!(outcome.complete);
+    assert_eq!(outcome.current, outcome.target);
+    assert_eq!(outcome.current.number, 1);
+    assert_eq!(
+        range_end_resolutions.load(Ordering::SeqCst),
+        1,
+        "the no-owner summary must reuse one range-end resolution"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn an_equal_height_redo_marker_uses_durable_lineage_evidence() -> AnyResult<()> {
+    let chain_id = "ingest-redo-equal-boundary";
+    let database = intake_database("ingest_redo_equal_boundary", chain_id).await?;
+    let durable = Marker {
+        number: 100,
+        hash: marker_hash(100),
+    };
+    let fresh = Marker {
+        number: 100,
+        hash: marker_hash(101),
+    };
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number,
+            block_timestamp, canonicality_state
+        )
+        VALUES ($1, $2, NULL, $3, now(), 'observed')
+        ",
+    )
+    .bind(chain_id)
+    .bind(&fresh.hash)
+    .bind(fresh.number)
+    .execute(database.pool())
+    .await?;
+
+    let error = crate::engine::redo::reject_lineage_backed_boundary_change(
+        database.pool(),
+        chain_id,
+        Some(&durable),
+        &fresh,
+    )
+    .await
+    .expect_err("an equal-height lineage-backed fork change must fail closed");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains(crate::REDO_BOUNDARY_DIVERGENCE_PREFIX),
+        "{error}"
+    );
+
+    crate::engine::redo::reject_lineage_backed_boundary_change(
+        database.pool(),
+        chain_id,
+        Some(&durable),
+        &durable,
+    )
+    .await?;
     database.cleanup().await
 }
 
@@ -407,6 +847,10 @@ fn a_marker_at_the_top_of_the_block_space_plans_nothing() {
 }
 
 async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
+    intake_database(name, RACE_CHAIN).await
+}
+
+async fn intake_database(name: &str, chain_id: &str) -> AnyResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
     for schema in [
         include_str!("../../../../../schema-v2/baseline/01_chain.sql"),
@@ -427,12 +871,12 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
                 'ensip15@ens-normalize-0.1.1', 'fixture.toml', $2)
         ",
     )
-    .bind(RACE_CHAIN)
+    .bind(chain_id)
     .bind(json!({
         "manifest_version": 1,
         "namespace": "test",
         "source_family": "test_floor",
-        "chain": RACE_CHAIN,
+        "chain": chain_id,
         "deployment_epoch": "fixture",
         "rollout_status": "active",
         "normalizer_version": "ensip15@ens-normalize-0.1.1",
@@ -462,7 +906,7 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
     .await?;
     let manifest_id: i64 =
         sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE chain_id = $1")
-            .bind(RACE_CHAIN)
+            .bind(chain_id)
             .fetch_one(database.pool())
             .await?;
     let contract_id = uuid::Uuid::new_v4();
@@ -475,7 +919,7 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
         ",
     )
     .bind(contract_id)
-    .bind(RACE_CHAIN)
+    .bind(chain_id)
     .execute(database.pool())
     .await?;
     sqlx::query(
@@ -489,7 +933,7 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
         ",
     )
     .bind(manifest_id)
-    .bind(RACE_CHAIN)
+    .bind(chain_id)
     .bind(contract_id)
     .bind(RACE_ADDRESS)
     .execute(database.pool())
@@ -504,12 +948,189 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
         ",
     )
     .bind(contract_id)
-    .bind(RACE_CHAIN)
+    .bind(chain_id)
     .bind(RACE_ADDRESS)
     .bind(manifest_id)
     .execute(database.pool())
     .await?;
     Ok(database)
+}
+
+async fn marker_resolution_endpoint() -> AnyResult<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/", listener.local_addr()?);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                while let Some(body) = read_request_body(&mut socket).await {
+                    let response =
+                        serde_json::from_str::<Value>(&body).map_or(Value::Null, |request| {
+                            match request {
+                                Value::Array(calls) => Value::Array(
+                                    calls.iter().map(marker_resolution_response).collect(),
+                                ),
+                                single => marker_resolution_response(&single),
+                            }
+                        });
+                    let payload = response.to_string();
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    if socket.write_all(http.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Ok(endpoint)
+}
+
+async fn scripted_marker_endpoint(markers: BTreeMap<i64, Vec<String>>) -> AnyResult<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/", listener.local_addr()?);
+    let markers = Arc::new(Mutex::new(
+        markers
+            .into_iter()
+            .map(|(number, hashes)| (number, hashes.into_iter().collect::<VecDeque<_>>()))
+            .collect::<BTreeMap<_, _>>(),
+    ));
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let markers = Arc::clone(&markers);
+            tokio::spawn(async move {
+                while let Some(body) = read_request_body(&mut socket).await {
+                    let response =
+                        serde_json::from_str::<Value>(&body).map_or(Value::Null, |request| {
+                            match request {
+                                Value::Array(calls) => Value::Array(
+                                    calls
+                                        .iter()
+                                        .map(|call| scripted_marker_response(call, &markers))
+                                        .collect(),
+                                ),
+                                single => scripted_marker_response(&single, &markers),
+                            }
+                        });
+                    let payload = response.to_string();
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    if socket.write_all(http.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Ok(endpoint)
+}
+
+fn scripted_marker_response(
+    call: &Value,
+    markers: &Mutex<BTreeMap<i64, VecDeque<String>>>,
+) -> Value {
+    let mut response = marker_resolution_response(call);
+    if call.get("method").and_then(Value::as_str) != Some("eth_getBlockByNumber") {
+        return response;
+    }
+    let number = call
+        .pointer("/params/0")
+        .and_then(Value::as_str)
+        .and_then(|selector| selector.strip_prefix("0x"))
+        .and_then(|number| i64::from_str_radix(number, 16).ok())
+        .unwrap_or_default();
+    if let Some(hash) = markers
+        .lock()
+        .expect("scripted marker lock")
+        .get_mut(&number)
+        .and_then(VecDeque::pop_front)
+    {
+        response["result"]["hash"] = json!(hash);
+    }
+    response
+}
+
+async fn changing_marker_endpoint(counted_number: i64) -> AnyResult<(String, Arc<AtomicUsize>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/", listener.local_addr()?);
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let server_resolutions = Arc::clone(&resolutions);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let resolutions = Arc::clone(&server_resolutions);
+            tokio::spawn(async move {
+                while let Some(body) = read_request_body(&mut socket).await {
+                    let response = serde_json::from_str::<Value>(&body)
+                        .map_or(Value::Null, |request| {
+                            changing_marker_response(&request, counted_number, &resolutions)
+                        });
+                    let payload = response.to_string();
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    if socket.write_all(http.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Ok((endpoint, resolutions))
+}
+
+fn changing_marker_response(call: &Value, counted_number: i64, resolutions: &AtomicUsize) -> Value {
+    let mut response = marker_resolution_response(call);
+    let selector = call
+        .pointer("/params/0")
+        .and_then(Value::as_str)
+        .unwrap_or("0x0");
+    let number = selector
+        .strip_prefix("0x")
+        .and_then(|number| i64::from_str_radix(number, 16).ok())
+        .unwrap_or_default();
+    if call.get("method").and_then(Value::as_str) == Some("eth_getBlockByNumber")
+        && number == counted_number
+    {
+        let resolution = resolutions.fetch_add(1, Ordering::SeqCst) as i64;
+        response["result"]["hash"] = json!(marker_hash(number + resolution));
+    }
+    response
+}
+
+fn marker_resolution_response(call: &Value) -> Value {
+    if call.get("method").and_then(Value::as_str) == Some("eth_getLogs") {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": call.get("id").cloned().unwrap_or_else(|| json!(1)),
+            "result": []
+        });
+    }
+    let selector = call
+        .pointer("/params/0")
+        .and_then(Value::as_str)
+        .unwrap_or("0x0");
+    let number = selector
+        .strip_prefix("0x")
+        .and_then(|number| i64::from_str_radix(number, 16).ok())
+        .unwrap_or_default();
+    json!({
+        "jsonrpc": "2.0",
+        "id": call.get("id").cloned().unwrap_or_else(|| json!(1)),
+        "result": {
+            "hash": marker_hash(number),
+            "parentHash": marker_hash(number.saturating_sub(1)),
+            "number": format!("0x{number:x}"),
+            "timestamp": "0x65"
+        }
+    })
+}
+
+fn marker_hash(number: i64) -> String {
+    format!("0x{number:064x}")
 }
 
 /// Serves one canonical block, enough for a batch to plan, fetch, and try to store.

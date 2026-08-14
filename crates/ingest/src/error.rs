@@ -1,5 +1,7 @@
 use std::{error::Error, fmt};
 
+pub const REDO_BOUNDARY_DIVERGENCE_PREFIX: &str = "ingest redo boundary changed during resume";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     Transient,

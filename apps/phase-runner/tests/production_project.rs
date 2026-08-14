@@ -399,6 +399,13 @@ async fn recompute_flags_refreshes_same_class_flags_and_primary_projection_witho
     let store = PhaseStore::new(scratch.pool().clone());
     store.initialize_chain(CHAIN).await?;
     seed_completed_project_extent(scratch.pool(), CHAIN, 3).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET settled_while_unconfigured = TRUE
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
 
     sqlx::query(
         "UPDATE label_preimages
@@ -495,6 +502,17 @@ async fn recompute_flags_refreshes_same_class_flags_and_primary_projection_witho
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(pending_redos, 0, "same-class names must not stamp replay");
+    let project_settlement: Option<bool> = sqlx::query_scalar(
+        "SELECT settled_while_unconfigured FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        project_settlement, None,
+        "a successful staged Project refresh must clear settlement provenance"
+    );
 
     let events_after: Vec<(i64, Value, Value, String)> = sqlx::query_as(
         "SELECT normalized_event_id, before_state, after_state, canonicality_state::text

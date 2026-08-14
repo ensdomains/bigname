@@ -290,14 +290,17 @@ highest. A redo that has not reached the floor yet is refused, one already past
 it keeps running, and one with nothing left to read plans nothing for that
 source. Progress outside the range is not judged at all: a resume marker below
 the range start or past its end is refused as a misconfigured request. Work
-already recorded is not re-examined: a completed ingest phase is not
-planned again, so a chain that recorded a pruned window before this rule existed
-keeps that stored coverage. Re-indexing it needs the node to hold the range
-again — a fresh resync or redo across the pruned window is refused rather than
-silently repeating the empty read. Live follow plans no declared range, so it is
-judged on the suffix it is about to load. Sources that do not read a node's
-database report no floor: an RPC endpoint owns its retention behind the wire,
-and the Coinbase SQL warehouse is not a block provider at all.
+already recorded is not re-examined: an Ingest phase completed through the
+normal completion checks is not planned again, so a chain that recorded a
+pruned window before this rule existed keeps that stored coverage. A row changed
+to `completed` only because its chain was absent from runtime configuration is
+replanned if its current block or live handoff does not match its target.
+Re-indexing validated stored coverage needs the node to hold the range again —
+a fresh resync or redo across the pruned window is refused rather than silently
+repeating the empty read. Live follow plans no declared range, so it is judged
+on the suffix it is about to load. Sources that do not read a node's database
+report no floor: an RPC endpoint owns its retention behind the wire, and the
+Coinbase SQL warehouse is not a block provider at all.
 
 ## Reorgs and required downstream redo
 

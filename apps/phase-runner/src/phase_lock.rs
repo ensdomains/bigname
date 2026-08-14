@@ -74,6 +74,20 @@ impl PhaseLock {
         &mut self.connection
     }
 
+    pub(crate) fn connection_for(
+        &mut self,
+        chain_id: &str,
+        phase: PhaseName,
+    ) -> RunnerResult<&mut PgConnection> {
+        if self.chain_id != chain_id || self.phase != phase {
+            return Err(RunnerError::data_integrity(format!(
+                "phase lock for chain {} phase {} cannot fence completion for chain {chain_id} phase {phase}",
+                self.chain_id, self.phase
+            )));
+        }
+        Ok(&mut self.connection)
+    }
+
     pub async fn run_while_alive<T>(
         &mut self,
         check_interval: Duration,

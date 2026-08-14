@@ -46,6 +46,8 @@ async fn main() -> Result<()> {
         ResolvedCommand::Run {
             database_url,
             verification_database_url,
+            metrics_bind_addr,
+            heartbeat_stale_after_secs,
             manifests_root,
             runtime,
             hydration_rpc_urls,
@@ -56,6 +58,26 @@ async fn main() -> Result<()> {
                 .max(4);
             let database = RunnerDatabase::connect(&database_url, connections).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
+            let loop_heartbeat = phase_runner::metrics::RunnerLoopHeartbeat::default();
+            for chain in runtime.chains.iter() {
+                loop_heartbeat.record_progress(&chain.chain_id);
+            }
+            let bound_metrics_addr = phase_runner::metrics::start(
+                metrics_bind_addr,
+                database.pool().clone(),
+                cancellation.clone(),
+                heartbeat_stale_after_secs,
+                loop_heartbeat.clone(),
+            )
+            .await?;
+            tracing::info!(
+                service = "phase-runner",
+                metrics_bind_addr = %bound_metrics_addr,
+                version = phase_runner::SOFTWARE_VERSION,
+                build_sha = phase_runner::BUILD_SHA,
+                interpreter_content_hash = phase_runner::INTERPRETER_CONTENT_HASH,
+                "phase-runner metrics listener started"
+            );
             let verification_database = VerificationDatabase::connect(
                 &verification_database_url,
                 &database,
@@ -78,13 +100,16 @@ async fn main() -> Result<()> {
                 Arc::new(VerifyPhase::new(verification_database)),
                 Arc::new(LivePhase::with_engine(ingest_engine)),
             )?;
-            let runner = Arc::new(PhaseRunner::new(
-                database,
-                phases,
-                CapacityGuard::system(runtime.capacity.clone()),
-                runtime.instance_id.clone(),
-                runtime.timing.clone(),
-            )?);
+            let runner = Arc::new(
+                PhaseRunner::new(
+                    database,
+                    phases,
+                    CapacityGuard::system(runtime.capacity.clone()),
+                    runtime.instance_id.clone(),
+                    runtime.timing.clone(),
+                )?
+                .with_loop_heartbeat(loop_heartbeat),
+            );
             let report = runner.run(&runtime, cancellation).await?;
             require_clean_supervisor_exit(report)?;
         }

@@ -132,6 +132,36 @@ before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
 reported.
 
+Startup settlement for a chain absent from runtime configuration records
+`settled_while_unconfigured = true` on every active phase row that it changes to
+`completed`. This nullable marker distinguishes a row deliberately settled
+during chain removal from an ordinary completed row. Settlement requires the
+row's `updated_at` revision to remain exactly the one observed by the startup
+scan; if it changes before the locked update, startup reports a transient error
+and its retry scans the durable state again. When that chain is configured
+again, incomplete Ingest evidence resumes from its preserved source cursors,
+and incomplete Verify evidence with the marker resumes normal verification.
+The same incomplete Verify row with a NULL marker follows completed-evidence
+validation and is recorded as failed with its diagnosis. Existing rows remain
+NULL and therefore retain their ordinary phase-start behavior. Only
+unconfigured-chain startup settlement writes the marker. It remains present
+through a resumed attempt or retry. A failed completed-state validation leaves
+it present with the diagnosis. Recovery clears it only after the same current
+configuration and retained phase evidence that ordinary completed-state
+revalidation requires have been accepted. Genuine normal completion or a
+successful redo that leaves complete retained phase evidence also clears it, so
+the recovered row is indistinguishable from an ordinary completion. These
+clearing writes use the phase advisory-lock connection, so losing phase
+ownership aborts the write. While any phase marker is present, that chain is not
+eligible for `ready` on the status endpoint and reports `degraded` unless a
+stronger `stale` condition applies, such as a genuinely failed phase or an
+expired heartbeat. Interpret and Project do not
+run a separate completed-state revalidation pass. For those phases, the
+phase-start check is the revalidation: their retained current block must match
+the canonical head's height and hash before `AlreadyCompleted` authorizes the
+marker-clearing write. If no canonical head is stored, startup reports a data
+integrity error and leaves both the retained position and marker unchanged.
+
 ### ENSv1→ENSv2 correlation visibility
 
 The slice-1 ENSv1→ENSv2 intake persists the
@@ -343,6 +373,89 @@ Project output is admitted only when its publication target is at or before the
 selected readable head. Equal-height admission requires the selected block hash
 to match. Name, relation, inventory, primary-name, and GraphQL reads all apply
 this rule against phase lineage.
+
+When a chain is removed from runtime configuration, recovery may change its
+active phase row to the non-paging `completed` state without claiming that the
+phase finished its work. If the chain is configured again, a completed Ingest
+row resumes unless its current block and live handoff match its target. A
+completed Verify row resumes unless it has a matching current/target block pair
+and a [verification level](glossary.md#verification-level). Ingest persists its
+summary and every source cursor in one transaction, so those completion markers
+cannot survive without the matching source progress. Recovery also clears the
+live handoff when it changes an active Ingest row to `completed`; this makes a
+later re-add resume from the preserved source cursors even if an older runner
+stopped between its formerly separate summary and cursor writes.
+
+When a bounded Ingest redo loads a source boundary in its completing batch, the
+source progress adopts the boundary marker returned by that load. The marker
+must match the source target resolved before the load; a different hash at the
+same boundary height fails the redo instead of substituting the pre-load target
+for the loaded marker. The completing phase summary comes from the source whose
+target is the redo range end after its boundary marker passes these checks. If
+multiple sources meet at that height, all of their checked markers must agree.
+In a multi-source redo, the final batch reloads an in-range source boundary below
+the overall redo end when durable phase progress has passed it, so its completion
+evidence also comes from the current
+[watch plan](glossary.md#watch-plan--watched-tuple). An equal-height
+durable phase marker is not intercepted by that reload. Each non-completing
+batch also stores a map from source key to the boundary marker returned by an
+actual source load during the active redo. At any source boundary where the
+durable phase marker is exactly that height, including the overall redo range
+end, a later batch resuming exactly there accepts only the stored load-derived
+marker, which must
+exist at that height and equal the fresh source target. A missing marker, such
+as an active checkpoint written before this map existed, or a different hash
+fails closed and requires a fresh redo of the full range. When this per-source
+evidence proves that the boundary was inside the completed redo range, redo
+completion updates the source cursor only when matching block lineage already
+records that height and hash. The map is cleared with the other resumable redo
+progress on completion or boundary divergence. The cursor update and phase
+summary share one transaction. The previous live handoff remains in place until
+the next normal Ingest pass confirms the reconciled cursor and publishes the
+replacement handoff.
+
+`chain_phase_state.redo_manifest_authority_fingerprint` binds the numeric
+Ingest redo checkpoint and its per-source marker map to the chain's active
+manifest payloads, excluding `normalizer_version`. Those payloads include the
+roots, contracts, addresses, and watched block ranges that determine the raw
+facts Ingest must load. An exact-range resume preserves evidence only when the
+stored fingerprint matches the fingerprint of the current active payloads. A
+missing or different fingerprint clears the resumable evidence and reports
+that the active manifest/watch-plan inputs changed; rerunning the redo then
+loads the full range under those inputs. Existing active redo rows receive no
+backfill, so their first post-upgrade resume fails closed and requires that
+full-range reload.
+
+`chain_phase_state.redo_attempt_generation` is a nonnegative, row-local counter
+that increments whenever an explicit redo begins. A batch carries that
+generation together with the persisted redo mode and the actual execution
+range chosen at begin time. Its pool-backed progress update, including the
+per-source boundary-marker map, succeeds only while all three values still
+match the active row. No match means another attempt has superseded the batch;
+the update records nothing and returns `redo attempt superseded; progress not
+recorded`. Completion, failure recording, and downstream redo finalization use
+the connection that owns the phase advisory lock, so losing that connection
+also prevents their writes. This generation fence closes the redo-progress
+instance of [#452](https://github.com/ensdomains/bigname/issues/452); that issue
+continues to track whether every pool-backed phase write should move to its
+lock-owning connection.
+
+Retained lineage alone does not authorize that reconciliation when an
+interrupted redo has already advanced past its last boundary. If the provider
+then reports a different hash at the same boundary height and that older fork
+also has retained lineage, the resumed redo fails instead of treating the fresh
+hash as newly loaded. The failure keeps the redo marked in progress, clears
+only its resumable progress, and leaves the source cursor unchanged. Re-running
+the redo therefore starts at the requested range beginning and loads the
+boundary under the current [watch plan](glossary.md#watch-plan--watched-tuple)
+before cursor reconciliation can proceed. If that fresh hash has no retained
+lineage, the equal-height evidence requirement still applies: the phase summary
+cannot adopt the fresh resolution without a matching per-source marker returned
+by a load during that redo.
+Together with the per-chain manifest/watch-plan fingerprint, this closes the
+last-boundary case when active inputs change between attempts. Binding
+watch-plan evidence to facts at interior range heights remains tracked by
+issue #376.
 
 ## Interpretation replay
 

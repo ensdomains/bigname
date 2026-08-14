@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use phase_runner::{
     capacity::{CapacityFuture, CapacityGuard, CapacityMeasurement, CapacityProbe},
     config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
@@ -18,7 +18,7 @@ use phase_runner::{
     heads::{BlockMarker, HeadMarkers, publish_heads},
     phase::{
         BlockRange, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress,
-        PhaseSet, RunMode, SourceProgress, VerificationLevel,
+        PhaseSet, RedoAttemptFence, RunMode, SourceProgress, VerificationLevel,
     },
     runner::{PhaseRunner, RedoPhase},
     state::{PhaseStore, StartDisposition},
@@ -27,6 +27,15 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use support::{ScratchDatabase, seed_lineage};
+
+type StoredBoundaryDivergenceState = (
+    bool,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<serde_json::Value>,
+);
 
 #[tokio::test]
 async fn crash_during_hash_redo_blocks_normal_resume_and_still_demands_full_range() -> Result<()> {
@@ -610,6 +619,414 @@ async fn cancelled_redo_is_incomplete_and_returns_the_required_rerun_command() -
         .await
         .expect_err("normal restart must remain blocked");
     assert!(normal_error.to_string().contains(instruction));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn boundary_divergence_clears_resumable_redo_progress_and_source_markers() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_boundary_divergence_clear").await?;
+    let chain_id = "redo-boundary-divergence-clear-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 9).await?;
+
+    let loaded_boundary = marker(chain_id, 5)?;
+    let redo_target = marker(chain_id, 6)?;
+    let phase_loaded_boundary = loaded_boundary.clone();
+    let phase_redo_target = redo_target.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let phase_calls = Arc::clone(&calls);
+    let phase = Arc::new(FunctionPhase {
+        name: PhaseName::Ingest,
+        handler: Arc::new(move |_| {
+            if phase_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(PhaseBatchOutcome::Continue(PhaseProgress {
+                    current: Some(phase_loaded_boundary.clone()),
+                    target: Some(phase_redo_target.clone()),
+                    source_progress: vec![SourceProgress {
+                        source_key: "source".to_owned(),
+                        current: Some(phase_loaded_boundary.clone()),
+                        target: Some(phase_loaded_boundary.clone()),
+                        redo_loaded_boundary: Some(phase_loaded_boundary.clone()),
+                    }],
+                    ..PhaseProgress::default()
+                }));
+            }
+            Err(RunnerError::data_integrity(format!(
+                "{} for chain {chain_id} source source at block 5: simulated fork change",
+                bigname_ingest::REDO_BOUNDARY_DIVERGENCE_PREFIX
+            )))
+        }),
+    });
+
+    let error = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Ingest, phase)?,
+        "redo-boundary-divergence-clear-runner",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Ingest),
+        BlockRange::new(5, 6)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("the second redo batch must report boundary divergence");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .starts_with(bigname_ingest::REDO_BOUNDARY_DIVERGENCE_PREFIX)
+    );
+
+    let state: StoredBoundaryDivergenceState = sqlx::query_as(
+        "SELECT redo_in_progress,
+                redo_current_block_number, redo_current_block_hash,
+                redo_target_block_number, redo_target_block_hash,
+                redo_source_boundary_markers
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        (true, None, None, None, None, None),
+        "boundary divergence must retain the active redo while clearing every resumable marker"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn superseded_redo_attempt_cannot_transplant_progress_into_a_wider_range() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_attempt_superseded").await?;
+    let chain_id = "redo-attempt-superseded-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 200).await?;
+
+    let boundary = marker(chain_id, 200)?;
+    let attempt_a_generation = Arc::new(AtomicI64::new(-1));
+    let attempt_a_phase =
+        completing_ingest_redo_phase(boundary.clone(), Arc::clone(&attempt_a_generation));
+    let attempt_a_entered = Arc::new(Notify::new());
+    let release_attempt_a = Arc::new(Notify::new());
+    let attempt_a_runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Ingest, attempt_a_phase)?,
+        "redo-attempt-a-runner",
+    )?
+    .with_before_redo_progress_write({
+        let entered = Arc::clone(&attempt_a_entered);
+        let release = Arc::clone(&release_attempt_a);
+        move || {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            async move {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+    });
+    let attempt_a_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    let attempt_a = tokio::spawn(async move {
+        attempt_a_runner
+            .redo(
+                &attempt_a_chain,
+                RedoPhase::Phase(PhaseName::Ingest),
+                BlockRange::new(100, 200).expect("fixed attempt A range"),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), attempt_a_entered.notified())
+        .await
+        .context("attempt A did not reach its delayed progress write")?;
+
+    let terminated: Option<bool> = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid)
+         FROM pg_locks
+         WHERE locktype = 'advisory'
+           AND granted
+           AND database = (
+               SELECT oid FROM pg_database WHERE datname = current_database()
+           )
+           AND classid::bigint =
+               ((hashtextextended($1::text, 0::bigint) >> 32) & 4294967295)
+           AND objid::bigint =
+               (hashtextextended($1::text, 0::bigint) & 4294967295)
+           AND pid <> pg_backend_pid()
+         LIMIT 1",
+    )
+    .bind(format!("phase-runner:{chain_id}:ingest"))
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(terminated, Some(true));
+    wait_for_phase_advisory_lock_release(scratch.pool(), chain_id, PhaseName::Ingest).await?;
+
+    let attempt_b_entered = Arc::new(Notify::new());
+    let phase_attempt_b_entered = Arc::clone(&attempt_b_entered);
+    let attempt_b_generation = Arc::new(AtomicI64::new(-1));
+    let phase_attempt_b_generation = Arc::clone(&attempt_b_generation);
+    let attempt_b_phase = Arc::new(FunctionPhase {
+        name: PhaseName::Ingest,
+        handler: Arc::new(move |context| {
+            phase_attempt_b_generation.store(
+                context
+                    .redo_attempt
+                    .expect("redo batch must carry its attempt fence")
+                    .generation,
+                Ordering::SeqCst,
+            );
+            phase_attempt_b_entered.notify_one();
+            Ok(PhaseBatchOutcome::Idle(PhaseProgress::default()))
+        }),
+    });
+    let attempt_b_cancellation = CancellationToken::new();
+    let run_attempt_b_cancellation = attempt_b_cancellation.clone();
+    let attempt_b_runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Ingest, attempt_b_phase)?,
+        "redo-attempt-b-runner",
+    )?;
+    let attempt_b_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    let attempt_b = tokio::spawn(async move {
+        attempt_b_runner
+            .redo(
+                &attempt_b_chain,
+                RedoPhase::Phase(PhaseName::Ingest),
+                BlockRange::new(0, 200).expect("fixed wider attempt B range"),
+                run_attempt_b_cancellation,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), attempt_b_entered.notified())
+        .await
+        .context("attempt B did not enter its first batch")?;
+    attempt_b_cancellation.cancel();
+    let attempt_b_error = tokio::time::timeout(Duration::from_secs(5), attempt_b)
+        .await
+        .context("attempt B did not stop after cancellation")??
+        .expect_err("attempt B must remain resumable after cancellation");
+    assert!(attempt_b_error.to_string().contains("is incomplete"));
+    wait_for_phase_advisory_lock_release(scratch.pool(), chain_id, PhaseName::Ingest).await?;
+
+    release_attempt_a.notify_one();
+    let attempt_a_error = tokio::time::timeout(Duration::from_secs(5), attempt_a)
+        .await
+        .context("attempt A did not stop after its delayed write was released")??
+        .expect_err("the superseded attempt A write must fail");
+    let state_after_attempt_a: (
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<serde_json::Value>,
+    ) = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number,
+                redo_current_block_number, redo_current_block_hash,
+                redo_source_boundary_markers
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(state_after_attempt_a, (0, 200, None, None, None));
+    assert!(
+        attempt_a_error
+            .to_string()
+            .contains("redo attempt superseded; progress not recorded"),
+        "{attempt_a_error}"
+    );
+    assert!(
+        attempt_b_generation.load(Ordering::SeqCst) > attempt_a_generation.load(Ordering::SeqCst),
+        "a wider begin must advance the redo generation"
+    );
+
+    let attempt_d_entered = Arc::new(Notify::new());
+    let release_attempt_d = Arc::new(Notify::new());
+    let attempt_d_hook_calls = Arc::new(AtomicUsize::new(0));
+    let attempt_d_generation = Arc::new(AtomicI64::new(-1));
+    let attempt_d_runner = runner(
+        scratch.runner(),
+        phase_set_replacing(
+            PhaseName::Ingest,
+            completing_ingest_redo_phase(boundary.clone(), Arc::clone(&attempt_d_generation)),
+        )?,
+        "redo-attempt-d-runner",
+    )?
+    .with_before_redo_progress_write({
+        let entered = Arc::clone(&attempt_d_entered);
+        let release = Arc::clone(&release_attempt_d);
+        let calls = Arc::clone(&attempt_d_hook_calls);
+        move || {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let calls = Arc::clone(&calls);
+            async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+            }
+        }
+    });
+    let attempt_d_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    let attempt_d = tokio::spawn(async move {
+        attempt_d_runner
+            .redo(
+                &attempt_d_chain,
+                RedoPhase::Phase(PhaseName::Ingest),
+                BlockRange::new(0, 200).expect("fixed wider attempt D range"),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), attempt_d_entered.notified())
+        .await
+        .context("attempt D did not reach its delayed progress write")?;
+    let terminated: Option<bool> = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid)
+         FROM pg_locks
+         WHERE locktype = 'advisory'
+           AND granted
+           AND database = (
+               SELECT oid FROM pg_database WHERE datname = current_database()
+           )
+           AND classid::bigint =
+               ((hashtextextended($1::text, 0::bigint) >> 32) & 4294967295)
+           AND objid::bigint =
+               (hashtextextended($1::text, 0::bigint) & 4294967295)
+           AND pid <> pg_backend_pid()
+         LIMIT 1",
+    )
+    .bind(format!("phase-runner:{chain_id}:ingest"))
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(terminated, Some(true));
+    wait_for_phase_advisory_lock_release(scratch.pool(), chain_id, PhaseName::Ingest).await?;
+
+    let attempt_e_entered = Arc::new(Notify::new());
+    let phase_attempt_e_entered = Arc::clone(&attempt_e_entered);
+    let attempt_e_generation = Arc::new(AtomicI64::new(-1));
+    let phase_attempt_e_generation = Arc::clone(&attempt_e_generation);
+    let attempt_e_phase = Arc::new(FunctionPhase {
+        name: PhaseName::Ingest,
+        handler: Arc::new(move |context| {
+            phase_attempt_e_generation.store(
+                context
+                    .redo_attempt
+                    .expect("redo batch must carry its attempt fence")
+                    .generation,
+                Ordering::SeqCst,
+            );
+            phase_attempt_e_entered.notify_one();
+            Ok(PhaseBatchOutcome::Idle(PhaseProgress::default()))
+        }),
+    });
+    let attempt_e_cancellation = CancellationToken::new();
+    let run_attempt_e_cancellation = attempt_e_cancellation.clone();
+    let attempt_e_runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Ingest, attempt_e_phase)?,
+        "redo-attempt-e-runner",
+    )?;
+    let attempt_e_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    let attempt_e = tokio::spawn(async move {
+        attempt_e_runner
+            .redo(
+                &attempt_e_chain,
+                RedoPhase::Phase(PhaseName::Ingest),
+                BlockRange::new(0, 200).expect("fixed wider attempt E range"),
+                run_attempt_e_cancellation,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), attempt_e_entered.notified())
+        .await
+        .context("attempt E did not enter its first batch")?;
+    attempt_e_cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(5), attempt_e)
+        .await
+        .context("attempt E did not stop after cancellation")??
+        .expect_err("attempt E must remain resumable after cancellation");
+    wait_for_phase_advisory_lock_release(scratch.pool(), chain_id, PhaseName::Ingest).await?;
+
+    release_attempt_d.notify_one();
+    let attempt_d_error = tokio::time::timeout(Duration::from_secs(5), attempt_d)
+        .await
+        .context("attempt D did not stop after its delayed write was released")??
+        .expect_err("the same-range superseded attempt D write must fail");
+    assert!(
+        attempt_d_error
+            .to_string()
+            .contains("redo attempt superseded; progress not recorded"),
+        "{attempt_d_error}"
+    );
+    assert!(
+        attempt_e_generation.load(Ordering::SeqCst) > attempt_d_generation.load(Ordering::SeqCst),
+        "an exact resume must advance the redo generation"
+    );
+    let state_after_attempt_d: (
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<serde_json::Value>,
+    ) = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number,
+                redo_current_block_number, redo_current_block_hash,
+                redo_source_boundary_markers
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(state_after_attempt_d, (0, 200, None, None, None));
+
+    let widened_prefix_loads = Arc::new(AtomicUsize::new(0));
+    let phase_widened_prefix_loads = Arc::clone(&widened_prefix_loads);
+    let recovery_boundary = boundary.clone();
+    let recovery_phase = Arc::new(FunctionPhase {
+        name: PhaseName::Ingest,
+        handler: Arc::new(move |context| {
+            if context.resume.current.is_none() {
+                phase_widened_prefix_loads.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: Some(recovery_boundary.clone()),
+                target: Some(recovery_boundary.clone()),
+                source_progress: vec![SourceProgress {
+                    source_key: "source".to_owned(),
+                    current: Some(recovery_boundary.clone()),
+                    target: Some(recovery_boundary.clone()),
+                    redo_loaded_boundary: Some(recovery_boundary.clone()),
+                }],
+                ..PhaseProgress::default()
+            }))
+        }),
+    });
+    runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Ingest, recovery_phase)?,
+        "redo-attempt-recovery-runner",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Ingest),
+        BlockRange::new(0, 200)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    assert!(
+        widened_prefix_loads.load(Ordering::SeqCst) > 0,
+        "the wider redo skipped its prefix after superseded progress was transplanted: \
+         {state_after_attempt_d:?}"
+    );
     scratch.cleanup().await
 }
 
@@ -1543,6 +1960,7 @@ async fn multi_source_ingest_completion_requires_every_configured_source() -> Re
                     source_key: "bulk".to_owned(),
                     current: Some(marker.clone()),
                     target: Some(marker.clone()),
+                    redo_loaded_boundary: None,
                 }],
                 ..PhaseProgress::default()
             }))
@@ -1712,6 +2130,7 @@ async fn non_verify_phase_rejects_a_verification_level() -> Result<()> {
             chain_id,
             PhaseName::Project,
             &RunMode::Normal,
+            None,
             &PhaseProgress {
                 verification_level: Some(VerificationLevel::CrossChecked),
                 ..PhaseProgress::default()
@@ -1725,7 +2144,7 @@ async fn non_verify_phase_rejects_a_verification_level() -> Result<()> {
 }
 
 #[tokio::test]
-async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
+async fn ingest_redo_round_trips_two_source_markers_and_fences_manifest_changes() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_ingest_redo_cursors").await?;
     let chain_id = "ingest-redo-cursor-chain";
     let store = PhaseStore::new(scratch.runner().pool().clone());
@@ -1745,11 +2164,13 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
                         source_key: "bulk".to_owned(),
                         current: Some(BlockMarker::new(19, "redo-cursor-block-19")?),
                         target: Some(BlockMarker::new(19, "redo-cursor-block-19")?),
+                        redo_loaded_boundary: None,
                     },
                     SourceProgress {
                         source_key: "rpc".to_owned(),
                         current: Some(BlockMarker::new(29, "redo-cursor-block-29")?),
                         target: Some(BlockMarker::new(40, "redo-cursor-block-40")?),
+                        redo_loaded_boundary: None,
                     },
                 ],
                 ..PhaseProgress::default()
@@ -1769,6 +2190,23 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
             redo_current_block_hash = 'redo-cursor-block-15',
             redo_target_block_number = 40,
             redo_target_block_hash = 'redo-cursor-block-40',
+            redo_manifest_authority_fingerprint = (
+                SELECT encode(
+                    public.digest(
+                        COALESCE(
+                            jsonb_agg(
+                                manifest_payload - 'normalizer_version'
+                                ORDER BY namespace, source_family
+                            )::text,
+                            '[]'
+                        ),
+                        'sha256'
+                    ),
+                    'hex'
+                )
+                FROM manifest_versions
+                WHERE chain_id = $1 AND rollout_status = 'active'
+            ),
             started_at = now()
         WHERE chain_id = $1
           AND phase_name = 'ingest'
@@ -1777,6 +2215,38 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
     .bind(chain_id)
     .execute(scratch.pool())
     .await?;
+    let bulk_boundary = BlockMarker::new(19, "redo-cursor-block-19")?;
+    let rpc_boundary = BlockMarker::new(29, "redo-cursor-block-29")?;
+    store
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Redo(BlockRange::new(10, 40)?),
+            Some(RedoAttemptFence {
+                generation: 0,
+                execution_range: BlockRange::new(10, 40)?,
+            }),
+            &PhaseProgress {
+                current: Some(BlockMarker::new(15, "redo-cursor-block-15")?),
+                target: Some(BlockMarker::new(40, "redo-cursor-block-40")?),
+                source_progress: vec![
+                    SourceProgress {
+                        source_key: "bulk".to_owned(),
+                        current: None,
+                        target: None,
+                        redo_loaded_boundary: Some(bulk_boundary.clone()),
+                    },
+                    SourceProgress {
+                        source_key: "rpc".to_owned(),
+                        current: None,
+                        target: None,
+                        redo_loaded_boundary: Some(rpc_boundary.clone()),
+                    },
+                ],
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
 
     let resume = store
         .phase_resume(
@@ -1790,6 +2260,10 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
     assert_eq!(resume.ingest_cursors[0].next_block_number, 20);
     assert_eq!(resume.ingest_cursors[0].target_block_number, Some(19));
     assert_eq!(
+        resume.ingest_cursors[0].redo_loaded_boundary.as_ref(),
+        Some(&bulk_boundary)
+    );
+    assert_eq!(
         resume.ingest_cursors[0]
             .last_processed
             .as_ref()
@@ -1799,6 +2273,68 @@ async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
     assert_eq!(resume.ingest_cursors[1].source_key, "rpc");
     assert_eq!(resume.ingest_cursors[1].next_block_number, 30);
     assert_eq!(resume.ingest_cursors[1].target_block_number, Some(40));
+    assert_eq!(
+        resume.ingest_cursors[1].redo_loaded_boundary.as_ref(),
+        Some(&rpc_boundary)
+    );
+
+    sqlx::query(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload
+         ) VALUES (
+             1, 'test', 'redo_authority', $1, 'test', 'active', 'test',
+             'tests/redo-authority.toml',
+             '{\"normalizer_version\":\"test\",\"roots\":[{\"address\":\"0x1\"}]}'::jsonb
+         )",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    let stale_progress_error = store
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Redo(BlockRange::new(10, 40)?),
+            Some(RedoAttemptFence {
+                generation: 0,
+                execution_range: BlockRange::new(10, 40)?,
+            }),
+            &PhaseProgress {
+                current: Some(BlockMarker::new(16, "redo-cursor-block-16")?),
+                target: Some(BlockMarker::new(40, "redo-cursor-block-40")?),
+                source_progress: vec![SourceProgress {
+                    source_key: "rpc".to_owned(),
+                    current: None,
+                    target: None,
+                    redo_loaded_boundary: Some(BlockMarker::new(30, "stale-authority-block-30")?),
+                }],
+                ..PhaseProgress::default()
+            },
+        )
+        .await
+        .expect_err("progress from the prior manifest/watch-plan fingerprint must be fenced");
+    assert_eq!(stale_progress_error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        stale_progress_error
+            .to_string()
+            .contains("redo attempt superseded; progress not recorded")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT redo_source_boundary_markers
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'ingest'",
+        )
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?,
+        Some(serde_json::json!({
+            "bulk": {"number": 19, "hash": "redo-cursor-block-19"},
+            "rpc": {"number": 29, "hash": "redo-cursor-block-29"}
+        })),
+        "the fenced write must not merge a stale per-source marker"
+    );
     scratch.cleanup().await
 }
 
@@ -1839,6 +2375,7 @@ async fn normal_mode_constraint_violations_are_terminal_data_integrity() -> Resu
             chain_id,
             PhaseName::Ingest,
             &RunMode::Normal,
+            None,
             &PhaseProgress {
                 current: Some(BlockMarker::new(23, "normal-constraint-block-23")?),
                 target: Some(BlockMarker::new(24, "normal-constraint-block-24")?),
@@ -1912,6 +2449,7 @@ async fn ingest_cursor_constraint_violations_are_terminal_data_integrity() -> Re
                     source_key: update_source.source_key.clone(),
                     current: Some(BlockMarker::new(10, "cursor-constraint-block-10")?),
                     target: Some(BlockMarker::new(11, "cursor-constraint-block-11")?),
+                    redo_loaded_boundary: None,
                 }],
                 ..PhaseProgress::default()
             },
@@ -2006,6 +2544,7 @@ async fn verify_phase_cannot_complete_without_a_verification_level() -> Result<(
                     source_key: "source".to_owned(),
                     current: Some(marker.clone()),
                     target: Some(marker.clone()),
+                    redo_loaded_boundary: None,
                 }],
                 ..PhaseProgress::default()
             }))
@@ -2336,6 +2875,39 @@ async fn wait_for_no_advisory_locks(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn wait_for_phase_advisory_lock_release(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    phase: PhaseName,
+) -> Result<()> {
+    let lock_name = format!("phase-runner:{chain_id}:{}", phase.as_str());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*)
+                 FROM pg_locks
+                 WHERE locktype = 'advisory'
+                   AND granted
+                   AND database = (
+                       SELECT oid FROM pg_database WHERE datname = current_database()
+                   )
+                   AND classid::bigint =
+                       ((hashtextextended($1::text, 0::bigint) >> 32) & 4294967295)
+                   AND objid::bigint =
+                       (hashtextextended($1::text, 0::bigint) & 4294967295)",
+            )
+            .bind(&lock_name)
+            .fetch_one(pool)
+            .await?;
+            if count == 0 {
+                return Result::<()>::Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?
+}
+
 async fn wait_for_phase_status(
     pool: &sqlx::PgPool,
     chain_id: &str,
@@ -2560,6 +3132,35 @@ impl Phase for FunctionPhase {
         let result = (self.handler)(context);
         Box::pin(async move { result })
     }
+}
+
+fn completing_ingest_redo_phase(
+    boundary: BlockMarker,
+    observed_generation: Arc<AtomicI64>,
+) -> Arc<dyn Phase> {
+    Arc::new(FunctionPhase {
+        name: PhaseName::Ingest,
+        handler: Arc::new(move |context| {
+            observed_generation.store(
+                context
+                    .redo_attempt
+                    .expect("redo batch must carry its attempt fence")
+                    .generation,
+                Ordering::SeqCst,
+            );
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: Some(boundary.clone()),
+                target: Some(boundary.clone()),
+                source_progress: vec![SourceProgress {
+                    source_key: "source".to_owned(),
+                    current: Some(boundary.clone()),
+                    target: Some(boundary.clone()),
+                    redo_loaded_boundary: Some(boundary.clone()),
+                }],
+                ..PhaseProgress::default()
+            }))
+        }),
+    })
 }
 
 fn phase_set_replacing(name: PhaseName, replacement: Arc<dyn Phase>) -> RunnerResult<PhaseSet> {

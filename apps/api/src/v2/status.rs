@@ -189,6 +189,9 @@ fn phase_readiness(
             row.verify_phase_status.as_deref(),
             row.verify_verification_level.as_deref(),
         ) {
+            (Some("completed"), _) if row.verify_settled_while_unconfigured => {
+                (ingest_incomplete, true)
+            }
             (Some("completed"), Some("quick_synced")) => (ingest_incomplete, false),
             (Some("idle" | "running" | "paused") | None, _) => (ingest_incomplete, true),
             (Some("completed" | "failed"), _) | (Some(_), _) => {
@@ -202,6 +205,9 @@ fn phase_readiness(
         Some(age) if age > heartbeat_max_age_seconds => return StatusReadiness::Stale,
         None => return StatusReadiness::Degraded,
         Some(_) => {}
+    }
+    if row.any_phase_settled_while_unconfigured {
+        return StatusReadiness::Degraded;
     }
     if ingest_incomplete || verify_incomplete {
         return StatusReadiness::Degraded;
@@ -507,6 +513,8 @@ mod tests {
             project_phase_status: Some("completed".to_owned()),
             verify_phase_status: None,
             verify_verification_level: None,
+            verify_settled_while_unconfigured: false,
+            any_phase_settled_while_unconfigured: false,
             provider_trusted_verification_required: false,
             project_generation_current: true,
             project_redo_in_progress: false,
@@ -523,14 +531,62 @@ mod tests {
         assert_eq!(phase_readiness(&row, 30), StatusReadiness::Stale);
     }
 
-    #[test]
-    fn expired_heartbeat_outweighs_incomplete_required_verify() {
+    fn settled_verify(level: Option<&str>) -> bigname_storage::IndexingStatusChainRow {
         let mut row = row("ethereum-sepolia", Some(1), Some(1), Some(1), Some(1));
         row.provider_trusted_verification_required = true;
-        row.verify_phase_status = Some("running".to_owned());
-        row.phase_runner_heartbeat_age_seconds = Some(31);
+        row.ingest_phase_status = Some("completed".to_owned());
+        row.verify_phase_status = Some("completed".to_owned());
+        row.verify_verification_level = level.map(str::to_owned);
+        row.verify_settled_while_unconfigured = true;
+        row.any_phase_settled_while_unconfigured = true;
+        row
+    }
 
-        assert_eq!(phase_readiness(&row, 30), StatusReadiness::Stale);
+    #[test]
+    fn v2_status_degrades_settled_required_verify_at_every_level() {
+        for level in [
+            None,
+            Some("cross_checked"),
+            Some("node_checked"),
+            Some("quick_synced"),
+        ] {
+            let row = settled_verify(level);
+            assert_eq!(
+                phase_readiness(&row, 30),
+                StatusReadiness::Degraded,
+                "settled Verify level {level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn settled_phase_readiness_precedence_is_pinned() {
+        for level in [None, Some("quick_synced")] {
+            let mut expired = settled_verify(level);
+            expired.phase_runner_heartbeat_age_seconds = Some(31);
+            assert_eq!(phase_readiness(&expired, 30), StatusReadiness::Stale);
+        }
+        let mut shaped = settled_verify(Some("quick_synced"));
+        shaped.phase_runner_heartbeat_age_seconds = None;
+        assert_eq!(phase_readiness(&shaped, 30), StatusReadiness::Degraded);
+        shaped = settled_verify(Some("quick_synced"));
+        shaped.ingest_phase_status = Some("failed".to_owned());
+        assert_eq!(phase_readiness(&shaped, 30), StatusReadiness::Stale);
+        shaped = settled_verify(Some("quick_synced"));
+        shaped.project_phase_status = Some("failed".to_owned());
+        assert_eq!(phase_readiness(&shaped, 30), StatusReadiness::Stale);
+        shaped = settled_verify(Some("quick_synced"));
+        shaped.verify_phase_status = Some("running".to_owned());
+        assert_eq!(phase_readiness(&shaped, 30), StatusReadiness::Degraded);
+    }
+
+    #[test]
+    fn non_sepolia_settlement_marker_keeps_heartbeat_precedence() {
+        let mut non_sepolia = row("base-mainnet", Some(1), Some(1), Some(1), Some(1));
+        non_sepolia.any_phase_settled_while_unconfigured = true;
+        assert_eq!(phase_readiness(&non_sepolia, 30), StatusReadiness::Degraded);
+        non_sepolia.phase_runner_heartbeat_age_seconds = Some(31);
+        assert_eq!(phase_readiness(&non_sepolia, 30), StatusReadiness::Stale);
     }
 
     fn timestamp_for_block(block: i64) -> OffsetDateTime {

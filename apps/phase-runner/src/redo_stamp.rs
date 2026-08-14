@@ -143,6 +143,8 @@ async fn extend_active(
          SET redo_from_block_number = $3, redo_to_block_number = $4,
              redo_current_block_number = NULL, redo_current_block_hash = NULL,
              redo_target_block_number = NULL, redo_target_block_hash = NULL,
+             redo_source_boundary_markers = NULL,
+             redo_manifest_authority_fingerprint = NULL,
              updated_at = now()
          WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress",
     )
@@ -179,6 +181,8 @@ async fn create_stamp(
              redo_from_block_number = $3, redo_to_block_number = $4,
              redo_current_block_number = NULL, redo_current_block_hash = NULL,
              redo_target_block_number = NULL, redo_target_block_hash = NULL,
+             redo_source_boundary_markers = NULL,
+             redo_manifest_authority_fingerprint = NULL,
              last_error = $5, started_at = now(), finished_at = NULL, updated_at = now()
          WHERE chain_id = $1 AND phase_name = $2
            AND current_block_number >= $3 AND NOT redo_in_progress",
