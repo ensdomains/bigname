@@ -252,7 +252,7 @@ async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
         ("unsupported", "not supported, in resolver_current"),
         (
             "invisible",
-            "is not API-visible at the copy's current Project head through canonical projection lineage",
+            "fails the resolver benchmark's canonical-read or chain-anchor integrity checks",
         ),
     ] {
         let database = TestDatabase::create(
@@ -525,9 +525,9 @@ async fn duplicate_resolver_roles_count_one_declared_address() {
         .await
         .unwrap();
     assert!(
-        advanced.failures.iter().any(
-            |failure| failure.contains("is not API-visible at the copy's current Project head")
-        ),
+        advanced.failures.iter().any(|failure| failure.contains(
+            "fails the resolver benchmark's canonical-read or chain-anchor integrity checks",
+        )),
         "{:?}",
         advanced.failures
     );
@@ -798,16 +798,67 @@ async fn resolver_coverage_uses_the_route_snapshot_bounds() {
             .unwrap();
 
         assert!(
-            coverage
-                .failures
-                .iter()
-                .any(|failure| failure
-                    .contains("is not API-visible at the copy's current Project head")),
+            coverage.failures.iter().any(|failure| failure.contains(
+                "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
+            )),
             "{case}: {:?}",
             coverage.failures
         );
         database.cleanup().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn resolver_coverage_binds_anchor_hash_to_its_claimed_block_number() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_resolver_anchor_number_binding").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            payload: serde_json::json!({"contracts": [{"address": resolver}]}),
+            addresses: vec![resolver.to_owned()],
+        },
+    )
+    .await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    insert_resolver_row(
+        database.pool(),
+        "ethereum-mainnet",
+        resolver,
+        "supported",
+        100,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE resolver_current
+         SET chain_positions = jsonb_set(
+             chain_positions, '{target_block_number}', '99'::jsonb
+         )",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        coverage.failures.iter().any(|failure| failure.contains(
+            "fails the resolver benchmark's canonical-read or chain-anchor integrity checks",
+        )),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
 }
 
 #[tokio::test]
@@ -928,7 +979,9 @@ async fn malformed_resolver_block_numbers_produce_report_failures() {
             );
         } else {
             assert!(
-                failures.contains("is not API-visible at the copy's current Project head"),
+                failures.contains(
+                    "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
+                ),
                 "{failures}"
             );
         }

@@ -20,6 +20,7 @@ for dependency in jq python3 sha256sum; do
 done
 
 source_head="$(git rev-parse HEAD)"
+release_rustflags_env=()
 if [ "$profile" = "release" ]; then
   if [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
     echo "release-profile benchmark commands require a clean worktree before build" >&2
@@ -33,6 +34,7 @@ if [ "$profile" = "release" ]; then
     echo "release-profile benchmark builds refuse non-empty CARGO_ENCODED_RUSTFLAGS; clear it before running the gate" >&2
     exit 1
   fi
+  release_rustflags_env=(RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS=)
   for compiler_override in RUSTC CARGO_BUILD_RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
     if [ -n "${!compiler_override:-}" ]; then
       echo "release-profile benchmark builds refuse non-empty $compiler_override; clear it before running the gate" >&2
@@ -84,6 +86,7 @@ captured_cargo_encoded_rustflags="${CARGO_ENCODED_RUSTFLAGS:-}"
 build_artifacts=""
 if ! build_artifacts="$(
   env -u CARGO_BUILD_RUSTC \
+    "${release_rustflags_env[@]}" \
     BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
     RUSTC="$rustc_binary" \
     RUSTC_WRAPPER= \

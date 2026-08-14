@@ -262,7 +262,7 @@ pub(super) async fn load(pool: &PgPool) -> Result<ResolverCoverage> {
                 "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} is {status:?}, not supported, in resolver_current; rebuild Project from the stored active manifests and rerun the gate"
             )),
             Some(_) if !api_visible => failures.push(format!(
-                "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} is not API-visible at the copy's current Project head through canonical projection lineage; repair or rebuild Project and rerun the gate"
+                "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} fails the resolver benchmark's canonical-read or chain-anchor integrity checks at the copy's current Project head; repair or rebuild Project and rerun the gate"
             )),
             Some(_) => resolvers.push(ResolverTarget {
                 chain_id,

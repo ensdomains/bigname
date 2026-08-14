@@ -40,19 +40,22 @@ Each report records `rustc_version`, `rustflags`,
 `cargo_encoded_rustflags`, `benchmark_binary_sha256`, and
 `locally_built_api_binary_sha256`. The release wrapper refuses non-empty
 `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`; clear either variable instead of
-measuring custom code generation. It also refuses non-empty `RUSTC`,
-`CARGO_BUILD_RUSTC`, `RUSTC_WRAPPER`, or `RUSTC_WORKSPACE_WRAPPER`, and refuses
-compiler or compiler-wrapper keys in the workspace `.cargo/config.toml`. The
-wrapper resolves an absolute `rustc` path, records that executable's `-Vv`
-output, and supplies the same path to Cargo. The harness does not inspect
-`CARGO_BUILD_RUSTFLAGS`, target-specific Cargo flag settings, or Cargo
-configuration such as `[profile.release]`; capturing every effective compiler
-and Cargo build-profile input beyond these checks is release-infrastructure
-work. The recorded executable digests distinguish the resulting local binary
-bytes. Smoke always runs the locally built API binary named by its
-digest. For a production API run, that digest is a companion build artifact;
-the remote target remains bound to the clean source commit through `/healthz`,
-not to the local executable digest.
+measuring custom code generation. For a release build, the build invocation
+then sets both variables present-and-empty, suppressing Rust flags from
+user-level, workspace, and target-specific Cargo configuration. It also refuses
+non-empty `RUSTC`, `CARGO_BUILD_RUSTC`, `RUSTC_WRAPPER`, or
+`RUSTC_WORKSPACE_WRAPPER`; pins an
+absolute `rustc` path; and sets both wrapper variables empty, so user-level
+compiler and wrapper configuration cannot select different tools. Compiler or
+compiler-wrapper keys in the workspace `.cargo/config.toml` remain a named
+refusal. The wrapper records the selected compiler's `-Vv` output. Other Cargo
+configuration, notably `[profile.release]` and linker selection, remains
+uninspected; capturing every effective Cargo build input is
+release-infrastructure work. The recorded executable digests distinguish the
+resulting local binary bytes. Smoke always runs the locally built API binary
+named by its digest. For a production API run, that digest is a companion build
+artifact; the remote target remains bound to the clean source commit through
+`/healthz`, not to the local executable digest.
 
 ## What the gate measures
 
@@ -110,11 +113,20 @@ API's [interpreter content hash](../glossary.md#interpreter-content-hash); a
 missing, running, stale, or invalidated head
 makes the gate red. A declaration whose `start_block` is no later than that head
 must have a
-supported, API-visible `resolver_current` row from that active manifest version.
-The row's publication target cannot be before the latest applicable
-`start_block` for that address. A missing or unsupported row, a row from another
-manifest version, a row published before `start_block`, or a canonically hidden
-declaration makes the run red and names its chain and source family. A
+supported `resolver_current` row from that active manifest version. The row must
+pass the API's canonical-lineage read filter. The gate additionally requires
+the row's declared block hash and number to identify the same readable lineage
+block; the publication target cannot precede the latest applicable `start_block`
+for that address. A missing or unsupported row, a row from another manifest
+version, a row published before `start_block`, a canonically hidden row, or an
+incoherent block anchor makes the run red and names its chain and source family.
+If [eligible interpreted resolver evidence](../projections.md#live-maintenance)
+exists but its projection row is missing or stale, rebuild Project. If that
+evidence should exist but is missing or stale, repair chain intake or Interpret
+first, then rebuild Project. A raw log-emitter address alone is not resolver
+evidence. If the selected chain has no eligible evidence for the declared
+address, a Project rebuild cannot create the row: check the manifest declaration
+against the chain instead. A
 declaration that starts after that head keeps its family visible in
 the report but is not yet demanded. If no declaration is currently applicable,
 the resolver workload cannot be constructed and the gate is red. Request volume
@@ -396,10 +408,11 @@ per second, return 100 percent successful HTTP responses, and meet all three
 latency percentiles. The records route must also meet its 1-percent populated
 response floor. Missing corpus cardinality or a missing active namespace is red
 rather than silently reducing request variety. Resolver coverage is red when a
-stored active declaration is missing, unsupported, or not API-visible at the
-current Project head through canonical lineage, or when the active resolver
-families contribute no currently applicable resolver address. The red JSON
-report retains the per-chain and per-family resolver counts and the named
+stored active declaration is missing, unsupported, hidden by the API's
+canonical-lineage read filter, or rejected by the gate's additional block-anchor
+integrity checks at the current Project head. It is also red when the active
+resolver families contribute no currently applicable resolver address. The red
+JSON report retains the per-chain and per-family resolver counts and the named
 refusal.
 
 Attach both reports and the recorded environment facts to the release record.

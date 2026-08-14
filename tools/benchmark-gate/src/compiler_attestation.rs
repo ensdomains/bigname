@@ -94,6 +94,68 @@ mod tests {
             "{error}"
         );
     }
+
+    #[test]
+    fn release_wrapper_scrubs_user_config_rustflags_from_the_build() {
+        let wrapper = include_str!("../../../scripts/benchmark-gate");
+        let release_branch = wrapper
+            .split_once("if [ \"$profile\" = \"release\" ]; then")
+            .expect("wrapper must distinguish release builds")
+            .1
+            .split_once("\nfi\n")
+            .expect("release branch must terminate")
+            .0;
+        let configured = release_branch
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("release_rustflags_env=(")
+                    .and_then(|value| value.strip_suffix(')'))
+            })
+            .expect("release build environment omits the Rust-flags scrub");
+
+        assert_eq!(
+            configured.split_ascii_whitespace().collect::<Vec<_>>(),
+            ["RUSTFLAGS=", "CARGO_ENCODED_RUSTFLAGS="],
+            "release build must set both Rust-flags variables present-and-empty"
+        );
+    }
+
+    #[test]
+    fn release_wrapper_preserves_caller_rustflags_for_non_release_builds() {
+        let wrapper = include_str!("../../../scripts/benchmark-gate");
+        let release_branch = wrapper
+            .split_once("if [ \"$profile\" = \"release\" ]; then")
+            .expect("wrapper must distinguish release builds")
+            .1
+            .split_once("\nfi\n")
+            .expect("release branch must terminate")
+            .0;
+        let build_environment = wrapper
+            .split_once("if ! build_artifacts=")
+            .expect("wrapper must capture the Cargo build")
+            .1
+            .split_once("cargo build")
+            .expect("wrapper must invoke Cargo")
+            .0;
+
+        assert!(wrapper.contains("release_rustflags_env=()"));
+        assert!(
+            release_branch.contains("release_rustflags_env=(RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS=)")
+        );
+        assert!(build_environment.contains("\"${release_rustflags_env[@]}\""));
+        assert_eq!(wrapper.matches("release_rustflags_env=(").count(), 2);
+        assert!(
+            !build_environment
+                .lines()
+                .any(|line| line.trim_start().starts_with("RUSTFLAGS="))
+        );
+        assert!(
+            !build_environment
+                .lines()
+                .any(|line| line.trim_start().starts_with("CARGO_ENCODED_RUSTFLAGS="))
+        );
+    }
 }
 #[test]
 fn reported_cargo_profile_comes_from_compiled_assertion_mode() {
