@@ -76,9 +76,9 @@ impl PhaseRunner {
     ) -> RunnerResult<()> {
         self.record_loop_progress(&chain.chain_id);
         self.store.initialize_chain(&chain.chain_id).await?;
+        self.recover_stopped_phases(chain).await?;
         self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
             .await?;
-        self.recover_stopped_live(chain).await?;
         self.catch_up_for_required_redo(chain, cancellation.clone())
             .await?;
         for phase in [PhaseName::Interpret, PhaseName::Project] {
@@ -86,7 +86,7 @@ impl PhaseRunner {
                 .await?;
         }
 
-        if chain.verify_before_live {
+        if Self::verify_before_live(chain)? {
             self.phases.get(PhaseName::Verify).preflight(
                 &chain.chain_id,
                 &chain.sources,

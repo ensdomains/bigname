@@ -442,7 +442,7 @@ async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> 
 async fn runner_loop_heartbeat_refreshes_across_completed_live_follow_passes() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_live_follow_heartbeat").await?;
     let chain_id = "live-follow-heartbeat-chain";
-    seed_lineage(scratch.pool(), chain_id, 1).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
     let heads = HeadMarkers {
         latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
         safe: None,
@@ -1088,7 +1088,7 @@ async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_readd_partial_ingest").await?;
     let chain_id = "readded-ingest-chain";
     let configured_chain = chain(chain_id)?;
-    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
     store.initialize_chain(chain_id).await?;
     store
@@ -1223,7 +1223,7 @@ async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
 async fn readding_chain_restarts_ingest_settled_with_wrong_handoff() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_readd_wrong_ingest_handoff").await?;
     let chain_id = "readded-wrong-ingest-handoff-chain";
-    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
     store.initialize_chain(chain_id).await?;
     store
@@ -1260,7 +1260,7 @@ async fn readding_chain_restarts_after_legacy_torn_ingest_progress() -> Result<(
     let scratch = ScratchDatabase::create("phase_runner_readd_torn_ingest_progress").await?;
     let chain_id = "readded-torn-ingest-chain";
     let configured_chain = chain(chain_id)?;
-    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
     store.initialize_chain(chain_id).await?;
     store
@@ -1344,7 +1344,7 @@ async fn readding_chain_restarts_verify_settled_without_level() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_readd_partial_verify").await?;
     let chain_id = "readded-verify-chain";
     let configured_chain = chain(chain_id)?;
-    seed_lineage(scratch.pool(), chain_id, 0).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 0).await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
     store.initialize_chain(chain_id).await?;
     let marker = BlockMarker::new(0, format!("{chain_id}-block-0"))?;
@@ -1499,7 +1499,7 @@ async fn readding_chain_restarts_verify_settled_before_target_with_level() -> Re
     let scratch = ScratchDatabase::create("phase_runner_readd_partial_verify_with_level").await?;
     let chain_id = "readded-partial-verify-chain";
     let configured_chain = chain(chain_id)?;
-    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
     store.initialize_chain(chain_id).await?;
     let target = BlockMarker::new(3, format!("{chain_id}-block-3"))?;
@@ -2980,9 +2980,12 @@ async fn seed_completed_ingest_cursor(
     source_current: BlockMarker,
     source_target: BlockMarker,
 ) -> Result<()> {
-    seed_readable_lineage(scratch.pool(), &chain.chain_id, summary.number).await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
     store.initialize_chain(&chain.chain_id).await?;
+    store
+        .ensure_ingest_sources(&chain.chain_id, &chain.sources)
+        .await?;
+    seed_readable_lineage(scratch.pool(), &chain.chain_id, summary.number).await?;
     store
         .start_phase(&chain.chain_id, PhaseName::Ingest, &RunMode::Normal)
         .await?;

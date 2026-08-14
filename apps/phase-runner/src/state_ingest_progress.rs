@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
-    config::SourceConfig,
+    config::{SourceConfig, normalized_source_kind},
     error::{RunnerError, RunnerResult},
     heads::BlockMarker,
     phase::{BlockRange, PhaseName, PhaseProgress},
@@ -161,6 +161,60 @@ async fn ensure_ingest_cursor(
     transaction: &mut Transaction<'_, Postgres>,
     source: &SourceConfig,
 ) -> RunnerResult<()> {
+    let cursor_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM ingest_cursors
+             WHERE chain_id = $1 AND source_key = $2
+         )",
+    )
+    .bind(&source.chain_id)
+    .bind(&source.source_key)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!(
+                "failed to check ingest cursor {} for chain {}",
+                source.source_key, source.chain_id
+            ),
+            error,
+        )
+    })?;
+    if !cursor_exists {
+        let has_durable_ingest_data: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM raw_transactions WHERE chain_id = $1
+             ) OR EXISTS (
+                 SELECT 1 FROM raw_receipts WHERE chain_id = $1
+             ) OR EXISTS (
+                 SELECT 1 FROM raw_logs WHERE chain_id = $1
+             ) OR EXISTS (
+                 SELECT 1 FROM chain_lineage WHERE chain_id = $1
+             ) OR EXISTS (
+                 SELECT 1 FROM chain_header_audit WHERE chain_id = $1
+             )",
+        )
+        .bind(&source.chain_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!(
+                    "failed to check durable ingest data for chain {}",
+                    source.chain_id
+                ),
+                error,
+            )
+        })?;
+        if has_durable_ingest_data {
+            return Err(RunnerError::data_integrity(format!(
+                "cannot initialize ingest source {} on chain {} because durable ingest data \
+                 already exists without a matching cursor; an explicit reset is required before \
+                 Ingest can run",
+                source.source_key, source.chain_id
+            )));
+        }
+    }
     sqlx::query(
         "
         INSERT INTO ingest_cursors (
@@ -177,7 +231,7 @@ async fn ensure_ingest_cursor(
     )
     .bind(&source.chain_id)
     .bind(&source.source_key)
-    .bind(&source.source_kind)
+    .bind(normalized_source_kind(&source.source_kind))
     .bind(source.seed_basis.as_str())
     .bind(source.start_block_number)
     .execute(&mut **transaction)
@@ -191,9 +245,9 @@ async fn ensure_ingest_cursor(
             error,
         )
     })?;
-    let stored: (String, i64) = sqlx::query_as(
+    let stored: (String, String, i64) = sqlx::query_as(
         "
-        SELECT seed_basis, start_block_number
+        SELECT source_kind, seed_basis, start_block_number
         FROM ingest_cursors
         WHERE chain_id = $1
           AND source_key = $2
@@ -212,15 +266,18 @@ async fn ensure_ingest_cursor(
             error,
         )
     })?;
-    if stored
-        != (
-            source.seed_basis.as_str().to_owned(),
-            source.start_block_number,
-        )
-    {
+    if stored.1 != source.seed_basis.as_str() || stored.2 != source.start_block_number {
         return Err(RunnerError::data_integrity(format!(
             "persisted ingest seed configuration for source {} on chain {} differs from runtime \
              configuration",
+            source.source_key, source.chain_id
+        )));
+    }
+    if normalized_source_kind(&stored.0) != normalized_source_kind(&source.source_kind) {
+        return Err(RunnerError::data_integrity(format!(
+            "persisted ingest source kind for source {} on chain {} differs from runtime \
+             configuration; source kind changes require an explicit reset and full source \
+             re-walk (docs/glossary.md#re-derivation-boundary)",
             source.source_key, source.chain_id
         )));
     }
@@ -293,7 +350,7 @@ async fn upsert_ingest_cursor(
     )
     .bind(&source.chain_id)
     .bind(&source.source_key)
-    .bind(&source.source_kind)
+    .bind(normalized_source_kind(&source.source_kind))
     .bind(source.seed_basis.as_str())
     .bind(source.start_block_number)
     .bind(next)

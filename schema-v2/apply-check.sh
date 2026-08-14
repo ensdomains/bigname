@@ -189,7 +189,7 @@ SQL
 } | run_psql
 # Comment-only upgrades must also tolerate SQLx running before init-schema.
 sed "s/bigname_phase/$scratch_schema/g" \
-    "$ROOT/migrations/20260813120000_phase_heartbeat_liveness_comment.sql" \
+    "$ROOT/migrations/20260814121000_phase_heartbeat_liveness_comment.sql" \
     | run_psql
 
 apply_baseline
@@ -365,7 +365,7 @@ SQL
 } | run_psql
 for ignored in 1 2; do
     sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260813120000_phase_heartbeat_liveness_comment.sql" \
+        "$ROOT/migrations/20260814121000_phase_heartbeat_liveness_comment.sql" \
         | run_psql
 done
 heartbeat_comment_check="$({
@@ -399,8 +399,8 @@ assert_unconfigured_settlement_constraint baseline
 } | run_psql
 for ignored in 1 2; do
     for migration_file in \
-        "$ROOT/migrations/20260813121000_verify_unconfigured_settlement.sql" \
-        "$ROOT/migrations/20260813121100_verify_unconfigured_settlement_validate.sql"
+        "$ROOT/migrations/20260814122000_verify_unconfigured_settlement.sql" \
+        "$ROOT/migrations/20260814122100_verify_unconfigured_settlement_validate.sql"
     do
         sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
     done

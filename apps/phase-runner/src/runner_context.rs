@@ -36,8 +36,13 @@ impl PhaseRunner {
         }
         if phase == PhaseName::Ingest {
             let status = self.store.status(&chain.chain_id, phase).await?;
+            let completed_phase_restarts = status == crate::state::PhaseStatus::Completed
+                && self
+                    .store
+                    .completed_ingest_requires_restart(&chain.chain_id)
+                    .await?;
             let validates_retained_completion = matches!(mode, RunMode::Normal)
-                && (status == crate::state::PhaseStatus::Completed
+                && ((status == crate::state::PhaseStatus::Completed && !completed_phase_restarts)
                     || self
                         .store
                         .pending_completed_validation(&chain.chain_id, phase)

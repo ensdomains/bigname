@@ -143,21 +143,16 @@ impl PhaseStore {
             && crate::completed_phase_recovery::locked_completed_validation_recovery(row, phase);
         let restarts_completed = match (status, phase) {
             (_, PhaseName::Live) => true,
-            (PhaseStatus::Completed, PhaseName::Ingest) => {
-                row.live_handoff_block_number.is_none()
-                    || row.live_handoff_block_number != row.target_block_number
-                    || row.live_handoff_block_hash != row.target_block_hash
-                    || row.current_block_number != row.target_block_number
-                    || row.current_block_hash != row.target_block_hash
-            }
+            (PhaseStatus::Completed, PhaseName::Ingest) => row.ingest_completion_is_incomplete(),
             (PhaseStatus::Completed, PhaseName::Interpret | PhaseName::Project) => {
                 completed_phase_is_behind(&mut transaction, chain_id, phase, row).await?
             }
             (PhaseStatus::Completed, PhaseName::Verify) => {
-                row.verification_level.is_none()
-                    || row.current_block_number.is_none()
-                    || row.current_block_number != row.target_block_number
-                    || row.current_block_hash != row.target_block_hash
+                row.settled_while_unconfigured == Some(true)
+                    && (row.verification_level.is_none()
+                        || row.current_block_number.is_none()
+                        || row.current_block_number != row.target_block_number
+                        || row.current_block_hash != row.target_block_hash)
             }
             _ => false,
         };
@@ -377,7 +372,8 @@ impl PhaseStore {
             chain_id,
             phase,
             progress,
-            "phase_status = 'completed', finished_at = now(), updated_at = now()",
+            "phase_status = 'completed', settled_while_unconfigured = NULL, \
+             finished_at = now(), updated_at = now()",
         )
         .await?;
         transaction.commit().await.map_err(|error| {
@@ -529,7 +525,26 @@ impl PhaseStore {
     ) -> RunnerResult<()> {
         crate::ingest_cursor_config::validate_completed(&self.pool, chain_id, sources).await
     }
+
+    pub async fn completed_ingest_requires_restart(&self, chain_id: &str) -> RunnerResult<bool> {
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            RunnerError::transient(format!(
+                "failed to begin completed Ingest check for chain {chain_id}: {error}"
+            ))
+        })?;
+        let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
+        let row = row_for(&rows, PhaseName::Ingest)?;
+        let requires_restart =
+            row.status()? == PhaseStatus::Completed && row.ingest_completion_is_incomplete();
+        transaction.commit().await.map_err(|error| {
+            RunnerError::transient(format!(
+                "failed to finish completed Ingest check for chain {chain_id}: {error}"
+            ))
+        })?;
+        Ok(requires_restart)
+    }
 }
+
 async fn completed_phase_is_behind(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chain_id: &str,

@@ -20,7 +20,7 @@ use bigname_ingest::{
 };
 use phase_runner::{
     capacity::CapacityGuard,
-    config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
     error::{ErrorKind, RunnerError, RunnerResult},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
@@ -1088,6 +1088,8 @@ async fn run_until_ingest_handoff(
     expected_hash: &str,
 ) -> Result<()> {
     let chain_id = chain.chain_id.clone();
+    let recovery_runner = runner.clone();
+    let recovery_chain = chain.clone();
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
     let mut task = tokio::spawn(async move { runner.run_chain(&chain, task_cancellation).await });
@@ -1128,6 +1130,11 @@ async fn run_until_ingest_handoff(
     .context("production ingest restart did not converge")??;
     cancellation.cancel();
     task.await??;
+    let recovery_cancellation = CancellationToken::new();
+    recovery_cancellation.cancel();
+    recovery_runner
+        .run_chain(&recovery_chain, recovery_cancellation)
+        .await?;
     Ok(())
 }
 
@@ -1710,6 +1717,64 @@ async fn same_kind_restart_after_first_batch_crash_refetches_and_completes() -> 
 
     drop(restarted);
     restart_server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn readded_ingest_settled_before_its_first_cursor_starts_normally() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_readd_before_cursor").await?;
+    seed_watch_set(scratch.pool(), SEPOLIA).await?;
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(SEPOLIA).await?;
+    store
+        .start_phase(
+            SEPOLIA,
+            PhaseName::Ingest,
+            &phase_runner::phase::RunMode::Normal,
+        )
+        .await?;
+    let retained_chain = ChainConfig::new(
+        "retained-chain",
+        vec![SourceConfig::new(
+            "retained-chain",
+            "rpc",
+            "rpc",
+            SeedBasis::EthereumHead,
+            0,
+            "http://unused.invalid",
+        )?],
+        false,
+    )?;
+    let runtime = RuntimeConfig::new(
+        "production-ingest-settlement",
+        vec![retained_chain],
+        CapacityConfig::default(),
+        test_timing(),
+    )?;
+    let settlement_cancellation = CancellationToken::new();
+    settlement_cancellation.cancel();
+    Arc::new(production_ingest_runner(
+        scratch.runner(),
+        "production-ingest-settlement",
+    )?)
+    .run(&runtime, settlement_cancellation)
+    .await?;
+
+    let (endpoint, server, requests) = spawn_crash_window_rpc(false).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = complete_ingest_runner(&scratch, Arc::clone(&live_calls)).await?;
+    runner
+        .run_chain(
+            &sepolia_ingest_chain("drpc", &endpoint)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert!(requests.load(Ordering::SeqCst) > 0);
+    assert!(ingest_identity(scratch.pool()).await?.is_some());
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+    drop(runner);
+    server.abort();
     scratch.cleanup().await
 }
 

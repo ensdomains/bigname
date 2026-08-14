@@ -1390,6 +1390,91 @@ async fn completed_verify_rejects_a_missing_retained_verification_level() -> Res
 }
 
 #[tokio::test]
+async fn verify_settlement_marker_distinguishes_resume_from_completed_validation() -> Result<()> {
+    let settled = ScratchDatabase::create("production_verify_marked_settlement").await?;
+    seed_incomplete_completed_verify(settled.pool(), true).await?;
+    let settled_live_calls = Arc::new(AtomicUsize::new(0));
+    let settled_runner = sepolia_verifier_runner(&settled, Arc::clone(&settled_live_calls)).await?;
+    settled_runner
+        .run_chain(&sepolia_chain()?, CancellationToken::new())
+        .await?;
+    let settled_state: (
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<bool>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT phase_status, verification_level,
+                    current_block_number, target_block_number,
+                    settled_while_unconfigured, last_error
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(settled.pool())
+    .await?;
+    assert_eq!(
+        settled_state,
+        (
+            "completed".to_owned(),
+            Some("quick_synced".to_owned()),
+            5,
+            5,
+            None,
+            None,
+        ),
+        "successful Verify resume must clear its settlement marker"
+    );
+    assert_eq!(settled_live_calls.load(Ordering::SeqCst), 1);
+    drop(settled_runner);
+    settled.cleanup().await?;
+
+    let ordinary = ScratchDatabase::create("production_verify_unmarked_incomplete").await?;
+    seed_incomplete_completed_verify(ordinary.pool(), false).await?;
+    let ordinary_live_calls = Arc::new(AtomicUsize::new(0));
+    let ordinary_runner =
+        sepolia_verifier_runner(&ordinary, Arc::clone(&ordinary_live_calls)).await?;
+    let error = ordinary_runner
+        .run_chain(&sepolia_chain()?, CancellationToken::new())
+        .await
+        .expect_err("an unmarked incomplete completion must be diagnosed, not resumed");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("frozen target"), "{error}");
+    let ordinary_state: (
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<bool>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT phase_status, verification_level,
+                    current_block_number, target_block_number,
+                    settled_while_unconfigured, last_error
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(ordinary.pool())
+    .await?;
+    assert_eq!(ordinary_state.0, "failed");
+    assert_eq!(ordinary_state.1.as_deref(), Some("quick_synced"));
+    assert_eq!((ordinary_state.2, ordinary_state.3), (4, 5));
+    assert_eq!(ordinary_state.4, None);
+    assert!(
+        ordinary_state.5.as_deref().is_some_and(|reason| reason
+            .starts_with("completed phase validation failed: ")
+            && reason.contains("frozen target")),
+        "unmarked completion must retain its diagnosis: {ordinary_state:?}"
+    );
+    assert_eq!(ordinary_live_calls.load(Ordering::SeqCst), 0);
+    drop(ordinary_runner);
+    ordinary.cleanup().await
+}
+
+#[tokio::test]
 async fn sepolia_requires_its_configured_intake_cursor_through_finality() -> Result<()> {
     for (prefix, cursor_key, cursor_through, message) in [
         ("changed_key", "previous-drpc-intake", 8, "matching cursor"),
@@ -3714,6 +3799,28 @@ async fn seed_completed_spine_prerequisites(
     .bind(through)
     .bind(block_hash(chain_id, through))
     .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_incomplete_completed_verify(pool: &sqlx::PgPool, settled: bool) -> Result<()> {
+    seed_lineage_and_heads(pool, SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(pool, SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(pool, SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', verification_level = 'quick_synced',
+             current_block_number = 4, current_block_hash = $2,
+             target_block_number = 5, target_block_hash = $3,
+             settled_while_unconfigured = CASE WHEN $4 THEN TRUE ELSE NULL END,
+             started_at = now(), finished_at = now(), last_error = NULL
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 4))
+    .bind(block_hash(SEPOLIA, 5))
+    .bind(settled)
     .execute(pool)
     .await?;
     Ok(())

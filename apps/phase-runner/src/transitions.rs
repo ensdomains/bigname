@@ -11,6 +11,7 @@ pub(crate) struct PhaseStateRow {
     pub phase_name: String,
     pub phase_status: String,
     pub verification_level: Option<String>,
+    pub settled_while_unconfigured: Option<bool>,
     pub current_block_number: Option<i64>,
     pub current_block_hash: Option<String>,
     pub target_block_number: Option<i64>,
@@ -35,6 +36,14 @@ impl PhaseStateRow {
     pub(crate) fn status(&self) -> RunnerResult<PhaseStatus> {
         self.phase_status.parse()
     }
+
+    pub(crate) fn ingest_completion_is_incomplete(&self) -> bool {
+        self.live_handoff_block_number.is_none()
+            || self.live_handoff_block_number != self.target_block_number
+            || self.live_handoff_block_hash != self.target_block_hash
+            || self.current_block_number != self.target_block_number
+            || self.current_block_hash != self.target_block_hash
+    }
 }
 
 pub(crate) async fn lock_chain_phase_state(
@@ -46,6 +55,7 @@ pub(crate) async fn lock_chain_phase_state(
         SELECT phase_name,
                phase_status,
                verification_level,
+               settled_while_unconfigured,
                current_block_number,
                current_block_hash,
                target_block_number,
