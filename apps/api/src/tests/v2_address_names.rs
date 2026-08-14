@@ -359,6 +359,56 @@ async fn v2_get_address_names_dedupe_name_vs_registration() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let shared_resource_id = Uuid::from_u128(0xd100);
+    upsert_phase_permissions_current_rows(
+        &database.pool,
+        &[permission_current_row(
+            shared_resource_id,
+            V2_PERMISSION_SUBJECT,
+            PermissionScope::Registry,
+            12,
+            111,
+        )],
+    )
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ADDRESS}/names?dedupe=registration&include=role_summary"
+        ),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("combined address-name data must be an array");
+    let shared_rows = rows
+        .iter()
+        .filter(|row| {
+            row["name"] == json!("shared-one.eth") || row["name"] == json!("shared-two.eth")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows.len(), 4);
+    assert_eq!(shared_rows.len(), 1);
+    assert_eq!(
+        shared_rows[0]["role_summary"],
+        json!([{
+            "address": V2_PERMISSION_SUBJECT,
+            "grants": [{
+                "grant_scope": {"kind": "registry", "detail": {}},
+                "powers": ["set_resolver", "create_subnames"]
+            }]
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> {
     let (database, expires_asc) = v2_address_names_payload(&format!(
         "/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"

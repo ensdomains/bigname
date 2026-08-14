@@ -206,6 +206,10 @@ same production-distribution address subjects as the other variants. The search
 workload keeps explicit-namespace requests for every seed and adds bare
 requests for a deterministic half; both forms cover prefix and contains
 matching, and production mode requires a populated bare-search seed response.
+The first production run after the address-name coverage change may show higher
+tails because three quarters of those timed requests now add role-summary work,
+registration deduplication, or both; the earlier workload measured only the
+base listing shape.
 Bare requests are a minority of the mixed search pool, so a regression limited
 to the bare path can move p95 or p99 without moving p50. The first production
 run after this coverage was added may also show higher search tails: bare search

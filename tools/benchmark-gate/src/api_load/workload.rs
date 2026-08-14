@@ -1,10 +1,13 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use reqwest::{Method, Url};
 use serde_json::{Value, json};
 
 use super::corpus::Corpus;
 
+mod base_url;
 mod resolver;
+pub(in crate::api_load) use base_url::normalized_base_url;
+pub(crate) use base_url::report_base_url;
 pub(in crate::api_load) use resolver::{ResolverTarget, endpoint_requests};
 
 #[derive(Clone, Debug)]
@@ -252,7 +255,7 @@ fn address_name_requests(
             ("order", if index % 3 == 0 { "desc" } else { "asc" }),
             ("page_size", page_size(index)),
         ];
-        match index % 4 {
+        match (index / 2) % 4 {
             1 => query_pairs.push(("include", "role_summary")),
             2 => query_pairs.push(("dedupe", "registration")),
             3 => {
@@ -320,29 +323,6 @@ fn address_history_requests(
         )?);
     }
     Ok(())
-}
-
-pub(super) fn normalized_base_url(value: &str) -> Result<Url> {
-    let mut url = Url::parse(value).context("failed to parse API base URL")?;
-    ensure!(
-        matches!(url.scheme(), "http" | "https"),
-        "API base URL must use HTTP or HTTPS"
-    );
-    url.set_query(None);
-    url.set_fragment(None);
-    if !url.path().ends_with('/') {
-        url.set_path(&format!("{}/", url.path()));
-    }
-    Ok(url)
-}
-
-pub(crate) fn report_base_url(value: &str) -> Result<String> {
-    let mut url = normalized_base_url(value)?;
-    ensure!(
-        url.set_username("").is_ok() && url.set_password(None).is_ok(),
-        "API base URL credentials could not be removed for the benchmark report"
-    );
-    Ok(url.to_string())
 }
 
 pub(super) fn get(base: &Url, segments: &[&str], query: &[(&str, &str)]) -> Result<RequestSpec> {
