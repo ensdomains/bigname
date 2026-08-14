@@ -48,6 +48,33 @@ async fn production_budget_reaches_the_default_source_probe_invocation() {
     );
 }
 
+#[tokio::test]
+async fn smoke_budget_exempts_an_empty_probe_through_the_public_wrapper() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
+    let budgets = BudgetsFile::load(&path).unwrap();
+    let smoke = budgets.profile(BudgetProfile::Smoke);
+    assert!(!smoke.api_require_populated_probes);
+    let base = super::super::workload::normalized_base_url("http://127.0.0.1:1").unwrap();
+
+    let report = probe_default_primary_name(&Client::new(), &base, &empty_corpus(), smoke)
+        .await
+        .unwrap();
+    assert_eq!(report.requests_sent, 0);
+    assert!(report.failures.is_empty());
+
+    let mut cursor_required = smoke.clone();
+    cursor_required.api_require_cursor_variants = true;
+    let report =
+        probe_default_primary_name(&Client::new(), &base, &empty_corpus(), &cursor_required)
+            .await
+            .unwrap();
+    assert_eq!(report.requests_sent, 0);
+    assert!(
+        report.failures.is_empty(),
+        "the unrelated cursor requirement must not control default-source probe vacuity"
+    );
+}
+
 #[test]
 fn default_source_probe_rejects_any_answer_count_other_than_two() {
     let indexed_only = json!({
