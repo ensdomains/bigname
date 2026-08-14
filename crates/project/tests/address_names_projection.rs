@@ -151,9 +151,9 @@ async fn seed_surface(
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES (
-             $1::uuid, $2, $3::uuid, 'declared_registry_path',
+             $1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v1',
              '2026-07-01T00:00:00Z', $4, $5, 8, 'canonical'
          )",
     )

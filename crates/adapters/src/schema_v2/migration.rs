@@ -9,6 +9,8 @@ use super::{
 };
 
 mod support;
+#[cfg(any(test, feature = "test-activation"))]
+pub use support::inject_activated_transition_for_test;
 use support::*;
 
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";

@@ -8,6 +8,7 @@ use time::{Duration, OffsetDateTime};
 
 pub const PREIMAGE_OBSERVATION_EVENT_KIND: &str = "PreimageObserved";
 pub const SURFACE_BOUND_EVENT_KIND: &str = "SurfaceBound";
+pub const MIGRATION_APPLIED_EVENT_KIND: &str = "MigrationApplied";
 pub const SURFACE_UNBOUND_EVENT_KIND: &str = "SurfaceUnbound";
 pub const SURFACE_BINDING_ID_KEY: &str = "surface_binding_id";
 pub const TOKEN_LINEAGE_ID_KEY: &str = "token_lineage_id";

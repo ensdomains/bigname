@@ -1299,6 +1299,12 @@ async fn seed_v2_search_fixture(database: &TestDatabase) -> Result<()> {
             logical_name_id: spec.logical_name_id(),
             resource_id: spec.resource_id(),
             binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            authority_arm: if spec.namespace == "basenames" {
+                "basenames"
+            } else {
+                "ens_v1"
+            }
+            .to_owned(),
             active_from: timestamp(1_717_190_000 + spec.block_number),
             active_to: None,
             chain_id: spec.chain_id().to_owned(),

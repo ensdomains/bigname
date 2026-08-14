@@ -146,6 +146,7 @@ pub(super) fn interpret(
             surface_binding_id: None,
             bind: false,
             binding_kind: "declared_registry_path".to_owned(),
+            authority_arm: "ens_v2".to_owned(),
             source_kind: format!("{}_label", selected.event.name),
             preimage_metadata: None,
         });

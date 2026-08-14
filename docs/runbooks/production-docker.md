@@ -227,6 +227,29 @@ additive; rollback may leave them in place.
 2. take and verify a database backup;
 3. for the release containing Issue #400, apply and validate the concurrent
    baseline indexes above; otherwise skip this step;
+   For the release containing
+   `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
+   cannot take the required `NOT NULL` column without the forbidden historical
+   arm backfill. Before step 4, empty only the rebuildable binding rows and the
+   two current projections that reference them:
+
+   ```sql
+   BEGIN;
+   TRUNCATE TABLE
+       bigname_phase.name_current,
+       bigname_phase.address_names_current,
+       bigname_phase.surface_bindings
+       CONTINUE IDENTITY RESTRICT;
+   COMMIT;
+   ```
+
+   Keep the API and phase runner stopped until steps 7 and 8 complete. This is
+   a targeted derived-state reset, not a phase-schema replacement: it preserves
+   raw facts, manifest rows and their sequence-assigned IDs, normalized-event
+   identities, and the metadata needed to resume pre-boundary cursors. Do not
+   clear or rename the phase schema at this boundary. Step 4 then applies the
+   required column to the empty binding table, and the mandatory full-history
+   Interpret and Project redos rebuild the cleared rows;
 4. if the reviewed artifact set includes a versioned schema-migration, apply it;
    otherwise skip this step;
 5. if an additive schema-migration created or changed a table, reapply and

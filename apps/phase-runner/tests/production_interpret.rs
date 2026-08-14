@@ -2341,8 +2341,8 @@ async fn active_to_shadow_recompute_stamps_redo_then_replay_retracts_the_binding
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
-         ) VALUES ($1, $2, $3, 'declared_registry_path', to_timestamp(1),
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 'declared_registry_path', 'ens_v1', to_timestamp(1),
                    $4, $5, 1, 'canonical')",
     )
     .bind(stale_binding_id)

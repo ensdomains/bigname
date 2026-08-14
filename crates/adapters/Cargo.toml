@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+test-activation = []
+
 [dependencies]
 alloy-json-abi.workspace = true
 alloy-primitives.workspace = true

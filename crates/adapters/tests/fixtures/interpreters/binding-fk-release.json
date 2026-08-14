@@ -140,6 +140,8 @@
     "source_manifest_id": 3,
     "binding_closure": {
       "logical_name_id": "ens:0x4e170399560e4ac2aa15f173565ddd572f7dc55acc67304d8dfcd81f97c45e02",
+      "authority_arm": "ens_v1",
+      "chain_id": "ethereum-mainnet",
       "except_surface_binding_id": "3bca4aa0-41f1-5769-913e-f220d6203e3a",
       "active_to": "2022-12-13T14:25:11+00:00",
       "block_number": 16176355,

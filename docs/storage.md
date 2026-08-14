@@ -108,7 +108,11 @@ The append-numbered phase-schema upgrade adds
 ships before the planned production re-walk from block zero, so it does not
 guess arms for historical rows or perform a historical backfill. Fresh replay
 always supplies the value. The fresh phase baseline has the identical column,
-constraint, and comment.
+constraint, and comment. At the offline boundary, operators empty only
+`surface_bindings` and its `name_current` and `address_names_current`
+dependents before applying the schema-migration; raw facts, manifest identities,
+normalized-event identities, and unrelated phase rows remain in place for the
+mandatory full Interpret and Project redos.
 
 ## Table ownership
 

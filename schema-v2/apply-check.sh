@@ -152,7 +152,7 @@ apply_baseline() {
 }
 
 # A schema-migration database can exist before phase-runner installs the phase
-# baseline. Every slice-1 migration must be a no-op on that empty path.
+# baseline. Every reviewed phase schema-migration must be a no-op on that empty path.
 for migration_file in \
     "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
@@ -160,7 +160,8 @@ for migration_file in \
     "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
     "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
     "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
-    "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql"
+    "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql" \
+    "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -288,10 +289,142 @@ for migration_file in \
     "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
     "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
-    "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql"
+    "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
+    "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
+    "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
+
+# Exercise the authority-arm upgrade from its exact preceding empty binding
+# shape. Applying the reviewed file twice must retain one required column, its
+# closed check, and the chain/name/arm exclusion domain.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+ALTER TABLE surface_bindings
+    DROP CONSTRAINT surface_bindings_no_overlap,
+    DROP CONSTRAINT surface_bindings_authority_arm_check,
+    DROP COLUMN authority_arm;
+ALTER TABLE surface_bindings
+    ADD CONSTRAINT surface_bindings_no_overlap
+    EXCLUDE USING gist (
+        logical_name_id WITH =,
+        tstzrange(active_from, COALESCE(active_to, 'infinity'::timestamptz), '[)') WITH &&
+    )
+    WHERE (canonicality_state IN ('canonical', 'safe', 'finalized'));
+
+INSERT INTO manifest_versions (
+    manifest_version, namespace, source_family, chain_id, deployment_label,
+    rollout_status, normalizer_version, file_path, manifest_payload
+) VALUES (
+    1, 'schema-v2-check', 'authority-reset-sentinel', 'authority-reset',
+    'authority-reset', 'draft', 'test', 'authority-reset-sentinel.toml', '{}'::jsonb
+);
+INSERT INTO chain_lineage (
+    chain_id, block_hash, block_number, block_timestamp, canonicality_state
+) VALUES (
+    'authority-reset', '0x01', 1, to_timestamp(1), 'canonical'
+);
+INSERT INTO name_surfaces (
+    logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+    namehash, labelhashes, normalizer_version, visibility_state,
+    chain_id, block_hash, block_number, canonicality_state
+) VALUES (
+    'schema-v2-check:0xreset', 'schema-v2-check', 'reset', ARRAY['reset'],
+    '\x'::bytea, '0xreset', ARRAY['0xreset'], 'test', 'active',
+    'authority-reset', '0x01', 1, 'canonical'
+);
+INSERT INTO resources (
+    resource_id, chain_id, block_hash, block_number, canonicality_state
+) VALUES (
+    '00000000-0000-0000-0000-000000000001',
+    'authority-reset', '0x01', 1, 'canonical'
+);
+INSERT INTO surface_bindings (
+    surface_binding_id, logical_name_id, resource_id, binding_kind,
+    active_from, chain_id, block_hash, block_number, canonicality_state
+) VALUES (
+    '00000000-0000-0000-0000-000000000002',
+    'schema-v2-check:0xreset',
+    '00000000-0000-0000-0000-000000000001',
+    'declared_registry_path', to_timestamp(1),
+    'authority-reset', '0x01', 1, 'canonical'
+);
+INSERT INTO normalized_events (
+    event_identity, namespace, event_kind, source_family, manifest_version,
+    chain_id, derivation_kind, canonicality_state
+) VALUES (
+    'authority-reset-normalized-sentinel', 'schema-v2-check',
+    'SourceManifestUpdated', 'authority-reset-sentinel', 1,
+    'authority-reset', 'manifest_sync', 'canonical'
+);
+
+TRUNCATE TABLE
+    name_current,
+    address_names_current,
+    surface_bindings
+    CONTINUE IDENTITY RESTRICT;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM surface_bindings) THEN
+        RAISE EXCEPTION 'targeted binding reset left historical bindings';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM manifest_versions
+        WHERE file_path = 'authority-reset-sentinel.toml'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM normalized_events
+        WHERE event_identity = 'authority-reset-normalized-sentinel'
+    ) THEN
+        RAISE EXCEPTION 'targeted binding reset removed preserved identity metadata';
+    END IF;
+END
+$$;
+SQL
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql"
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql"
+    cat <<'SQL'
+DO $$
+DECLARE
+    exclusion_definition text;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'surface_bindings'
+          AND column_name = 'authority_arm'
+          AND is_nullable = 'NO'
+    ) THEN
+        RAISE EXCEPTION 'authority-arm upgrade did not add the required column';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'surface_bindings'::regclass
+          AND conname = 'surface_bindings_authority_arm_check'
+    ) THEN
+        RAISE EXCEPTION 'authority-arm upgrade did not add its closed check';
+    END IF;
+    SELECT pg_get_constraintdef(oid)
+    INTO exclusion_definition
+    FROM pg_constraint
+    WHERE conrelid = 'surface_bindings'::regclass
+      AND conname = 'surface_bindings_no_overlap';
+    IF exclusion_definition NOT LIKE '%chain_id WITH =%'
+        OR exclusion_definition NOT LIKE '%logical_name_id WITH =%'
+        OR exclusion_definition NOT LIKE '%authority_arm WITH =%'
+    THEN
+        RAISE EXCEPTION
+            'authority-arm exclusion has the wrong domain: %', exclusion_definition;
+    END IF;
+END
+$$;
+SQL
+} | run_psql
 
 # Exercise the initialized pre-change schema branch: normalized events and
 # unrelated data already exist, while the new redo handoff does not.
@@ -3017,6 +3150,7 @@ BEGIN
             logical_name_id,
             resource_id,
             binding_kind,
+            authority_arm,
             active_from,
             chain_id,
             block_hash,
@@ -3027,6 +3161,7 @@ BEGIN
             'schema-v2-check:namehash-0',
             '00000000-0000-0000-0000-000000000013',
             'declared_registry_path',
+            'ens_v1',
             '2026-01-01 00:00:00+00',
             'schema-v2-other',
             'block-other-0',
@@ -3055,6 +3190,7 @@ BEGIN
             logical_name_id,
             resource_id,
             binding_kind,
+            authority_arm,
             active_from,
             chain_id,
             block_hash,
@@ -3065,6 +3201,7 @@ BEGIN
             'schema-v2-check:namehash-0',
             '00000000-0000-0000-0000-000000000013',
             'declared_registry_path',
+            'ens_v1',
             '2026-01-01 00:00:00+00',
             'schema-v2-check',
             'block-0',
@@ -3762,6 +3899,7 @@ BEGIN
         logical_name_id,
         resource_id,
         binding_kind,
+        authority_arm,
         active_from,
         chain_id,
         block_hash,
@@ -3773,6 +3911,7 @@ BEGIN
         'schema-v2-check:namehash-0',
         '00000000-0000-0000-0000-000000000011',
         'declared_registry_path',
+        'ens_v1',
         '2026-01-01 00:00:00+00',
         'schema-v2-check',
         'block-0',
@@ -3785,6 +3924,7 @@ BEGIN
         logical_name_id,
         resource_id,
         binding_kind,
+        authority_arm,
         active_from,
         chain_id,
         block_hash,
@@ -3796,6 +3936,7 @@ BEGIN
         'schema-v2-check:namehash-2',
         '00000000-0000-0000-0000-000000000012',
         'declared_registry_path',
+        'ens_v1',
         '2026-01-01 00:00:00+00',
         'schema-v2-check',
         'block-0',
@@ -4370,6 +4511,7 @@ BEGIN
             logical_name_id,
             resource_id,
             binding_kind,
+            authority_arm,
             active_from,
             chain_id,
             block_hash,
@@ -4380,6 +4522,7 @@ BEGIN
             'schema-v2-check:namehash-0',
             '00000000-0000-0000-0000-000000000011',
             'declared',
+            'ens_v1',
             '2025-01-01 00:00:00+00',
             'schema-v2-check',
             'block-0',
@@ -4869,6 +5012,7 @@ BEGIN
         logical_name_id,
         resource_id,
         binding_kind,
+        authority_arm,
         active_from,
         chain_id,
         block_hash,
@@ -4880,6 +5024,7 @@ BEGIN
         'schema-v2-check:namehash-oversized',
         '00000000-0000-0000-0000-000000000011',
         'declared_registry_path',
+        'ens_v1',
         '2026-01-01 00:00:00+00',
         'schema-v2-check',
         'block-0',
@@ -5378,6 +5523,7 @@ BEGIN
             logical_name_id,
             resource_id,
             binding_kind,
+            authority_arm,
             active_from,
             chain_id,
             block_hash,
@@ -5389,6 +5535,7 @@ BEGIN
             'schema-v2-check:namehash-0',
             '00000000-0000-0000-0000-000000000012',
             'declared_registry_path',
+            'ens_v1',
             '2026-01-01 00:00:00+00',
             'schema-v2-check',
             'block-0',

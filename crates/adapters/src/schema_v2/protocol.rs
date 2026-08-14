@@ -166,6 +166,7 @@ pub(super) struct NameDraft {
     pub surface_binding_id: Option<Uuid>,
     pub bind: bool,
     pub binding_kind: String,
+    pub authority_arm: String,
     pub source_kind: String,
     pub preimage_metadata: Option<Value>,
 }
@@ -179,6 +180,7 @@ pub(super) struct ResourceDraft {
 #[derive(Clone, Debug)]
 pub(super) struct BindingClosureDraft {
     pub logical_name_id: String,
+    pub authority_arm: String,
 }
 
 #[derive(Clone, Debug)]
@@ -186,6 +188,7 @@ pub(super) struct BindingDraft {
     pub logical_name_id: String,
     pub resource_id: Uuid,
     pub binding_kind: String,
+    pub authority_arm: String,
     pub surface_binding_id: Option<Uuid>,
 }
 

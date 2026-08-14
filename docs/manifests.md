@@ -321,6 +321,7 @@ is callable only by the receiver itself.
 (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L164-L174 @ ens_v2@ccaeb58)
 The claimed token retains the unrevokable `ROLE_WAS_RESERVED` marker.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L447 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@ccaeb58)
 
 The activated form is an exact-name operation. It carries the successful
 registration's block number, transaction index, and log index, never timestamp

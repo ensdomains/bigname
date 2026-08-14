@@ -9,6 +9,7 @@ use super::*;
 
 const MIGRATION_MANIFEST_ID: i64 = 100;
 const REGISTRY_MANIFEST_ID: i64 = 101;
+const V1_REGISTRY_MANIFEST_ID: i64 = 102;
 
 sol! {
     event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation);
@@ -59,7 +60,7 @@ fn unwrapped_catalog_shape_emits_one_self_sufficient_candidate_boundary() -> any
     let graveyard = address(addresses, "graveyard")?;
     let unlocked = address(addresses, "unlocked_controller")?;
     let owner = Address::from([0x11; 20]);
-    let output = interpret_test_batch(batch(
+    let mut output = interpret_test_batch(batch(
         vec![
             raw_at_transaction(
                 with_topic0(
@@ -264,6 +265,7 @@ fn unwrapped_catalog_shape_emits_one_self_sufficient_candidate_boundary() -> any
             .all(|association| association.event_identity != unrelated_transfer.event_identity),
         "an unrelated positive transfer must not become migration evidence"
     );
+    assert_activated_transition(&mut output, "unwrapped")?;
     Ok(())
 }
 
@@ -277,7 +279,7 @@ fn unlocked_wrapped_catalog_shape_is_distinguished_per_name() -> anyhow::Result<
     let label = scenario["label"].as_str().unwrap();
     let block = scenario["migration_block"].as_i64().unwrap();
     let owner = Address::from([0x11; 20]);
-    let output = interpret_test_batch(batch(
+    let mut output = interpret_test_batch(batch(
         vec![
             raw_at_transaction(
                 super::v1_registrar::Transfer {
@@ -345,6 +347,189 @@ fn unlocked_wrapped_catalog_shape_is_distinguished_per_name() -> anyhow::Result<
         scenario["stored_expiry"]
     );
     assert_eq!(boundary.migration_correlation_ids.len(), 1);
+    assert_activated_transition(&mut output, "unlocked_wrapped")?;
+    Ok(())
+}
+
+#[test]
+fn two_names_in_one_transaction_keep_separate_authority_boundaries() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let unwrapped = &fixture["scenarios"]["U-01"];
+    let wrapped = &fixture["scenarios"]["W-01"];
+    let block = unwrapped["migration_block"].as_i64().unwrap();
+    let mut logs = unlocked_name_logs(unwrapped, addresses, block, 1, false)?;
+    logs.extend(unlocked_name_logs(wrapped, addresses, block, 5, true)?);
+    let canonical_logs = logs.clone();
+    let mut output = interpret_test_batch(batch(logs, &fixture, true))?;
+    let boundaries = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "MigrationApplied")
+        .map(|event| {
+            (
+                event.logical_name_id.clone().unwrap(),
+                event.migration_correlation_ids[0].clone(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(boundaries.len(), 2);
+    assert_eq!(output.migration_candidate_identity_effects.len(), 2);
+    for effect in &output.migration_candidate_identity_effects {
+        let logical_name = effect.proposed_effect["logical_name_id"].as_str().unwrap();
+        assert_eq!(
+            effect.migration_correlation_ids,
+            [boundaries[logical_name].clone()]
+        );
+    }
+    for association in &output.migration_event_associations {
+        let Some(event) = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_identity == association.event_identity)
+        else {
+            continue;
+        };
+        if let Some(logical_name) = event.logical_name_id.as_deref()
+            && let Some(expected) = boundaries.get(logical_name)
+        {
+            assert_eq!(&association.migration_correlation_id, expected);
+        }
+    }
+    super::super::migration::inject_activated_transition_for_test(&mut output)?;
+    assert_eq!(output.migration_authority_transitions.len(), 2);
+    assert!(
+        output
+            .migration_authority_transitions
+            .iter()
+            .all(|transition| {
+                output.surface_bindings.iter().any(|binding| {
+                    binding.surface_binding_id == transition.successor_surface_binding_id
+                        && binding.logical_name_id == transition.logical_name_id
+                })
+            })
+    );
+    let canonical_ids = output
+        .migration_authority_transitions
+        .iter()
+        .map(|transition| transition.boundary_event_identity.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut orphaned_logs = canonical_logs.clone();
+    for raw in &mut orphaned_logs {
+        raw.canonicality_state = "orphaned".to_owned();
+    }
+    let mut orphaned = interpret_test_batch(batch(orphaned_logs, &fixture, true))?;
+    assert!(
+        orphaned
+            .migration_candidate_identity_effects
+            .iter()
+            .all(|effect| { effect.canonicality_state == "orphaned" })
+    );
+    super::super::migration::inject_activated_transition_for_test(&mut orphaned)?;
+    assert_eq!(
+        canonical_ids,
+        orphaned
+            .migration_authority_transitions
+            .iter()
+            .map(|transition| transition.boundary_event_identity.clone())
+            .collect()
+    );
+    let mut restored = interpret_test_batch(batch(canonical_logs, &fixture, true))?;
+    super::super::migration::inject_activated_transition_for_test(&mut restored)?;
+    assert_eq!(
+        output.migration_authority_transitions,
+        restored.migration_authority_transitions
+    );
+    Ok(())
+}
+
+#[test]
+fn resolver_and_ttl_clears_are_optional_boundary_evidence() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["U-01"];
+    let addresses = &fixture["addresses"];
+    let block = scenario["migration_block"].as_i64().unwrap();
+    let migration_logs = unlocked_name_logs(scenario, addresses, block, 4, false)?;
+    let absent = interpret_test_batch(batch(migration_logs.clone(), &fixture, true))?;
+    assert_eq!(
+        absent
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "MigrationApplied")
+            .count(),
+        1
+    );
+
+    let registry = "0x0000000000000000000000000000000000000099";
+    let node = scenario["namehash"].as_str().unwrap().parse::<B256>()?;
+    let mut logs = migration_logs;
+    logs.extend([
+        raw_at_transaction(
+            super::v1_registry::NewResolver {
+                node,
+                resolver: Address::ZERO,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            2,
+            registry,
+        ),
+        raw_at_transaction(
+            super::v1_registry::NewTTL { node, ttl: 0 }.encode_log_data(),
+            block,
+            0,
+            3,
+            registry,
+        ),
+    ]);
+    logs.sort_by_key(|raw| raw.log_index);
+    let mut input = batch(logs, &fixture, true);
+    input.manifests.push(manifest_with_events(
+        V1_REGISTRY_MANIFEST_ID,
+        "ens",
+        "ens_v1_registry_l1",
+        &[
+            (
+                "NewResolver",
+                "event NewResolver(bytes32 indexed node, address resolver)",
+                &["registry"],
+                &["ResolverChanged"],
+            ),
+            (
+                "NewTTL",
+                "event NewTTL(bytes32 indexed node, uint64 ttl)",
+                &["registry"],
+                &[],
+            ),
+        ],
+    ));
+    input.admissions.push(admission_at(
+        V1_REGISTRY_MANIFEST_ID,
+        "registry",
+        registry,
+        102,
+    ));
+    let present = interpret_test_batch(input)?;
+    assert_eq!(
+        present
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "MigrationApplied")
+            .count(),
+        1
+    );
+    let resolver = present
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "ResolverChanged")
+        .expect("ordinary resolver clear remains visible");
+    assert!(
+        present
+            .migration_event_associations
+            .iter()
+            .all(|association| { association.event_identity != resolver.event_identity })
+    );
     Ok(())
 }
 
@@ -909,7 +1094,7 @@ fn migration_registry_association_preserves_the_ordinary_announcement_edge() -> 
         scenario["v2_registration_log_index"].as_i64().unwrap() + 2,
         addresses["eth_registry"].as_str().unwrap(),
     );
-    let output = interpret_test_batch(batch(
+    let mut output = interpret_test_batch(batch(
         vec![
             registry_created.clone(),
             factory.clone(),
@@ -1056,6 +1241,7 @@ fn migration_registry_association_preserves_the_ordinary_announcement_edge() -> 
     assert_eq!(full.surface_bindings, control.surface_bindings);
     assert_eq!(full.binding_closures, control.binding_closures);
     assert_eq!(full.discovery_edges, control.discovery_edges);
+    assert_activated_transition(&mut output, "locked_wrapped")?;
     Ok(())
 }
 
@@ -1066,6 +1252,50 @@ fn activated_events(output: &BatchOutput) -> Vec<NormalizedEvent> {
         .filter(|event| event.consumer_visibility == "activated")
         .cloned()
         .collect()
+}
+
+fn assert_activated_transition(output: &mut BatchOutput, path: &str) -> anyhow::Result<()> {
+    assert!(
+        output.migration_authority_transitions.is_empty(),
+        "candidate interpretation must not schedule a binding write"
+    );
+    super::super::migration::inject_activated_transition_for_test(output)?;
+    let transition = output
+        .migration_authority_transitions
+        .iter()
+        .find(|transition| {
+            output.normalized_events.iter().any(|event| {
+                event.event_identity == transition.boundary_event_identity
+                    && event.after_state["migration_path"] == path
+            })
+        })
+        .expect("test-only activated authority transition");
+    assert!(output.normalized_events.iter().any(|event| {
+        event.event_identity == transition.boundary_event_identity
+            && event.consumer_visibility == "activated"
+    }));
+    assert_eq!(transition.expected_predecessor_arm, "ens_v1");
+    assert_eq!(transition.successor_arm, "ens_v2");
+    assert_eq!(
+        transition.predecessor_selector["selection"],
+        "active_immediately_before_boundary"
+    );
+    let successor = output
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.surface_binding_id == transition.successor_surface_binding_id)
+        .expect("transition names its concrete successor binding");
+    assert_eq!(successor.block_number, transition.block_number);
+    assert_eq!(
+        successor.provenance[seam::TRANSACTION_INDEX_KEY],
+        transition.transaction_index
+    );
+    assert!(
+        successor.provenance[seam::LOG_INDEX_KEY]
+            .as_i64()
+            .is_some_and(|log| log >= transition.log_index)
+    );
+    Ok(())
 }
 
 fn registry_created_raw(scenario: &Value, addresses: &Value) -> RawLogInput {
@@ -1108,6 +1338,62 @@ fn decimal_u256(value: &Value) -> anyhow::Result<U256> {
 
 fn address(addresses: &Value, key: &str) -> anyhow::Result<Address> {
     Ok(addresses[key].as_str().expect("fixture address").parse()?)
+}
+
+fn unlocked_name_logs(
+    scenario: &Value,
+    addresses: &Value,
+    block: i64,
+    first_log: i64,
+    wrapped: bool,
+) -> anyhow::Result<Vec<RawLogInput>> {
+    let controller = address(addresses, "unlocked_controller")?;
+    let from = if wrapped {
+        address(addresses, "name_wrapper")?
+    } else {
+        controller
+    };
+    let token = decimal_u256(&scenario["v2_token_id"])?;
+    Ok(vec![
+        raw_at_transaction(
+            super::v1_registrar::Transfer {
+                from,
+                to: address(addresses, "graveyard")?,
+                tokenId: decimal_u256(&scenario["base_token_id"])?,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            first_log,
+            addresses["base_registrar"].as_str().unwrap(),
+        ),
+        raw_at_transaction(
+            super::v2_registry::LabelRegistered {
+                tokenId: token,
+                labelHash: keccak256(scenario["label"].as_str().unwrap().as_bytes()),
+                label: scenario["label"].as_str().unwrap().to_owned(),
+                owner: Address::from([0x11; 20]),
+                expiry: scenario["stored_expiry"].as_u64().unwrap(),
+                sender: controller,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            first_log + 1,
+            addresses["eth_registry"].as_str().unwrap(),
+        ),
+        raw_at_transaction(
+            super::v2_registry::TokenResource {
+                tokenId: token,
+                resource: token,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            first_log + 2,
+            addresses["eth_registry"].as_str().unwrap(),
+        ),
+    ])
 }
 
 fn batch(raw_logs: Vec<RawLogInput>, fixture: &Value, include_registry_setup: bool) -> BatchInput {

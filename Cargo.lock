@@ -1751,10 +1751,12 @@ version = "0.1.0"
 dependencies = [
  "bigname-adapters",
  "bigname-domain",
+ "bigname-test-support",
  "futures-util",
  "serde_json",
  "sqlx",
  "time",
+ "tokio",
 ]
 
 [[package]]

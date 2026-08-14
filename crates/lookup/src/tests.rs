@@ -2621,9 +2621,10 @@ async fn seed_identity_and_projection(
     .await?;
     sqlx::query(
         "INSERT INTO surface_bindings
-            (surface_binding_id, logical_name_id, resource_id, binding_kind, active_from,
+            (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from,
              chain_id, block_hash, block_number, canonicality_state)
          VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path',
+                 CASE WHEN $2 LIKE 'basenames:%' THEN 'basenames' ELSE 'ens_v1' END,
                  '2026-08-03T00:00:00Z', $4, $5, 10, 'canonical')",
     )
     .bind(binding_id)

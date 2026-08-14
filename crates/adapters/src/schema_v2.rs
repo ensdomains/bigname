@@ -10,6 +10,8 @@ mod discovery;
 mod identity;
 mod manifest;
 mod migration;
+#[cfg(feature = "test-activation")]
+pub use migration::inject_activated_transition_for_test;
 mod model;
 mod normalized;
 mod protocol;
@@ -276,6 +278,13 @@ fn settle_block_boundary(
         if previous_surface.is_some() {
             output.binding_closures.push(BindingClosure {
                 logical_name_id: logical_name_id.clone(),
+                authority_arm: if active_source.namespace == "basenames" {
+                    "basenames"
+                } else {
+                    "ens_v1"
+                }
+                .to_owned(),
+                chain_id: block.chain_id.clone(),
                 except_surface_binding_id: next_binding_id,
                 active_to: block.block_timestamp,
                 block_number: block.block_number,
@@ -305,6 +314,12 @@ fn settle_block_boundary(
                 logical_name_id,
                 resource_id: next.resource_id,
                 binding_kind: "declared_registry_path".to_owned(),
+                authority_arm: if active_source.namespace == "basenames" {
+                    "basenames"
+                } else {
+                    "ens_v1"
+                }
+                .to_owned(),
                 active_from: block.block_timestamp,
                 chain_id: block.chain_id.clone(),
                 block_hash: block.block_hash.clone(),
@@ -338,6 +353,8 @@ fn settle_block_boundary(
         for closure in interpreted.binding_closures.drain(..) {
             output.binding_closures.push(BindingClosure {
                 logical_name_id: closure.logical_name_id,
+                authority_arm: closure.authority_arm,
+                chain_id: block.chain_id.clone(),
                 except_surface_binding_id: None,
                 active_to: block.block_timestamp,
                 block_number: block.block_number,

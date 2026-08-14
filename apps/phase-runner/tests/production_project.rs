@@ -1910,9 +1910,9 @@ async fn target_block_uses_the_last_same_block_surface_binding() -> Result<()> {
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES ($1, 'ens:0xalice', $2, 'declared_registry_path',
-                   to_timestamp(3) + interval '5 microseconds', $3, $4, 3,
+                   'ens_v1', to_timestamp(3) + interval '5 microseconds', $3, $4, 3,
                    'canonical')",
     )
     .bind(Uuid::new_v4())
@@ -2003,14 +2003,14 @@ async fn resolver_embedded_collections_report_totals_and_cap_samples() -> Result
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          )
          SELECT ('20000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid,
                 'basenames:0xsample' || lpad(ordinal::text, 3, '0'),
                 ('10000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid,
                 CASE WHEN ordinal = 100 THEN 'resolver_alias_path'
                      ELSE 'declared_registry_path' END,
-                to_timestamp(1), $1, $2, 1, 'canonical'
+                'basenames', to_timestamp(1), $1, $2, 1, 'canonical'
          FROM generate_series(1, 100) AS ordinal",
     )
     .bind(BASE_CHAIN)
@@ -5466,10 +5466,10 @@ async fn record_delta_rebuilds_emitter_but_not_other_current_resolver_dependents
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES (
              $1, 'ens:0xbob', $2, 'declared_registry_path',
-             to_timestamp(1), $3, $4, 1, 'canonical'
+             'ens_v1', to_timestamp(1), $3, $4, 1, 'canonical'
          )",
     )
     .bind(Uuid::new_v4())
@@ -9864,9 +9864,9 @@ async fn seed_basenames_project_fixture(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES ($1, 'basenames:0xalice-base', $2, 'declared_registry_path',
-                   to_timestamp(1), $3, $4, 1, 'canonical')",
+                   'basenames', to_timestamp(1), $3, $4, 1, 'canonical')",
     )
     .bind(Uuid::new_v4())
     .bind(Uuid::parse_str(BASENAMES_RESOURCE)?)
@@ -10075,10 +10075,10 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES (
              $1, 'ens:0xbob', $2, 'declared_registry_path',
-             to_timestamp(1), $3, $4, 1, 'canonical'
+             'ens_v1', to_timestamp(1), $3, $4, 1, 'canonical'
          )",
     )
     .bind(Uuid::parse_str(EQUIVALENCE_BOB_BINDING)?)
@@ -10628,10 +10628,10 @@ async fn extend_permission_only_resolver_fixture(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES (
              $1, 'ens:0xpermission-only', $2, 'declared_registry_path',
-             to_timestamp(1), $3, $4, 1, 'canonical'
+             'ens_v2', to_timestamp(1), $3, $4, 1, 'canonical'
          )",
     )
     .bind(Uuid::parse_str(PERMISSION_ONLY_BINDING)?)
@@ -10743,10 +10743,10 @@ async fn extend_equivalence_registrar_transfer_fixture(pool: &PgPool) -> Result<
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES (
              $1, 'ens:0xtransfer', $2, 'declared_registry_path',
-             to_timestamp(1), $3, $4, 1, 'canonical'
+             'ens_v1', to_timestamp(1), $3, $4, 1, 'canonical'
          )",
     )
     .bind(Uuid::parse_str(EQUIVALENCE_TRANSFER_BINDING)?)
@@ -11072,10 +11072,10 @@ async fn seed_equivalence_subregistry_flip(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES (
              $1, 'ens:0xequivalence-parent', $2, 'declared_registry_path',
-             to_timestamp(7776002), $3, $4, 1, 'canonical'
+             'ens_v1', to_timestamp(7776002), $3, $4, 1, 'canonical'
          )",
     )
     .bind(Uuid::parse_str(EQUIVALENCE_PARENT_BINDING)?)
@@ -11310,9 +11310,9 @@ async fn seed_project_fixture(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES ($1, 'ens:0xalice', $2, 'declared_registry_path',
-                   to_timestamp(1), $3, $4, 1, 'canonical')",
+                   'ens_v1', to_timestamp(1), $3, $4, 1, 'canonical')",
     )
     .bind(Uuid::parse_str(SURFACE_BINDING)?)
     .bind(Uuid::parse_str(RESOURCE)?)
@@ -12244,8 +12244,8 @@ async fn seed_cross_family_binding_fixture(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "INSERT INTO surface_bindings (
              surface_binding_id, logical_name_id, resource_id, binding_kind,
-             active_from, chain_id, block_hash, block_number, canonicality_state
-         ) VALUES ($1, $2, $3, 'declared_registry_path', to_timestamp(1),
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 'declared_registry_path', 'ens_v1', to_timestamp(1),
                    $4, $5, 1, 'canonical')",
     )
     .bind(Uuid::parse_str(FAMILY_BINDING_ID)?)

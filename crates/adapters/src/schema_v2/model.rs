@@ -103,6 +103,7 @@ pub struct BatchOutput {
     pub migration_discovery_associations: Vec<MigrationDiscoveryAssociation>,
     pub migration_candidate_identity_effects: Vec<MigrationCandidateEffect>,
     pub migration_candidate_discovery_effects: Vec<MigrationCandidateEffect>,
+    pub migration_authority_transitions: Vec<MigrationAuthorityTransition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -187,6 +188,22 @@ pub struct MigrationCandidateEffect {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationAuthorityTransition {
+    pub boundary_event_identity: String,
+    pub migration_correlation_id: String,
+    pub logical_name_id: String,
+    pub predecessor_selector: Value,
+    pub expected_predecessor_arm: String,
+    pub successor_surface_binding_id: Uuid,
+    pub successor_resource_id: Uuid,
+    pub successor_arm: String,
+    pub chain_id: String,
+    pub block_number: i64,
+    pub transaction_index: i64,
+    pub log_index: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LabelPreimage {
     pub labelhash: String,
     pub raw_label: Vec<u8>,
@@ -247,6 +264,7 @@ pub struct SurfaceBinding {
     pub logical_name_id: String,
     pub resource_id: Uuid,
     pub binding_kind: String,
+    pub authority_arm: String,
     pub active_from: OffsetDateTime,
     pub chain_id: String,
     pub block_hash: String,
@@ -258,6 +276,8 @@ pub struct SurfaceBinding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BindingClosure {
     pub logical_name_id: String,
+    pub authority_arm: String,
+    pub chain_id: String,
     pub except_surface_binding_id: Option<Uuid>,
     pub active_to: OffsetDateTime,
     pub block_number: i64,

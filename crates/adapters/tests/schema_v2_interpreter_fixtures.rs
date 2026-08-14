@@ -324,6 +324,7 @@ fn production_lease_release_corpus_materializes_its_registry_fallback() -> Resul
     assert_eq!(binding.logical_name_id, expected.logical_name_id);
     assert_eq!(binding.resource_id, expected.resource_id);
     assert_eq!(binding.binding_kind, "declared_registry_path");
+    assert_eq!(binding.authority_arm, "ens_v1");
     assert!(release.normalized_events.iter().any(|event| {
         event.event_kind == "SurfaceBound"
             && event.logical_name_id.as_deref() == Some(expected.logical_name_id.as_str())
@@ -344,6 +345,8 @@ fn production_lease_release_corpus_materializes_its_registry_fallback() -> Resul
     assert_eq!(
         serde_json::json!({
             "logical_name_id": closure.logical_name_id,
+            "authority_arm": closure.authority_arm,
+            "chain_id": closure.chain_id,
             "except_surface_binding_id": closure.except_surface_binding_id,
             "active_to": rfc3339(closure.active_to),
             "block_number": closure.block_number,
@@ -2069,7 +2072,7 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
         .join("\n");
     assert_eq!(
         format!("{:#x}", keccak256(snapshot.as_bytes())),
-        "0x3ac08e81a452dff5c20541400c62314eac3aee540351f724bdb3220aa604f22c",
+        "0x7d5340bf49e4117648c88197b518715193a19a79bfd6167285d94bfd1689c036",
         "output minus the debug-only flag and the retained rows must equal the pre-retention snapshot"
     );
     Ok(())

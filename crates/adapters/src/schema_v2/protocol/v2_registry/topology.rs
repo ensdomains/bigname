@@ -22,6 +22,7 @@ pub(super) fn append_v2_name_transitions(
         if let Some(previous) = transition.previous.as_ref() {
             output.binding_closures.push(BindingClosureDraft {
                 logical_name_id: previous.logical_name_id.clone(),
+                authority_arm: "ens_v2".to_owned(),
             });
             if let Some(resource_id) = transition.resource_id {
                 output.events.push(EventDraft {
@@ -97,6 +98,7 @@ pub(super) fn append_v2_name_transitions(
             }),
             bind: transition.resource_id.is_some(),
             binding_kind: "declared_registry_path".to_owned(),
+            authority_arm: "ens_v2".to_owned(),
             source_kind: format!("{source_event}_registry_suffix"),
             preimage_metadata: None,
         });
@@ -148,6 +150,7 @@ fn append_removed_name(
     };
     output.binding_closures.push(BindingClosureDraft {
         logical_name_id: previous.logical_name_id.clone(),
+        authority_arm: "ens_v2".to_owned(),
     });
     let Some(resource_id) = transition.resource_id else {
         return;
@@ -340,6 +343,7 @@ pub(super) fn append_terminal_boundaries(
     if let Some(logical_name_id) = logical_name_id.as_ref() {
         output.binding_closures.push(BindingClosureDraft {
             logical_name_id: logical_name_id.clone(),
+            authority_arm: "ens_v2".to_owned(),
         });
     }
     if linked.resource_id.is_some() && logical_name_id.is_some() {
