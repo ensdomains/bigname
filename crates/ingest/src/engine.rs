@@ -319,12 +319,20 @@ impl Engine {
                     redo::adopt_loaded_boundary(&request.chain_id, loaded.marker, &source_target)?;
                 (Some(marker.clone()), Some(marker))
             } else if to >= source_target_number {
-                let current = if source_target_number < range_to
-                    && request
-                        .resume_current
-                        .as_ref()
-                        .is_some_and(|resume| resume.number == source_target_number)
+                let current = if request
+                    .resume_current
+                    .as_ref()
+                    .is_some_and(|resume| resume.number == source_target_number)
                 {
+                    if source_target_number == range_to {
+                        redo::reject_lineage_backed_boundary_change(
+                            &self.pool,
+                            &request.chain_id,
+                            request.resume_current.as_ref(),
+                            &source_target,
+                        )
+                        .await?;
+                    }
                     let durable = request
                         .cursors
                         .iter()

@@ -253,7 +253,8 @@ async fn an_out_of_range_resume_marker_fails_the_batch_before_any_network_use() 
 #[tokio::test]
 async fn a_marker_at_the_top_of_the_block_space_completes_without_loading() -> AnyResult<()> {
     let database = single_block_database("ingest_redo_resume_top").await?;
-    // The chain serves marker resolution only: a finished redo must not fetch a window.
+    // The chain serves marker resolution only: a finished redo with durable evidence from
+    // its completed boundary load must not fetch the window again.
     let node = test_floors::pruning_node(0, 0);
     let endpoint = single_block_chain_endpoint(node).await?;
     let engine = Engine::new(database.pool().clone());
@@ -267,7 +268,16 @@ async fn a_marker_at_the_top_of_the_block_space_completes_without_loading() -> A
                 start_block: 0,
                 endpoint,
             }],
-            cursors: Vec::new(),
+            cursors: vec![SourceCursor {
+                key: "redo-rpc".to_owned(),
+                next_block: i64::MAX,
+                target_block: Some(i64::MAX),
+                last_processed: None,
+                redo_loaded_boundary: Some(Marker {
+                    number: i64::MAX,
+                    hash: TOP_BLOCK_HASH.to_owned(),
+                }),
+            }],
             redo_range: Some((i64::MAX, i64::MAX)),
             resume_current: Some(Marker {
                 number: i64::MAX,

@@ -399,18 +399,19 @@ evidence also comes from the current
 [watch plan](glossary.md#watch-plan--watched-tuple). An equal-height
 durable phase marker is not intercepted by that reload. Each non-completing
 batch also stores a map from source key to the boundary marker returned by an
-actual source load during the active redo. At an earlier source boundary where
-the durable phase marker is exactly that height, the completing batch accepts
-only the stored load-derived marker: it must exist at that height and equal the
-fresh source target. A missing marker or different hash fails closed and
-requires a fresh redo of the full range. When this per-source evidence proves
-that the boundary was inside the completed redo range, redo completion updates
-the source cursor only when matching block lineage already records that height
-and hash. The map is cleared with the other resumable redo progress on
-completion or boundary divergence. The cursor update and phase summary share
-one transaction. The previous live handoff remains in place until the next
-normal Ingest pass confirms the reconciled cursor and publishes the replacement
-handoff.
+actual source load during the active redo. At any source boundary where the
+durable phase marker is exactly that height, including the overall redo range
+end, the completing batch accepts only the stored load-derived marker: it must
+exist at that height and equal the fresh source target. A missing marker, such
+as an active checkpoint written before this map existed, or a different hash
+fails closed and requires a fresh redo of the full range. When this per-source
+evidence proves that the boundary was inside the completed redo range, redo
+completion updates the source cursor only when matching block lineage already
+records that height and hash. The map is cleared with the other resumable redo
+progress on completion or boundary divergence. The cursor update and phase
+summary share one transaction. The previous live handoff remains in place until
+the next normal Ingest pass confirms the reconciled cursor and publishes the
+replacement handoff.
 
 `chain_phase_state.redo_attempt_generation` is a nonnegative, row-local counter
 that increments whenever an explicit redo begins. A batch carries that
@@ -435,12 +436,9 @@ only its resumable progress, and leaves the source cursor unchanged. Re-running
 the redo therefore starts at the requested range beginning and loads the
 boundary under the current [watch plan](glossary.md#watch-plan--watched-tuple)
 before cursor reconciliation can proceed. If that fresh hash has no retained
-lineage, a resume marker already at the redo end may instead let the phase
-summary adopt the fresh resolution; cursor reconciliation still refuses the
-lineage-lacking marker, so it is never published as the live handoff or chain
-head. The next normal pass fails closed if the provider continues to report the
-divergent marker; if the provider returns to the durable fork, that pass can
-complete and publish the durable marker instead.
+lineage, the equal-height evidence requirement still applies: the phase summary
+cannot adopt the fresh resolution without a matching per-source marker returned
+by a load during that redo.
 This closes the last-boundary case; binding watch-plan evidence to facts at
 interior range heights remains tracked by issue #376.
 

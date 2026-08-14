@@ -437,58 +437,33 @@ async fn resumed_ingest_redo_requires_lineage_before_reconciling_cursor() -> Res
 
     hash_epoch.store(2, Ordering::SeqCst);
     let resumed_runner = production_ingest_runner(scratch.runner(), "redo-lineage-resume-runner")?;
-    resumed_runner
+    let resume_error = resumed_runner
         .redo(
             &configured_chain,
             RedoPhase::Phase(PhaseName::Ingest),
             BlockRange::new(1, 1)?,
             CancellationToken::new(),
         )
-        .await?;
-    let resumed: (bool, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT phase.redo_in_progress,
-                phase.current_block_hash,
-                cursor.last_processed_block_hash
-         FROM chain_phase_state phase
-         JOIN ingest_cursors cursor USING (chain_id)
-         WHERE phase.chain_id = $1
-           AND phase.phase_name = 'ingest'
-           AND cursor.source_key = 'rpc'",
-    )
-    .bind(chain_id)
-    .fetch_one(scratch.pool())
-    .await?;
+        .await
+        .expect_err("the resumed redo must reject a target without matching loaded evidence");
+    assert_eq!(resume_error.kind(), ErrorKind::DataIntegrity);
+    let message = resume_error.to_string();
+    for expected in [BLOCK_1_REORG, BLOCK_1_SECOND_REORG, "rerun the Ingest redo"] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?} in {message}"
+        );
+    }
     assert_eq!(
-        resumed,
-        (
-            false,
-            Some(BLOCK_1_SECOND_REORG.to_owned()),
-            Some(BLOCK_1.to_owned()),
-        ),
-        "a resumed redo must not reconcile a cursor to a hash absent from chain lineage"
+        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?,
+        (true, None, None, Some(BLOCK_1.to_owned()),),
+        "a failed resume must clear its progress and preserve the truthful cursor"
     );
     assert_eq!(
         load_boundary_lineage_hashes(scratch.pool(), chain_id).await?,
         vec![BLOCK_1.to_owned(), BLOCK_1_REORG.to_owned()]
     );
 
-    let restart_error = resumed_runner
-        .clone()
-        .run_chain(&configured_chain, CancellationToken::new())
-        .await
-        .expect_err("normal processing must reject the unreconciled boundary");
-    assert_eq!(restart_error.kind(), ErrorKind::DataIntegrity);
-    assert!(
-        restart_error
-            .to_string()
-            .contains("complete an Ingest redo covering that block"),
-        "unexpected normal-restart failure: {restart_error}"
-    );
-    assert!(
-        !restart_error
-            .to_string()
-            .contains("missing from chain lineage")
-    );
     let published_head: (i64, String) = sqlx::query_as(
         "SELECT latest_block_number, latest_block_hash
          FROM chain_heads
@@ -727,6 +702,210 @@ async fn resumed_ingest_redo_reloads_a_divergent_boundary_under_the_current_watc
     );
     run_until_ingest_handoff(
         resumed_runner,
+        configured_chain,
+        scratch.pool(),
+        BLOCK_1_SECOND_REORG,
+    )
+    .await?;
+    assert_eq!(
+        load_ingest_boundary_state(scratch.pool(), chain_id).await?,
+        (
+            "completed".to_owned(),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+        )
+    );
+    server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn pre_upgrade_range_end_redo_checkpoint_requires_loaded_boundary_evidence() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_redo_pre_upgrade_boundary").await?;
+    let chain_id = "rpc-ingest-redo-pre-upgrade-boundary";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, rpc_state, server) = spawn_watch_plan_boundary_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "redo-pre-upgrade-boundary-runner")?;
+
+    rpc_state.hash_epoch.store(2, Ordering::SeqCst);
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1_SECOND_REORG,
+    )
+    .await?;
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1_SECOND_REORG, CONTRACT).await?,
+        1,
+        "the historical fork must have retained lineage and its narrow-watch fact"
+    );
+
+    rpc_state.hash_epoch.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1,
+    )
+    .await?;
+    widen_watch_set(scratch.pool(), chain_id).await?;
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            chain_id,
+            BLOCK_1_SECOND_REORG,
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        0,
+        "the old fork must not contain the fact admitted by the widened watch set"
+    );
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running',
+             redo_in_progress = true,
+             redo_attempt_generation = 0,
+             redo_mode = 'redo',
+             redo_previous_phase_status = 'completed',
+             redo_previous_last_error = NULL,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 1,
+             redo_to_block_number = 1,
+             redo_current_block_number = 1,
+             redo_current_block_hash = $2,
+             redo_target_block_number = 1,
+             redo_target_block_hash = $2,
+             redo_source_boundary_markers = NULL,
+             last_error = NULL,
+             finished_at = NULL,
+             updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .bind(BLOCK_1_SECOND_REORG)
+    .execute(scratch.pool())
+    .await?;
+    assert_eq!(
+        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?,
+        (
+            true,
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1.to_owned()),
+        ),
+        "the seeded checkpoint must match the format written before source markers existed"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, i64)>(
+            "SELECT redo_source_boundary_markers IS NULL, redo_attempt_generation
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'ingest'",
+        )
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?,
+        (true, 0),
+        "the migrated checkpoint must have no source-marker map and the generation default"
+    );
+
+    rpc_state.hash_epoch.store(2, Ordering::SeqCst);
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    let resume_result = runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await;
+    let cursor_after_resume = load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?;
+    let published_after_resume: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash
+         FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    let boundary_calls_after_resume = rpc_state.boundary_log_calls.load(Ordering::SeqCst);
+    let resume_error = resume_result.expect_err(&format!(
+        "a pre-upgrade checkpoint resumed without load-derived evidence: \
+         cursor={cursor_after_resume:?}, published={published_after_resume:?}, \
+         boundary_get_logs={boundary_calls_after_resume}"
+    ));
+    assert_eq!(resume_error.kind(), ErrorKind::DataIntegrity);
+    let message = resume_error.to_string();
+    for expected in [
+        chain_id,
+        "source rpc",
+        "block 1",
+        "no load-derived boundary marker was persisted",
+        "rerun the Ingest redo",
+        "current watch plan",
+    ] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?} in {message}"
+        );
+    }
+    assert_eq!(boundary_calls_after_resume, 0);
+    assert_eq!(
+        cursor_after_resume,
+        (true, None, None, Some(BLOCK_1.to_owned())),
+        "the failed resume must clear resumable progress and preserve the truthful cursor"
+    );
+    assert_eq!(published_after_resume, (1, BLOCK_1.to_owned()));
+
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert!(rpc_state.boundary_log_calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            chain_id,
+            BLOCK_1_SECOND_REORG,
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        1,
+        "the fresh redo must fetch the widened fact before adopting the old fork"
+    );
+    run_until_ingest_handoff(
+        runner,
         configured_chain,
         scratch.pool(),
         BLOCK_1_SECOND_REORG,
