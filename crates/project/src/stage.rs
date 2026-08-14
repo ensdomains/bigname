@@ -171,8 +171,7 @@ async fn create_scoped_event_ids(
     .await
     .map_err(|error| ProjectError::database("failed to create event identity stage", error))?;
 
-    sqlx::query(
-        r#"
+    let scoped_event_ids = r#"
         INSERT INTO project_event_ids
         SELECT event.normalized_event_id
         FROM normalized_events event
@@ -216,6 +215,11 @@ async fn create_scoped_event_ids(
         WHERE event.chain_id = $1 AND event.block_number <= $2
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
+        -- Candidate-only resources supply just the resolver evidence consumed by this build.
+        -- They remain outside delete-and-publish resource scope.
+        SELECT normalized_event_id
+        FROM project_scope_resolver_candidate_events
+        UNION
         SELECT event.normalized_event_id
         FROM normalized_events event
         CROSS JOIN LATERAL (
@@ -248,19 +252,27 @@ async fn create_scoped_event_ids(
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
         SELECT event.normalized_event_id
-        FROM project_scope_resolvers scope
-        JOIN normalized_events event
-          ON lower(event.after_state ->> 'resolver') = lower(scope.resolver_address)
-          OR lower(event.before_state ->> 'resolver') = lower(scope.resolver_address)
-        WHERE event.chain_id = $1 AND event.block_number <= $2
-          AND event.event_kind = 'ResolverChanged'
-          AND event.consumer_visibility = 'activated'
+        FROM project_changed_events event
+        CROSS JOIN LATERAL (VALUES
+            (CASE WHEN event.event_kind = 'ResolverChanged'
+                  THEN event.after_state ->> 'resolver' END),
+            (CASE WHEN event.event_kind = 'ResolverChanged'
+                  THEN event.before_state ->> 'resolver' END),
+            (CASE WHEN event.event_kind = 'PermissionChanged'
+                       AND event.after_state #>> '{scope,kind}' = 'resolver'
+                  THEN event.after_state #>> '{scope,resolver_address}' END),
+            (CASE WHEN event.event_kind = 'PermissionChanged'
+                       AND event.before_state #>> '{scope,kind}' = 'resolver'
+                  THEN event.before_state #>> '{scope,resolver_address}' END)
+        ) candidate(resolver_address)
+        JOIN project_scope_resolvers scope
+          ON lower(candidate.resolver_address) = lower(scope.resolver_address)
+        WHERE event.event_kind IN ('ResolverChanged', 'PermissionChanged')
           AND NOT EXISTS (
               SELECT 1 FROM project_scope_resolver_passthrough passthrough
               WHERE lower(passthrough.resolver_address) =
                     lower(scope.resolver_address)
           )
-          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
         SELECT event.normalized_event_id
         FROM project_scope_resolvers scope
@@ -336,13 +348,15 @@ async fn create_scoped_event_ids(
          AND lower(resolver.after_state ->> 'node') =
              lower(reverse.after_state ->> 'reverse_node')
         ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(chain_id)
-    .bind(target_block)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to stage scoped event identities", error))?;
+        "#;
+    sqlx::query(scoped_event_ids)
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to stage scoped event identities", error)
+        })?;
     Ok(())
 }
 

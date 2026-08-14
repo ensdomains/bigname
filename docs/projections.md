@@ -27,8 +27,9 @@ Normal incremental Project work starts from events and identity rows in the
 select only that name or resource. `RecordChanged`, `RecordVersionChanged`,
 and `AliasChanged` also rebuild the emitting resolver's own `resolver_current`
 row. `PermissionChanged` rebuilds every resolver identified by
-`scope.resolver_address` in its before or after state and, for a resolver
-[source family](glossary.md#source-family), also rebuilds the emitting resolver.
+`scope.resolver_address` in its before or after state. Raw emitting-address
+metadata is not resolver evidence; resolver-family adapters put the emitting
+resolver in that semantic scope.
 None of these events rebuilds other names that use the resolver. Record and
 record-version events do not contribute to the resolver overview's derived
 sections, so an existing resolver touched only by those kinds is republished at
@@ -39,16 +40,34 @@ linked name or resource does not create a resolver row.
 rows, again without expanding either resolver to its other names.
 Only a resolver `Upgraded` event or stale resolver classification caused by the
 active manifest set expands through resources whose current resolver pointer
-matches that resolver. Whenever a resolver row must be rebuilt rather than
-carried forward unchanged, Project also scopes only resources whose readable
-`PermissionChanged` history names that resolver. It repeats this resource and
-resolver expansion until no new resources enter scope. This stages both live
-and fully revoked resolver-scoped permission partitions, so incremental
-candidate selection matches a full rebuild without expanding record-only
-resolver updates through unrelated permissions. The same rebuilt resolver
-scope stages readable `ResolverChanged` history that names the resolver, even
-when an event is not linked to a projected name or resource. Before event
-staging, Project expands child scope until no more connected topology is found.
+matches that resolver. Permission history by itself does not disable the
+record-only carry-forward path. When a resolver must be rebuilt, Project
+restages the current delta and one stored event reference for each historical
+[source family](glossary.md#source-family) and each relevant permission,
+resolver-pointer, or alias input. A resource
+referenced only by one of those stored events is builder input, not affected
+serving state: its projection rows are neither deleted nor republished. The
+stored events cover live and fully revoked resolver-scoped permission
+families and unlinked resolver-pointer history, so candidate selection remains
+equal to a full rebuild without loading every name that ever used a shared
+resolver. A content-hash change first performs a complete rebuild, which writes
+those stored event references before later incremental or redo work can use
+them.
+
+Before Interpret deletes a redo range, it records the resolver addresses,
+source families, event kinds, and permission resources referenced by that
+range's `PermissionChanged`, `ResolverChanged`, and `AliasChanged` rows. Project
+compares that small pre-redo set with the re-derived events, rebuilds only
+resolvers and permission resources whose evidence disappeared, stages a
+replacement for an affected family when one still exists, and consumes the
+record in the same transaction as projection publication. Interpret inserts
+this record once and preserves it across a restarted redo until Project
+publishes the repair. When the Project head clips the redo range, later normal
+catch-up consumes the remaining records as it publishes those blocks. Resolver
+provenance keeps the per-family event references
+for explanation only; it is not the redo work queue. Before
+ordinary event staging, Project expands child scope until no more connected
+topology is found.
 The expansion follows both current
 `children_current` rows and activated canonical `SubregistryChanged` history
 through the target. Normalized rows with `node` and `child_node` fields define
@@ -339,8 +358,11 @@ alone does not prove primary status.
 Canonicality change, manifest change, or interpreted-content replacement stamps
 the affected Project range. Project rebuilds the affected scope in dependency
 order and publishes one coherent generation. There is no worker invalidation
-queue, apply cursor, replay-version fence, durable stage table, replay marker,
-dead-letter queue, or cache invalidation side effect.
+queue, apply cursor, replay-version fence, general-purpose durable staging,
+replay marker, dead-letter queue, or cache invalidation side effect. The narrow
+`project_redo_resolver_evidence` exception preserves only resolver references
+that would otherwise disappear before Project can select its redo scope; it is
+never serving data and Project consumes it with the corresponding publication.
 
 `phase-runner rewind` selects an exact stored readable ancestor, marks the
 displaced suffix orphaned through normal head publication, and stamps downstream
@@ -364,6 +386,9 @@ new truth family.
 ## Ownership
 
 - Interpret and adapters emit identity, discovery, and normalized events.
+  Interpret also preserves the pre-delete resolver references needed for the
+  next Project redo or normal catch-up; this is replay coordination, not a
+  projection write.
 - Project reads canonical interpreted input and owns every projection write.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not

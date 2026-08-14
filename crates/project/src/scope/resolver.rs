@@ -6,58 +6,37 @@ pub(super) async fn include_permission_resources(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target_block: i64,
-) -> Result<u64> {
-    // Candidate selection reads all PermissionChanged history for a scoped resource. Scope only
-    // resources whose readable resolver-scoped history names a resolver already being rebuilt so
-    // an incremental build sees the same live and revoked family partitions as a full rebuild.
-    let result = sqlx::query(
-        "WITH matching_resources AS (
-             SELECT event.resource_id
-             FROM normalized_events event
-             JOIN chain_lineage lineage
-               ON lineage.chain_id = event.chain_id
-              AND lineage.block_hash = event.block_hash
-              AND lineage.block_number = event.block_number
-             JOIN project_scope_resolvers scope
-               ON lower(scope.resolver_address) = lower(
-                   event.after_state #>> '{scope,resolver_address}'
-               )
-             LEFT JOIN project_scope_resolver_passthrough passthrough
-               ON lower(passthrough.resolver_address) = lower(scope.resolver_address)
-             WHERE event.chain_id = $1
-               AND event.event_kind = 'PermissionChanged'
-               AND event.resource_id IS NOT NULL
-               AND event.consumer_visibility = 'activated'
-               AND event.block_number <= $2
-               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND event.after_state #>> '{scope,kind}' = 'resolver'
-               AND passthrough.resolver_address IS NULL
-             UNION
-             SELECT event.resource_id
-             FROM normalized_events event
-             JOIN chain_lineage lineage
-               ON lineage.chain_id = event.chain_id
-              AND lineage.block_hash = event.block_hash
-              AND lineage.block_number = event.block_number
-             JOIN project_scope_resolvers scope
-               ON lower(scope.resolver_address) = lower(
-                   event.before_state #>> '{scope,resolver_address}'
-               )
-             LEFT JOIN project_scope_resolver_passthrough passthrough
-               ON lower(passthrough.resolver_address) = lower(scope.resolver_address)
-             WHERE event.chain_id = $1
-               AND event.event_kind = 'PermissionChanged'
-               AND event.resource_id IS NOT NULL
-               AND event.consumer_visibility = 'activated'
-               AND event.block_number <= $2
-               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND event.before_state #>> '{scope,kind}' = 'resolver'
-               AND passthrough.resolver_address IS NULL
+) -> Result<()> {
+    // A release-fingerprint rebuild stores one event reference for every resolver family and
+    // relevant input kind. Later incremental builds restage those events instead of rescanning every resource
+    // that ever named a shared resolver. Their resources are builder input only: they never enter
+    // delete-and-publish resource scope.
+    sqlx::query(
+        "INSERT INTO project_scope_resolver_candidate_events (
+             normalized_event_id, resource_id
          )
-         INSERT INTO project_scope_resources
-         SELECT resource_id FROM matching_resources
+         SELECT event.normalized_event_id, event.resource_id
+         FROM resolver_current current
+         JOIN project_scope_resolvers scope
+           ON lower(scope.resolver_address) = lower(current.resolver_address)
+         CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(
+             current.provenance -> 'candidate_event_ids', '[]'::jsonb
+         )) citation(event_id)
+         JOIN normalized_events event
+           ON event.normalized_event_id = citation.event_id::bigint
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = event.chain_id
+          AND lineage.block_hash = event.block_hash
+          AND lineage.block_number = event.block_number
+         LEFT JOIN project_scope_resolver_passthrough passthrough
+           ON lower(passthrough.resolver_address) = lower(scope.resolver_address)
+         WHERE current.chain_id = $1
+           AND event.chain_id = $1
+           AND event.block_number <= $2
+           AND event.consumer_visibility = 'activated'
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND passthrough.resolver_address IS NULL
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
@@ -67,7 +46,75 @@ pub(super) async fn include_permission_resources(
     .map_err(|error| {
         ProjectError::database("failed to scope resolver permission resources", error)
     })?;
-    Ok(result.rows_affected())
+    let replacement_candidates = format!(
+        "INSERT INTO project_scope_resolver_candidate_events (
+             normalized_event_id, resource_id
+         )
+         SELECT replacement.normalized_event_id, replacement.resource_id
+         FROM project_scope_retracted_resolver_evidence retracted
+         LEFT JOIN project_scope_resolver_passthrough passthrough
+           ON lower(passthrough.resolver_address) = lower(retracted.resolver_address)
+         CROSS JOIN LATERAL (
+             SELECT event.normalized_event_id, event.resource_id
+             FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             CROSS JOIN LATERAL (VALUES
+                 (CASE WHEN event.event_kind = 'ResolverChanged'
+                       THEN event.after_state ->> 'resolver' END),
+                 (CASE WHEN event.event_kind = 'ResolverChanged'
+                       THEN event.before_state ->> 'resolver' END),
+                 (CASE WHEN event.event_kind = 'AliasChanged'
+                       THEN COALESCE(
+                           event.after_state ->> 'resolver',
+                           event.before_state ->> 'resolver',
+                           event.raw_fact_ref ->> 'emitting_address'
+                       ) END),
+                 {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
+             ) candidate(resolver_address)
+             WHERE event.chain_id = $1
+               AND event.block_number <= $2
+               AND event.event_kind = retracted.event_kind
+               AND event.consumer_visibility = 'activated'
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lower(candidate.resolver_address) = lower(retracted.resolver_address)
+               AND CASE
+                       WHEN event.source_family LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN event.source_family LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END = retracted.source_family
+             ORDER BY event.normalized_event_id
+             LIMIT 1
+         ) replacement
+         WHERE passthrough.resolver_address IS NULL
+         ON CONFLICT DO NOTHING"
+    );
+    sqlx::query(&replacement_candidates)
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to replace retracted resolver candidates", error)
+        })?;
+    sqlx::query(
+        "INSERT INTO project_scope_resolver_candidate_resources
+         SELECT DISTINCT resource_id
+         FROM project_scope_resolver_candidate_events
+         WHERE resource_id IS NOT NULL
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to scope resolver candidate input resources", error)
+    })?;
+    Ok(())
 }
 
 pub(super) async fn include_resource_pointers(
@@ -218,6 +265,12 @@ pub(super) async fn classify_unchanged(
                      AND lower(inventory.provenance ->> 'resolver_address') =
                          lower(current.resolver_address)
                )
+               OR EXISTS (
+                   SELECT 1
+                   FROM project_scope_resolver_permission_history history
+                   WHERE lower(history.resolver_address) =
+                         lower(current.resolver_address)
+               )
            )
            AND NOT EXISTS (
                SELECT 1
@@ -242,27 +295,36 @@ pub(super) async fn classify_unchanged(
            )
            AND NOT EXISTS (
                SELECT 1
-               FROM permissions_current permission
-               JOIN project_scope_resources resource USING (resource_id)
-               WHERE permission.scope_kind = 'resolver'
-                 AND permission.scope_detail ->> 'chain_id' = $1
-                 AND lower(permission.scope_detail ->> 'resolver_address') =
-                     lower(current.resolver_address)
-           )
-           AND NOT EXISTS (
-               SELECT 1
-               FROM project_scope_resolver_permission_history permission
-               WHERE lower(permission.resolver_address) =
+               FROM project_scope_permission_effect_resources resource
+               JOIN normalized_events event USING (resource_id)
+               JOIN chain_lineage lineage
+                 ON lineage.chain_id = event.chain_id
+                AND lineage.block_hash = event.block_hash
+                AND lineage.block_number = event.block_number
+               CROSS JOIN LATERAL (VALUES
+                   {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
+               ) permission(resolver_address)
+               WHERE event.chain_id = $1
+                 AND event.event_kind = 'PermissionChanged'
+                 AND event.consumer_visibility = 'activated'
+                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                 AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                 AND lower(permission.resolver_address) =
                      lower(current.resolver_address)
            )
            AND NOT EXISTS (
                SELECT 1 FROM project_changed_events event
                CROSS JOIN LATERAL (VALUES
-                   (event.after_state ->> 'resolver'),
-                   (event.before_state ->> 'resolver'),
-                   (event.after_state ->> 'proxy_address'),
-                   (event.before_state ->> 'proxy_address'),
-                   (event.raw_fact_ref ->> 'emitting_address'),
+                   (CASE WHEN event.event_kind IN ('ResolverChanged', 'AliasChanged')
+                         THEN event.after_state ->> 'resolver' END),
+                   (CASE WHEN event.event_kind IN ('ResolverChanged', 'AliasChanged')
+                         THEN event.before_state ->> 'resolver' END),
+                   (CASE WHEN event.event_kind = 'Upgraded'
+                         THEN event.after_state ->> 'proxy_address' END),
+                   (CASE WHEN event.event_kind = 'Upgraded'
+                         THEN event.before_state ->> 'proxy_address' END),
+                   (CASE WHEN event.event_kind = 'AliasChanged'
+                         THEN event.raw_fact_ref ->> 'emitting_address' END),
                    {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
                ) candidate(resolver_address)
                WHERE event.event_kind IN (

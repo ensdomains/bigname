@@ -83,17 +83,34 @@ the walk repeatedly.
 The release containing Issue #400 adds baseline indexes and the versioned
 schema-migrations
 `20260813120000_reverse_hydration_attempt_state.sql` and
-`20260813120100_reverse_hydration_attempt_state_validate.sql`. Fresh namespaces
+`20260813120100_reverse_hydration_attempt_state_validate.sql`, followed by
+`20260814120000_project_redo_resolver_evidence.sql`. Fresh namespaces
 receive the same objects from `schema-v2/baseline`. For an initialized
 production namespace, keep the API and every phase-runner or one-shot Project
 process stopped. Apply and validate the following concurrent indexes as step 3
-below, then apply both schema-migrations in order as step 4. The first adds the
+below, then apply all three schema-migrations in order as step 4. The first adds the
 three internal reverse-name polling selection columns, their sequence, and an
 unvalidated all-null-or-complete constraint; the second validates that
-constraint. Before deploying the new binary, confirm the sequence and all three
-columns exist and that
+constraint. The third adds the bounded Interpret-to-Project redo handoff for
+resolver evidence. Before deploying the new binary, confirm the sequence, all
+three columns, the handoff table, and its range index exist; also confirm that
 `primary_names_current_reverse_hydration_attempt_check` has
 `pg_constraint.convalidated = true`.
+
+```sql
+SELECT
+    to_regclass('bigname_phase.project_redo_resolver_evidence') IS NOT NULL
+        AS redo_handoff_exists,
+    EXISTS (
+        SELECT 1
+        FROM pg_class index_relation
+        JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+        WHERE index_relation.oid =
+              to_regclass('bigname_phase.project_redo_resolver_evidence_range_idx')
+          AND index_state.indisvalid
+          AND index_state.indisready
+    ) AS redo_handoff_range_index_ready;
+```
 
 Apply the following index statements one at a time with the writer role. Do not
 wrap them in a transaction: PostgreSQL requires each `CREATE INDEX CONCURRENTLY`

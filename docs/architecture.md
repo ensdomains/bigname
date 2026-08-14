@@ -366,7 +366,8 @@ Phases per chain:
 
 1. `ingest` — block lineage, selected transactions/receipts/logs, and raw-fact
    persistence
-2. `interpret` — schema-v2 identity, discovery, and normalized-event writes
+2. `interpret` — schema-v2 identity, discovery, and normalized-event writes,
+   plus pre-delete resolver-reference coordination for Project redo
 3. `project` — canonical identity and normalized-event input, staged current
    projections, one-transaction publication for the affected scope, and
    canonical-head [hydration](glossary.md#hydration) after publication
@@ -847,7 +848,10 @@ The phase runner stores competing block lineage per chain. Head publication
 marks a displaced readable lineage branch `orphaned` and promotes the selected
 branch; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
-identity, discovery, and normalized-event output for its selected range.
+identity, discovery, and normalized-event output for its selected range. Before
+that replacement it preserves only the resolver references that Project needs
+to find projection rows affected by disappearing events; Project consumes that
+coordination state during redo or later normal catch-up publication.
 
 The live phase uses the same head-publication transaction as ingest. That
 transaction orphans the displaced suffix, clears affected active resolution

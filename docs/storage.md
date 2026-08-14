@@ -96,6 +96,7 @@ state; it is never identity.
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret | Protocol events normalized transactionally with identity output. |
+| `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
@@ -348,7 +349,10 @@ this rule against phase lineage.
 Interpretation is deterministic for a fixed manifest set, interpreter content
 hash, canonical raw facts, and requested block range. A bounded Interpret redo
 may replace only derived identity, discovery, and normalized-event output in
-that range. Raw facts are never edited by replay.
+that range. Immediately before replacement, it may preserve the resolver
+references Project needs to identify rows affected by disappearing events.
+Those coordination rows are consumed by Project publication and are never
+served. Raw facts are never edited by replay.
 
 The ENSv1→ENSv2 `consumer_visibility` rule is included in the interpreter
 content hash. Replaying one fixed hash reproduces the same correlation sets,
@@ -539,8 +543,11 @@ fails the build rather than silently narrowing the fingerprint.
 Project is the only projection writer. It derives the affected scope from
 canonical interpreted input, stages rows in connection-local tables, and
 publishes the affected projection set transactionally. It has no legacy claim
-queue, durable replay stage tables, apply cursors, dead-letter queue, database
-session version stamp, or worker heartbeat.
+queue, general-purpose durable replay stage tables, apply cursors, dead-letter
+queue, database session version stamp, or worker heartbeat. The sole replay
+handoff, `project_redo_resolver_evidence`, contains pre-delete resolver
+references rather than staged projection rows and is consumed by the matching
+redo or later normal catch-up publication.
 
 Consumer slice 2 adds one diagnostic exception to durable staging, not to
 projection ownership. A post-reconciliation dual-current invariant makes the

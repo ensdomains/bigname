@@ -59,7 +59,7 @@ pub(super) async fn include_time_boundaries(
             SELECT 131072::bigint AS is_dot_eth,
                    7776000::numeric AS grace_period_seconds
         )
-        INSERT INTO project_scope_resources
+        INSERT INTO project_scope_permission_effect_resources
         SELECT summary.resource_id
         FROM permissions_current_resource_summary summary
         CROSS JOIN positions
@@ -98,6 +98,7 @@ pub(super) async fn include_time_boundaries(
     .map_err(|error| {
         ProjectError::database("failed to scope wrapper timestamp transitions", error)
     })?;
+    include_effect_resources(transaction).await?;
     Ok(())
 }
 
@@ -119,7 +120,7 @@ async fn include_all(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO project_scope_resources
+        INSERT INTO project_scope_permission_effect_resources
         SELECT DISTINCT event.resource_id
         FROM normalized_events event
         JOIN chain_lineage lineage
@@ -141,6 +142,21 @@ async fn include_all(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope wrapper redo", error))?;
+    include_effect_resources(transaction).await?;
+    Ok(())
+}
+
+async fn include_effect_resources(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_scope_resources
+         SELECT resource_id FROM project_scope_permission_effect_resources
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to include permission-effect resources", error)
+    })?;
     Ok(())
 }
 

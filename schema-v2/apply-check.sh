@@ -119,10 +119,37 @@ apply_baseline() {
 for migration_file in \
     "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
-    "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql"
+    "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
+    "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
+
+# SQLx migrations run before phase-runner installs a fresh schema-v2 baseline.
+# They must leave that namespace empty so init-schema can still accept it.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = current_schema()
+        UNION ALL
+        SELECT 1
+        FROM pg_proc function
+        JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+        WHERE namespace.nspname = current_schema()
+    ) THEN
+        RAISE EXCEPTION
+            'schema-migrations created objects before fresh schema initialization';
+    END IF;
+END
+$$;
+SQL
+} | run_psql
 
 apply_baseline
 apply_baseline
@@ -211,15 +238,82 @@ SQL
 } | run_psql
 
 # TestDatabase installs the current baseline before SQLx applies reviewed
-# migrations. The same three files must be idempotent on that baseline-first
+# migrations. The same reviewed files must be idempotent on that baseline-first
 # path, including the validation and metadata-swap steps.
 for migration_file in \
     "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
-    "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql"
+    "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
+    "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
+
+# Exercise the initialized pre-change schema branch: normalized events and
+# unrelated data already exist, while the new redo handoff does not.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+INSERT INTO normalized_events (
+    event_identity, namespace, event_kind, source_family,
+    manifest_version, chain_id, derivation_kind, canonicality_state
+) VALUES (
+    'redo-handoff-upgrade-sentinel', 'schema-v2-check',
+    'SourceManifestUpdated', 'schema-check', 1, 'schema-v2-check',
+    'manifest_sync', 'finalized'
+);
+DROP TABLE project_redo_resolver_evidence;
+SQL
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql"
+    cat <<'SQL'
+DO $$
+DECLARE
+    constraint_count bigint;
+    index_is_ready boolean;
+BEGIN
+    IF to_regclass(current_schema() || '.project_redo_resolver_evidence') IS NULL THEN
+        RAISE EXCEPTION 'initialized-schema upgrade did not create redo handoff';
+    END IF;
+
+    SELECT count(*)
+    INTO constraint_count
+    FROM pg_constraint constraint_row
+    WHERE constraint_row.conrelid = 'project_redo_resolver_evidence'::regclass
+      AND constraint_row.contype IN ('p', 'c');
+    IF constraint_count <> 4 THEN
+        RAISE EXCEPTION
+            'initialized-schema redo handoff has % required constraints, expected 4',
+            constraint_count;
+    END IF;
+
+    SELECT index_state.indisvalid
+       AND index_state.indisready
+       AND index_state.indislive
+    INTO index_is_ready
+    FROM pg_class index_relation
+    JOIN pg_namespace namespace
+      ON namespace.oid = index_relation.relnamespace
+    JOIN pg_index index_state
+      ON index_state.indexrelid = index_relation.oid
+    WHERE namespace.nspname = current_schema()
+      AND index_relation.relname = 'project_redo_resolver_evidence_range_idx';
+    IF index_is_ready IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'initialized-schema redo handoff index is not ready';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM normalized_events
+        WHERE event_identity = 'redo-handoff-upgrade-sentinel'
+    ) THEN
+        RAISE EXCEPTION 'initialized-schema upgrade changed existing normalized data';
+    END IF;
+END
+$$;
+DELETE FROM normalized_events
+WHERE event_identity = 'redo-handoff-upgrade-sentinel';
+SQL
+} | run_psql
 
 # Exercise the initialized-schema upgrade against the preceding closed
 # vocabularies. Rewrite only the qualified schema name so the checked-in
@@ -512,6 +606,7 @@ BEGIN
             ('name_current'),
             ('name_surfaces'),
             ('normalized_events'),
+            ('project_redo_resolver_evidence'),
             ('permissions_current'),
             ('permissions_current_resource_summary'),
             ('primary_names_current'),
@@ -564,6 +659,7 @@ BEGIN
             ('name_current'),
             ('name_surfaces'),
             ('normalized_events'),
+            ('project_redo_resolver_evidence'),
             ('permissions_current'),
             ('permissions_current_resource_summary'),
             ('primary_names_current'),

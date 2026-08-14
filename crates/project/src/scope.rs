@@ -26,6 +26,7 @@ pub(crate) async fn initialize(
 ) -> Result<()> {
     create_scope_tables(transaction).await?;
     if window.full_rebuild {
+        retracted::consume(transaction, chain_id, window.from_block, window.to_block).await?;
         return Ok(());
     }
 
@@ -60,20 +61,10 @@ pub(crate) async fn initialize(
     // Topology must consume that final name set before event-history staging begins.
     // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
-    loop {
-        resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
-        resolver::classify_unchanged(transaction, chain_id).await?;
-        if resolver::include_permission_resources(transaction, chain_id, target.number).await? == 0
-        {
-            break;
-        }
-        // A newly scoped grantor can add bound names and pointer resolvers. Close those edges
-        // before freezing event IDs, then repeat until every rebuilt resolver has its history.
-        close_binding_scope(transaction, chain_id, target).await?;
-        include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
-        close_binding_scope(transaction, chain_id, target).await?;
-        include_topology_scope(transaction, chain_id, target.number).await?;
-    }
+    resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
+    resolver::classify_unchanged(transaction, chain_id).await?;
+    resolver::include_permission_resources(transaction, chain_id, target.number).await?;
+    retracted::consume(transaction, chain_id, window.from_block, window.to_block).await?;
     Ok(())
 }
 
@@ -82,8 +73,12 @@ async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Res
         "CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_permission_effect_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolvers (resolver_address text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolver_permission_history (resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_resolver_candidate_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_resolver_candidate_events (normalized_event_id bigint PRIMARY KEY, resource_id uuid) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_retracted_resolver_evidence (resolver_address text, source_family text, event_kind text, PRIMARY KEY (resolver_address, source_family, event_kind)) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolver_dependents (resolver_address text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolver_passthrough (resolver_address text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_primary (address text, coin_type text, namespace text, PRIMARY KEY (address, coin_type, namespace)) ON COMMIT DROP",
@@ -204,6 +199,21 @@ async fn seed_direct_scope(
     .await
     .map_err(|error| ProjectError::database("failed to derive direct resource scope", error))?;
 
+    sqlx::query(
+        "INSERT INTO project_scope_permission_effect_resources
+         SELECT resource_id FROM project_changed_events
+         WHERE resource_id IS NOT NULL
+           AND event_kind IN (
+               'PermissionChanged', 'PermissionScopeChanged', 'ExpiryChanged'
+           )
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to derive permission-effect resource scope", error)
+    })?;
+
     for statement in [
         "INSERT INTO project_scope_resources
          SELECT resource_id FROM resources
@@ -253,11 +263,7 @@ async fn seed_direct_scope(
              SELECT permission.resolver_address
              FROM project_changed_events event
              CROSS JOIN LATERAL (VALUES
-                 {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES},
-                 (CASE WHEN event.source_family IN (
-                     'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
-                     'basenames_base_resolver'
-                 ) THEN event.raw_fact_ref ->> 'emitting_address' END)
+                 {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
              ) permission(resolver_address)
              WHERE event.event_kind = 'PermissionChanged'
          ) candidate

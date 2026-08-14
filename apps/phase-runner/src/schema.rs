@@ -30,6 +30,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "name_current",
     "name_surfaces",
     "normalized_events",
+    "project_redo_resolver_evidence",
     "permissions_current",
     "permissions_current_resource_summary",
     "primary_names_current",
