@@ -5,6 +5,7 @@ mod engine;
 mod error;
 mod hydration;
 mod publish;
+mod resolver_address;
 mod scope;
 mod stage;
 

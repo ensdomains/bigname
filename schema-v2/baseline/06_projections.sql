@@ -85,6 +85,14 @@ CREATE INDEX IF NOT EXISTS name_current_resource_idx
     ON name_current (resource_id)
     WHERE resource_id IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS name_current_resolver_idx
+    ON name_current (
+        (declared_summary #>> '{resolver,chain_id}'),
+        lower(declared_summary #>> '{resolver,address}'),
+        logical_name_id
+    )
+    WHERE declared_summary #>> '{resolver,address}' IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS children_current (
     parent_logical_name_id text NOT NULL
         REFERENCES name_surfaces (logical_name_id),
@@ -153,6 +161,14 @@ CREATE INDEX IF NOT EXISTS children_current_parent_idx
 CREATE INDEX IF NOT EXISTS children_current_namehash_idx
     ON children_current (namespace, namehash);
 
+CREATE INDEX IF NOT EXISTS children_current_labelhash_idx
+    ON children_current (
+        namespace,
+        lower(labelhash),
+        parent_logical_name_id,
+        child_logical_name_id
+    );
+
 CREATE TABLE IF NOT EXISTS permissions_current (
     resource_id uuid NOT NULL
         REFERENCES resources (resource_id),
@@ -201,6 +217,15 @@ CREATE TABLE IF NOT EXISTS permissions_current (
 
 CREATE INDEX IF NOT EXISTS permissions_current_subject_idx
     ON permissions_current (subject, resource_id, scope);
+
+CREATE INDEX IF NOT EXISTS permissions_current_resolver_scope_idx
+    ON permissions_current (
+        (scope_detail ->> 'chain_id'),
+        lower(scope_detail ->> 'resolver_address'),
+        resource_id
+    )
+    WHERE scope_kind = 'resolver'
+      AND scope_detail ->> 'resolver_address' IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS permissions_current_resource_summary (
     resource_id uuid PRIMARY KEY
@@ -269,6 +294,14 @@ CREATE TABLE IF NOT EXISTS record_inventory_current (
     CHECK (jsonb_typeof(canonicality_summary) = 'object'),
     CHECK (manifest_version > 0)
 );
+
+CREATE INDEX IF NOT EXISTS record_inventory_current_resolver_idx
+    ON record_inventory_current (
+        (provenance ->> 'chain_id'),
+        lower(provenance ->> 'resolver_address'),
+        resource_id
+    )
+    WHERE provenance ->> 'resolver_address' IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS resolver_current (
     chain_id text NOT NULL,
@@ -392,6 +425,8 @@ CREATE INDEX IF NOT EXISTS address_names_current_address_idx
 CREATE INDEX IF NOT EXISTS address_names_current_name_idx
     ON address_names_current (logical_name_id, relation, lower(address));
 
+CREATE SEQUENCE IF NOT EXISTS reverse_hydration_attempt_ordinal_seq AS bigint;
+
 CREATE TABLE IF NOT EXISTS primary_names_current (
     address text NOT NULL,
     coin_type text NOT NULL,
@@ -401,6 +436,9 @@ CREATE TABLE IF NOT EXISTS primary_names_current (
     claim_name_is_normalized boolean NOT NULL DEFAULT false,
     unsupported_reason text,
     claim_provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
+    reverse_hydration_attempted_block_number bigint,
+    reverse_hydration_attempted_block_hash text,
+    reverse_hydration_attempt_ordinal bigint,
     PRIMARY KEY (address, coin_type, namespace),
     CHECK (btrim(address) <> ''),
     CHECK (btrim(coin_type) <> ''),
@@ -434,7 +472,22 @@ CREATE TABLE IF NOT EXISTS primary_names_current (
         unsupported_reason IS NULL
         OR btrim(unsupported_reason) <> ''
     ),
-    CHECK (jsonb_typeof(claim_provenance) = 'object')
+    CHECK (jsonb_typeof(claim_provenance) = 'object'),
+    CONSTRAINT primary_names_current_reverse_hydration_attempt_check CHECK (
+        (
+            reverse_hydration_attempted_block_number IS NULL
+            AND reverse_hydration_attempted_block_hash IS NULL
+            AND reverse_hydration_attempt_ordinal IS NULL
+        )
+        OR (
+            reverse_hydration_attempted_block_number IS NOT NULL
+            AND reverse_hydration_attempted_block_number >= 0
+            AND reverse_hydration_attempted_block_hash IS NOT NULL
+            AND btrim(reverse_hydration_attempted_block_hash) <> ''
+            AND reverse_hydration_attempt_ordinal IS NOT NULL
+            AND reverse_hydration_attempt_ordinal > 0
+        )
+    )
 );
 
 CREATE INDEX IF NOT EXISTS primary_names_current_claim_idx
@@ -444,6 +497,24 @@ CREATE INDEX IF NOT EXISTS primary_names_current_claim_idx
         address
     )
     WHERE claim_status = 'success';
+
+CREATE INDEX IF NOT EXISTS primary_names_current_reverse_node_idx
+    ON primary_names_current (
+        (claim_provenance ->> 'chain_id'),
+        lower(claim_provenance ->> 'reverse_node'),
+        address,
+        coin_type,
+        namespace
+    )
+    WHERE claim_provenance ->> 'reverse_node' IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS permissions_current_resource_wrapper_expiry_idx
+    ON permissions_current_resource_summary (
+        (provenance ->> 'chain_id'),
+        ((provenance -> 'wrapper_expiry_boundary' ->> 'expiry_seconds')::numeric),
+        resource_id
+    )
+    WHERE provenance ? 'wrapper_expiry_boundary';
 
 COMMENT ON TABLE name_current IS
     'This table stores the current product row for each visible name.';
@@ -694,6 +765,15 @@ COMMENT ON COLUMN primary_names_current.unsupported_reason IS
     'This value explains an unsupported claim.';
 COMMENT ON COLUMN primary_names_current.claim_provenance IS
     'This object identifies the claim source.';
+COMMENT ON COLUMN primary_names_current.reverse_hydration_attempted_block_number IS
+    'This internal reverse-name polling selection value identifies the head height of the latest attempt. Readers never use it as serving data.';
+COMMENT ON COLUMN primary_names_current.reverse_hydration_attempted_block_hash IS
+    'This internal reverse-name polling selection value identifies the head hash of the latest attempt. Readers never use it as serving data.';
+COMMENT ON COLUMN primary_names_current.reverse_hydration_attempt_ordinal IS
+    'This internal value orders reverse-name polling attempts for fair rolling selection. It never records or validates a provider result.';
+
+COMMENT ON SEQUENCE reverse_hydration_attempt_ordinal_seq IS
+    'This sequence assigns durable order to reverse-name polling batches; its values are not serving data.';
 
 COMMENT ON INDEX name_current_lookup_idx IS
     'This bounded index supports namespace and name identity lookup by name hash. Verbatim names remain unbounded payload and are not btree-indexed.';

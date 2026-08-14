@@ -29,6 +29,53 @@ pub const EVENT_CLOSE_TIME_SQL: &str = "lineage.block_timestamp + make_interval(
 pub const BINDING_CLOSE_CLAMP_SQL: &str = "GREATEST($2, active_from + interval '1 microsecond')";
 pub const REDO_BINDING_CLOSE_CLAMP_SQL: &str =
     "GREATEST(event.closed_at, binding.active_from + interval '1 microsecond')";
+pub const REDO_RESOLVER_EVIDENCE_SELECT_SQL: &str = r#"
+    SELECT event.chain_id, event.event_identity, event.block_number, event.event_kind,
+           event.source_family, event.resource_id,
+           CASE
+               WHEN event.event_kind = 'ResolverChanged' THEN
+                   NULLIF(lower(event.before_state ->> 'resolver'), '')
+               WHEN event.event_kind = 'AliasChanged' THEN
+                   NULLIF(lower(COALESCE(
+                       event.before_state ->> 'resolver',
+                       event.raw_fact_ref ->> 'emitting_address'
+                   )), '')
+               WHEN event.before_state #>> '{scope,kind}' = 'resolver' THEN
+                   NULLIF(lower(event.before_state #>> '{scope,resolver_address}'), '')
+           END,
+           CASE
+               WHEN event.event_kind = 'ResolverChanged' THEN
+                   NULLIF(lower(event.after_state ->> 'resolver'), '')
+               WHEN event.event_kind = 'AliasChanged' THEN
+                   NULLIF(lower(COALESCE(
+                       event.after_state ->> 'resolver',
+                       event.raw_fact_ref ->> 'emitting_address'
+                   )), '')
+               WHEN event.after_state #>> '{scope,kind}' = 'resolver' THEN
+                   NULLIF(lower(event.after_state #>> '{scope,resolver_address}'), '')
+           END
+    FROM normalized_events event
+    WHERE event.chain_id = $1
+      AND event.block_number BETWEEN $2 AND $3
+      AND event.consumer_visibility = 'activated'
+      AND event.event_kind IN ('PermissionChanged', 'ResolverChanged', 'AliasChanged')
+      AND (
+          event.before_state ->> 'resolver' IS NOT NULL
+          OR event.after_state ->> 'resolver' IS NOT NULL
+          OR (
+              event.event_kind = 'AliasChanged'
+              AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
+          )
+          OR (
+              event.before_state #>> '{scope,kind}' = 'resolver'
+              AND event.before_state #>> '{scope,resolver_address}' IS NOT NULL
+          )
+          OR (
+              event.after_state #>> '{scope,kind}' = 'resolver'
+              AND event.after_state #>> '{scope,resolver_address}' IS NOT NULL
+          )
+      )
+"#;
 
 pub fn event_time(block_timestamp: OffsetDateTime, log_index: i64) -> OffsetDateTime {
     block_timestamp + Duration::microseconds(log_index.max(0))

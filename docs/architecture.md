@@ -366,7 +366,8 @@ Phases per chain:
 
 1. `ingest` — block lineage, selected transactions/receipts/logs, and raw-fact
    persistence
-2. `interpret` — schema-v2 identity, discovery, and normalized-event writes
+2. `interpret` — schema-v2 identity, discovery, and normalized-event writes,
+   plus pre-delete resolver-reference coordination for Project redo
 3. `project` — canonical identity and normalized-event input, staged current
    projections, one-transaction publication for the affected scope, and
    canonical-head [hydration](glossary.md#hydration) after publication
@@ -428,12 +429,15 @@ only that chain. Normal verification starts at the durable ingest-cursor extent,
 not a replacement command-line start, and a resumed scan retains the weaker of
 its prior whole-extent level and the current reference's level.
 The project phase is the single schema-v2 projection writer and has no claim
-queue, dead-letter referee, watermarks, heartbeat threading, or standing
-hydration planner. When a hydration RPC is configured, the same project run
-refreshes eligible Ethereum legacy reverse-name and text values at the exact
-published canonical head after its event-derived projection work. A redo whose
-event-derived publication target is behind that head defers hydration until
-  project catches up.
+queue, dead-letter referee, heartbeat threading, or separate background
+planner. When a hydration RPC is configured, the same project run refreshes
+eligible Ethereum legacy reverse-name and text values at the exact published
+canonical head after its event-derived projection work. Bounded reverse-name
+polling keeps per-row attempted-head and attempt-order values so a failed page
+cannot occupy every same-head retry. Those internal values are not serving
+state; an affected projection rebuild clears them and selects the rebuilt tuple
+from the event-derived delta. A redo whose event-derived publication target is
+behind the canonical head defers polling until project catches up.
 
 Current ingest, interpretation, projection, live follow, redo, and rewind
 boundaries are described in [`chain-intake.md`](chain-intake.md).
@@ -488,6 +492,13 @@ Execution and coverage: `VerifiedResolutionObserved`, `VerifiedResolutionInvalid
 
 ENSv2 mappings:
 
+- ENSv2 registry `RegistrationGranted`, `RegistrationRenewed`, and
+  `RegistrationReleased` payloads always identify the emitting registry with
+  `registry_contract_instance_id`. A direct `unregister` emits
+  `LabelUnregistered` from that registry, so its normalized release carries the
+  same identity as the corresponding grant or renewal.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58)
 - The `MigrationApplied` kind records a candidate [ENSv1→ENSv2
   migration boundary](glossary.md#migration-boundary) in slice 1. It is derived
   from the complete admitted per-name transaction shape at the successful ENSv2
@@ -837,7 +848,10 @@ The phase runner stores competing block lineage per chain. Head publication
 marks a displaced readable lineage branch `orphaned` and promotes the selected
 branch; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
-identity, discovery, and normalized-event output for its selected range.
+identity, discovery, and normalized-event output for its selected range. Before
+that replacement it preserves only the resolver references that Project needs
+to find projection rows affected by disappearing events; Project consumes that
+coordination state during redo or later normal catch-up publication.
 
 The live phase uses the same head-publication transaction as ingest. That
 transaction orphans the displaced suffix, clears affected active resolution

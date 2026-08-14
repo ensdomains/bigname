@@ -4,60 +4,118 @@ use crate::{ProjectError, Result};
 
 pub(super) async fn stage(
     transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
     sample_limit: i32,
+    full_rebuild: bool,
 ) -> Result<()> {
+    // Resolver bindings depend on each name's current pointer, not its historical pointers.
+    // Merge untouched name_current rows with the rebuilt name slice; both store the
+    // [source family](../../../../../docs/glossary.md#source-family) of the event that selected the
+    // pointer.
     sqlx::query(
         r#"
         CREATE TEMP TABLE project_resolver_binding_summary ON COMMIT DROP AS
-        WITH binding_events AS (
-            SELECT event.*,
-                   row_number() OVER (
-                       PARTITION BY event.logical_name_id, event.resource_id
-                       ORDER BY event.block_number DESC NULLS LAST,
-                                event.transaction_index DESC NULLS LAST,
-                                event.log_index DESC NULLS LAST,
-                                event.normalized_event_id DESC
-                   ) AS latest_rank
-            FROM project_events event
-            WHERE event.event_kind = 'ResolverChanged'
-              AND event.logical_name_id IS NOT NULL
-              AND event.resource_id IS NOT NULL
-        ),
-        binding_items AS (
-            SELECT lower(event.after_state ->> 'resolver') AS resolver_address,
+        WITH retained_names AS (
+            SELECT current.logical_name_id,
+                   current.resource_id,
+                   current.binding_kind,
+                   current.raw_name,
+                   current.namehash,
+                   current.surface_binding_id,
+                   lower(current.declared_summary #>> '{resolver,address}')
+                       AS resolver_address,
                    CASE
-                       WHEN event.source_family LIKE 'ens_v2_%'
-                           THEN 'ens_v2_resolver_l1'
-                       WHEN event.source_family LIKE 'basenames_%'
-                           THEN 'basenames_base_resolver'
+                       WHEN current.provenance ->> 'resolver_pointer_source_family'
+                                LIKE 'ens_v2_%' THEN 'ens_v2_resolver_l1'
+                       WHEN current.provenance ->> 'resolver_pointer_source_family'
+                                LIKE 'basenames_%' THEN 'basenames_base_resolver'
                        ELSE 'ens_v1_resolver_l1'
-                   END AS source_family,
-                   surface.logical_name_id IS NOT NULL AS has_item,
-                   surface.raw_name,
-                   event.logical_name_id,
-                   event.resource_id,
-                   binding.binding_kind,
+                   END AS source_family
+            FROM name_current current
+            WHERE NOT $2
+              -- A changed Project binary requires a full rebuild before incremental work, so a
+              -- retained row from this binary always carries its pointer-event family.
+              AND current.provenance ->> 'resolver_pointer_source_family' IS NOT NULL
+              AND current.declared_summary #>> '{resolver,chain_id}' = $3
+              AND EXISTS (
+                  SELECT 1 FROM project_scope_resolvers scope
+                  WHERE lower(scope.resolver_address) = lower(
+                      current.declared_summary #>> '{resolver,address}'
+                  )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_scope_names scope
+                  WHERE scope.logical_name_id = current.logical_name_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_scope_resources scope
+                  WHERE scope.resource_id = current.resource_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_scope_resolver_passthrough passthrough
+                  WHERE lower(passthrough.resolver_address) =
+                        lower(current.declared_summary #>> '{resolver,address}')
+              )
+        ), staged_names AS (
+            SELECT staged.logical_name_id,
+                   staged.resource_id,
+                   staged.binding_kind,
+                   staged.raw_name,
+                   staged.namehash,
+                   staged.surface_binding_id,
+                   lower(staged.declared_summary #>> '{resolver,address}')
+                       AS resolver_address,
+                   CASE
+                       WHEN staged.provenance ->> 'resolver_pointer_source_family'
+                                LIKE 'ens_v2_%' THEN 'ens_v2_resolver_l1'
+                       WHEN staged.provenance ->> 'resolver_pointer_source_family'
+                                LIKE 'basenames_%' THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END AS source_family
+            FROM project_stage_name_current staged
+            WHERE staged.declared_summary #>> '{resolver,chain_id}' = $3
+              AND staged.provenance ->> 'resolver_pointer_source_family' IS NOT NULL
+              AND (
+                    $2 OR EXISTS (
+                        SELECT 1 FROM project_scope_names name_scope
+                        WHERE name_scope.logical_name_id = staged.logical_name_id
+                    )
+                  )
+              AND (
+                    $2 OR EXISTS (
+                        SELECT 1 FROM project_scope_resolvers scope
+                        WHERE lower(scope.resolver_address) = lower(
+                            staged.declared_summary #>> '{resolver,address}'
+                        )
+                    )
+                  )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_scope_resolver_passthrough passthrough
+                  WHERE lower(passthrough.resolver_address) =
+                        lower(staged.declared_summary #>> '{resolver,address}')
+              )
+        ), projected_names AS (
+            SELECT * FROM retained_names
+            UNION ALL
+            SELECT * FROM staged_names
+        ), binding_items AS (
+            SELECT name.*,
                    jsonb_build_object(
-                       'logical_name_id', surface.logical_name_id,
-                       'canonical_display_name', surface.raw_name,
-                       'normalized_name', surface.raw_name,
-                       'raw_name', surface.raw_name,
-                       'namehash', surface.namehash,
-                       'resource_id', binding.resource_id,
-                       'surface_binding_id', binding.surface_binding_id,
-                       'binding_kind', binding.binding_kind
+                       'logical_name_id', name.logical_name_id,
+                       'canonical_display_name', name.raw_name,
+                       'normalized_name', name.raw_name,
+                       'raw_name', name.raw_name,
+                       'namehash', name.namehash,
+                       'resource_id', name.resource_id,
+                       'surface_binding_id', name.surface_binding_id,
+                       'binding_kind', name.binding_kind
                    ) AS item
-            FROM binding_events event
-            JOIN project_bindings binding
-              ON binding.logical_name_id = event.logical_name_id
-             AND binding.resource_id = event.resource_id
-            LEFT JOIN project_surfaces surface
-              ON surface.logical_name_id = binding.logical_name_id
-            WHERE event.latest_rank = 1
-              AND event.after_state ->> 'resolver' IS NOT NULL
-              AND btrim(event.after_state ->> 'resolver') <> ''
-        ),
-        ranked AS (
+            FROM projected_names name
+            WHERE name.resolver_address IS NOT NULL
+              AND btrim(name.resolver_address) <> ''
+              AND name.resolver_address <>
+                  '0x0000000000000000000000000000000000000000'
+        ), ranked AS (
             SELECT binding_items.*,
                    row_number() OVER (
                        PARTITION BY resolver_address
@@ -72,16 +130,15 @@ pub(super) async fn stage(
         )
         SELECT resolver_address,
                min(source_family) AS source_family,
-               count(*) FILTER (WHERE has_item)::integer AS item_count,
+               count(*)::integer AS item_count,
                COALESCE(jsonb_agg(item ORDER BY raw_name, logical_name_id, resource_id)
-                   FILTER (WHERE has_item AND item_rank <= $1), '[]'::jsonb) AS items,
+                   FILTER (WHERE item_rank <= $1), '[]'::jsonb) AS items,
                count(*) FILTER (
-                   WHERE has_item AND binding_kind = 'resolver_alias_path'
+                   WHERE binding_kind = 'resolver_alias_path'
                )::integer AS alias_item_count,
                COALESCE(jsonb_agg(item ORDER BY raw_name, logical_name_id, resource_id)
                    FILTER (
-                       WHERE has_item
-                         AND binding_kind = 'resolver_alias_path'
+                       WHERE binding_kind = 'resolver_alias_path'
                          AND alias_item_rank <= $1
                    ), '[]'::jsonb) AS alias_items
         FROM ranked
@@ -89,6 +146,8 @@ pub(super) async fn stage(
         "#,
     )
     .bind(sample_limit)
+    .bind(full_rebuild)
+    .bind(chain_id)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to group resolver bindings", error))?;

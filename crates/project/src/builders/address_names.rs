@@ -7,6 +7,9 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    // Address relations fold registration, token-holder, and controller events for the staged
+    // current name/resource. They read no resolver classification or pointer history; a resolver
+    // event can therefore affect only its directly scoped name/resource here.
     sqlx::query(
         r#"
         WITH RECURSIVE target_time AS (

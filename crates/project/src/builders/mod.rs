@@ -18,9 +18,9 @@ pub(crate) async fn build_all(
     full_rebuild: bool,
 ) -> Result<()> {
     permissions::build(transaction, chain_id, target).await?;
+    name_current::build(transaction, chain_id, target).await?;
     resolver::build(transaction, chain_id, target, full_rebuild).await?;
     record_inventory::build(transaction, chain_id, target).await?;
-    name_current::build(transaction, chain_id, target).await?;
     name_topology::build(transaction, chain_id, target).await?;
     children::build(transaction, chain_id, target).await?;
     address_names::build(transaction, chain_id, target).await?;

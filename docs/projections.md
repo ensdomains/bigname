@@ -22,6 +22,82 @@ allowing a winning fork to retract losing-fork output. It stages the affected
 scope in connection-local tables and publishes the related projection rows and
 phase state transactionally.
 
+Normal incremental Project work starts from events and identity rows in the
+`(previous, target]` block window. Name- or resource-local events initially
+select only that name or resource. `RecordChanged`, `RecordVersionChanged`,
+and `AliasChanged` also rebuild the emitting resolver's own `resolver_current`
+row. `PermissionChanged` rebuilds every resolver identified by
+`scope.resolver_address` in its before or after state. Raw emitting-address
+metadata is not resolver evidence; resolver-family adapters put the emitting
+resolver in that semantic scope.
+None of these events rebuilds other names that use the resolver. Record and
+record-version events do not contribute to the resolver overview's derived
+sections, so an existing resolver touched only by those kinds is republished at
+the new target without restaging unrelated resolver history. That republish
+path is existing-row only: a record or record-version observation without a
+linked name or resource does not create a resolver row.
+`ResolverChanged` rebuilds its name and resource plus the old and new resolver
+rows, again without expanding either resolver to its other names.
+Only a resolver `Upgraded` event or stale resolver classification caused by the
+active manifest set expands through resources whose current resolver pointer
+matches that resolver. Permission history by itself does not disable the
+record-only carry-forward path. When a resolver must be rebuilt, Project
+restages the current delta and one stored event reference for each historical
+[source family](glossary.md#source-family) and each relevant permission,
+resolver-pointer, or alias input. A resource
+referenced only by one of those stored events is builder input, not affected
+serving state: its projection rows are neither deleted nor republished. The
+stored events cover live and fully revoked resolver-scoped permission
+families and unlinked resolver-pointer history, so candidate selection remains
+equal to a full rebuild without loading every name that ever used a shared
+resolver. A content-hash change first performs a complete rebuild, which writes
+those stored event references before later incremental or redo work can use
+them.
+
+Before Interpret deletes a redo range, it records the resolver addresses,
+source families, event kinds, and permission resources referenced by that
+range's `PermissionChanged`, `ResolverChanged`, and `AliasChanged` rows. Project
+compares that small pre-redo set with the re-derived events, rebuilds only
+resolvers and permission resources whose evidence disappeared, stages a
+replacement for an affected family when one still exists, and consumes the
+record in the same transaction as projection publication. Interpret inserts
+this record once and preserves it across a restarted redo until Project
+publishes the repair. When the Project head clips the redo range, later normal
+catch-up consumes the remaining records as it publishes those blocks. Resolver
+provenance keeps the per-family event references
+for explanation only; it is not the redo work queue. Before
+ordinary event staging, Project expands child scope until no more connected
+topology is found.
+The expansion follows both current
+`children_current` rows and activated canonical `SubregistryChanged` history
+through the target. Normalized rows with `node` and `child_node` fields define
+direct edges. Rows with a `subregistry` field join each logical parent through
+its previous and current referenced contract instances to the normalized
+registration histories for those instances. This transitive step can rebuild a
+whole connected topology component: every child edge whose parent or child
+enters deletion scope must have its complete per-name event history staged
+before publication. Candidate events and events whose block is no longer on
+readable canonical lineage never widen this scope. `project_events` remains the
+single filter for data that builders may serve.
+
+Rows outside an incremental tick's affected scope keep the target block number,
+hash, and timestamp from the last tick that rebuilt them. Readers require each
+stored block hash to remain canonical; they do not require an unaffected row's
+target to equal the latest head, so those rows remain readable. This can
+preserve an older timestamp: when a name's `declared_summary` has neither
+`registration.created_at` nor `history.created_at`, the API derives `created_at`
+from the earliest timestamp in that row's `chain_positions`. Until that name is
+rebuilt, the fallback therefore stays at the timestamp from its last rebuild
+instead of advancing with the chain head.
+
+Wrapper expiry and `.eth` grace transitions read the latest raw fuse word and
+wrapper expiry stored in the affected resource's
+`permissions_current_resource_summary` provenance.[^v1-wrapper-grace-expiry]
+The permission builder
+refreshes that internal boundary whenever the resource is rebuilt. This keeps
+timestamp-only Project ticks on projected current state instead of re-reading
+all `PermissionScopeChanged` and `ExpiryChanged` history.
+
 After event-derived publication, configured Ethereum
 [hydration](glossary.md#hydration) may refresh:
 
@@ -90,6 +166,10 @@ coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
 in [`architecture.md`](architecture.md#identity-strategy).
+Its projection provenance stores the [source family](glossary.md#source-family)
+of the event that selected the current resolver pointer. Resolver binding
+summaries use that stored event provenance rather than a prior resolver row's
+classification.
 
 ENSv1 wrapper lifecycle and fuse effects are projected from canonical wrapper
 facts. During registrar grace, the holder and lifecycle state remain visible,
@@ -229,15 +309,45 @@ profile.
 
 ## Primary names
 
-`primary_names_current` stores declared claim state only. Supported statuses are
-`success`, `not_found`, `unsupported`, and `invalid_name`. A successful row keeps
-the raw claim and whether its bytes already equal the normalized claim. Project
+`primary_names_current` stores declared claim state plus internal rolling
+reverse-name polling selection state. Supported claim statuses are `success`,
+`not_found`, `unsupported`, and `invalid_name`. A successful row keeps the raw
+claim and whether its bytes already equal the normalized claim. The internal
+selection columns are not claim fields and readers never select them. Project
 does not persist a verified-primary result or trace identity.
 
 Current-head hydration for an admitted event-silent ENSv1 reverse resolver may
 refresh an existing ENS/60 claim tuple at the exact published Ethereum head. It
 does not create a normalized event or verified result. Provider failure restores
 the event-derived row and keeps Project retryable.
+
+Each hydration tick refreshes every eligible reverse tuple rebuilt by the
+Project delta at that head, then at most 250 additional eligible tuples. A tuple
+is attempted at most once at a given head. The rolling selection orders groups
+by their durable attempt order: never-attempted tuples first, then the group
+attempted least recently. Within one group it orders tuples by oldest successful
+hydration head, with missing hydration first, and then by stable tuple identity.
+Every attempted group gets a new durable head and ordering value, including
+after provider failure. Failure removes the
+`canonical_head_multicall_hydration` provenance object that readers require
+before accepting the provider-derived claim, but does not return the group to
+the front; it keeps its place in the global round-robin. A same-head retry
+therefore reaches tuples beyond a failed group, and a new head does not let that
+group repeatedly overtake older waiting groups.
+These values belong only to Project's rolling hydration selection: readers never
+use them as claim data, and they cannot make a failed provider result readable.
+They persist across transaction commit, process restart, same-head retry, and
+head advancement. Rebuilding an affected primary-name tuple clears them with
+the rest of that projection row; the rebuilt tuple is selected immediately from
+the Project delta, so it does not depend on its prior rolling position. The tick
+also restores every newly ineligible delta tuple and at most 250 older
+ineligible hydrated tuples. Thus event-driven changes are visible immediately,
+while event-silent provider values for the remaining corpus are refreshed in
+bounded rolling batches instead of all being polled at every head. If a
+hydration block becomes noncanonical, readers expose the stored event-derived
+baseline until that tuple is refreshed at a readable head. A same-height fork
+makes the prior attempt eligible at the replacement hash without changing its
+round-robin position.
 
 Verified ENS/60 primary-name status is computed per request by schema-v2 lookup.
 It requires the declared claim and a matching forward address; tuple presence
@@ -248,8 +358,11 @@ alone does not prove primary status.
 Canonicality change, manifest change, or interpreted-content replacement stamps
 the affected Project range. Project rebuilds the affected scope in dependency
 order and publishes one coherent generation. There is no worker invalidation
-queue, apply cursor, replay-version fence, durable stage table, replay marker,
-dead-letter queue, or cache invalidation side effect.
+queue, apply cursor, replay-version fence, general-purpose durable staging,
+replay marker, dead-letter queue, or cache invalidation side effect. The narrow
+`project_redo_resolver_evidence` exception preserves only resolver references
+that would otherwise disappear before Project can select its redo scope; it is
+never serving data and Project consumes it with the corresponding publication.
 
 `phase-runner rewind` selects an exact stored readable ancestor, marks the
 displaced suffix orphaned through normal head publication, and stamps downstream
@@ -273,6 +386,9 @@ new truth family.
 ## Ownership
 
 - Interpret and adapters emit identity, discovery, and normalized events.
+  Interpret also preserves the pre-delete resolver references needed for the
+  next Project redo or normal catch-up; this is replay coordination, not a
+  projection write.
 - Project reads canonical interpreted input and owns every projection write.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not

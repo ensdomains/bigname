@@ -4,7 +4,9 @@ mod permission_summary;
 
 use sqlx::{Postgres, Transaction};
 
-use crate::{Marker, ProjectError, Result};
+use crate::{
+    Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
+};
 
 const SUMMARY_SAMPLE_LIMIT: i32 = 100;
 
@@ -14,11 +16,11 @@ pub(super) async fn build(
     target: &Marker,
     full_rebuild: bool,
 ) -> Result<()> {
-    binding_summary::stage(transaction, SUMMARY_SAMPLE_LIMIT).await?;
+    binding_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
     alias_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT).await?;
-    permission_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT).await?;
+    permission_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
 
-    sqlx::query(
+    let resolver_build = format!(
         r#"
         WITH discovered AS (
             SELECT lower(address.address) AS resolver_address,
@@ -73,9 +75,11 @@ pub(super) async fn build(
                        WHEN event.event_kind = 'Upgraded'
                            THEN event.after_state ->> 'proxy_address'
                        WHEN event.event_kind = 'AliasChanged'
-                           THEN event.after_state ->> 'resolver'
-                       WHEN event.event_kind = 'PermissionChanged'
-                           THEN event.raw_fact_ref ->> 'emitting_address'
+                           THEN COALESCE(
+                               event.after_state ->> 'resolver',
+                               event.before_state ->> 'resolver',
+                               event.raw_fact_ref ->> 'emitting_address'
+                           )
                    END) AS resolver_address,
                    event.source_family,
                    NULL::text AS classification_role,
@@ -92,17 +96,54 @@ pub(super) async fn build(
                       'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
                       'basenames_base_resolver'
                   )
-                  AND event.after_state ->> 'resolver' IS NOT NULL
-                  AND btrim(event.after_state ->> 'resolver') <> ''
-              ) OR (
-                      event.event_kind = 'PermissionChanged'
-                  AND event.source_family IN (
-                      'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
-                      'basenames_base_resolver'
-                  )
-                  AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
-                  AND btrim(event.raw_fact_ref ->> 'emitting_address') <> ''
+                  AND COALESCE(
+                      event.after_state ->> 'resolver',
+                      event.before_state ->> 'resolver',
+                      event.raw_fact_ref ->> 'emitting_address'
+                  ) IS NOT NULL
+                  AND btrim(COALESCE(
+                      event.after_state ->> 'resolver',
+                      event.before_state ->> 'resolver',
+                      event.raw_fact_ref ->> 'emitting_address'
+                  )) <> ''
               )
+            UNION ALL
+            SELECT lower(candidate.resolver_address),
+                   CASE
+                       WHEN event.source_family LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN event.source_family LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END,
+                   NULL::text,
+                   4
+            FROM project_events event
+            CROSS JOIN LATERAL (VALUES
+                {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
+            ) candidate(resolver_address)
+            WHERE event.event_kind = 'PermissionChanged'
+              AND candidate.resolver_address IS NOT NULL
+              AND btrim(candidate.resolver_address) <> ''
+            UNION ALL
+            SELECT lower(candidate.resolver_address),
+                   CASE
+                       WHEN event.source_family LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN event.source_family LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END,
+                   NULL::text,
+                   3
+            FROM project_events event
+            CROSS JOIN LATERAL (
+                VALUES (event.after_state ->> 'resolver'),
+                       (event.before_state ->> 'resolver')
+            ) candidate(resolver_address)
+            WHERE event.event_kind = 'ResolverChanged'
+              AND candidate.resolver_address IS NOT NULL
+              AND btrim(candidate.resolver_address) <> ''
         ),
         observed AS (
             SELECT resolver_address, source_family,
@@ -110,6 +151,159 @@ pub(super) async fn build(
             FROM project_resolver_binding_summary
             UNION ALL
             SELECT * FROM resolver_event_candidates
+        ),
+        retained_permission_evidence AS (
+            SELECT permission.resolver_address, permission.resource_id,
+                   CASE
+                       WHEN evidence.item ->> 'source_family' LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN evidence.item ->> 'source_family' LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END AS source_family,
+                   citation.event_id::bigint AS normalized_event_id
+            FROM project_resolver_permission_rows permission
+            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(
+                permission.provenance -> 'normalized_event_ids', '[]'::jsonb
+            )) WITH ORDINALITY citation(event_id, ordinality)
+            JOIN LATERAL jsonb_array_elements(COALESCE(
+                permission.provenance -> 'permission_manifest_versions', '[]'::jsonb
+            )) WITH ORDINALITY evidence(item, ordinality)
+              ON evidence.ordinality = citation.ordinality
+            WHERE NOT $4
+        ),
+        retained_permission_candidates AS (
+            SELECT evidence.resolver_address, evidence.source_family,
+                   NULL::text AS classification_role,
+                   4 AS priority
+            FROM retained_permission_evidence evidence
+            WHERE NOT EXISTS (
+                  SELECT 1 FROM project_scope_resources scope
+                  WHERE scope.resource_id = evidence.resource_id
+              )
+            -- A retained permission may be the only surviving resolver evidence during redo.
+            -- Reconstruct family candidates from its PermissionChanged provenance; current
+            -- manifests and readable upgrade history below determine the role without copying
+            -- prior classification.
+        ),
+        permission_citation_events AS (
+            SELECT DISTINCT lower(candidate.resolver_address) AS resolver_address,
+                   CASE
+                       WHEN event.source_family LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN event.source_family LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END AS source_family,
+                   event.normalized_event_id
+            FROM project_events event
+            CROSS JOIN LATERAL (VALUES
+                {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
+            ) candidate(resolver_address)
+            WHERE event.event_kind = 'PermissionChanged'
+              AND candidate.resolver_address IS NOT NULL
+              AND btrim(candidate.resolver_address) <> ''
+        ),
+        permission_citation_representatives AS (
+            -- Candidate provenance is display evidence, not redo state. One representative per
+            -- family and evidence kind is enough because family presence is the candidate input.
+            SELECT resolver_address, source_family,
+                   'PermissionChanged'::text AS evidence_kind,
+                   min(normalized_event_id) AS normalized_event_id
+            FROM permission_citation_events
+            GROUP BY resolver_address, source_family
+        ),
+        retained_permission_citations AS (
+            SELECT resolver_address, source_family,
+                   'PermissionChanged'::text AS evidence_kind,
+                   min(normalized_event_id) AS normalized_event_id
+            FROM retained_permission_evidence
+            GROUP BY resolver_address, source_family
+        ),
+        pointer_citation_representatives AS (
+            SELECT lower(candidate.resolver_address) AS resolver_address,
+                   CASE
+                       WHEN event.source_family LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN event.source_family LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END AS source_family,
+                   'ResolverChanged'::text AS evidence_kind,
+                   min(event.normalized_event_id) AS normalized_event_id
+            FROM project_events event
+            CROSS JOIN LATERAL (
+                VALUES (event.after_state ->> 'resolver'),
+                       (event.before_state ->> 'resolver')
+            ) candidate(resolver_address)
+            WHERE event.event_kind = 'ResolverChanged'
+              AND candidate.resolver_address IS NOT NULL
+              AND btrim(candidate.resolver_address) <> ''
+            GROUP BY lower(candidate.resolver_address),
+                     CASE
+                         WHEN event.source_family LIKE 'ens_v2_%'
+                             THEN 'ens_v2_resolver_l1'
+                         WHEN event.source_family LIKE 'basenames_%'
+                             THEN 'basenames_base_resolver'
+                         ELSE 'ens_v1_resolver_l1'
+                     END
+        ),
+        alias_citation_events AS (
+            SELECT lower(COALESCE(
+                       event.after_state ->> 'resolver',
+                       event.before_state ->> 'resolver',
+                       event.raw_fact_ref ->> 'emitting_address'
+                   )) AS resolver_address,
+                   event.source_family,
+                   COALESCE(
+                       event.logical_name_id,
+                       event.after_state ->> 'from_logical_name_id',
+                       event.before_state ->> 'from_logical_name_id',
+                       event.after_state ->> 'from_namehash',
+                       event.before_state ->> 'from_namehash',
+                       event.after_state ->> 'from_dns_encoded_name',
+                       event.before_state ->> 'from_dns_encoded_name',
+                       event.after_state ->> 'from_name',
+                       event.before_state ->> 'from_name',
+                       event.event_identity
+                   ) AS alias_identity,
+                   event.block_number,
+                   event.transaction_index,
+                   event.log_index,
+                   event.normalized_event_id
+            FROM project_events event
+            WHERE event.event_kind = 'AliasChanged'
+              AND event.source_family IN (
+                  'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
+                  'basenames_base_resolver'
+              )
+        ),
+        alias_family_citations AS (
+            SELECT resolver_address, source_family,
+                   'AliasChanged'::text AS evidence_kind,
+                   min(normalized_event_id) AS normalized_event_id
+            FROM alias_citation_events
+            WHERE resolver_address IS NOT NULL
+            GROUP BY resolver_address, source_family
+        ),
+        candidate_citation_events AS (
+            SELECT * FROM permission_citation_representatives
+            UNION ALL SELECT * FROM retained_permission_citations
+            UNION ALL SELECT * FROM pointer_citation_representatives
+            UNION ALL SELECT * FROM alias_family_citations
+        ),
+        candidate_citation_representatives AS (
+            SELECT resolver_address, min(normalized_event_id) AS normalized_event_id
+            FROM candidate_citation_events
+            GROUP BY resolver_address, source_family, evidence_kind
+        ),
+        resolver_candidate_citations AS (
+            SELECT resolver_address,
+                   jsonb_agg(
+                       to_jsonb(normalized_event_id) ORDER BY normalized_event_id
+                   ) AS event_ids
+            FROM candidate_citation_representatives
+            GROUP BY resolver_address
         ),
         candidates AS (
             SELECT DISTINCT ON (combined.resolver_address)
@@ -119,6 +313,7 @@ pub(super) async fn build(
             FROM (
                 SELECT * FROM discovered WHERE source_family IS NOT NULL
                 UNION ALL SELECT * FROM observed
+                UNION ALL SELECT * FROM retained_permission_candidates
             ) combined
             WHERE combined.resolver_address <>
                   '0x0000000000000000000000000000000000000000'
@@ -128,6 +323,11 @@ pub(super) async fn build(
                       WHERE lower(scope.resolver_address) =
                             lower(combined.resolver_address)
                   )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_scope_resolver_passthrough passthrough
+                  WHERE lower(passthrough.resolver_address) =
+                        lower(combined.resolver_address)
               )
             ORDER BY combined.resolver_address,
                      combined.priority,
@@ -256,11 +456,13 @@ pub(super) async fn build(
                    COALESCE(permission.role_count, 0) AS role_count,
                    COALESCE(permission.role_items, '[]'::jsonb) AS role_items,
                    COALESCE(alias.event_count, 0) AS alias_event_count,
-                   COALESCE(permission.event_count, 0) AS permission_event_count
+                   COALESCE(permission.event_count, 0) AS permission_event_count,
+                   COALESCE(citation.event_ids, '[]'::jsonb) AS candidate_event_ids
             FROM supported
             LEFT JOIN project_resolver_binding_summary binding USING (resolver_address)
             LEFT JOIN project_resolver_alias_summary alias USING (resolver_address)
             LEFT JOIN project_resolver_permission_summary permission USING (resolver_address)
+            LEFT JOIN resolver_candidate_citations citation USING (resolver_address)
         )
         INSERT INTO project_stage_resolver_current (
             chain_id, resolver_address, declared_summary, support_status,
@@ -334,7 +536,8 @@ pub(super) async fn build(
                jsonb_strip_nulls(jsonb_build_object(
                    'chain_id', $1, 'manifest_id', manifest_id,
                    'manifest_event_id', manifest_event_id,
-                   'upgrade_event_id', upgrade_event_id
+                   'upgrade_event_id', upgrade_event_id,
+                   'candidate_event_ids', NULLIF(candidate_event_ids, '[]'::jsonb)
                )),
                jsonb_strip_nulls(jsonb_build_object(
                    'block_number', upgrade_block_number,
@@ -347,16 +550,38 @@ pub(super) async fn build(
                ),
                manifest_version
         FROM summarized
+        UNION ALL
+        SELECT current.chain_id,
+               current.resolver_address,
+               current.declared_summary,
+               current.support_status,
+               current.unsupported_reason,
+               current.provenance,
+               current.chain_positions || jsonb_build_object(
+                   'target_block_number', $2,
+                   'target_block_hash', $3
+               ),
+               current.canonicality_summary || jsonb_build_object(
+                   'state', 'canonical_lineage',
+                   'target_block_number', $2,
+                   'target_block_hash', $3
+               ),
+               current.manifest_version
+        FROM resolver_current current
+        JOIN project_scope_resolver_passthrough passthrough
+          ON lower(passthrough.resolver_address) = lower(current.resolver_address)
+        WHERE current.chain_id = $1
         ORDER BY resolver_address
         "#,
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(&target.hash)
-    .bind(full_rebuild)
-    .bind(SUMMARY_SAMPLE_LIMIT)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to build resolver_current", error))?;
+    );
+    sqlx::query(&resolver_build)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .bind(full_rebuild)
+        .bind(SUMMARY_SAMPLE_LIMIT)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to build resolver_current", error))?;
     Ok(())
 }

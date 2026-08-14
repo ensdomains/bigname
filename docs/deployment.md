@@ -35,7 +35,10 @@ Ethereum Sepolia instead records the
 through the finalized head. V2, GraphQL, and operational paths consume its
 phase projections and lookup output. Apply append-only SQLx schema-migrations
 through deployment automation; there is no application schema-migration command
-in the image.
+in the image. A release may also carry explicitly reviewed additive baseline
+indexes whose exact `CREATE INDEX CONCURRENTLY` statements and validity checks
+are listed in the release runbook. Those exceptional indexes are applied and
+recorded as a separate pre-deploy step rather than entered in `_sqlx_migrations`.
 
 ## Server Compose
 
@@ -60,9 +63,11 @@ back to `BIGNAME_DATABASE_URL` for the API. The phase runner and
 schema-migration automation use the writer URL.
 
 Preflight every release with `sqlx migrate info --source migrations` against
-the writer URL and confirm no version is pending. Neither the API nor the
-phase runner reports the applied schema version, so a forgotten schema-migration
-surfaces only as a runtime query failure.
+the writer URL and confirm no version is pending. Also complete any explicitly
+listed manual concurrent baseline-index step and verify each named index before
+starting the new artifact. Neither the API nor the phase runner reports the
+applied schema version, so a forgotten schema-migration or release-specific
+index step surfaces only as a runtime query failure or unacceptable query plan.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current

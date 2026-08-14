@@ -933,11 +933,13 @@ may serve as a name — see [non-name form](#non-name-form) for what serves when
 it may not. A preimage improves display only; it never
 creates ownership, resolver, record, or primary-name truth.
 
-**Projection** — a disposable read-model table rebuilt deterministically from
-canonical facts and normalized events (standard event-sourcing usage);
-resource-keyed rows additionally require the event's resource to resolve to a
-canonical identity row at rebuild time. The schema-v2 Project phase is the only
-projection writer.
+**Projection** — a disposable read-model table whose serving fields are rebuilt
+deterministically from canonical facts and normalized events (standard
+event-sourcing usage); resource-keyed rows additionally require the event's
+resource to resolve to a canonical identity row at rebuild time. A projection
+table may carry explicitly documented Project-owned maintenance fields that
+readers never select and that an affected row rebuild clears. The schema-v2
+Project phase is the only projection writer.
 
 **Raw facts** — the stored record of what was observed on chain: selected
 logs and the transaction/receipt fields needed to decode them. Their content is

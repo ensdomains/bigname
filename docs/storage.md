@@ -23,8 +23,13 @@ in-place schema-migrations for initialized `bigname_phase` databases.
 `phase-runner init-schema` installs the fresh baseline into an empty
 `bigname_phase` namespace and refuses a nonempty target. The phase runner and
 API use that namespace in one database. Reviewed versioned schema-migrations
-upgrade an initialized namespace in place when the change can preserve its
-durable state; the reviewed replacement procedure is required otherwise.
+normally upgrade an initialized namespace in place when the change can preserve
+its durable state; the reviewed replacement procedure is required otherwise.
+An additive baseline index may be an explicitly reviewed release exception when
+its production build must use `CREATE INDEX CONCURRENTLY`: the release runbook
+must carry the exact live DDL, validity checks, recovery procedure, and
+release-record evidence instead of silently treating the baseline edit as an
+initialized-namespace upgrade.
 
 The physical layers are:
 
@@ -91,6 +96,7 @@ state; it is never identity.
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret | Protocol events normalized transactionally with identity output. |
+| `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
@@ -312,9 +318,10 @@ pick up the new preimages through Project:
 - On a populated database, run the import and then redo Project over each
   chain's full retained range, for example
   `phase-runner redo --chain ethereum-mainnet --phase project --from-block <first retained block> --to-block <head>`.
-  A windowed or incremental Project run re-derives only the names touched by
-  events in its window, so it does not pick up preimages for older child edges;
-  the full-range redo is the required sequence.
+  A windowed or incremental Project run re-derives only its affected scope.
+  Child-topology closure can add a connected component, but it does not cover
+  older disconnected child edges; the full-range redo is the required
+  sequence.
 
 [^graph-ens-rainbow-table]: (upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
 [^graph-ens-rainbow-hash]: (upstream: .refs/ens_rainbow/src/main.rs:L50 @ ens_rainbow@bc44492)
@@ -342,7 +349,10 @@ this rule against phase lineage.
 Interpretation is deterministic for a fixed manifest set, interpreter content
 hash, canonical raw facts, and requested block range. A bounded Interpret redo
 may replace only derived identity, discovery, and normalized-event output in
-that range. Raw facts are never edited by replay.
+that range. Immediately before replacement, it may preserve the resolver
+references Project needs to identify rows affected by disappearing events.
+Those coordination rows are consumed by Project publication and are never
+served. Raw facts are never edited by replay.
 
 The ENSv1→ENSv2 `consumer_visibility` rule is included in the interpreter
 content hash. Replaying one fixed hash reproduces the same correlation sets,
@@ -533,8 +543,11 @@ fails the build rather than silently narrowing the fingerprint.
 Project is the only projection writer. It derives the affected scope from
 canonical interpreted input, stages rows in connection-local tables, and
 publishes the affected projection set transactionally. It has no legacy claim
-queue, durable replay stage tables, apply cursors, dead-letter queue, database
-session version stamp, or worker heartbeat.
+queue, general-purpose durable replay stage tables, apply cursors, dead-letter
+queue, database session version stamp, or worker heartbeat. The sole replay
+handoff, `project_redo_resolver_evidence`, contains pre-delete resolver
+references rather than staged projection rows and is consumed by the matching
+redo or later normal catch-up publication.
 
 Consumer slice 2 adds one diagnostic exception to durable staging, not to
 projection ownership. A post-reconciliation dual-current invariant makes the
@@ -635,6 +648,10 @@ manifest drift, watch plans, or execution traces.
   names.
 - Schema-v2 baseline changes require either a reviewed in-place upgrade or the
   documented offline namespace replacement and full pipeline walk.
+- Explicitly reviewed additive baseline indexes may use the manual concurrent
+  build procedure documented for that release. The step must be named in
+  deployment preflight and recorded outside `_sqlx_migrations`; it does not
+  establish a general manual schema-change path.
 - A schema-migration that changes identity, manifest authority, canonicality,
   projection meaning, or replay behavior updates the corresponding contract
   docs in the same change.

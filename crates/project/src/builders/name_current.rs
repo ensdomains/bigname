@@ -141,7 +141,9 @@ pub(super) async fn build(
                        evidence.manifest_versions, '[]'::jsonb
                    ),
                    'derivation_kind', 'name_current_rebuild'
-               ),
+               ) || jsonb_strip_nulls(jsonb_build_object(
+                   'resolver_pointer_source_family', resolver.source_family
+               )),
                jsonb_build_object(
                    CASE $1
                        WHEN 'ethereum-mainnet' THEN 'ethereum'

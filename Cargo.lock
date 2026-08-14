@@ -5688,6 +5688,7 @@ dependencies = [
  "alloy-sol-types",
  "anyhow",
  "axum",
+ "bigname-adapters",
  "bigname-content-hash",
  "bigname-ingest",
  "bigname-interpret",

@@ -957,6 +957,191 @@ async fn prior_state_is_loaded_once_and_folded_forward_across_500_block_batches(
 }
 
 #[tokio::test]
+async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_project() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_interpret_redo_resolver_handoff").await?;
+    let chain = "interpret-redo-resolver-handoff";
+    seed_discovery_fixture(scratch.pool(), chain).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         )
+         SELECT $1, $1 || '-block-' || height::text,
+                $1 || '-block-' || (height - 1)::text,
+                height, to_timestamp(height), 'canonical'::canonicality_state
+         FROM generate_series(2, 501) AS height",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, raw_fact_ref,
+             derivation_kind, canonicality_state, before_state, after_state
+         )
+         SELECT $1 || ':manifest:' || manifest.manifest_id::text,
+                manifest.namespace, 'SourceManifestUpdated', manifest.source_family,
+                manifest.manifest_version, manifest.manifest_id, manifest.chain_id,
+                jsonb_build_object(
+                    'manifest_id', manifest.manifest_id,
+                    'namespace', manifest.namespace,
+                    'source_family', manifest.source_family,
+                    'chain', manifest.chain_id,
+                    'deployment_epoch', manifest.deployment_label
+                ), 'manifest_sync', 'finalized', '{}'::jsonb,
+                jsonb_build_object(
+                    'manifest_version', manifest.manifest_version,
+                    'normalizer_version', manifest.normalizer_version,
+                    'rollout_status', manifest.rollout_status,
+                    'manifest_payload', manifest.manifest_payload
+                )
+         FROM manifest_versions manifest
+         WHERE manifest.chain_id = $1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let registry_manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = $1 AND source_family = 'ens_v2_registry_l1'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id,
+             block_number, block_hash, raw_fact_ref, derivation_kind,
+             canonicality_state, after_state
+         ) VALUES (
+             'retracted-resolver-suffix', 'ens', 'ResolverChanged',
+             'ens_v2_registry_l1', 1, $1, $2, 501, $3,
+             '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical',
+             jsonb_build_object('resolver', lower($4::text))
+         )",
+    )
+    .bind(registry_manifest_id)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
+    .bind(DISCOVERED_RESOLVER)
+    .execute(scratch.pool())
+    .await?;
+    run_project(scratch.pool(), chain, 501, 0, 501).await?;
+    let projected_before: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)
+         )",
+    )
+    .bind(chain)
+    .bind(DISCOVERED_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        projected_before,
+        "fixture must publish the suffix-only resolver"
+    );
+    sqlx::query(
+        "UPDATE resolver_current
+         SET declared_summary = declared_summary || '{\"redo_guard\":true}'::jsonb
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(chain)
+    .bind(DISCOVERED_RESOLVER)
+    .execute(scratch.pool())
+    .await?;
+
+    let first = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: None,
+            mode: InterpretRunMode::Redo,
+        })
+        .await?;
+    assert!(!first.complete);
+    assert_eq!(first.current.number, 499);
+    let restarted_engine = Engine::new(scratch.pool().clone());
+    let restarted = restarted_engine
+        .run_batch(BatchRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: None,
+            mode: InterpretRunMode::Redo,
+        })
+        .await?;
+    assert!(!restarted.complete);
+    let suffix_evidence_survived: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM project_redo_resolver_evidence
+             WHERE chain_id = $1 AND event_identity = 'retracted-resolver-suffix'
+         )",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        suffix_evidence_survived,
+        "redo restart replaced the original handoff with the re-derived prefix"
+    );
+    let finished = restarted_engine
+        .run_batch(BatchRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: Some(restarted.current),
+            mode: InterpretRunMode::Redo,
+        })
+        .await?;
+    assert!(finished.complete);
+    let projected = ProjectEngine::new(scratch.pool().clone())
+        .run_batch(ProjectBatchRequest {
+            chain_id: chain.into(),
+            target_block: 501,
+            affected_from_block: 0,
+            affected_to_block: 501,
+            resume_current: None,
+            mode: ProjectRunMode::Redo,
+        })
+        .await?;
+    assert!(projected.complete);
+    let projected_after: (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS (
+             SELECT 1 FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)
+         ), COALESCE((
+             SELECT declared_summary @> '{\"redo_guard\":true}'::jsonb
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)
+         ), false)",
+    )
+    .bind(chain)
+    .bind(DISCOVERED_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        projected_after,
+        (true, false),
+        "Project did not rebuild the discovered resolver after suffix evidence retracted"
+    );
+    let handoff_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_redo_resolver_evidence WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(handoff_rows, 0, "Project did not consume the redo handoff");
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn zero_capacity_reloads_the_exact_prior_state_from_normalized_events() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_zero_state_cache").await?;
     let chain = "interpret-zero-state-cache";

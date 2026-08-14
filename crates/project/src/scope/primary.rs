@@ -23,5 +23,23 @@ pub(super) async fn seed(transaction: &mut Transaction<'_, Postgres>) -> Result<
     .await
     .map_err(|error| ProjectError::database("failed to derive primary-name scope", error))?;
 
+    sqlx::query(
+        "INSERT INTO project_scope_primary
+         SELECT current.address, current.coin_type, current.namespace
+         FROM primary_names_current current
+         JOIN project_changed_events event
+           ON event.event_kind = 'ResolverChanged'
+          AND current.claim_provenance ->> 'chain_id' = event.chain_id
+          AND lower(event.after_state ->> 'node') =
+              lower(current.claim_provenance ->> 'reverse_node')
+         WHERE current.claim_provenance ->> 'reverse_node' IS NOT NULL
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to scope reverse-resolver primary names", error)
+    })?;
+
     Ok(())
 }

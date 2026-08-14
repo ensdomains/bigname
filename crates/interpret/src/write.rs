@@ -3,6 +3,7 @@ mod identity;
 mod identity_names;
 mod migration;
 mod normalized;
+mod redo;
 
 use bigname_adapters::schema_v2::BatchOutput;
 use bigname_adapters::schema_v2::seam::{
@@ -121,6 +122,7 @@ async fn prepare_redo_range(
     stage_referenced_stable_identities(transaction, chain_id, from_block, to_block).await?;
     orphan_bindings_started_in_range(transaction, chain_id, from_block, to_block).await?;
     reopen_bindings_closed_in_range(transaction, chain_id, from_block, to_block).await?;
+    redo::capture_resolver_evidence(transaction, chain_id, from_block, to_block).await?;
     sqlx::query(
         "
         DELETE FROM normalized_events

@@ -106,7 +106,8 @@ pub(super) async fn build(
         ranked_v2_registrations AS (
             SELECT event.*,
                    row_number() OVER (
-                       PARTITION BY event.logical_name_id
+                       PARTITION BY event.logical_name_id,
+                                    event.after_state ->> 'registry_contract_instance_id'
                        ORDER BY event.block_number DESC NULLS LAST,
                                 event.transaction_index DESC NULLS LAST,
                                 event.log_index DESC NULLS LAST,

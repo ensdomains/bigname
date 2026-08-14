@@ -58,87 +58,30 @@ pub(super) async fn include_time_boundaries(
         wrapper_constants AS (
             SELECT 131072::bigint AS is_dot_eth,
                    7776000::numeric AS grace_period_seconds
-        ),
-        modifiers AS (
-            SELECT DISTINCT ON (event.resource_id)
-                   event.resource_id,
-                   CASE
-                       WHEN jsonb_typeof(event.after_state -> 'fuses') = 'number'
-                        AND (event.after_state ->> 'fuses')::numeric >= 0
-                        AND (event.after_state ->> 'fuses')::numeric <=
-                            9223372036854775807
-                           THEN (event.after_state ->> 'fuses')::bigint
-                   END AS fuses
-            FROM normalized_events event
-            JOIN chain_lineage lineage
-              ON lineage.chain_id = event.chain_id
-             AND lineage.block_number = event.block_number
-             AND lineage.block_hash = event.block_hash
-            WHERE event.chain_id = $1
-              AND event.block_number <= $4
-              AND event.event_kind = 'PermissionScopeChanged'
-              AND event.source_family = 'ens_v1_wrapper_l1'
-              AND event.resource_id IS NOT NULL
-              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            ORDER BY event.resource_id,
-                     event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
-        ),
-        expiries AS (
-            SELECT DISTINCT ON (event.resource_id)
-                   event.resource_id,
-                   CASE
-                       WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
-                        AND (event.after_state ->> 'expiry')::numeric >= 0
-                        AND (event.after_state ->> 'expiry')::numeric <=
-                            18446744073709551615
-                           THEN (event.after_state ->> 'expiry')::numeric
-                   END AS expiry_seconds
-            FROM normalized_events event
-            JOIN chain_lineage lineage
-              ON lineage.chain_id = event.chain_id
-             AND lineage.block_number = event.block_number
-             AND lineage.block_hash = event.block_hash
-            WHERE event.chain_id = $1
-              AND event.block_number <= $4
-              AND event.event_kind = 'ExpiryChanged'
-              AND (
-                    event.source_family = 'ens_v1_wrapper_l1'
-                 OR (
-                        event.source_family = 'ens_v1_registrar_l1'
-                    AND event.after_state ->> 'source_event' = 'NameRenewed'
-                    AND event.after_state ->> 'authority_kind' = 'wrapper'
-                 )
-              )
-              AND event.resource_id IS NOT NULL
-              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            ORDER BY event.resource_id,
-                     event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
         )
-        INSERT INTO project_scope_resources
-        SELECT modifier.resource_id
-        FROM modifiers modifier
-        JOIN expiries expiry USING (resource_id)
+        INSERT INTO project_scope_permission_effect_resources
+        SELECT summary.resource_id
+        FROM permissions_current_resource_summary summary
         CROSS JOIN positions
         CROSS JOIN wrapper_constants
-        WHERE modifier.fuses IS NOT NULL
-          AND expiry.expiry_seconds IS NOT NULL
+        CROSS JOIN LATERAL (
+            SELECT
+                (summary.provenance -> 'wrapper_expiry_boundary' ->> 'fuses')::bigint
+                    AS fuses,
+                (summary.provenance -> 'wrapper_expiry_boundary' ->> 'expiry_seconds')::numeric
+                    AS expiry_seconds
+        ) boundary
+        WHERE summary.provenance ->> 'chain_id' = $1
+          AND summary.provenance ? 'wrapper_expiry_boundary'
           AND (
               (
-                  positions.prior_seconds <= expiry.expiry_seconds
-                  AND expiry.expiry_seconds < positions.target_seconds
+                  positions.prior_seconds <= boundary.expiry_seconds
+                  AND boundary.expiry_seconds < positions.target_seconds
               ) OR (
-                  (modifier.fuses & wrapper_constants.is_dot_eth) <> 0
+                  (boundary.fuses & wrapper_constants.is_dot_eth) <> 0
                   AND positions.prior_seconds <=
-                      expiry.expiry_seconds - wrapper_constants.grace_period_seconds
-                  AND expiry.expiry_seconds - wrapper_constants.grace_period_seconds
+                      boundary.expiry_seconds - wrapper_constants.grace_period_seconds
+                  AND boundary.expiry_seconds - wrapper_constants.grace_period_seconds
                       < positions.target_seconds
               )
           )
@@ -155,6 +98,7 @@ pub(super) async fn include_time_boundaries(
     .map_err(|error| {
         ProjectError::database("failed to scope wrapper timestamp transitions", error)
     })?;
+    include_effect_resources(transaction).await?;
     Ok(())
 }
 
@@ -176,7 +120,7 @@ async fn include_all(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO project_scope_resources
+        INSERT INTO project_scope_permission_effect_resources
         SELECT DISTINCT event.resource_id
         FROM normalized_events event
         JOIN chain_lineage lineage
@@ -198,6 +142,21 @@ async fn include_all(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope wrapper redo", error))?;
+    include_effect_resources(transaction).await?;
+    Ok(())
+}
+
+async fn include_effect_resources(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_scope_resources
+         SELECT resource_id FROM project_scope_permission_effect_resources
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to include permission-effect resources", error)
+    })?;
     Ok(())
 }
 
