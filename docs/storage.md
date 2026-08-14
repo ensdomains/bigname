@@ -391,6 +391,18 @@ summary share one transaction. The previous live handoff remains in place until
 the next normal Ingest pass confirms the reconciled cursor and publishes the
 replacement handoff.
 
+Retained lineage alone does not authorize that reconciliation when an
+interrupted redo has already advanced past its last boundary. If the provider
+then reports a different hash at the same boundary height and that older fork
+also has retained lineage, the resumed redo fails instead of treating the fresh
+hash as newly loaded. The failure keeps the redo marked in progress, clears
+only its resumable progress, and leaves the source cursor unchanged. Re-running
+the redo therefore starts at the requested range beginning and loads the
+boundary under the current [watch plan](glossary.md#watch-plan--watched-tuple)
+before cursor reconciliation can proceed.
+This closes the last-boundary case; binding watch-plan evidence to facts at
+interior range heights remains tracked by issue #376.
+
 ## Interpretation replay
 
 Interpretation is deterministic for a fixed manifest set, interpreter content

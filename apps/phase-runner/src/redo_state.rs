@@ -359,49 +359,7 @@ pub(crate) async fn finish(
     let progress = match outcome {
         RedoOutcome::Completed(progress) => progress,
         RedoOutcome::Failed(error) => {
-            // A partial redo may already have committed derived writes. Keep its marker and redo
-            // cursor durable so normal execution cannot cross that mixed epoch.
-            let result = sqlx::query(
-                "
-                UPDATE chain_phase_state
-                SET last_error = CASE
-                        WHEN last_error LIKE $4
-                            THEN $5
-                                 || substring(last_error FROM char_length($6) + 1)
-                                 || '; last attempt failed: ' || $3
-                        WHEN last_error LIKE $7
-                            THEN last_error || '; last attempt failed: ' || $3
-                        ELSE $3
-                    END,
-                    updated_at = now()
-                WHERE chain_id = $1
-                  AND phase_name = $2
-                  AND redo_in_progress
-                ",
-            )
-            .bind(chain_id)
-            .bind(phase.as_str())
-            .bind(error.to_string())
-            .bind(format!(
-                "{}%",
-                crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX
-            ))
-            .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
-            .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
-            .bind(crate::redo_stamp::required_redo_owner_pattern())
-            .execute(&mut *lock_connection)
-            .await
-            .map_err(|database_error| {
-                RunnerError::database(
-                    format!("failed to record redo failure for chain {chain_id} phase {phase}"),
-                    database_error,
-                )
-            })?;
-            if result.rows_affected() != 1 {
-                return Err(RunnerError::data_integrity(format!(
-                    "redo failure requires an active redo for chain {chain_id} phase {phase}"
-                )));
-            }
+            crate::redo_failure::record(lock_connection, chain_id, phase, error).await?;
             return Ok(());
         }
     };

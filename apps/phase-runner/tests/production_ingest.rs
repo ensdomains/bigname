@@ -51,6 +51,12 @@ const REORG_TRANSACTION: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000013";
 const SECOND_REORG_TRANSACTION: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000023";
+const WIDENED_TRANSACTION: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000033";
+const WIDENED_REORG_TRANSACTION: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000043";
+const WIDENED_SECOND_REORG_TRANSACTION: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000053";
 const ANNOUNCEMENT_TRANSACTION: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000008";
 const REGISTRATION_TRANSACTION: &str =
@@ -532,6 +538,216 @@ async fn resumed_ingest_redo_requires_lineage_before_reconciling_cursor() -> Res
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn resumed_ingest_redo_reloads_a_divergent_boundary_under_the_current_watch_set() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("phase_runner_ingest_redo_watch_boundary").await?;
+    let chain_id = "rpc-ingest-redo-watch-boundary";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, rpc_state, server) = spawn_watch_plan_boundary_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "redo-watch-boundary-runner")?;
+
+    rpc_state.hash_epoch.store(2, Ordering::SeqCst);
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1_SECOND_REORG,
+    )
+    .await?;
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1_SECOND_REORG, CONTRACT,).await?,
+        1,
+        "the initial watch set must load its selected fork-C fact"
+    );
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            chain_id,
+            BLOCK_1_SECOND_REORG,
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        0,
+        "the initial watch set must not select the widened address"
+    );
+
+    rpc_state.hash_epoch.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1,
+    )
+    .await?;
+    widen_watch_set(scratch.pool(), chain_id).await?;
+
+    let interrupting_ingest = Arc::new(InterruptAfterCompletedIngestBatch {
+        inner: IngestPhase::new(scratch.pool().clone()),
+        interrupt_next_batch: AtomicBool::new(false),
+    });
+    let interrupted_runner = production_ingest_runner_with_phase(
+        scratch.runner(),
+        "redo-watch-boundary-interrupted-runner",
+        interrupting_ingest,
+    )?;
+    let interruption = interrupted_runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the wrapper must interrupt after durable final-batch progress");
+    assert!(interruption.to_string().contains("forced interruption"));
+    assert_eq!(
+        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?,
+        (
+            true,
+            Some(BLOCK_1.to_owned()),
+            Some(BLOCK_1.to_owned()),
+            Some(BLOCK_1.to_owned()),
+        )
+    );
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1, SIBLING_CONTRACT).await?,
+        1,
+        "the interrupted redo must durably load fork A under the widened watch set"
+    );
+
+    rpc_state.hash_epoch.store(2, Ordering::SeqCst);
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    let resumed_runner =
+        production_ingest_runner(scratch.runner(), "redo-watch-boundary-resumed-runner")?;
+    let resume_result = resumed_runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await;
+    let silently_resumed = resume_result.is_ok();
+    if silently_resumed {
+        run_until_ingest_handoff(
+            resumed_runner.clone(),
+            configured_chain.clone(),
+            scratch.pool(),
+            BLOCK_1_SECOND_REORG,
+        )
+        .await?;
+    }
+    let cursor_after_resume = load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?;
+    let published_after_resume: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash
+         FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    let widened_fact_after_resume = raw_log_count(
+        scratch.pool(),
+        chain_id,
+        BLOCK_1_SECOND_REORG,
+        SIBLING_CONTRACT,
+    )
+    .await?;
+    let boundary_calls_after_resume = rpc_state.boundary_log_calls.load(Ordering::SeqCst);
+    let resume_error = resume_result.expect_err(&format!(
+        "a resumed empty redo silently reconciled to the old fork: cursor={cursor_after_resume:?}, \
+         published={published_after_resume:?}, boundary_get_logs={boundary_calls_after_resume}, \
+         widened_raw_logs={widened_fact_after_resume}"
+    ));
+    assert_eq!(resume_error.kind(), ErrorKind::DataIntegrity);
+    let message = resume_error.to_string();
+    for expected in [
+        chain_id,
+        "block 1",
+        BLOCK_1,
+        BLOCK_1_SECOND_REORG,
+        "rerun the Ingest redo",
+        "current watch plan",
+    ] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?} in {message}"
+        );
+    }
+    assert_eq!(boundary_calls_after_resume, 0);
+    assert_eq!(
+        cursor_after_resume,
+        (true, None, None, Some(BLOCK_1.to_owned())),
+        "the failed resume must stay marked in progress, clear redo progress, and preserve the truthful cursor"
+    );
+    assert_eq!(published_after_resume, (1, BLOCK_1.to_owned()));
+    assert_eq!(widened_fact_after_resume, 0);
+
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    resumed_runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert!(rpc_state.boundary_log_calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            chain_id,
+            BLOCK_1_SECOND_REORG,
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        1,
+        "the fresh redo must load the widened fact on the newly canonical fork"
+    );
+    run_until_ingest_handoff(
+        resumed_runner,
+        configured_chain,
+        scratch.pool(),
+        BLOCK_1_SECOND_REORG,
+    )
+    .await?;
+    assert_eq!(
+        load_ingest_boundary_state(scratch.pool(), chain_id).await?,
+        (
+            "completed".to_owned(),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+        )
+    );
+    server.abort();
+    scratch.cleanup().await
+}
+
 struct InterruptAfterCompletedIngestBatch {
     inner: IngestPhase,
     interrupt_next_batch: AtomicBool,
@@ -690,6 +906,43 @@ async fn load_boundary_lineage_hashes(pool: &sqlx::PgPool, chain_id: &str) -> Re
     )
     .bind(chain_id)
     .fetch_all(pool)
+    .await?)
+}
+
+async fn load_redo_and_cursor_hashes(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<(bool, Option<String>, Option<String>, Option<String>)> {
+    Ok(sqlx::query_as(
+        "SELECT phase.redo_in_progress, phase.redo_current_block_hash,
+                phase.redo_target_block_hash,
+                cursor.last_processed_block_hash
+         FROM chain_phase_state phase
+         JOIN ingest_cursors cursor USING (chain_id)
+         WHERE phase.chain_id = $1
+           AND phase.phase_name = 'ingest'
+           AND cursor.source_key = 'rpc'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn raw_log_count(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    block_hash: &str,
+    address: &str,
+) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM raw_logs
+         WHERE chain_id = $1 AND block_hash = $2
+           AND lower(emitting_address) = lower($3)",
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(address)
+    .fetch_one(pool)
     .await?)
 }
 
@@ -1919,6 +2172,77 @@ async fn seed_watch_set(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
     Ok(())
 }
 
+async fn widen_watch_set(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
+    let contract_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind, provenance
+         ) VALUES ($1, $2, 'contract', '{}'::jsonb)",
+    )
+    .bind(contract_id)
+    .bind(chain_id)
+    .execute(pool)
+    .await?;
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "test",
+        "source_family": "widened_test_events",
+        "chain": chain_id,
+        "deployment_epoch": "test",
+        "rollout_status": "active",
+        "normalizer_version": "test",
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": {
+            "events": [{
+                "name": "Transfer",
+                "fragment": "event Transfer(address indexed from,address indexed to,uint256 value)",
+                "emitter_roles": [],
+                "normalized_events": []
+            }]
+        }
+    });
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload
+         ) VALUES (1, 'test', 'widened_test_events', $1, 'test', 'active', 'test', $2, $3::jsonb)
+         RETURNING manifest_id",
+    )
+    .bind(chain_id)
+    .bind(format!("tests/{chain_id}-widened.toml"))
+    .bind(payload.to_string())
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances (
+             manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind
+         ) VALUES ($1, $2, 'contract', 'widened', $3, $4, 'widened', 'none')",
+    )
+    .bind(manifest_id)
+    .bind(chain_id)
+    .bind(contract_id)
+    .bind(SIBLING_CONTRACT)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(contract_id)
+    .bind(chain_id)
+    .bind(SIBLING_CONTRACT)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn seed_announcement_watch_set(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
     let anchor_id = Uuid::new_v4();
     sqlx::query(
@@ -2384,6 +2708,182 @@ async fn spawn_hash_switchable_rpc() -> Result<(String, Arc<AtomicU8>, tokio::ta
     Ok((format!("http://{address}/"), hash_epoch, server))
 }
 
+#[derive(Clone)]
+struct WatchPlanBoundaryRpcState {
+    hash_epoch: Arc<AtomicU8>,
+    boundary_log_calls: Arc<AtomicUsize>,
+}
+
+async fn spawn_watch_plan_boundary_rpc() -> Result<(
+    String,
+    WatchPlanBoundaryRpcState,
+    tokio::task::JoinHandle<()>,
+)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let state = WatchPlanBoundaryRpcState {
+        hash_epoch: Arc::new(AtomicU8::new(0)),
+        boundary_log_calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/", post(watch_plan_boundary_rpc))
+                .with_state(server_state),
+        )
+        .await
+        .expect("watch-plan boundary RPC server");
+    });
+    Ok((format!("http://{address}/"), state, server))
+}
+
+async fn watch_plan_boundary_rpc(
+    State(state): State<WatchPlanBoundaryRpcState>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    let hash_epoch = state.hash_epoch.load(Ordering::SeqCst);
+    if let Some(requests) = request.as_array() {
+        return Json(Value::Array(
+            requests
+                .iter()
+                .map(|request| watch_plan_boundary_rpc_response(request, hash_epoch, &state))
+                .collect(),
+        ));
+    }
+    Json(watch_plan_boundary_rpc_response(
+        &request, hash_epoch, &state,
+    ))
+}
+
+fn watch_plan_boundary_rpc_response(
+    request: &Value,
+    hash_epoch: u8,
+    state: &WatchPlanBoundaryRpcState,
+) -> Value {
+    let mut response = hash_switchable_rpc_response(request, hash_epoch);
+    let method = request["method"].as_str().unwrap_or_default();
+    let epoch_boundary = match hash_epoch {
+        0 => BLOCK_1,
+        1 => BLOCK_1_REORG,
+        2 => BLOCK_1_SECOND_REORG,
+        other => panic!("unsupported hash epoch {other}"),
+    };
+    if matches!(method, "eth_getBlockByNumber" | "eth_getBlockByHash")
+        && response["result"]["number"] == "0x1"
+    {
+        let returned_hash = response["result"]["hash"]
+            .as_str()
+            .expect("boundary block hash")
+            .to_owned();
+        let (_, widened_transaction) = watch_plan_transactions(&returned_hash);
+        add_widened_transaction(
+            &mut response,
+            &returned_hash,
+            widened_transaction,
+            request.pointer("/params/1") == Some(&Value::Bool(true)),
+        );
+        return response;
+    }
+    if method == "eth_getBlockReceipts"
+        && request.pointer("/params/0").and_then(Value::as_str) != Some(BLOCK_0)
+    {
+        let requested_hash = request
+            .pointer("/params/0")
+            .and_then(Value::as_str)
+            .unwrap_or(epoch_boundary);
+        let (primary_transaction, widened_transaction) = watch_plan_transactions(requested_hash);
+        let mut widened_receipt = switchable_receipt(requested_hash, widened_transaction);
+        widened_receipt["transactionIndex"] = json!("0x1");
+        response["result"] = json!([
+            switchable_receipt(requested_hash, primary_transaction),
+            widened_receipt,
+        ]);
+        return response;
+    }
+    if method != "eth_getLogs" {
+        return response;
+    }
+    let filter = request.pointer("/params/0").cloned().unwrap_or_default();
+    let block_hash = filter
+        .get("blockHash")
+        .and_then(Value::as_str)
+        .unwrap_or(epoch_boundary);
+    if block_hash == BLOCK_0 {
+        return response;
+    }
+    let selects_boundary = filter.get("blockHash").is_some()
+        || (rpc_quantity(filter.get("fromBlock")).unwrap_or_default() <= 1
+            && rpc_quantity(filter.get("toBlock")).unwrap_or(i64::MAX) >= 1);
+    if !selects_boundary {
+        response["result"] = json!([]);
+        return response;
+    }
+    state.boundary_log_calls.fetch_add(1, Ordering::SeqCst);
+    let addresses = filter
+        .get("address")
+        .map(string_filter_values)
+        .unwrap_or_default();
+    let transaction_hash = match block_hash {
+        BLOCK_1 => TRANSACTION,
+        BLOCK_1_REORG => REORG_TRANSACTION,
+        BLOCK_1_SECOND_REORG => SECOND_REORG_TRANSACTION,
+        _ => return response,
+    };
+    let includes = |address: &str| {
+        addresses.is_empty()
+            || addresses
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(address))
+    };
+    let mut logs = Vec::new();
+    if includes(CONTRACT) {
+        logs.push(switchable_log(block_hash, transaction_hash));
+    }
+    if includes(SIBLING_CONTRACT) {
+        let (_, widened_transaction) = watch_plan_transactions(block_hash);
+        logs.push(switchable_widened_log(block_hash, widened_transaction));
+    }
+    response["result"] = Value::Array(logs);
+    response
+}
+
+fn watch_plan_transactions(block_hash: &str) -> (&'static str, &'static str) {
+    match block_hash {
+        BLOCK_1 => (TRANSACTION, WIDENED_TRANSACTION),
+        BLOCK_1_REORG => (REORG_TRANSACTION, WIDENED_REORG_TRANSACTION),
+        BLOCK_1_SECOND_REORG => (SECOND_REORG_TRANSACTION, WIDENED_SECOND_REORG_TRANSACTION),
+        other => panic!("unsupported watch-plan block hash {other}"),
+    }
+}
+
+fn add_widened_transaction(
+    response: &mut Value,
+    block_hash: &str,
+    transaction_hash: &str,
+    full: bool,
+) {
+    let transaction = if full {
+        json!({
+            "hash": transaction_hash,
+            "blockHash": block_hash,
+            "blockNumber": "0x1",
+            "transactionIndex": "0x1",
+            "from": SENDER,
+            "to": SIBLING_CONTRACT,
+            "input": "0xbeef",
+            "value": "0x0"
+        })
+    } else {
+        json!(transaction_hash)
+    };
+    response["result"]["transactions"]
+        .as_array_mut()
+        .expect("boundary block transactions")
+        .push(transaction);
+}
+
 async fn hash_switchable_rpc(
     State(hash_epoch): State<Arc<AtomicU8>>,
     Json(request): Json<Value>,
@@ -2518,6 +3018,23 @@ fn switchable_log(block_hash: &str, transaction_hash: &str) -> Value {
             format!("0x{}", "00".repeat(32))
         ],
         "data": "0x"
+    })
+}
+
+fn switchable_widened_log(block_hash: &str, transaction_hash: &str) -> Value {
+    json!({
+        "blockHash": block_hash,
+        "blockNumber": "0x1",
+        "transactionHash": transaction_hash,
+        "transactionIndex": "0x1",
+        "logIndex": "0x1",
+        "address": SIBLING_CONTRACT,
+        "topics": [
+            TRANSFER_TOPIC,
+            format!("0x{}", "00".repeat(32)),
+            format!("0x{}", "00".repeat(32))
+        ],
+        "data": "0x1234"
     })
 }
 

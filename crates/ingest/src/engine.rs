@@ -20,6 +20,7 @@ use crate::{
 
 mod live;
 mod query;
+mod redo;
 mod source_floor;
 
 const BLOCKS_PER_BATCH: i64 = 256;
@@ -274,6 +275,13 @@ impl Engine {
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
                 Some(loaded.marker)
             } else if to >= source_target_number {
+                redo::reject_lineage_backed_boundary_change(
+                    &self.pool,
+                    &request.chain_id,
+                    request.resume_current.as_ref(),
+                    &source_target,
+                )
+                .await?;
                 Some(source_target.clone())
             } else {
                 request
