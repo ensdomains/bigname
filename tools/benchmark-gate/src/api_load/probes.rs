@@ -51,6 +51,21 @@ pub(super) async fn probe_default_primary_name(
     client: &Client,
     base: &Url,
     corpus: &Corpus,
+    budgets: &GateBudgets,
+) -> Result<DefaultPrimaryNameProbe> {
+    probe_default_primary_name_with_requirement(
+        client,
+        base,
+        corpus,
+        budgets.api_require_populated_probes,
+    )
+    .await
+}
+
+async fn probe_default_primary_name_with_requirement(
+    client: &Client,
+    base: &Url,
+    corpus: &Corpus,
     require_nonempty: bool,
 ) -> Result<DefaultPrimaryNameProbe> {
     let probes = default_primary_name_requests(base, corpus)?;
@@ -226,26 +241,6 @@ mod tests {
         assert!(failure.contains("coin type \"60\""));
         assert!(failure.contains("0x0000000000000000000000000000000000000001"));
         assert!(failure.contains("returned HTTP 503"));
-    }
-
-    #[test]
-    fn default_source_probe_rejects_an_indexed_only_success() {
-        let body = json!({
-            "data": {
-                "answers": [{"source": "indexed", "status": "ok", "name": "example.eth"}]
-            }
-        });
-
-        let failure = default_primary_name_failure(
-            "ens",
-            "0x0000000000000000000000000000000000000001",
-            "60",
-            StatusCode::OK,
-            Some(&body),
-        )
-        .expect("omitted source must return indexed and verified answers");
-
-        assert!(failure.contains("documented indexed-then-verified answer pair"));
     }
 
     #[test]
@@ -451,9 +446,10 @@ mod tests {
             parents_by_namespace: Default::default(),
         };
 
-        let report = probe_default_primary_name(&Client::new(), &base, &corpus, true)
-            .await
-            .unwrap();
+        let report =
+            probe_default_primary_name_with_requirement(&Client::new(), &base, &corpus, true)
+                .await
+                .unwrap();
         server.await.unwrap();
         assert_eq!(report.requests_sent, 2);
         assert_eq!(report.outcomes.get("http_200"), Some(&1));
@@ -521,7 +517,7 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
         let budgets = BudgetsFile::load(&path).unwrap();
 
-        let report = probe_default_primary_name(
+        let report = probe_default_primary_name_with_requirement(
             &Client::new(),
             &base,
             &corpus,
@@ -563,9 +559,10 @@ mod tests {
             parents_by_namespace: Default::default(),
         };
 
-        let report = probe_default_primary_name(&Client::new(), &base, &corpus, false)
-            .await
-            .unwrap();
+        let report =
+            probe_default_primary_name_with_requirement(&Client::new(), &base, &corpus, false)
+                .await
+                .unwrap();
         assert_eq!(report.requests_sent, 0);
         assert!(report.outcomes.is_empty());
         assert!(report.failures.is_empty());
@@ -591,3 +588,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "probes/tests/mutation.rs"]
+mod mutation_tests;

@@ -22,7 +22,7 @@ justification = "Snapshot admission, anchor fallback, and canonical-lineage proo
 
 [[files]]
 path = "tools/benchmark-gate/src/api_load.rs"
-loc = 1086
+loc = 1081
 justification = "The benchmark API orchestrator keeps target-identity boundaries, seed probes, timed sampling, and the single report contract together so a release gate cannot omit a validation phase."
 review_justification = "Reviewed as non-serving release tooling: the file is below the 1200 LOC ceiling, its route workload builders and corpus loading are split into child modules, and its remaining code is one auditable gate sequence plus focused tests."
 

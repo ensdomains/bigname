@@ -181,13 +181,8 @@ pub async fn run(
         ));
     }
     let corpus = Corpus::load(pool, budgets).await?;
-    let default_primary_name_probe = probes::probe_default_primary_name(
-        &client,
-        &base,
-        &corpus,
-        budgets.api_require_populated_probes,
-    )
-    .await?;
+    let default_primary_name_probe =
+        probes::probe_default_primary_name(&client, &base, &corpus, budgets).await?;
     let mut failures = default_primary_name_probe.failures;
     let mut endpoint_reports = Vec::with_capacity(budgets.endpoints.len());
     let mut postflight_identity = None;
