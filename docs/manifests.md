@@ -349,18 +349,57 @@ group ID uses the BaseRegistrar emitter, controller account, event kind, anchor
 position, and complete evidence set; it does not invent a logical name or use
 the transaction hash as identity.
 
-A BaseRegistrar `NameRegistered` whose owner is the declared Graveyard is
-correlation evidence, never proof of an ENSv1→ENSv2 authority transition.
-Graveyard cleanup can produce that shape without transferring authority to
-ENSv2; its group uses
-`correlation_kind=graveyard_cleanup`. `MigrationApplied` requires the
-complete per-name controller path and successful v2 registration in addition to
-the Graveyard evidence. Slice-1 negative fixtures cover Graveyard cleanup
+A BaseRegistrar `NameRegistered` whose owner is the declared Graveyard and
+whose [emitted expiry](glossary.md#emitted-expiry) is exactly `uint64` maximum
+minus the ENSv1 BaseRegistrar grace period is
+[Graveyard cleanup](glossary.md#graveyard-cleanup): historical evidence, never
+a registration, lease, current-authority, wrapped-state, resource, token-lineage,
+or surface-binding fact. The Graveyard produces that shape when `clear`
+self-claims a fully expired name.
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158-L170 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L154 @ ens_v1@91c966f)
+Its group uses `correlation_kind=graveyard_cleanup`. A Graveyard-held event with
+any other expiry does not satisfy this classification. `MigrationApplied`
+requires the complete per-name controller path and successful v2 registration
+in addition to the Graveyard evidence. Negative fixtures cover Graveyard cleanup
 without an ENSv1→ENSv2 authority transition, unrelated Graveyard-owned registrar
 events, bridge-less BaseRegistrar renewals, and unrelated events co-located in a
 batch transaction.
-BaseRegistrar `NameRenewed` is retained only for a matching per-name bridge
-renewal. Controller additions and removals remain name-independent permission
+
+A version-zero ownerless [premigration reservation](glossary.md#premigration-reservation)
+materializes stable backing-resource and token-lineage identities for the
+registry entry, but no token mint, registration, current authority, or surface
+binding. `ResolverUpdated` and `ExpiryUpdated` before a claim remain normalized
+against that same resource. The claim keeps the identities and uses the expiry
+emitted by `LabelRegistered`; the adapter does not reconstruct a grace-period or
+bridge-offset formula. The later `TokenResource` emission confirms the
+registered ENSv2 EAC resource before any surface binding is created. A mismatch
+between that emitted resource and the reservation's retained resource is an
+interpretation error rather than permission to manufacture a second authority
+object. A reservation whose emitted token has nonzero version bits remains
+reservation evidence without a derived resource: upstream tracks token and EAC
+resource versions independently, so the token alone cannot identify the
+resource in that case. The upstream claim path copies the stored reservation
+expiry when its expiry input is zero and then emits the copied value.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L468 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471-L475 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629-L647 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@ccaeb58)
+An `ExpiryUpdated` for that non-derived entry can still join its BaseRegistrar
+and bridge facts as a resource-less `synchronized_renewal`; correlation uses the
+logical name, emitted expiry, exact emitters, and log order rather than inventing
+a resource anchor.
+
+BaseRegistrar `NameRenewed` observations that participate in a bridge or
+NameWrapper synchronization use `correlation_kind=synchronized_renewal`.
+Another launch-bounded BaseRegistrar renewal remains candidate historical
+evidence under `after_state.lifecycle_classification=historical_renewal`; it
+does not materialize an ENSv1 resource, token lineage, authority transition, or
+surface binding. This
+retains post-boundary ENSv1 residue without allowing it to overwrite ENSv2
+authority. Controller additions and removals remain name-independent permission
 history. The selected Sepolia deployment profile has no pre-existing ENSv1
 registrar source, so every controller event admitted through this launch-bounded
 declaration is candidate in slice 1. The manifest's
@@ -374,7 +413,14 @@ event around a multi-label
 every participating name; it is not duplicated per name and remains candidate
 until all referenced groups activate. A controller event outside such a batch
 uses the name-independent `controller_configuration` derivation group above.
-(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows anchored to their own resources; no transaction-level synthetic renewal is created. In slice 1 the bridge row uses the already-materialized ENSv2 `resource_id`, while a launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it does not materialize an ordinary ENSv1 resource or token lineage before later consumer activation. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
+(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows; no transaction-level synthetic renewal is created. A resource-bearing registry observation retains its resource, and the bridge observation uses that already-materialized ENSv2 `resource_id`. When the reserved registry resource cannot be derived, both observations remain resource-less rather than inventing an anchor. A launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it does not materialize an ordinary ENSv1 resource or token lineage before later consumer activation. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
+
+The deployed launch sequence removes the public ENSv1 registration controllers
+and installs only the Graveyard and `ETHRenewerV1`; the setup script's deployer
+controller addition is inside its fork-rehearsal branch.
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L844-L888 @ ens_v2@ccaeb58)
+Production fixtures therefore reject a controller sequence copied from that
+fork-only topology as evidence of a fresh ENSv1 registration stream.
 
 `MigrationHelper` at `0xd54a53c1567b26f9653c8565dccc39bceb6ab327`,
 starting at block `11163415`,

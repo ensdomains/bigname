@@ -175,22 +175,22 @@ impl State {
             });
             let previous = token.name.clone();
             let previous_shadow = token.shadow_name.clone();
+            let current_resource = token
+                .registration
+                .is_some()
+                .then_some(token.resource_id)
+                .flatten();
             let changed = previous != name || previous_shadow != shadow_name;
             if changed {
                 let previous_surface = previous.as_ref().map(|name| name.logical_name_id.clone());
                 let current_surface = name.as_ref().map(|name| name.logical_name_id.clone());
                 if let Some(previous) = previous.as_ref()
+                    && token.registration.is_some()
                     && token.resource_id.is_some_and(|resource_id| {
                         self.active_resources.get(&previous.logical_name_id) == Some(&resource_id)
                     })
                 {
                     self.active_resources.remove(&previous.logical_name_id);
-                }
-                if let Some(current) = name.as_ref()
-                    && let Some(resource_id) = token.resource_id
-                {
-                    self.active_resources
-                        .insert(current.logical_name_id.clone(), resource_id);
                 }
                 transitions.push(V2NameTransition {
                     registry: emitter.to_owned(),
@@ -217,6 +217,12 @@ impl State {
                 current.name = name.clone();
                 current.shadow_name = shadow_name.clone();
                 self.replace_v2_token_indexes(&key, Some(&token), Some(&current));
+            }
+            if let Some(current) = name.as_ref()
+                && let Some(resource_id) = current_resource
+            {
+                self.active_resources
+                    .insert(current.logical_name_id.clone(), resource_id);
             }
             if let Some(current) = self.v2_tokens.get_mut(&key) {
                 current.name = name;

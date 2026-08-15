@@ -365,7 +365,10 @@ does. The stable correlation ID is derived from `correlation_kind`, logical
 name when applicable, anchor position, and complete evidence set, never from the
 transaction hash alone. A `controller_configuration` ID instead uses the
 registrar emitter, controller account, and event kind in place of a logical
-name. A later operation has a different ID.
+name. A later operation has a different ID. A [historical
+renewal](#historical-renewal) is not a `correlation_kind`; its normalized event
+instead carries `after_state.lifecycle_classification=historical_renewal` and a
+deterministic migration correlation ID.
 
 Every dependent effect whose existence relies on the correlation carries a
 sorted, duplicate-free `migration_correlation_ids` set and
@@ -436,14 +439,39 @@ return zero
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L259 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L626 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L653 @ ens_v2@ccaeb58).
-During the remaining ENSv2 28-day grace window, the status is `AVAILABLE` but
+During the remaining configured ENSv2 grace window, the status is `AVAILABLE` but
 the registrar still treats the entry as in grace, and `ETHRenewerV1` can still
 renew it
 (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L290 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L145 @ ens_v2@ccaeb58).
 The consequence for an indexer: before that expiry, a name can carry ENSv2
 expiry and resolver facts, and no owner, while ENSv1 is still the authority for
-it. Reserved entries are not registrations.
+it. For the version-zero initial reservations used by premigration, bigname
+attaches those facts to a stable registry-entry [resource](#resource) and
+token-lineage identity, but creates no token mint or [surface
+binding](#surface-binding); the identities are not a registration or current
+authority. The lower 32 bits carry the independently maintained token and EAC
+resource versions, so a nonzero-token reservation remains reservation evidence
+without an invented resource. A later successful claim reuses the derivable
+identities, while its `TokenResource` emission confirms the resource and can
+bind the name. Reserved entries are not registrations.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L468 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629-L647 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@ccaeb58)
+
+**Emitted expiry** — an expiry timestamp decoded directly from the event that
+writes or reports it. For ENSv1→ENSv2 migration, bigname stores the independent
+values emitted by `LabelReserved`, `LabelRegistered`, `ExpiryUpdated`, the
+ENSv1 BaseRegistrar `NameRenewed`, and the applicable registrar `NameRenewed`.
+It never replaces one with a value reconstructed from a duration, grace period,
+or cross-version offset. The registry emits the supplied reservation expiry,
+copies the stored expiry when a claim passes zero, and emits every renewal's
+`newExpiry`.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L444-L468 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214-L229 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2@ccaeb58)
 
 **Migration controller** — an ENSv2 contract that accepts a transferred ENSv1
 token and performs that name's migration. There are two, split by whether the
@@ -730,6 +758,18 @@ expiry at `uint64` max minus the ENSv1 grace period
 which surfaces as an ENSv1 `NameRegistered` naming the Graveyard as registrant
 with an absurdly distant expiry.
 
+**Graveyard cleanup** (`graveyard_cleanup`) — the historical classification for
+that BaseRegistrar `NameRegistered` only when both terminal conditions are
+present: the declared Graveyard is the holder and the emitted expiry is exactly
+`uint64` maximum minus the ENSv1 BaseRegistrar grace period. It is retained as
+evidence and is never a
+registration, lease, backing resource, token lineage, wrapped state, current
+authority, or surface binding. The expiry is terminal evidence, not a usable
+lease deadline.
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158-L170 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L154 @ ens_v1@91c966f)
+
 **ETHRenewerV1** — the only renewal path left for a name that was
 [premigrated](#premigration-reservation) but has not migrated. The deployment
 script's activation sequence revokes every ENSv1 registration path as a
@@ -753,6 +793,23 @@ registrar controller and removing it again within the same call
 (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58).
 Any code that treats the ENSv1 controller set as static, or `ControllerAdded`
 as a rare governance event, is wrong once this is live.
+
+**Synchronized renewal** (`synchronized_renewal`) — one renewal operation whose
+separate ENSv2 registry, ENSv1 BaseRegistrar, and renewal-bridge emissions remain
+separate normalized facts, retaining resource anchors only when derivable. The
+adapter correlates those facts per name but does not synthesize a transaction-level
+replacement or calculate one arm from another. The bridge first emits the ENSv2
+`ExpiryUpdated`, then renews the ENSv1 registrar by the same duration, and emits
+its own `NameRenewed` with the ENSv2 `newExpiry`.
+(upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L132-L148 @ ens_v2@ccaeb58)
+
+**Historical renewal** (`historical_renewal`) — a launch-bounded ENSv1
+BaseRegistrar renewal that is not part of a synchronized renewal group. Its
+emitted expiry remains candidate historical evidence, but the observation does
+not materialize a resource, token lineage, authority transition, or surface
+binding. This preserves a post-ENSv1→ENSv2 migration ENSv1 arm without treating it as
+current authority.
 
 **v1 fallback resolver** (`ENSV1Resolver`, exposed as `V1_RESOLVER`) — the
 ENSv2-side resolver that answers by reading ENSv1. It looks the name up in the

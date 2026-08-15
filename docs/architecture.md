@@ -506,6 +506,37 @@ Identity, preimage, discovery: `PreimageObserved`, `NameClassified`, `SurfaceBou
 
 Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied` (schema-admitted as candidate-only until consumer activation), `PricingPolicyChanged`.
 
+For a version-zero initial `RegistrationReserved`, the emitted token ID also
+identifies the ENSv2 registry-entry resource, so interpretation materializes the
+stable resource and token-lineage identities without a token mint or
+`SurfaceBinding`. Resolver and [emitted-expiry](glossary.md#emitted-expiry)
+observations may refer to that resource before a claim, but they do not become
+registration or authority facts.
+A successful claim retains those identities and copies the expiry emitted by
+`LabelRegistered`; its later `TokenResource` confirms the retained resource and
+can bind the name. A reservation with nonzero version bits remains reservation
+evidence without an invented resource because token and EAC resource versions
+can differ. Upstream stores independent token and EAC versions, writes them into
+the lower 32 bits, emits `LabelReserved` for the ownerless state, copies the
+stored expiry when a claim supplies zero, and emits `TokenResource` only after
+the registered token mint.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L468 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471-L475 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629-L647 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@ccaeb58)
+Interpretation never derives an expiry from a grace period, renewal duration, or
+cross-version offset.
+
+An ENSv1 BaseRegistrar `NameRegistered` naming the declared Graveyard with the
+exact terminal expiry emitted by `clear` normalizes only as
+[`graveyard_cleanup`](glossary.md#graveyard-cleanup) historical evidence. It
+creates no registration, lease, backing resource, token lineage, wrapped state,
+authority transition, or surface binding.
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158-L170 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L154 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+
 Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`, `ResolutionEpochChanged`.
 
 Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `WildcardCoverageChanged`, `RecordChanged`, `RecordVersionChanged`, `RecordInventoryObserved`.
@@ -550,9 +581,12 @@ ENSv2 mappings:
   candidate event performs no `SurfaceBinding` transition. Slice 2A defines and
   tests the explicit activated transition operation, but production activation
   remains deferred.
-- Synchronized renewal interpretation preserves separate bridge, ENSv1
-  registrar, and ENSv2 registry normalized rows at their own resource anchors.
-  It never collapses a transaction into one synthetic renewal.
+- [Synchronized renewal](glossary.md#synchronized-renewal) interpretation preserves separate bridge, ENSv1
+  registrar, and ENSv2 registry normalized rows. A resource-bearing registry
+  observation retains its derived resource and the bridge uses that resource;
+  when the reserved registry resource cannot be derived, the registry and bridge
+  observations remain resource-less. Interpretation never collapses a
+  transaction into one synthetic renewal.
 - `TokenResourceLinked` ← upstream `TokenResource(tokenId, resource)`. The only adapter event linking current token ID to upstream EAC resource.[^v2-iperm-l34][^v2-pr-l216]
 - `TokenRegenerated` ← upstream `TokenRegenerated(oldTokenId, newTokenId)`. Preserves `resource_id`, `token_lineage_id`, and active surface binding.[^v2-events-l69][^v2-pr-l451]
 - `TokenControlTransferred` ← each positive-value item in upstream ERC-1155 `TransferSingle` or `TransferBatch` when both `from` and `to` are nonzero. A batch item produces its own normalized event. The upstream update changes the current owner only for positive values and uses the zero address for mint and burn, so those lifecycle logs do not become token-control transfers. Both events are present in the deployed `ETHRegistry` and `UserRegistryImpl` ABIs. (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L194 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L201 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L208 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L210 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L318 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L333 @ ens_v2@ccaeb58)

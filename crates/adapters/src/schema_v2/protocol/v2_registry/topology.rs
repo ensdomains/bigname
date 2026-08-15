@@ -1,3 +1,4 @@
+use alloy_primitives::U256;
 use serde_json::{Value, json};
 
 use crate::schema_v2::{
@@ -20,11 +21,18 @@ pub(super) fn append_v2_name_transitions(
             continue;
         }
         if let Some(previous) = transition.previous.as_ref() {
-            output.binding_closures.push(BindingClosureDraft {
-                logical_name_id: previous.logical_name_id.clone(),
-                authority_arm: "ens_v2".to_owned(),
-            });
-            if let Some(resource_id) = transition.resource_id {
+            if transition.registration.is_some() {
+                output.binding_closures.push(BindingClosureDraft {
+                    logical_name_id: previous.logical_name_id.clone(),
+                    authority_arm: "ens_v2".to_owned(),
+                });
+            }
+            if let Some(resource_id) = transition
+                .registration
+                .as_ref()
+                .and(transition.resource_id.as_ref())
+                .copied()
+            {
                 output.events.push(EventDraft {
                     event_kind: "SurfaceUnbound".to_owned(),
                     logical_name_id: Some(previous.logical_name_id.clone()),
@@ -76,12 +84,17 @@ pub(super) fn append_v2_name_transitions(
         let Some(ref current) = transition.current else {
             continue;
         };
+        let bound_resource = transition
+            .registration
+            .as_ref()
+            .and(transition.resource_id.as_ref())
+            .copied();
         output.names.push(NameDraft {
             labels: current.labels.clone(),
             namehash: current.namehash.clone(),
             resource_id: transition.resource_id,
             token_lineage_id: transition.token_lineage_id,
-            surface_binding_id: transition.resource_id.map(|_| {
+            surface_binding_id: bound_resource.map(|_| {
                 crate::schema_v2::common::stable_uuid(&format!(
                     "ens-v2-surface-binding-rebound:{}:{}:{}:{}:{}:{}:{}",
                     raw.chain_id,
@@ -96,13 +109,13 @@ pub(super) fn append_v2_name_transitions(
                     raw.log_index,
                 ))
             }),
-            bind: transition.resource_id.is_some(),
+            bind: bound_resource.is_some(),
             binding_kind: "declared_registry_path".to_owned(),
             authority_arm: "ens_v2".to_owned(),
             source_kind: format!("{source_event}_registry_suffix"),
             preimage_metadata: None,
         });
-        if let Some(resource_id) = transition.resource_id {
+        if let Some(resource_id) = bound_resource {
             output.events.push(EventDraft {
                 event_kind: "SurfaceBound".to_owned(),
                 logical_name_id: Some(current.logical_name_id.clone()),
@@ -148,11 +161,18 @@ fn append_removed_name(
     let Some(previous) = transition.previous.as_ref() else {
         return;
     };
-    output.binding_closures.push(BindingClosureDraft {
-        logical_name_id: previous.logical_name_id.clone(),
-        authority_arm: "ens_v2".to_owned(),
-    });
-    let Some(resource_id) = transition.resource_id else {
+    if transition.registration.is_some() {
+        output.binding_closures.push(BindingClosureDraft {
+            logical_name_id: previous.logical_name_id.clone(),
+            authority_arm: "ens_v2".to_owned(),
+        });
+    }
+    let Some(resource_id) = transition
+        .registration
+        .as_ref()
+        .and(transition.resource_id.as_ref())
+        .copied()
+    else {
         return;
     };
     output.events.push(EventDraft {
@@ -340,13 +360,15 @@ pub(super) fn append_terminal_boundaries(
         .name
         .as_ref()
         .map(|name| name.logical_name_id.clone());
-    if let Some(logical_name_id) = logical_name_id.as_ref() {
+    if linked.registration.is_some()
+        && let Some(logical_name_id) = logical_name_id.as_ref()
+    {
         output.binding_closures.push(BindingClosureDraft {
             logical_name_id: logical_name_id.clone(),
             authority_arm: "ens_v2".to_owned(),
         });
     }
-    if linked.resource_id.is_some() && logical_name_id.is_some() {
+    if linked.registration.is_some() && linked.resource_id.is_some() && logical_name_id.is_some() {
         output.events.push(EventDraft {
             event_kind: "SurfaceUnbound".to_owned(),
             logical_name_id: logical_name_id.clone(),
@@ -394,5 +416,24 @@ pub(super) fn append_terminal_boundaries(
             after_state,
             state_scope: String::new(),
         });
+    }
+}
+
+pub(super) fn discovery_observation_key(
+    raw: &crate::schema_v2::RawLogInput,
+    token_id: U256,
+    resolver: bool,
+) -> String {
+    let mut bytes = token_id.to_be_bytes::<32>();
+    bytes[28..].fill(0);
+    let base = format!(
+        "{}:{:#x}",
+        raw.emitting_address.to_ascii_lowercase(),
+        U256::from_be_bytes(bytes)
+    );
+    if resolver {
+        format!("resolver:{base}")
+    } else {
+        base
     }
 }

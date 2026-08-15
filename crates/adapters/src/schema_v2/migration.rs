@@ -37,7 +37,6 @@ pub(super) fn correlate(
     let base_registrar_instance = catalog
         .declared_contract_instance_for_role(MIGRATION_FAMILY, "ens_v1_base_registrar")
         .context("migration manifest has no ENSv1 BaseRegistrar contract instance")?;
-
     let mut by_transaction = BTreeMap::<(String, String), Vec<&MigrationObservation>>::new();
     for observation in &observations {
         by_transaction
@@ -48,11 +47,11 @@ pub(super) fn correlate(
             .or_default()
             .push(observation);
     }
-
     let mut boundaries = Vec::new();
     for transaction_observations in by_transaction.values() {
         correlate_renewals(transaction_observations, output)?;
         correlate_controllers(name_wrapper, transaction_observations, output)?;
+        correlate_historical_renewals(transaction_observations, output)?;
         correlate_cleanups(transaction_observations, &graveyard, output)?;
         let registry_groups =
             correlate_registry_creation(catalog, transaction_observations, &locked, output)?;
@@ -71,9 +70,8 @@ pub(super) fn correlate(
     }
 
     associate_restored_registry_effects(catalog, output)?;
-    // Direct ENSv1→ENSv2 migration-family events that did not satisfy a complete supported
-    // shape are not admitted as normalized facts. This keeps unrelated factory and registrar
-    // logs out.
+    // Logs from the ENSv1→ENSv2 migration source that do not match an admitted shape are omitted;
+    // unrelated factory logs stay out.
     output.normalized_events.retain(|event| {
         event.source_family != MIGRATION_FAMILY || event.consumer_visibility == CANDIDATE
     });
@@ -108,9 +106,9 @@ fn correlate_renewals(
                     .log_index
                     .is_some_and(|index| index < bridge.raw.log_index)
         });
-        if !["ExpiryChanged", "RegistrationRenewed"]
-            .into_iter()
-            .all(|kind| v2_events.iter().any(|event| event.event_kind == kind))
+        if !v2_events
+            .iter()
+            .any(|event| event.event_kind == "ExpiryChanged")
         {
             continue;
         }
@@ -136,16 +134,18 @@ fn correlate_renewals(
             .iter()
             .filter_map(|event| event.resource_id)
             .collect::<BTreeSet<_>>();
-        if resources.len() != 1 {
+        if resources.len() > 1 {
             continue;
         }
-        let successor_resource = resources.pop_first().expect("one renewal resource");
+        let successor_resource = resources.pop_first();
         let mut evidence = vec![observation_evidence(bridge), observation_evidence(base)];
         evidence.extend(v2_events.iter().map(event_evidence));
         let correlation_id =
             correlation_id("synchronized_renewal", Some(&logical_name_id), &evidence);
         mark_direct_position(output, &bridge.raw, &correlation_id);
-        anchor_direct_position(output, &bridge.raw, successor_resource);
+        if let Some(successor_resource) = successor_resource {
+            anchor_direct_position(output, &bridge.raw, successor_resource);
+        }
         mark_direct_position(output, &base.raw, &correlation_id);
         for event in &v2_events {
             associate_event(

@@ -23,6 +23,18 @@ fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
 }
 #[test]
 fn v2_targeted_invalidation_matches_the_former_full_walk() {
+    assert_targeted_refresh_matches_full_walk(reserved_state(), |state| {
+        state.attach_v2_unbound_resource(
+            ROOT,
+            "0x01",
+            "0x99".to_owned(),
+            Uuid::from_u128(99),
+            Some(Uuid::from_u128(100)),
+        );
+    });
+    assert_targeted_refresh_matches_full_walk(reserved_resource_state(), |state| {
+        install_token(state, ROOT, "0x01", b"alpha", 200);
+    });
     assert_targeted_refresh_matches_full_walk(nested_state(100), |state| {
         state.set_v2_parent_claim(CHILD, None, b"sub");
     });
@@ -129,6 +141,28 @@ fn v2_reverse_indexes_resolve_hits_misses_regeneration_and_release() {
     assert_v2_indexes_are_derived(&state);
 }
 #[test]
+fn v2_reserved_resource_is_indexed_without_an_active_binding_and_survives_claim() {
+    let mut state = reserved_resource_state();
+    let reserved = state.v2_token(ROOT, "0x01").expect("reserved token state");
+    let name = reserved.name.as_ref().expect("reserved name facts");
+    assert_v2_indexes_are_derived(&state);
+    assert!(has_upstream(&state, "0x99"));
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id.clone(), None))
+    );
+    install_token(&mut state, ROOT, "0x01", b"alpha", 200);
+    state.refresh_dirty_v2_names(3);
+    let claimed = state.v2_token(ROOT, "0x01").expect("claimed token state");
+    assert_eq!(claimed.resource_id, reserved.resource_id);
+    assert_eq!(claimed.token_lineage_id, reserved.token_lineage_id);
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id.clone(), Some(Uuid::from_u128(99))))
+    );
+    assert_v2_indexes_are_derived(&state);
+}
+#[test]
 fn v2_restore_rebuilds_indexes_and_reorg_histories_remove_then_restore_mappings() {
     let retained = retained_token_events(100);
     let restored = State::new(retained.clone(), anchors());
@@ -232,6 +266,32 @@ fn nested_state(parent_expiry: u64) -> State {
     state.set_v2_subregistry(ROOT, "0x01", Some(CHILD.to_owned()));
     state.set_v2_parent_claim(CHILD, Some(ROOT.to_owned()), b"sub");
     install_token(&mut state, CHILD, "0x02", b"leaf", 100);
+    state
+}
+fn reserved_state() -> State {
+    let mut state = anchored_state();
+    state.replace_v2_registration(
+        ROOT,
+        "0x01",
+        Uuid::from_u128(1),
+        NAMESPACE,
+        b"alpha",
+        100,
+        None,
+    );
+    state.refresh_dirty_v2_names(1);
+    state
+}
+fn reserved_resource_state() -> State {
+    let mut state = reserved_state();
+    state.attach_v2_unbound_resource(
+        ROOT,
+        "0x01",
+        "0x99".to_owned(),
+        Uuid::from_u128(99),
+        Some(Uuid::from_u128(100)),
+    );
+    state.refresh_dirty_v2_names(2);
     state
 }
 fn install_token(state: &mut State, emitter: &str, token_id: &str, raw_label: &[u8], expiry: u64) {
