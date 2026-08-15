@@ -264,7 +264,15 @@ pub(crate) async fn get_name_records(
                                 record_inventory.as_ref(),
                                 records,
                             )?;
-                        if refreshed_fallback_records.is_empty() {
+                        if refreshed_fallback_records.is_empty()
+                            || build_authority_unsupported_name_records(
+                                &row,
+                                record_inventory.as_ref(),
+                                requested_records,
+                                include_inventory,
+                            )?
+                            .is_some()
+                        {
                             return Err(V2Error::stale(
                                 "name records changed while preparing verified fallback; retry the request",
                             ));

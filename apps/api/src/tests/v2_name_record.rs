@@ -1893,6 +1893,200 @@ async fn seed_v2_basenames_auto_transition_fixture(
 }
 
 #[tokio::test]
+async fn v2_get_basenames_records_source_auto_retries_when_authority_reclassifies_during_reselection()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    database.initialize_lookup_schema().await?;
+    let lookup_pool = database.lookup_pool().await?;
+    let _namehash = seed_schema_v2_basenames_record_lookup(
+        &lookup_pool,
+        21_000_003,
+        "0xbase-binding",
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+        "0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            },
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        }))
+        .await?;
+    seed_basenames_auto_fallback_requiring_inventory(&database).await?;
+
+    let (_guard, control) =
+        crate::v2::name_records_auto_fallback_test_hooks::install(&database.pool).await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_basenames_l1_addr60_response("0x0000000000000000000000000000000000000e0e"),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/v2/names/alice.base.eth/records?source=auto&keys=addr:60",
+                    )
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'current_authority_not_projected'
+         WHERE namespace = 'basenames' AND raw_name = 'alice.base.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("v2 auto fallback authority transition request task panicked")?
+        .context("v2 auto fallback authority transition request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("name records changed while preparing verified fallback; retry the request")
+    );
+
+    // The mock queue still holds its one response: any dispatch would have
+    // consumed it and finished the task with a recorded request.
+    rpc_handle.abort();
+    let dispatched = match rpc_handle.await {
+        Err(join_error) if join_error.is_cancelled() => Vec::new(),
+        other => other.context("mock primary-name RPC task failed")??,
+    };
+    assert!(
+        dispatched.is_empty(),
+        "authority reclassification during auto-fallback reselection must not dispatch a verified lookup: {dispatched:?}"
+    );
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_basenames_records_source_auto_executes_verified_fallback_after_reselection()
+-> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    database.initialize_lookup_schema().await?;
+    let lookup_pool = database.lookup_pool().await?;
+    let _namehash = seed_schema_v2_basenames_record_lookup(
+        &lookup_pool,
+        21_000_003,
+        "0xbase-binding",
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+        "0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            },
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbinding",
+                "timestamp": "2026-04-17T00:00:03Z"
+            }
+        }))
+        .await?;
+    seed_basenames_auto_fallback_requiring_inventory(&database).await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000e0e";
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_basenames_l1_addr60_response(executed_address),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/alice.base.eth/records?source=auto&keys=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 auto fallback verified execution request failed")?;
+
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["records"]["addr:60"],
+        json!({
+            "status": "ok",
+            "value": executed_address
+        })
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 1);
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Rewrite the seeded Basenames inventory entry so `addr:60` stops being
+/// indexed-satisfying and `source=auto` must take the verified fallback path.
+async fn seed_basenames_auto_fallback_requiring_inventory(database: &TestDatabase) -> Result<()> {
+    sqlx::query(
+        "UPDATE bigname_phase.record_inventory_current
+         SET entries = $1
+         WHERE resource_id = (
+             SELECT resource_id FROM bigname_phase.name_current
+             WHERE namespace = 'basenames' AND raw_name = 'alice.base.eth'
+         )",
+    )
+    .bind(json!([{
+        "record_key": "addr:60",
+        "record_family": "addr",
+        "selector_key": "60",
+        "status": "unsupported",
+        "unsupported_reason": "value_not_retained_in_normalized_events"
+    }]))
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_position(
 ) -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
