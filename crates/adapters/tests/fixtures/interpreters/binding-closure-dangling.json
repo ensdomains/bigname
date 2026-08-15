@@ -180,6 +180,6 @@
     "resource_id": "ed884e02-7154-575e-a285-dc5e1dbc0335",
     "surface_binding_id": "3bca4aa0-41f1-5769-913e-f220d6203e3a",
     "release_block_number": 16176355,
-    "surface_binding_id_note": "The binding the release boundary derives. In the base fixture the release opens it; here same-transaction reconciliation drops it and the boundary closure is left exempting it. Its id is stable across both because it hashes the registry-only authority key and the block hash."
+    "surface_binding_id_note": "The binding the release boundary derives. Same-transaction reconciliation retains it because its missing transaction and log indexes are not the pending log's real chain position. Its id is stable across both fixtures because it hashes the registry-only authority key and the block hash."
   }
 }

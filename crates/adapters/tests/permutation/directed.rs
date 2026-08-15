@@ -96,8 +96,8 @@ impl Directed {
     }
 
     /// The rows the #339 pin names. `surface_binding_id` is the binding the release boundary
-    /// derives — which this fixture's reconciliation then drops, leaving the closure exempting it.
-    /// `assert_release_reached` therefore does not hold for this case and must not be called on it.
+    /// derives. Reconciliation must retain it because its raw-block provenance has no sortable
+    /// transaction or log position.
     pub fn release_block_number(&self) -> i64 {
         self.expected.release_block_number
     }
@@ -107,8 +107,8 @@ impl Directed {
     }
 
     /// The same lapsed lease with a registration setup landing in the release block's first
-    /// transaction, where the binding index's `(block, 0, 0)` default for boundary provenance
-    /// collides with the pending log.
+    /// transaction. The pending log has the real `(block, 0, 0)` position that missing boundary
+    /// provenance must not collide with.
     pub fn same_transaction_setup(checked_in: &[LoadedManifest]) -> Result<Self> {
         Self::from_fixture(BINDING_CLOSURE_DANGLING, checked_in)
     }
