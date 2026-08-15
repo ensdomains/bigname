@@ -1,7 +1,5 @@
-use sqlx::{Postgres, Transaction};
-
 use crate::{Marker, ProjectError, Result};
-
+use sqlx::{Postgres, Transaction};
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -15,14 +13,9 @@ pub(super) async fn build(
             declared_summary, support_status, unsupported_reason, provenance,
             chain_positions, canonicality_summary, manifest_version
         )
-        SELECT surface.logical_name_id,
-               surface.namespace,
-               surface.raw_name,
-               surface.namehash,
-               binding.surface_binding_id,
-               binding.resource_id,
-               resource.token_lineage_id,
-               binding.binding_kind,
+        SELECT surface.logical_name_id, surface.namespace, surface.raw_name,
+               surface.namehash, binding.surface_binding_id, binding.resource_id,
+               resource.token_lineage_id, binding.binding_kind,
                jsonb_build_object(
                    'registration', jsonb_build_object(
                        'status', CASE registration.event_kind
@@ -41,8 +34,13 @@ pub(super) async fn build(
                        'created_at', created.block_timestamp,
                        'released_at', registration.after_state -> 'released_at',
                        'latest_event_kind', registration_latest.event_kind
-                   ),
+                   ) || CASE WHEN registration.event_kind = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2'
+                       THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
+                           'registrant', NULL, 'expiry', NULL) ELSE '{}'::jsonb END,
                    'control', CASE
+                       WHEN registration.event_kind = 'RegistrationReleased' AND
+                            selected_authority.selected_authority_arm = 'ens_v2'
+                           THEN jsonb_build_object('status', 'unregistered')
                        WHEN COALESCE(
                            resource.provenance ->> 'authority_kind',
                            registration_grant.after_state ->> 'authority_kind'
@@ -70,15 +68,15 @@ pub(super) async fn build(
                    'resolver', jsonb_build_object(
                        'chain_id', CASE
                            WHEN resolver.resolver_address IS NOT NULL
-                            AND resolver.resolver_address <>
-                                '0x0000000000000000000000000000000000000000'
+                            AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
+                            AND NOT (COALESCE(registration.event_kind, '') = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2')
                                THEN resolver.chain_id
                            ELSE NULL
                        END,
                        'address', CASE
                            WHEN resolver.resolver_address IS NOT NULL
-                            AND resolver.resolver_address <>
-                                '0x0000000000000000000000000000000000000000'
+                            AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
+                            AND NOT (COALESCE(registration.event_kind, '') = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2')
                                THEN resolver.resolver_address
                            ELSE NULL
                        END,
@@ -98,7 +96,7 @@ pub(super) async fn build(
                        'exhaustiveness', 'not_asserted',
                        'source_classes_considered', CASE
                            WHEN corpus.has_ens_v2 THEN jsonb_build_array(
-                               'ens_v2_registry_l1', 'ens_v2_registrar_l1'
+                               'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
                            )
                            WHEN surface.namespace IN ('ens', 'basenames')
                                THEN jsonb_build_array('ensv1_registry_path')
@@ -140,7 +138,21 @@ pub(super) async fn build(
                    'manifest_versions', COALESCE(
                        evidence.manifest_versions, '[]'::jsonb
                    ),
-                   'derivation_kind', 'name_current_rebuild'
+                   'derivation_kind', 'name_current_rebuild',
+                   'authority_selection', jsonb_strip_nulls(jsonb_build_object(
+                       'authority_arm', selected_authority.selected_authority_arm,
+                       'surface_binding_id', selected_authority.selected_binding_id,
+                       'resource_id', selected_authority.selected_resource_id,
+                       'epoch_start_position', selected_authority.authority_epoch_start_position,
+                       'proof_kind', selected_authority.authority_proof_kind,
+                       'proof_event_id', selected_authority.authority_proof_event_id,
+                       'proof_event_identity', selected_authority.authority_proof_event_identity,
+                       'transition_id', selected_authority.authority_transition_id,
+                       'lifecycle_state', selected_authority.lifecycle_state,
+                       'deployment_profile', selected_authority.deployment_profile,
+                       'resource_authority_context', selected_authority.resource_authority_context,
+                       'unsupported_reason', selected_authority.unsupported_reason
+                   ))
                ) || jsonb_strip_nulls(jsonb_build_object(
                    'resolver_pointer_source_family', resolver.source_family
                )),
@@ -181,39 +193,38 @@ pub(super) async fn build(
                    )
                )
         FROM project_surfaces surface
+        LEFT JOIN project_name_authority selected_authority USING (logical_name_id)
         LEFT JOIN project_bindings binding USING (logical_name_id)
         LEFT JOIN project_resources resource ON resource.resource_id = binding.resource_id
         LEFT JOIN LATERAL (
-            SELECT event.* FROM project_events event
+            SELECT event.* FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed',
-                  'RegistrationReleased', 'RegistrationReserved'
+                  'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+                  'RegistrationReserved'
               )
             ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
             LIMIT 1
         ) registration ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.event_kind
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed',
-                  'RegistrationReleased', 'RegistrationReserved',
+                  'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+                  'RegistrationReserved',
                   'ExpiryChanged'
               )
             ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
             LIMIT 1
         ) registration_latest ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.*, lineage.block_timestamp
-            FROM project_events event
+            FROM project_authority_events event
             LEFT JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
              AND lineage.block_number = event.block_number
@@ -221,22 +232,20 @@ pub(super) async fn build(
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind = 'RegistrationGranted'
             ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
             LIMIT 1
         ) registration_grant ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.after_state ->> 'authority_kind' AS authority_kind,
                    event.after_state ->> 'authority_key' AS authority_key
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
                   'RegistrationGranted', 'AuthorityEpochChanged'
               )
             ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
             LIMIT 1
         ) authority_context ON TRUE
@@ -245,14 +254,13 @@ pub(super) async fn build(
                        WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
                   'RegistrationGranted', 'TokenControlTransferred'
               )
             ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
             LIMIT 1
         ) registrant ON TRUE
@@ -266,7 +274,7 @@ pub(super) async fn build(
                            THEN (event.after_state ->> 'expiry')::bigint
                        ELSE NULL
                    END AS expiry_seconds
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
@@ -289,8 +297,7 @@ pub(super) async fn build(
                   OR jsonb_typeof(event.after_state -> 'expiry') = 'number'
               )
             ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
             LIMIT 1
         ) expiry ON TRUE
@@ -306,7 +313,7 @@ pub(super) async fn build(
                         AND (event.after_state ->> 'fuses')::numeric <= 4294967295
                            THEN (event.after_state ->> 'fuses')::bigint
                    END AS fuses
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.resource_id = binding.resource_id
               AND event.event_kind = 'PermissionScopeChanged'
               AND event.source_family = 'ens_v1_wrapper_l1'
@@ -324,7 +331,7 @@ pub(super) async fn build(
                             18446744073709551615
                            THEN (event.after_state ->> 'expiry')::numeric
                    END AS expiry_seconds
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.resource_id = binding.resource_id
               AND event.event_kind = 'ExpiryChanged'
               AND (
@@ -382,7 +389,7 @@ pub(super) async fn build(
         ) created ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.*
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.after_state ? 'status'
             ORDER BY event.block_number DESC NULLS LAST,
@@ -400,7 +407,7 @@ pub(super) async fn build(
                            event.after_state ->> 'owner'
                        )
                    END) AS registry_owner
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
                   'AuthorityTransferred', 'AuthorityEpochChanged'
@@ -413,7 +420,7 @@ pub(super) async fn build(
         ) control_owner ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.event_kind AS latest_event_kind
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
                   'TokenControlTransferred', 'AuthorityTransferred',
@@ -426,7 +433,7 @@ pub(super) async fn build(
             LIMIT 1
         ) control ON TRUE
         LEFT JOIN LATERAL (
-            SELECT event.* FROM project_events event
+            SELECT event.* FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
                   'AuthorityTransferred', 'TokenControlTransferred',
@@ -441,7 +448,7 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT event.*,
                    lower(event.after_state ->> 'resolver') AS resolver_address
-            FROM project_events event
+            FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind = 'ResolverChanged'
               AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
@@ -487,7 +494,7 @@ pub(super) async fn build(
                            'timestamp', lineage.block_timestamp
                        ))
                    ) AS pointer
-            FROM project_events event
+            FROM project_authority_events event
             LEFT JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
              AND lineage.block_number = event.block_number
@@ -517,7 +524,7 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT COALESCE(bool_or(
                        event.source_family IN (
-                           'ens_v2_registry_l1', 'ens_v2_registrar_l1'
+                           'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
                        )
                    ), false) AS has_ens_v2,
                    COALESCE(bool_or(
@@ -562,19 +569,18 @@ pub(super) async fn build(
         ) ens_v2_profile ON TRUE
         CROSS JOIN LATERAL (
             SELECT CASE
-                       WHEN binding.resource_id IS NULL THEN 'unsupported'
-                       WHEN corpus.has_ens_v2 AND corpus.has_ens_v1
+                       WHEN selected_authority.unsupported_reason IS NOT NULL
                            THEN 'unsupported'
-                       WHEN corpus.has_ens_v2 AND NOT ens_v2_profile.supported
+                       WHEN selected_authority.selected_authority_arm = 'ens_v2'
+                        AND NOT ens_v2_profile.supported
                            THEN 'unsupported'
                        ELSE 'supported'
                    END AS support_status,
                    CASE
-                       WHEN binding.resource_id IS NULL
-                           THEN 'current_authority_not_projected'
-                       WHEN corpus.has_ens_v2 AND corpus.has_ens_v1
-                           THEN 'mixed_ensv1_ensv2_exact_name_corpus'
-                       WHEN corpus.has_ens_v2 AND NOT ens_v2_profile.supported
+                       WHEN selected_authority.unsupported_reason IS NOT NULL
+                           THEN selected_authority.unsupported_reason
+                       WHEN selected_authority.selected_authority_arm = 'ens_v2'
+                        AND NOT ens_v2_profile.supported
                            THEN 'ensv2_exact_name_profile_shadow'
                        ELSE NULL
                    END AS unsupported_reason

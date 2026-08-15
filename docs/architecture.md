@@ -195,12 +195,22 @@ transition writer; there is no runtime or manifest activation flag.
 When the later consumer-activation slice re-derives that group with
 `consumer_visibility=activated`, it activates the diagnostic associations
 without rewriting their independently admitted events, changes the name's
-`authority_epoch` from `ens_v1` to `ens_v2`, closes the selected ENSv1 binding
-at the recorded boundary position, and retains or opens the concrete ENSv2
-binding. Only then do later ENSv1 facts for the same migrated name become history that cannot
-reopen current authority, and an ENSv2 release or unregister does not fall back
-to the
-[ENSv1 husk](glossary.md#ensv1-husk). The unlocked controller transfers the
+[`authority_epoch`](glossary.md#authority-epoch) from `ens_v1` to `ens_v2`,
+closes the selected ENSv1 binding at the recorded boundary position, and
+retains or opens the concrete ENSv2 binding. Interpret first validates the
+one-to-one correspondence between that activated `MigrationApplied` event and
+its [migration authority transition](glossary.md#migration-authority-transition).
+Project therefore consumes the activated
+event's successor binding, resource, position, and correlation ID as an
+[`authority proof`](glossary.md#authority-proof); it does not repeat migration
+transition correlation or predecessor validation. The selected binding keeps the exact
+`surface_bindings.authority_arm` vocabulary: `ens_v1`, `ens_v2`, or
+`basenames`.
+
+Only then do later ENSv1 facts for the same migrated name become history that
+cannot reopen current authority. An ENSv2 release or unregister leaves
+[`released v2 authority`](glossary.md#released-v2-authority) and does not fall
+back to the [ENSv1 husk](glossary.md#ensv1-husk). The unlocked controller transfers the
 ENSv1 registry position and registrar token to the Graveyard before claiming
 the reserved ENSv2 registration; the locked path instead parks the wrapper
 token in the Graveyard and registers the name in ENSv2 while NameWrapper can
@@ -254,31 +264,44 @@ behavior remains in force and this paragraph is the contract for its
 replacement.
 
 Consumer slice 2C activates the same ownership rule for exact-name coverage. A
-name with a canonical migration boundary, or a current ENSv2 child
+name with an activated transition authority proof, or a current ENSv2 child
 registration in an admitted migration registry below a proven migrated parent,
 is then not unsupported merely because its history contains both ENSv1 and
 ENSv2 source families. The second case does not require a child
 `MigrationApplied`: the registry permits a registration when the child is not
 protected as migratable, and a prior positive ENSv2 expiry makes ENSv2 the
 child authority. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) The name is supported when the selected current authority's capability is
-supported. That first ENSv2 registration supersedes the retained ENSv1 child
+supported. Project identifies the registry from Interpret's readable canonical
+`migration_registry_creation` association; that candidate association only
+classifies the independently admitted emitter and is not authority proof by
+itself. The first positive registration under that registry establishes the
+child's epoch. Later manifest rotation, parent topology changes, or release do
+not erase that established epoch; a reorg of its parent proof, registry
+association, topology-at-proof, or registration reconstructs the result from
+the surviving lineage. The positive registration is an authority proof only: it neither
+invents a `MigrationApplied` event nor creates ENSv1→ENSv2 migration history or a binding
+transition. That first ENSv2 registration supersedes the retained ENSv1 child
 binding for subsequent current-state selection; releasing it leaves the child
-unregistered in ENSv2 and does not reactivate the ENSv1 residue. This rule does
-not invent a `MigrationApplied` event for the child.
+with released v2 authority and does not reactivate the ENSv1 residue.
 
-The exact-name and child dual-current assertions run after transaction-level
-and then block-level reconciliation. A transient state while one ENSv1→ENSv2
-migration transaction cleans up the predecessor and establishes the successor
-does not fail a generation. On Mainnet, if both bindings remain current after the
-applicable proven activated boundary, Project aborts before `publish::swap`,
+Consumer slice 2C trusts the validated activated transition proof and does not
+treat retained binding intervals as a second authority vote. This is why its
+dual-open regression fixture selects the proven successor instead of ranking
+either arm. Slice 2E adds the separate exact-name dual-current integrity
+assertion and durable failure audit; slice 3B applies the corresponding child
+assertion. Those assertions run after transaction-level and then block-level
+reconciliation, so a transient state while one ENSv1→ENSv2 migration transaction
+cleans up the predecessor and establishes the successor does not fail a
+generation. Once slice 2E is active, a Mainnet name whose bindings remain
+current after the applicable proven activated boundary causes Project to abort
+before `publish::swap`,
 publishes no partial generation, and fails readiness for that target
 generation. After the Project transaction rolls back, the phase runner writes a
 separate append-only `project_generation_failures` diagnostic audit row with
 both binding and resource identities, the boundary event, and the block,
 transaction, and log position of each. Reorgs retain the row and make its stored
 block hashes explicitly orphaned through lineage; a later successful generation
-does not erase the failure. Project does not choose by recency or publish an
-ambiguous row. A mixed
+does not erase the failure. Neither slice chooses by recency. A mixed
 Mainnet corpus with no provable boundary is explicit `unsupported` with
 `conflicting_current_ens_authority`. A proven Sepolia migration boundary
 follows the same per-name authority rule. Sepolia is not otherwise subject to

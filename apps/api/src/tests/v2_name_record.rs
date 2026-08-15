@@ -81,6 +81,72 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_name_exposes_authority_unsupported_shape() -> Result<()> {
+    for reason in [
+        "conflicting_current_ens_authority",
+        "independent_ens_deployments_overlap",
+    ] {
+        let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+            row.coverage = json!({
+                "status": "unsupported",
+                "exhaustiveness": "not_asserted",
+                "unsupported_reason": reason
+            });
+        })
+        .await?;
+        let data = payload["data"].as_object().expect("data must be an object");
+        assert_eq!(data.get("status"), Some(&json!("unsupported")));
+        assert_eq!(data.get("unsupported_reason"), Some(&json!(reason)));
+        assert_eq!(
+            data.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                "display_name",
+                "name",
+                "namehash",
+                "namespace",
+                "status",
+                "unsupported_reason",
+            ]
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_preserves_non_authority_unsupported_shape() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        row.coverage = json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_asserted",
+            "unsupported_reason": "ensv2_exact_name_profile_shadow"
+        });
+    })
+    .await?;
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("ok")));
+    assert_eq!(data.get("registration_status"), Some(&json!("active")));
+    assert_eq!(data.get("network"), Some(&json!("ethereum")));
+    assert!(data.get("unsupported_reason").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_does_not_serve_a_resolver_without_projected_authority() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        row.coverage = json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_asserted",
+            "unsupported_reason": "current_authority_not_projected"
+        });
+    })
+    .await?;
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("ok")));
+    assert!(data.get("resolver").is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_exposes_projected_wrapper_state_and_fuses() -> Result<()> {
     let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
         row.declared_summary["wrapper_state"] = json!("locked");
@@ -1283,6 +1349,54 @@ async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_
             "unsupported_reason": "verified_records_not_supported"
         })
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_withholds_unproven_authority_without_verified_lookup() -> Result<()> {
+    for (reason, product_reason) in [
+        (
+            "conflicting_current_ens_authority",
+            "conflicting_current_ens_authority",
+        ),
+        (
+            "current_authority_not_projected",
+            "inventory_not_available",
+        ),
+    ] {
+        for source in ["indexed", "verified", "auto"] {
+            let payload = v2_name_records_payload_with_row_and_setup(
+                &format!("/v2/names/Alice.eth/records?source={source}&keys=addr:60"),
+                |row| {
+                    row.coverage = json!({
+                        "status":"unsupported",
+                        "unsupported_reason":reason
+                    });
+                },
+                |_, _, _| {},
+            )
+            .await?;
+
+            assert_eq!(payload["data"]["resolver"], Value::Null);
+            assert_eq!(payload["data"]["addresses"], json!({}));
+            assert_eq!(
+                payload["data"]["records"]["addr:60"],
+                json!({
+                    "status":"unsupported",
+                    "unsupported_reason":product_reason
+                })
+            );
+            assert_eq!(
+                payload["meta"]["source"],
+                json!(if source == "verified" {
+                    "verified"
+                } else {
+                    "indexed"
+                })
+            );
+        }
+    }
 
     Ok(())
 }

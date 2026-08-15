@@ -27,6 +27,10 @@ pub(super) fn build_forward_feed_record(
     record: &bigname_storage::IdentityNameRecordRow,
 ) -> V2Result<LookupRecord> {
     let status = identity_record_status(&record.row.coverage);
+    let unsupported_reason = identity_record_unsupported_reason(&record.row.coverage, status)?;
+    if let Some(record) = authority_unsupported_record(record, status, unsupported_reason.clone()) {
+        return Ok(record);
+    }
     Ok(LookupRecord {
         name: record.row.normalized_name.clone(),
         display_name: record.row.canonical_display_name.clone(),
@@ -48,11 +52,14 @@ pub(super) fn build_forward_feed_record(
         primary_name: None,
         primary_address: None,
         chain_id: chain_id_from_positions(&record.row.chain_positions),
-        network: network_from_parts(&record.row.namespace, &record.row.chain_positions),
+        network: Some(network_from_parts(
+            &record.row.namespace,
+            &record.row.chain_positions,
+        )),
         is_primary: None,
         relations: Vec::new(),
         status,
-        unsupported_reason: identity_record_unsupported_reason(&record.row.coverage, status)?,
+        unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
         unsupported_fields: Vec::new(),
     })
@@ -73,6 +80,13 @@ pub(super) fn build_reverse_feed_record(
     record: &bigname_storage::ReverseIdentityRecordRow,
 ) -> V2Result<LookupRecord> {
     let status = identity_record_status(&record.name_record.row.coverage);
+    let unsupported_reason =
+        identity_record_unsupported_reason(&record.name_record.row.coverage, status)?;
+    if let Some(record) =
+        authority_unsupported_record(&record.name_record, status, unsupported_reason.clone())
+    {
+        return Ok(record);
+    }
     Ok(LookupRecord {
         name: record.name_record.row.normalized_name.clone(),
         display_name: record.name_record.row.canonical_display_name.clone(),
@@ -94,17 +108,14 @@ pub(super) fn build_reverse_feed_record(
         primary_name: None,
         primary_address: None,
         chain_id: chain_id_from_positions(&record.name_record.row.chain_positions),
-        network: network_from_parts(
+        network: Some(network_from_parts(
             &record.name_record.row.namespace,
             &record.name_record.row.chain_positions,
-        ),
+        )),
         is_primary: Some(reverse_identity_is_primary(record)),
         relations: lookup_relations(&record.relation_facets),
         status,
-        unsupported_reason: identity_record_unsupported_reason(
-            &record.name_record.row.coverage,
-            status,
-        )?,
+        unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.name_record.row.coverage, status)?,
         unsupported_fields: Vec::new(),
     })
@@ -133,6 +144,11 @@ fn build_detail_record(
     is_primary: Option<bool>,
     relations: Vec<Relation>,
 ) -> V2Result<LookupRecord> {
+    let status = identity_record_status(&record.row.coverage);
+    let unsupported_reason = identity_record_unsupported_reason(&record.row.coverage, status)?;
+    if let Some(record) = authority_unsupported_record(record, status, unsupported_reason.clone()) {
+        return Ok(record);
+    }
     let addresses = identity_addresses(record.record_inventory_current.as_ref());
     let text_records = identity_text_records(record.record_inventory_current.as_ref());
     let content_hash = identity_content_hash(record.record_inventory_current.as_ref());
@@ -149,7 +165,6 @@ fn build_detail_record(
         .as_ref()
         .filter(|_| !unsupported_fields.contains("primary_address"))
         .and_then(|addresses| addresses.get(primary_coin_type).cloned());
-    let status = identity_record_status(&record.row.coverage);
 
     Ok(LookupRecord {
         name: record.row.normalized_name.clone(),
@@ -179,14 +194,61 @@ fn build_detail_record(
             ],
         ),
         chain_id: chain_id_from_positions(&record.row.chain_positions),
-        network: network_from_parts(&record.row.namespace, &record.row.chain_positions),
+        network: Some(network_from_parts(
+            &record.row.namespace,
+            &record.row.chain_positions,
+        )),
         is_primary,
         relations,
         status,
-        unsupported_reason: identity_record_unsupported_reason(&record.row.coverage, status)?,
+        unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
         unsupported_fields: unsupported_fields.into_iter().collect(),
     })
+}
+
+fn authority_unsupported_record(
+    record: &bigname_storage::IdentityNameRecordRow,
+    status: Status,
+    unsupported_reason: Option<String>,
+) -> Option<LookupRecord> {
+    unsupported_reason
+        .as_deref()
+        .is_some_and(|reason| {
+            matches!(
+                reason,
+                "conflicting_current_ens_authority" | "independent_ens_deployments_overlap"
+            )
+        })
+        .then(|| LookupRecord {
+            name: record.row.normalized_name.clone(),
+            display_name: record.row.canonical_display_name.clone(),
+            namespace: record.row.namespace.clone(),
+            namehash: record.row.namehash.clone(),
+            registration_id: None,
+            token_id: None,
+            owner: None,
+            manager: None,
+            registrant: None,
+            registered_at: None,
+            created_at: None,
+            expires_at: None,
+            registration_status: None,
+            resolver: None,
+            addresses: None,
+            text_records: None,
+            content_hash: None,
+            primary_name: None,
+            primary_address: None,
+            chain_id: None,
+            network: None,
+            is_primary: None,
+            relations: Vec::new(),
+            status,
+            unsupported_reason,
+            failure_reason: None,
+            unsupported_fields: Vec::new(),
+        })
 }
 
 fn identity_addresses(

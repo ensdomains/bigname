@@ -293,6 +293,65 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_withholds_fields_for_unsupported_name_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:authority-gap.eth",
+        "authority-gap.eth",
+        "authority-gap.eth",
+        "namehash:authority-gap.eth",
+        Uuid::from_u128(0x5a0191),
+        Uuid::from_u128(0x5a0192),
+        Uuid::from_u128(0x5a0193),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+
+    for reason in [
+        "conflicting_current_ens_authority",
+        "independent_ens_deployments_overlap",
+    ] {
+        sqlx::query(
+            "UPDATE name_current
+             SET support_status = 'unsupported', unsupported_reason = $1
+             WHERE raw_name = 'authority-gap.eth'",
+        )
+        .bind(reason)
+        .execute(&database.lookup_pool)
+        .await?;
+
+        for profile in ["detail", "feed"] {
+            let payload = v2_lookup_json(
+                &database,
+                json!({
+                    "profile": profile,
+                    "inputs": [{"name": "authority-gap.eth"}]
+                }),
+            )
+            .await?;
+            assert_eq!(payload["data"][0]["status"], "unsupported");
+            assert_eq!(payload["data"][0]["unsupported_reason"], reason);
+            assert_eq!(
+                payload["data"][0]["record"],
+                json!({
+                    "name":"authority-gap.eth",
+                    "display_name":"authority-gap.eth",
+                    "namespace":"ens",
+                    "namehash":bigname_lookup::ens_namehash_hex("authority-gap.eth")?,
+                    "status":"unsupported",
+                    "unsupported_reason":reason
+                })
+            );
+        }
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_flattens_phase_writer_byte_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

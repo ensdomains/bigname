@@ -113,6 +113,7 @@ pub async fn load_phase_resolver_bound_name_rows(
           ON token_lineage.token_lineage_id = nc.token_lineage_id
         {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
         WHERE nc.support_status IN ('supported', 'unsupported')
+          AND nc.unsupported_reason IS DISTINCT FROM 'current_authority_not_projected'
           {DEFAULT_NAME_CURRENT_READ_FILTER}
           AND nc.declared_summary #>> '{{resolver,chain_id}}' = $1
           AND lower(nc.declared_summary #>> '{{resolver,address}}') = lower($2)
