@@ -31,70 +31,81 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                        )
                        OR (
                            authority.selected_authority_arm = 'ens_v1'
-                           AND event.event_kind = 'ExpiryChanged'
+                           AND event.event_kind IN (
+                               'RegistrationGranted', 'RegistrationRenewed',
+                               'ExpiryChanged'
+                           )
                            AND event.source_family = 'ens_v1_registrar_l1'
                            AND COALESCE(
                                NULLIF(event.after_state ->> 'authority_kind', ''),
                                'registrar'
                            ) = 'registrar'
-                           AND EXISTS (
-                               SELECT 1
-                               FROM project_bindings selected_binding
-                               JOIN LATERAL (
-                                   SELECT predecessor.*
-                                   FROM project_binding_candidates predecessor
-                                   WHERE predecessor.logical_name_id =
-                                         selected_binding.logical_name_id
-                                     AND predecessor.authority_arm = 'ens_v1'
-                                     AND (
-                                         predecessor.block_number,
-                                         COALESCE(
-                                             (predecessor.provenance ->> 'transaction_index')::bigint,
-                                             -1
-                                         ),
-                                         COALESCE(
-                                             (predecessor.provenance ->> 'log_index')::bigint, -1
+                           AND (
+                               EXISTS (
+                                   SELECT 1
+                                   FROM project_bindings selected_binding
+                                   JOIN LATERAL (
+                                       SELECT predecessor.*
+                                       FROM project_binding_candidates predecessor
+                                       WHERE predecessor.logical_name_id =
+                                             selected_binding.logical_name_id
+                                         AND predecessor.authority_arm = 'ens_v1'
+                                         AND (
+                                             predecessor.block_number,
+                                             COALESCE(
+                                                 (predecessor.provenance ->> 'transaction_index')::bigint,
+                                                 -1
+                                             ),
+                                             COALESCE(
+                                                 (predecessor.provenance ->> 'log_index')::bigint, -1
+                                             )
+                                         ) < (
+                                             selected_binding.block_number,
+                                             COALESCE(
+                                                 (selected_binding.provenance ->> 'transaction_index')::bigint,
+                                                 -1
+                                             ),
+                                             COALESCE(
+                                                 (selected_binding.provenance ->> 'log_index')::bigint,
+                                                 -1
+                                             )
                                          )
-                                     ) < (
-                                         selected_binding.block_number,
-                                         COALESCE(
-                                             (selected_binding.provenance ->> 'transaction_index')::bigint,
-                                             -1
-                                         ),
-                                         COALESCE(
-                                             (selected_binding.provenance ->> 'log_index')::bigint,
-                                             -1
-                                         )
-                                     )
-                                   ORDER BY predecessor.block_number DESC,
-                                            COALESCE(
-                                                (predecessor.provenance ->> 'transaction_index')::bigint,
-                                                -1
-                                            ) DESC,
-                                            COALESCE(
-                                                (predecessor.provenance ->> 'log_index')::bigint,
-                                                -1
-                                            ) DESC,
-                                            predecessor.surface_binding_id DESC
-                                   LIMIT 1
-                               ) predecessor ON TRUE
-                               WHERE selected_binding.logical_name_id =
-                                     authority.logical_name_id
-                                 AND predecessor.resource_id = event.resource_id
-                                 AND (
-                                     event.block_number,
-                                     COALESCE(event.transaction_index, -1),
-                                     COALESCE(event.log_index, -1)
-                                 ) >= (
-                                     predecessor.block_number,
-                                     COALESCE(
-                                         (predecessor.provenance ->> 'transaction_index')::bigint,
-                                         -1
-                                     ),
-                                     COALESCE(
-                                         (predecessor.provenance ->> 'log_index')::bigint, -1
-                                     )
-                                 )
+                                       ORDER BY predecessor.block_number DESC,
+                                                COALESCE(
+                                                    (predecessor.provenance ->> 'transaction_index')::bigint,
+                                                    -1
+                                                ) DESC,
+                                                COALESCE(
+                                                    (predecessor.provenance ->> 'log_index')::bigint,
+                                                    -1
+                                                ) DESC,
+                                                predecessor.surface_binding_id DESC
+                                       LIMIT 1
+                                   ) predecessor ON TRUE
+                                   WHERE selected_binding.logical_name_id =
+                                         authority.logical_name_id
+                                     AND predecessor.resource_id = event.resource_id
+                               )
+                               OR EXISTS (
+                                   SELECT 1
+                                   FROM project_events selected_wrapper
+                                   JOIN project_events registration
+                                     ON registration.logical_name_id =
+                                        selected_wrapper.logical_name_id
+                                    AND registration.transaction_hash =
+                                        selected_wrapper.transaction_hash
+                                    AND registration.resource_id = event.resource_id
+                                    AND registration.source_family =
+                                        'ens_v1_registrar_l1'
+                                    AND registration.event_kind = 'RegistrationGranted'
+                                   WHERE selected_wrapper.logical_name_id =
+                                         authority.logical_name_id
+                                     AND selected_wrapper.resource_id =
+                                         authority.selected_resource_id
+                                     AND selected_wrapper.source_family =
+                                         'ens_v1_wrapper_l1'
+                                     AND selected_wrapper.event_kind = 'SurfaceBound'
+                               )
                            )
                            AND EXISTS (
                                SELECT 1 FROM project_events wrapper
@@ -105,7 +116,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                            )
                        )
                        OR (
-                           authority.selected_authority_arm = 'ens_v1'
+                           authority.selected_authority_arm IN ('ens_v1', 'basenames')
                            AND event.event_kind IN (
                                'RegistrationGranted', 'RegistrationRenewed',
                                'RegistrationReleased', 'RegistrationReserved',
@@ -126,7 +137,8 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                                    FROM project_binding_candidates predecessor
                                    WHERE predecessor.logical_name_id =
                                          selected_binding.logical_name_id
-                                     AND predecessor.authority_arm = 'ens_v1'
+                                     AND predecessor.authority_arm =
+                                         authority.selected_authority_arm
                                      AND (
                                          predecessor.block_number,
                                          COALESCE(
