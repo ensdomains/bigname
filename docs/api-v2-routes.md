@@ -791,12 +791,10 @@ Field ownership:
   retries. Malformed addresses return `400 invalid_input`.
   `source=indexed` does not enter verified-execution rate or concurrency
   admission; omitted `source` and `source=verified` do because they run the
-  fresh lookup. Once exact-name authority is activated, forward verification
-  of a claimed mixed-history name with no provable current authority returns a
-  verified `status=unsupported` answer with
-  `conflicting_current_ens_authority` or
-  `independent_ens_deployments_overlap`; it does not verify against an
-  arbitrarily selected resolver.
+  fresh lookup. Exact-name authority does not yet govern primary-name forward
+  verification. Slice 2D applies the selected authority to this route; until
+  then, a mixed-history claim retains the pre-authority verified lookup
+  behavior rather than returning an exact-name unsupported reason.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`
