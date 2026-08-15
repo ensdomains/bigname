@@ -17,12 +17,114 @@ pub(in crate::schema_v2) fn v2_refresh_visits() -> usize {
 }
 
 impl State {
-    pub(in crate::schema_v2) fn refresh_v2_names(
+    pub(in crate::schema_v2) fn refresh_dirty_v2_names(
         &mut self,
         at_unix_timestamp: i64,
     ) -> Vec<V2NameTransition> {
+        let previous_timestamp = self.latest_v2_timestamp;
+        let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
+        self.capture_crossed_v2_expiries(previous_timestamp, at_unix_timestamp);
+        self.expand_dirty_v2_registries();
+        let keys = std::mem::take(&mut self.v2_dirty_tokens)
+            .into_iter()
+            .collect();
+        self.refresh_v2_name_keys(keys, at_unix_timestamp)
+    }
+
+    pub(super) fn refresh_all_v2_names(&mut self, at_unix_timestamp: i64) -> Vec<V2NameTransition> {
+        let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
+        self.v2_dirty_tokens.clear();
+        self.v2_dirty_registries.clear();
         let keys = self.v2_tokens.keys().cloned().collect::<Vec<_>>();
         self.refresh_v2_name_keys(keys, at_unix_timestamp)
+    }
+
+    pub(super) fn mark_v2_token_dirty(&mut self, token_key: impl Into<String>) {
+        self.v2_dirty_tokens.insert(token_key.into());
+    }
+
+    pub(super) fn mark_v2_token_component_dirty(&mut self, token_key: &str) {
+        self.v2_dirty_tokens.insert(token_key.to_owned());
+        if let Some(subregistry) = self
+            .v2_tokens
+            .get(token_key)
+            .and_then(|token| token.subregistry.clone())
+        {
+            self.v2_dirty_registries
+                .insert(subregistry.to_ascii_lowercase());
+        }
+    }
+
+    pub(super) fn mark_v2_registry_dirty(&mut self, registry: &str) {
+        self.v2_dirty_registries
+            .insert(registry.to_ascii_lowercase());
+    }
+
+    fn advance_v2_timestamp(&mut self, at_unix_timestamp: i64) -> i64 {
+        let effective = self
+            .latest_v2_timestamp
+            .map_or(at_unix_timestamp, |previous| {
+                previous.max(at_unix_timestamp)
+            });
+        self.latest_v2_timestamp = Some(effective);
+        effective
+    }
+
+    fn capture_crossed_v2_expiries(
+        &mut self,
+        previous_timestamp: Option<i64>,
+        current_timestamp: i64,
+    ) {
+        let previous_timestamp = previous_timestamp.unwrap_or(-1);
+        if current_timestamp <= previous_timestamp || current_timestamp < 0 {
+            return;
+        }
+        let first_expiry = u64::try_from(previous_timestamp.saturating_add(1)).unwrap_or_default();
+        let last_expiry = u64::try_from(current_timestamp).expect("non-negative timestamp");
+        let crossed = self
+            .v2_expiries
+            .range((first_expiry, String::new())..)
+            .take_while(|(expiry, _)| *expiry <= last_expiry)
+            .map(|(_, token_key)| token_key.clone())
+            .collect::<Vec<_>>();
+        for token_key in crossed {
+            self.mark_v2_token_component_dirty(&token_key);
+        }
+    }
+
+    fn expand_dirty_v2_registries(&mut self) {
+        let mut pending = std::mem::take(&mut self.v2_dirty_registries)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut visited = imbl::ordset::OrdSet::new();
+        while let Some(registry) = pending.pop() {
+            if visited.insert(registry.clone()).is_some() {
+                continue;
+            }
+            let prefix = format!("{registry}:");
+            let keys = self
+                .v2_tokens
+                .range(prefix.clone()..)
+                .take_while(|(key, _)| key.starts_with(&prefix))
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in keys {
+                self.v2_dirty_tokens.insert(key.clone());
+                let Some(token) = self.v2_tokens.get(&key) else {
+                    continue;
+                };
+                let (Some(raw_label), Some(subregistry)) =
+                    (token.raw_label.as_ref(), token.subregistry.as_ref())
+                else {
+                    continue;
+                };
+                if self.v2_parent_claims.get(subregistry)
+                    == Some(&(registry.clone(), raw_label.clone()))
+                {
+                    pending.push(subregistry.clone());
+                }
+            }
+        }
     }
 
     pub(in crate::schema_v2) fn refresh_v2_name_keys(
@@ -37,7 +139,7 @@ impl State {
             let Some((emitter, token_id)) = key.rsplit_once(':') else {
                 continue;
             };
-            let Some(token) = self.v2_tokens.get(&key) else {
+            let Some(token) = self.v2_tokens.get(&key).cloned() else {
                 continue;
             };
             let (Some(namespace), Some(raw_label)) =
@@ -73,7 +175,8 @@ impl State {
             });
             let previous = token.name.clone();
             let previous_shadow = token.shadow_name.clone();
-            if previous != name || previous_shadow != shadow_name {
+            let changed = previous != name || previous_shadow != shadow_name;
+            if changed {
                 let previous_surface = previous.as_ref().map(|name| name.logical_name_id.clone());
                 let current_surface = name.as_ref().map(|name| name.logical_name_id.clone());
                 if let Some(previous) = previous.as_ref()
@@ -93,8 +196,8 @@ impl State {
                     registry: emitter.to_owned(),
                     registry_contract_instance_id: token.registry_contract_instance_id,
                     token_id: token_id.to_owned(),
-                    previous,
-                    previous_shadow,
+                    previous: previous.clone(),
+                    previous_shadow: previous_shadow.clone(),
                     current: name.clone(),
                     current_shadow: shadow_name.clone(),
                     resource_id: token.resource_id,
@@ -109,9 +212,15 @@ impl State {
                     current_surface.as_deref(),
                 );
             }
-            if let Some(token) = self.v2_tokens.get_mut(&key) {
-                token.name = name;
-                token.shadow_name = shadow_name;
+            if changed {
+                let mut current = token.clone();
+                current.name = name.clone();
+                current.shadow_name = shadow_name.clone();
+                self.replace_v2_token_indexes(&key, Some(&token), Some(&current));
+            }
+            if let Some(current) = self.v2_tokens.get_mut(&key) {
+                current.name = name;
+                current.shadow_name = shadow_name;
             }
         }
         transitions

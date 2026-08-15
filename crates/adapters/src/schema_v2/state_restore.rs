@@ -1,8 +1,9 @@
+use super::{model::PriorEventInput, protocol::v1::unmasked_word, state::State};
 use serde_json::Value;
 use uuid::Uuid;
-
-use super::{model::PriorEventInput, protocol::v1::unmasked_word, state::State};
-
+pub(super) fn rebuild_v2_indexes(state: &mut State) {
+    state.rebuild_v2_token_indexes();
+}
 pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
     if event.source_family == "ens_v2_resolver_l1" && event.event_kind == "PreimageObserved" {
         if let (Some(resolver), Some(upstream_resource), Some(logical_name_id)) = (
@@ -154,7 +155,6 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
         _ => {}
     }
 }
-
 fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
     after_state
         .get("raw_label_hex")

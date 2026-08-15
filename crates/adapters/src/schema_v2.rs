@@ -329,7 +329,7 @@ fn settle_block_boundary(
             });
         }
     }
-    for transition in state.refresh_v2_names(block.block_timestamp.unix_timestamp()) {
+    for transition in state.refresh_dirty_v2_names(block.block_timestamp.unix_timestamp()) {
         let registry_instance = transition
             .registry_contract_instance_id
             .context("ENSv2 boundary transition has no registry contract identity")?;

@@ -39,6 +39,10 @@ impl State {
             active_resources: OrdMap::new(),
             v2_tokens: OrdMap::new(),
             v2_expiries: OrdSet::new(),
+            v2_dirty_tokens: OrdSet::new(),
+            v2_dirty_registries: OrdSet::new(),
+            v2_token_by_upstream_resource_index: OrdMap::new(),
+            v2_token_by_name_index: OrdMap::new(),
             v2_entry_by_parent_label: OrdMap::new(),
             v2_parent_claims: OrdMap::new(),
             v2_resolver_hints: OrdMap::new(),
@@ -63,17 +67,34 @@ impl State {
         self.apply_prior_events(prior, false, false);
     }
 
+    pub(in crate::schema_v2) fn commit_v2_batch_boundary(&mut self, at_unix_timestamp: i64) {
+        if self.latest_v2_timestamp.is_none() && self.v2_tokens.is_empty() {
+            return;
+        }
+        self.refresh_dirty_v2_names(at_unix_timestamp);
+        self.prune_unbacked_surfaces();
+    }
+
     pub(in crate::schema_v2) fn restore_prior_event_chunk(&mut self, prior: Vec<PriorEventInput>) {
         self.apply_prior_events(prior, true, false);
     }
 
-    pub(in crate::schema_v2) fn finish_prior_event_restore(&mut self) {
+    pub(in crate::schema_v2) fn finish_prior_event_restore(
+        &mut self,
+        resume_predecessor_timestamp: Option<i64>,
+    ) {
         if let Some(timestamp) = self.latest_v2_timestamp {
             // Replaying prior events reconstructs topology before the next raw-log batch. The
             // resulting transitions already exist in normalized_events, so only retain the
             // reconstructed name state here.
-            self.refresh_v2_names(timestamp);
+            self.refresh_all_v2_names(timestamp);
         }
+        if let Some(timestamp) = resume_predecessor_timestamp
+            && !self.v2_tokens.is_empty()
+        {
+            self.refresh_dirty_v2_names(timestamp);
+        }
+        crate::schema_v2::state_restore::rebuild_v2_indexes(self);
         self.prune_unbacked_surfaces();
     }
 
@@ -129,21 +150,17 @@ impl State {
             }
             self.restoring_state_key = None;
         }
-        self.latest_v2_timestamp = previous_v2_timestamp.max(latest_delta_timestamp);
+        self.latest_v2_timestamp = if full_restore {
+            previous_v2_timestamp.max(latest_delta_timestamp)
+        } else {
+            previous_v2_timestamp
+        };
         if full_restore && finish_restore {
-            self.finish_prior_event_restore();
+            self.finish_prior_event_restore(None);
         } else if let Some(delta_timestamp) = latest_delta_timestamp {
-            self.capture_crossed_v2_expiries(
-                previous_v2_timestamp,
-                delta_timestamp,
-                &mut refresh_targets,
-            );
-            self.expand_v2_refresh_components(&mut refresh_targets);
-            self.refresh_v2_name_keys(
-                refresh_targets.tokens.into_iter().collect(),
-                self.latest_v2_timestamp
-                    .expect("a timestamped ENSv2 delta sets the retained timestamp"),
-            );
+            self.v2_dirty_tokens.extend(refresh_targets.tokens);
+            self.v2_dirty_registries.extend(refresh_targets.registries);
+            self.refresh_dirty_v2_names(delta_timestamp);
         }
         if !full_restore {
             self.prune_unbacked_surfaces();
@@ -196,59 +213,6 @@ impl State {
             .and_then(|token| token.subregistry.as_ref())
         {
             targets.registries.insert(subregistry.to_ascii_lowercase());
-        }
-    }
-
-    fn capture_crossed_v2_expiries(
-        &self,
-        previous_timestamp: Option<i64>,
-        current_timestamp: i64,
-        targets: &mut V2RefreshTargets,
-    ) {
-        let previous_timestamp = previous_timestamp.unwrap_or(-1);
-        if current_timestamp <= previous_timestamp || current_timestamp < 0 {
-            return;
-        }
-        let first_expiry = u64::try_from(previous_timestamp.saturating_add(1)).unwrap_or_default();
-        let last_expiry = u64::try_from(current_timestamp).expect("non-negative timestamp");
-        for (expiry, token_key) in self.v2_expiries.range((first_expiry, String::new())..) {
-            if *expiry > last_expiry {
-                break;
-            }
-            self.capture_v2_token_target(token_key, targets);
-        }
-    }
-
-    fn expand_v2_refresh_components(&self, targets: &mut V2RefreshTargets) {
-        let mut pending = targets.registries.iter().cloned().collect::<Vec<_>>();
-        let mut visited = OrdSet::new();
-        while let Some(registry) = pending.pop() {
-            if visited.insert(registry.clone()).is_some() {
-                continue;
-            }
-            let prefix = format!("{registry}:");
-            let keys = self
-                .v2_tokens
-                .range(prefix.clone()..)
-                .take_while(|(key, _)| key.starts_with(&prefix))
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            for key in keys {
-                targets.tokens.insert(key.clone());
-                let Some(token) = self.v2_tokens.get(&key) else {
-                    continue;
-                };
-                let (Some(raw_label), Some(subregistry)) =
-                    (token.raw_label.as_ref(), token.subregistry.as_ref())
-                else {
-                    continue;
-                };
-                if self.v2_parent_claims.get(subregistry)
-                    == Some(&(registry.clone(), raw_label.clone()))
-                {
-                    pending.push(subregistry.clone());
-                }
-            }
         }
     }
 
@@ -319,7 +283,7 @@ impl State {
         }
         self.v2_suffix_anchors = anchors;
         if let Some(timestamp) = self.latest_v2_timestamp {
-            self.refresh_v2_names(timestamp);
+            self.refresh_all_v2_names(timestamp);
             self.prune_unbacked_surfaces();
         }
     }
