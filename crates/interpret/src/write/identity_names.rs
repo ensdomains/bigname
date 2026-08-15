@@ -364,3 +364,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "identity_names/coverage_tests.rs"]
+mod coverage_tests;
