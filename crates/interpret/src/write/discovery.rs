@@ -1,8 +1,10 @@
 use bigname_adapters::schema_v2::seam::{LOG_INDEX_KEY, OBSERVATION_KEY, TRANSACTION_INDEX_KEY};
 use bigname_adapters::schema_v2::{BatchOutput, DiscoveryEdge, DiscoveryEdgeClosure};
-use sqlx::{Postgres, Transaction, types::Uuid};
+use sqlx::{Postgres, QueryBuilder, Transaction, types::Uuid};
 
 use crate::{InterpretError, Result};
+
+use super::batching::{batch_row_context, conflict_free_batches};
 
 type ActiveAddressEpoch = (i64, Option<i64>, Option<String>, Option<i64>);
 
@@ -11,23 +13,37 @@ pub(super) async fn write(
     output: &BatchOutput,
     preserve_outside_range_closes: bool,
 ) -> Result<()> {
-    for instance in &output.contract_instances {
-        sqlx::query(
+    for (start, batch) in conflict_free_batches(&output.contract_instances, |instance| {
+        instance.contract_instance_id
+    }) {
+        let mut query = QueryBuilder::<Postgres>::new(
             "
             INSERT INTO contract_instances (
                 contract_instance_id, chain_id, contract_kind, provenance
             )
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (contract_instance_id) DO NOTHING
             ",
-        )
-        .bind(instance.contract_instance_id)
-        .bind(&instance.chain_id)
-        .bind(&instance.contract_kind)
-        .bind(&instance.provenance)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| InterpretError::database("failed to write discovered contract", error))?;
+        );
+        query.push_values(batch, |mut row, instance| {
+            row.push_bind(instance.contract_instance_id)
+                .push_bind(&instance.chain_id)
+                .push_bind(&instance.contract_kind)
+                .push_bind(&instance.provenance);
+        });
+        query.push(" ON CONFLICT (contract_instance_id) DO NOTHING");
+        query
+            .build()
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                let context = batch_row_context(
+                    start,
+                    batch.iter().map(|instance| instance.contract_instance_id),
+                );
+                InterpretError::database(
+                    format!("failed to write discovered-contract batch; {context}"),
+                    error,
+                )
+            })?;
     }
     for address in &output.contract_addresses {
         let active: Option<ActiveAddressEpoch> = sqlx::query_as(
@@ -550,3 +566,6 @@ fn edge_position(edge: &DiscoveryEdge) -> Result<(i64, i64)> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests;

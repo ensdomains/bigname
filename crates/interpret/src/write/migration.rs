@@ -1,7 +1,10 @@
 use bigname_adapters::schema_v2::{BatchOutput, MigrationCandidateEffect};
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, QueryBuilder, Transaction};
+use std::collections::HashSet;
 
 use crate::{InterpretError, Result};
+
+use super::batching::{batch_row_context, conflict_free_batches};
 
 pub(super) async fn write(
     transaction: &mut Transaction<'_, Postgres>,
@@ -29,16 +32,39 @@ pub(super) async fn write(
             )
         })?;
 
-    for association in &output.migration_event_associations {
-        let written: Option<String> = sqlx::query_scalar(
+    for (start, batch) in
+        conflict_free_batches(&output.migration_event_associations, |association| {
+            (
+                association.event_identity.clone(),
+                association.migration_correlation_id.clone(),
+            )
+        })
+    {
+        let mut query = QueryBuilder::<Postgres>::new(
             "INSERT INTO migration_event_associations (
                  event_identity, migration_correlation_id, correlation_kind, evidence_refs,
                  chain_id, block_number, block_hash, transaction_hash, transaction_index,
                  log_index, canonicality_state, consumer_visibility, interpreter_content_hash
-             ) VALUES (
-                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                 $11::canonicality_state, $12, $13
-             )
+             ) ",
+        );
+        query.push_values(batch, |mut row, association| {
+            row.push_bind(&association.event_identity)
+                .push_bind(&association.migration_correlation_id)
+                .push_bind(&association.correlation_kind)
+                .push_bind(&association.evidence_refs)
+                .push_bind(&association.chain_id)
+                .push_bind(association.block_number)
+                .push_bind(&association.block_hash)
+                .push_bind(&association.transaction_hash)
+                .push_bind(association.transaction_index)
+                .push_bind(association.log_index)
+                .push_bind(&association.canonicality_state)
+                .push_unseparated("::canonicality_state")
+                .push_bind(&association.consumer_visibility)
+                .push_bind(&content_hash);
+        });
+        query.push(
+            "
              ON CONFLICT (event_identity, migration_correlation_id) DO UPDATE
              SET canonicality_state = EXCLUDED.canonicality_state,
                  consumer_visibility = EXCLUDED.consumer_visibility,
@@ -58,46 +84,93 @@ pub(super) async fn write(
                  EXCLUDED.block_number, EXCLUDED.block_hash, EXCLUDED.transaction_hash,
                  EXCLUDED.transaction_index, EXCLUDED.log_index
              )
-             RETURNING event_identity",
-        )
-        .bind(&association.event_identity)
-        .bind(&association.migration_correlation_id)
-        .bind(&association.correlation_kind)
-        .bind(&association.evidence_refs)
-        .bind(&association.chain_id)
-        .bind(association.block_number)
-        .bind(&association.block_hash)
-        .bind(&association.transaction_hash)
-        .bind(association.transaction_index)
-        .bind(association.log_index)
-        .bind(&association.canonicality_state)
-        .bind(&association.consumer_visibility)
-        .bind(&content_hash)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|error| {
-            InterpretError::database("failed to write migration event association", error)
-        })?;
-        if written.is_none() {
+             RETURNING event_identity, migration_correlation_id",
+        );
+        let written = query
+            .build_query_as::<(String, String)>()
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|error| {
+                let identities = batch.iter().map(|association| {
+                    format!(
+                        "({}, {})",
+                        association.event_identity, association.migration_correlation_id
+                    )
+                });
+                let context = batch_row_context(start, identities);
+                InterpretError::database(
+                    format!("failed to write migration-event-association batch; {context}"),
+                    error,
+                )
+            })?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let conflicting = batch
+            .iter()
+            .enumerate()
+            .filter(|(_, association)| {
+                !written.contains(&(
+                    association.event_identity.clone(),
+                    association.migration_correlation_id.clone(),
+                ))
+            })
+            .map(|(offset, association)| {
+                format!(
+                    "{}=({}, {})",
+                    start + offset,
+                    association.event_identity,
+                    association.migration_correlation_id
+                )
+            })
+            .collect::<Vec<_>>();
+        if !conflicting.is_empty() {
             return Err(InterpretError::data_integrity(format!(
-                "migration event association ({}, {}) is already bound to different evidence",
-                association.event_identity, association.migration_correlation_id
+                "migration event associations are already bound to different evidence; conflicting batch rows [{}]",
+                conflicting.join(", ")
             )));
         }
     }
 
-    for association in &output.migration_discovery_associations {
-        let written: Option<String> = sqlx::query_scalar(
+    for (start, batch) in
+        conflict_free_batches(&output.migration_discovery_associations, |association| {
+            (
+                association.logical_edge_identity.clone(),
+                association.migration_correlation_id.clone(),
+            )
+        })
+    {
+        let mut query = QueryBuilder::<Postgres>::new(
             "INSERT INTO migration_discovery_associations (
                  logical_edge_identity, migration_correlation_id, correlation_kind,
                  registry_contract_instance_id, registry_address, source_manifest_id,
                  evidence_refs, chain_id, block_number, block_hash, transaction_hash,
                  transaction_index, log_index, canonicality_state, consumer_visibility,
                  interpreter_content_hash
-             ) VALUES (
-                 $1, $2, 'migration_registry_creation', $3, lower($4), $5, $6, $7,
-                 $8, $9, $10, $11, $12, $13::canonicality_state, $14, $15
-             )
+             ) ",
+        );
+        query.push_values(batch, |mut row, association| {
+            row.push_bind(&association.logical_edge_identity)
+                .push_bind(&association.migration_correlation_id)
+                .push("'migration_registry_creation'")
+                .push_bind(association.registry_contract_instance_id)
+                .push("lower(")
+                .push_bind_unseparated(&association.registry_address)
+                .push_unseparated(")")
+                .push_bind(association.source_manifest_id)
+                .push_bind(&association.evidence_refs)
+                .push_bind(&association.chain_id)
+                .push_bind(association.block_number)
+                .push_bind(&association.block_hash)
+                .push_bind(&association.transaction_hash)
+                .push_bind(association.transaction_index)
+                .push_bind(association.log_index)
+                .push_bind(&association.canonicality_state)
+                .push_unseparated("::canonicality_state")
+                .push_bind(&association.consumer_visibility)
+                .push_bind(&content_hash);
+        });
+        query.push(
+            "
              ON CONFLICT (logical_edge_identity, migration_correlation_id) DO UPDATE
              SET canonicality_state = EXCLUDED.canonicality_state,
                  consumer_visibility = EXCLUDED.consumer_visibility,
@@ -120,32 +193,49 @@ pub(super) async fn write(
                  EXCLUDED.block_number, EXCLUDED.block_hash, EXCLUDED.transaction_hash,
                  EXCLUDED.transaction_index, EXCLUDED.log_index
              )
-             RETURNING logical_edge_identity",
-        )
-        .bind(&association.logical_edge_identity)
-        .bind(&association.migration_correlation_id)
-        .bind(association.registry_contract_instance_id)
-        .bind(&association.registry_address)
-        .bind(association.source_manifest_id)
-        .bind(&association.evidence_refs)
-        .bind(&association.chain_id)
-        .bind(association.block_number)
-        .bind(&association.block_hash)
-        .bind(&association.transaction_hash)
-        .bind(association.transaction_index)
-        .bind(association.log_index)
-        .bind(&association.canonicality_state)
-        .bind(&association.consumer_visibility)
-        .bind(&content_hash)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|error| {
-            InterpretError::database("failed to write migration discovery association", error)
-        })?;
-        if written.is_none() {
+             RETURNING logical_edge_identity, migration_correlation_id",
+        );
+        let written = query
+            .build_query_as::<(String, String)>()
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|error| {
+                let identities = batch.iter().map(|association| {
+                    format!(
+                        "({}, {})",
+                        association.logical_edge_identity, association.migration_correlation_id
+                    )
+                });
+                let context = batch_row_context(start, identities);
+                InterpretError::database(
+                    format!("failed to write migration-discovery-association batch; {context}"),
+                    error,
+                )
+            })?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let conflicting = batch
+            .iter()
+            .enumerate()
+            .filter(|(_, association)| {
+                !written.contains(&(
+                    association.logical_edge_identity.clone(),
+                    association.migration_correlation_id.clone(),
+                ))
+            })
+            .map(|(offset, association)| {
+                format!(
+                    "{}=({}, {})",
+                    start + offset,
+                    association.logical_edge_identity,
+                    association.migration_correlation_id
+                )
+            })
+            .collect::<Vec<_>>();
+        if !conflicting.is_empty() {
             return Err(InterpretError::data_integrity(format!(
-                "migration discovery association ({}, {}) is already bound to different evidence",
-                association.logical_edge_identity, association.migration_correlation_id
+                "migration discovery associations are already bound to different evidence; conflicting batch rows [{}]",
+                conflicting.join(", ")
             )));
         }
     }
@@ -172,16 +262,35 @@ async fn write_effects(
     effects: &[MigrationCandidateEffect],
     content_hash: &str,
 ) -> Result<()> {
-    let statement = format!(
-        "INSERT INTO {table} (
+    for (start, batch) in conflict_free_batches(effects, |effect| effect.effect_identity.clone()) {
+        let mut query = QueryBuilder::<Postgres>::new(format!(
+            "INSERT INTO {table} (
              effect_identity, migration_correlation_ids, correlation_kind, effect_kind,
              proposed_effect, evidence_refs, chain_id, block_number, block_hash,
              transaction_hash, transaction_index, log_index, canonicality_state,
              consumer_visibility, interpreter_content_hash
-         ) VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-             $13::canonicality_state, $14, $15
-         )
+         ) "
+        ));
+        query.push_values(batch, |mut row, effect| {
+            row.push_bind(&effect.effect_identity)
+                .push_bind(&effect.migration_correlation_ids)
+                .push_bind(&effect.correlation_kind)
+                .push_bind(&effect.effect_kind)
+                .push_bind(&effect.proposed_effect)
+                .push_bind(&effect.evidence_refs)
+                .push_bind(&effect.chain_id)
+                .push_bind(effect.block_number)
+                .push_bind(&effect.block_hash)
+                .push_bind(&effect.transaction_hash)
+                .push_bind(effect.transaction_index)
+                .push_bind(effect.log_index)
+                .push_bind(&effect.canonicality_state)
+                .push_unseparated("::canonicality_state")
+                .push_bind(&effect.consumer_visibility)
+                .push_bind(content_hash);
+        });
+        query.push(format!(
+            "
          ON CONFLICT (effect_identity) DO UPDATE
          SET canonicality_state = EXCLUDED.canonicality_state,
              consumer_visibility = EXCLUDED.consumer_visibility,
@@ -199,31 +308,28 @@ async fn write_effects(
              EXCLUDED.transaction_hash, EXCLUDED.transaction_index, EXCLUDED.log_index
          )
          RETURNING effect_identity"
-    );
-    for effect in effects {
-        let written: Option<String> = sqlx::query_scalar(&statement)
-            .bind(&effect.effect_identity)
-            .bind(&effect.migration_correlation_ids)
-            .bind(&effect.correlation_kind)
-            .bind(&effect.effect_kind)
-            .bind(&effect.proposed_effect)
-            .bind(&effect.evidence_refs)
-            .bind(&effect.chain_id)
-            .bind(effect.block_number)
-            .bind(&effect.block_hash)
-            .bind(&effect.transaction_hash)
-            .bind(effect.transaction_index)
-            .bind(effect.log_index)
-            .bind(&effect.canonicality_state)
-            .bind(&effect.consumer_visibility)
-            .bind(content_hash)
-            .fetch_optional(&mut **transaction)
+        ));
+        let written = query
+            .build_query_scalar::<String>()
+            .fetch_all(&mut **transaction)
             .await
-            .map_err(|error| InterpretError::database(format!("failed to write {table}"), error))?;
-        if written.is_none() {
+            .map_err(|error| {
+                let context =
+                    batch_row_context(start, batch.iter().map(|effect| &effect.effect_identity));
+                InterpretError::database(format!("failed to write {table} batch; {context}"), error)
+            })?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let conflicting = batch
+            .iter()
+            .enumerate()
+            .filter(|(_, effect)| !written.contains(&effect.effect_identity))
+            .map(|(offset, effect)| format!("{}={}", start + offset, effect.effect_identity))
+            .collect::<Vec<_>>();
+        if !conflicting.is_empty() {
             return Err(InterpretError::data_integrity(format!(
-                "migration candidate effect {} in {table} is already bound to different evidence",
-                effect.effect_identity
+                "migration candidate effects in {table} are already bound to different evidence; conflicting batch rows [{}]",
+                conflicting.join(", ")
             )));
         }
     }
@@ -267,3 +373,6 @@ pub(super) async fn clear_redo_range(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

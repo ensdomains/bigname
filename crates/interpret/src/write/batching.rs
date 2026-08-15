@@ -2,6 +2,33 @@ use std::{collections::HashSet, fmt::Write as _, hash::Hash};
 
 const ROWS_PER_INSERT: usize = 500;
 
+pub(super) fn conflict_free_batches<T, K>(rows: &[T], key: impl Fn(&T) -> K) -> Vec<(usize, &[T])>
+where
+    K: Eq + Hash,
+{
+    let mut seen = HashSet::new();
+    let mut batches = Vec::new();
+    let mut start = 0;
+    for (index, row) in rows.iter().enumerate() {
+        if !seen.insert(key(row)) {
+            if start < index {
+                batches.push((start, &rows[start..index]));
+            }
+            batches.push((index, &rows[index..index + 1]));
+            start = index + 1;
+            continue;
+        }
+        if index - start == ROWS_PER_INSERT {
+            batches.push((start, &rows[start..index]));
+            start = index;
+        }
+    }
+    if start < rows.len() {
+        batches.push((start, &rows[start..]));
+    }
+    batches
+}
+
 pub(super) fn conflict_free_batches_with_singletons<'a, T, K>(
     rows: &'a [T],
     key: impl Fn(&T) -> K,
@@ -49,11 +76,24 @@ pub(super) fn batch_row_context(
     identities: impl IntoIterator<Item = impl std::fmt::Display>,
 ) -> String {
     let mut context = String::from("batch rows [");
+    let mut total = 0;
     for (offset, identity) in identities.into_iter().enumerate() {
-        if offset > 0 {
-            context.push_str(", ");
+        if offset < ROWS_PER_INSERT {
+            if offset > 0 {
+                context.push_str(", ");
+            }
+            write!(context, "{}={identity}", start + offset)
+                .expect("writing to String cannot fail");
         }
-        write!(context, "{}={identity}", start + offset).expect("writing to String cannot fail");
+        total = offset + 1;
+    }
+    if total > ROWS_PER_INSERT {
+        write!(
+            context,
+            ", ... {} more; {total} total",
+            total - ROWS_PER_INSERT
+        )
+        .expect("writing to String cannot fail");
     }
     context.push(']');
     context
@@ -110,5 +150,34 @@ mod tests {
                 (2, vec!["new-after"]),
             ]
         );
+    }
+
+    #[test]
+    fn stateful_batches_group_first_occurrences_and_singleton_repeats() {
+        let rows = ["first", "second", "third", "second", "fourth", "fifth"];
+        let batches = conflict_free_batches(&rows, |row| *row)
+            .into_iter()
+            .map(|(start, rows)| (start, rows.to_vec()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            batches,
+            vec![
+                (0, vec!["first", "second", "third"]),
+                (3, vec!["second"]),
+                (4, vec!["fourth", "fifth"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn row_context_caps_identities_and_reports_the_total() {
+        let identities = (0..=ROWS_PER_INSERT).map(|index| format!("id-{index}"));
+        let context = batch_row_context(7, identities);
+
+        assert!(context.contains("7=id-0"));
+        assert!(context.contains("506=id-499"));
+        assert!(!context.contains("=id-500"));
+        assert!(context.ends_with(", ... 1 more; 501 total]"), "{context}");
     }
 }
