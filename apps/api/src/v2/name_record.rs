@@ -193,6 +193,10 @@ pub(crate) fn build_name_record(
     status: Status,
 ) -> V2Result<NameRecord> {
     let registration = name_registration_fields(Some(row), &row.namespace);
+    // The projection deletes a released name's inventory row and resolver
+    // pointer; never serve either even if state loss leaves them attached.
+    let released_tombstone = registration.registration_status == RegistrationStatus::Released;
+    let record_inventory = record_inventory.filter(|_| !released_tombstone);
     let unsupported_fields = unsupported_fields(record_inventory);
     let field_supported = |field: &str| {
         !unsupported_fields
@@ -214,8 +218,9 @@ pub(crate) fn build_name_record(
         .flatten();
     let (wrapper_state, wrapper_fuses) = wrapper_metadata(&row.declared_summary)?
         .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
-    let resolver = (string_field(row.coverage.get("unsupported_reason")).as_deref()
-        != Some("current_authority_not_projected"))
+    let resolver = (!released_tombstone
+        && string_field(row.coverage.get("unsupported_reason")).as_deref()
+            != Some("current_authority_not_projected"))
     .then(|| resolver(&row.declared_summary))
     .flatten();
 

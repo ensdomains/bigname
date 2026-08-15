@@ -756,6 +756,37 @@ async fn v2_get_name_classifies_released_as_released() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Result<()> {
+    // The fixture's inventory row and declared resolver stay attached: a
+    // released tombstone must not serve them even if projection state loss
+    // retains them.
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        row.declared_summary["registration"]["status"] = json!("released");
+        row.declared_summary["registration"]["released_at"] = json!("2026-06-14T00:00:00Z");
+    })
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("ok")));
+    assert_eq!(data.get("registration_status"), Some(&json!("released")));
+    assert!(data.get("resolver").is_none());
+    assert!(data.get("addresses").is_none());
+    assert!(data.get("text_records").is_none());
+    assert!(data.get("content_hash").is_none());
+    assert!(data.get("primary_address").is_none());
+    assert_eq!(
+        data.get("unsupported_fields"),
+        Some(&json!([
+            "addresses",
+            "content_hash",
+            "primary_address",
+            "text_records"
+        ]))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_classifies_no_binding_as_unregistered() -> Result<()> {
     let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
         row.surface_binding_id = None;

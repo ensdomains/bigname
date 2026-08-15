@@ -352,6 +352,118 @@ async fn v2_lookup_withholds_fields_for_unsupported_name_authority() -> Result<(
 }
 
 #[tokio::test]
+async fn v2_lookup_withholds_resolver_without_projected_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'current_authority_not_projected'
+         WHERE raw_name = 'alice.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let forward = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "alice.eth"}]}),
+    )
+    .await?;
+    let record = &forward["data"][0]["record"];
+    assert_eq!(record["status"], json!("unsupported"));
+    assert_eq!(
+        record["unsupported_reason"],
+        json!("current_authority_not_projected")
+    );
+    // The record keeps the full detail shape for this reason; only the
+    // retained internal resolver pointer is withheld.
+    assert_eq!(record["addresses"]["60"], json!(address));
+    assert!(record.get("resolver").is_none());
+
+    // Reverse detail shares build_detail_record with the forward path, so the
+    // forward assertion above covers the builder for both. Reverse membership
+    // additionally excludes unsupported name rows outright (readable_names
+    // requires support_status = 'supported'), so the row cannot reach the
+    // builder from a reverse input while its authority is not projected.
+    let reverse = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"address": address}]}),
+    )
+    .await?;
+    let records = reverse["data"][0]["records"]
+        .as_array()
+        .expect("reverse detail lookup must return records");
+    assert!(
+        records
+            .iter()
+            .all(|record| record["name"] != json!("alice.eth")),
+        "unprojected-authority row must be absent from reverse membership"
+    );
+    let bob = records
+        .iter()
+        .find(|record| record["name"] == json!("bob.eth"))
+        .expect("reverse records must include bob.eth");
+    assert_eq!(
+        bob["resolver"],
+        json!({"chain_id": 1, "address": address})
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:released.eth",
+        "released.eth",
+        "released.eth",
+        "namehash:released.eth",
+        Uuid::from_u128(0x5a0401),
+        Uuid::from_u128(0x5a0402),
+        Uuid::from_u128(0x5a0403),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    // The seeded inventory row and declared resolver stay attached: a released
+    // tombstone must not serve them even if projection state loss retains them.
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary =
+             jsonb_set(declared_summary, '{registration,status}', '\"released\"')
+         WHERE raw_name = 'released.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "released.eth"}]}),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+    assert_eq!(record["status"], json!("ok"));
+    assert_eq!(record["registration_status"], json!("released"));
+    assert!(record.get("resolver").is_none());
+    assert!(record.get("addresses").is_none());
+    assert!(record.get("text_records").is_none());
+    assert!(record.get("content_hash").is_none());
+    assert!(record.get("primary_address").is_none());
+    assert_eq!(
+        record["unsupported_fields"],
+        json!(["addresses", "content_hash", "primary_address", "text_records"])
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_flattens_phase_writer_byte_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

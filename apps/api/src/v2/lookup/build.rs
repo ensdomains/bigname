@@ -8,7 +8,7 @@ use crate::v2::support::{
     record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
 };
 use crate::v2::{
-    Relation, Status, V2Result,
+    RegistrationStatus, Relation, Status, V2Result,
     name_record::{
         self, chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
     },
@@ -149,12 +149,19 @@ fn build_detail_record(
     if let Some(record) = authority_unsupported_record(record, status, unsupported_reason.clone()) {
         return Ok(record);
     }
-    let addresses = identity_addresses(record.record_inventory_current.as_ref());
-    let text_records = identity_text_records(record.record_inventory_current.as_ref());
-    let content_hash = identity_content_hash(record.record_inventory_current.as_ref());
-    let unsupported_fields = identity_unsupported_fields(record);
     let registration =
         name_record::identity_name_registration_fields(Some(&record.row), &record.row.namespace);
+    // The projection deletes a released name's inventory row and resolver
+    // pointer; never serve either even if state loss leaves them attached.
+    let released_tombstone = registration.registration_status == RegistrationStatus::Released;
+    let record_inventory = record
+        .record_inventory_current
+        .as_ref()
+        .filter(|_| !released_tombstone);
+    let addresses = identity_addresses(record_inventory);
+    let text_records = identity_text_records(record_inventory);
+    let content_hash = identity_content_hash(record_inventory);
+    let unsupported_fields = identity_unsupported_fields(record_inventory);
     let token_id = name_record::identity_declared_token_id(&record.row);
     let addresses = (!unsupported_fields.contains("addresses")).then_some(addresses);
     let text_records = (!unsupported_fields.contains("text_records")).then_some(text_records);
@@ -165,6 +172,11 @@ fn build_detail_record(
         .as_ref()
         .filter(|_| !unsupported_fields.contains("primary_address"))
         .and_then(|addresses| addresses.get(primary_coin_type).cloned());
+    let resolver = (!released_tombstone
+        && string_field(record.row.coverage.get("unsupported_reason")).as_deref()
+            != Some("current_authority_not_projected"))
+    .then(|| name_record::resolver(&record.row.declared_summary))
+    .flatten();
 
     Ok(LookupRecord {
         name: record.row.normalized_name.clone(),
@@ -180,7 +192,7 @@ fn build_detail_record(
         created_at: registration.created_at,
         expires_at: registration.expires_at,
         registration_status: Some(registration.registration_status),
-        resolver: name_record::resolver(&record.row.declared_summary),
+        resolver,
         primary_address,
         addresses,
         text_records,
@@ -279,18 +291,13 @@ fn identity_content_hash(
 }
 
 fn identity_unsupported_fields(
-    record: &bigname_storage::IdentityNameRecordRow,
+    inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
 ) -> BTreeSet<String> {
-    let inventory_supported = record
-        .record_inventory_current
-        .as_ref()
-        .is_some_and(|inventory| inventory.support_status == "supported");
+    let inventory_supported =
+        inventory.is_some_and(|inventory| inventory.support_status == "supported");
     record_unsupported_fields(
         inventory_supported,
-        record
-            .record_inventory_current
-            .as_ref()
-            .map(|inventory| &inventory.unsupported_families),
+        inventory.map(|inventory| &inventory.unsupported_families),
         direct_json_field,
         V2_RECORD_UNSUPPORTED_FIELD_NAMES,
     )
