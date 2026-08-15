@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use alloy_primitives::{B256, keccak256};
 use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
+use bigname_adapters::schema_v2::{BatchInput, BatchOutput};
 use serde_json::Value;
 
 use permutation::{
@@ -1473,32 +1474,27 @@ fn knob(name: &str, fallback: u64) -> Result<u64> {
     }
 }
 
-/// Pins issue #339: a binding closure whose `except_surface_binding_id` names a binding the same
-/// batch no longer opens.
+/// Pins the issue #339 contract: a raw-block `binding_closures` row cannot set
+/// `except_surface_binding_id` to a binding whose opening provenance does not exist.
 ///
 /// The mechanism, directed rather than drawn, so it is deterministic and independent of the
 /// generator. A lapsed lease settles at a bare block boundary, which derives a registry-only
-/// resource, a surface binding for it, and a closure clamping the name's binding window with that
-/// binding exempted. In the same block a registry `Transfer` and a registrar `NameRegistered` land
-/// in one transaction, so same-transaction reconciliation folds the pending registry setup into the
-/// registration.
+/// resource, a [surface binding](../../../docs/glossary.md#surface-name-surface) for it, and a
+/// `binding_closures` row whose `except_surface_binding_id` preserves that binding. In the same
+/// block a registry `Transfer` and a registrar `NameRegistered` land in one transaction, so
+/// same-transaction reconciliation folds the pending registry setup into the registration.
 ///
-/// The two indexes then disagree about where the boundary rows sit. A binding's position comes from
-/// its provenance, and boundary provenance carries no transaction or log index, so `BindingIndex`
-/// defaults it to `(block, 0, 0)` — which is exactly where the pending log sits, and the binding is
-/// dropped. The closure carries its own `(-1, -1)` sentinel, which is in no pending position, so it
-/// survives. The exemption is left naming a binding that is gone.
+/// Missing transaction and log indexes are not a chain position. The binding side index must keep
+/// that state distinct from the pending log's real `(block, 0, 0)` position, so reconciliation
+/// retains the boundary binding and `except_surface_binding_id` never dangles.
 ///
-/// Nothing downstream rejects it: there is no foreign key on that column, so the writer's
-/// `surface_binding_id <> $3` clause matches no row and the closure clamps its whole window with
-/// nothing exempted. Whether that loses a binding the interpreter meant to keep depends on where
-/// the intended binding sits, which this test does not establish — it pins the dangling reference.
-///
-/// This asserts the current, wrong behaviour. The #339 fix does not retire this test: it inverts
-/// it into the fixed-state acceptance test — assert that no closure exemption dangles and that
-/// the boundary binding survives — so the mechanism keeps its regression coverage either way.
+/// The same transaction also opens a registrar binding at a real log position and emits a
+/// `binding_closures` row with the matching `except_surface_binding_id`. That positive case must
+/// survive: rejecting the sentinel collision must not reject a reference backed by a genuine
+/// opening position.
 #[test]
-fn a_boundary_closure_exempts_a_binding_the_same_batch_no_longer_opens() -> Result<()> {
+fn a_boundary_closure_cannot_exempt_a_binding_whose_opening_provenance_does_not_exist() -> Result<()>
+{
     let checked_in = checked_in_manifests()?;
     let directed = Directed::same_transaction_setup(&checked_in)?;
     let context = format!("directed={}", directed.id);
@@ -1526,20 +1522,211 @@ fn a_boundary_closure_exempts_a_binding_the_same_batch_no_longer_opens() -> Resu
             )
         })
         .collect::<Vec<_>>();
-    let expected = (
-        directed.release_block_number(),
-        -1,
-        -1,
-        Some(directed.surface_binding_id()),
-    );
-    if dangling != vec![expected] {
+    if !dangling.is_empty() {
         bail!(
-            "{context}: expected exactly the boundary closure {expected:?} to exempt a binding the \
-             batch no longer opens, found {dangling:?}. A closure that stopped dangling is issue \
-             #339 fixed — invert this test into the fixed-state acceptance test (no dangling \
-             exemption, the boundary binding survives); do not retire it. A different one is a \
-             new defect"
+            "{context}: a binding_closures row cannot set except_surface_binding_id to a binding \
+             whose opening provenance does not exist, found {dangling:?}"
+        );
+    }
+    if !opened.contains(&directed.surface_binding_id()) {
+        bail!(
+            "{context}: reconciliation removed boundary binding {} by treating missing provenance \
+             indexes as the pending log's real chain position",
+            directed.surface_binding_id()
+        );
+    }
+    let boundary_exemption = output.binding_closures.iter().find(|closure| {
+        closure.block_number == directed.release_block_number()
+            && closure.transaction_index == -1
+            && closure.log_index == -1
+    });
+    if boundary_exemption.and_then(|closure| closure.except_surface_binding_id)
+        != Some(directed.surface_binding_id())
+    {
+        bail!(
+            "{context}: the retained boundary binding is not named by the raw-block \
+             except_surface_binding_id: {boundary_exemption:?}"
+        );
+    }
+
+    let matching = matching_release_except_binding(&directed, output);
+    if matching.is_none() {
+        bail!(
+            "{context}: rejecting the sentinel collision also removed every \
+             except_surface_binding_id backed by a binding with a genuine matching opening \
+             position"
         );
     }
     Ok(())
+}
+
+/// Runs the #339 fixture family with both orders of the two release-transaction logs. For each
+/// ordering, the adapter must produce the same complete output as a rebuild when restarted before
+/// the release boundary, after the boundary binding and closure have been emitted, or after every
+/// physical block. `converge` also compares fresh and incremental interpretation, a compacted
+/// restore, a live resumed session, and a deliberately tiny restored-state cache at every split.
+#[test]
+fn issue_339_event_orders_and_restart_splits_equal_rebuild() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let directed = Directed::same_transaction_setup(&checked_in)?;
+    for (order, input) in issue_339_event_orders(&directed)? {
+        let block_count = input.blocks.len();
+        let release = block_count - 2;
+        let split_grids = [
+            (
+                "single rebuild batch",
+                std::iter::once(0..block_count).collect(),
+            ),
+            (
+                "restart before the closure boundary",
+                vec![0..release, release..block_count],
+            ),
+            (
+                "restart after the boundary binding and closure",
+                vec![0..release + 1, release + 1..block_count],
+            ),
+            (
+                "restart after every block",
+                (0..block_count).map(|index| index..index + 1).collect(),
+            ),
+        ];
+        for (grid, splits) in split_grids {
+            let context = format!("directed={} order={order} grid={grid}", directed.id);
+            let converged = converge(&context, input.clone(), splits)?;
+            assert_issue_339_references(&context, &directed, &converged.whole.output)?;
+            let artifacts = converged.artifacts.counts();
+            if !artifacts.is_empty() {
+                bail!(
+                    "{context}: fixture replay differs from a rebuild through batch-boundary \
+                     artifacts {artifacts:?}"
+                );
+            }
+
+            let mut references = IdentityReferences::new(
+                &input.chain_id,
+                &directed.declared_instances,
+                &directed.manifest_ids,
+            );
+            for batch in &converged.batches {
+                references.absorb(&context, &batch.blocks, &batch.output)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn issue_339_event_orders(directed: &Directed) -> Result<Vec<(&'static str, BatchInput)>> {
+    let mut transfer_before_registration = directed.input.clone();
+    let mut post_closure = transfer_before_registration
+        .blocks
+        .last()
+        .cloned()
+        .context("issue #339 fixture has no release block")?;
+    post_closure.block_number += 1;
+    post_closure.block_hash = format!("0x{:064x}", 339_u64);
+    post_closure.block_timestamp += time::Duration::seconds(1);
+    transfer_before_registration.blocks.push(post_closure);
+
+    let mut registration_before_transfer = transfer_before_registration.clone();
+    let release_block_number = directed.release_block_number();
+    let release_logs = registration_before_transfer
+        .raw_logs
+        .iter()
+        .enumerate()
+        .filter(|(_, log)| log.block_number == release_block_number)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if release_logs.len() != 2 {
+        bail!(
+            "directed={}: expected two synthetic release-transaction logs, found {}",
+            directed.id,
+            release_logs.len()
+        );
+    }
+    let first = registration_before_transfer.raw_logs[release_logs[0]].log_index;
+    let second = registration_before_transfer.raw_logs[release_logs[1]].log_index;
+    registration_before_transfer.raw_logs[release_logs[0]].log_index = second;
+    registration_before_transfer.raw_logs[release_logs[1]].log_index = first;
+    registration_before_transfer
+        .raw_logs
+        .sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
+
+    Ok(vec![
+        ("transfer-before-registration", transfer_before_registration),
+        ("registration-before-transfer", registration_before_transfer),
+    ])
+}
+
+fn assert_issue_339_references(
+    context: &str,
+    directed: &Directed,
+    output: &BatchOutput,
+) -> Result<()> {
+    let opened = output
+        .surface_bindings
+        .iter()
+        .map(|binding| binding.surface_binding_id)
+        .collect::<BTreeSet<_>>();
+    let dangling = output
+        .binding_closures
+        .iter()
+        .filter_map(|closure| {
+            closure
+                .except_surface_binding_id
+                .filter(|binding_id| !opened.contains(binding_id))
+        })
+        .collect::<BTreeSet<_>>();
+    if !dangling.is_empty() {
+        bail!("{context}: except_surface_binding_id references unopened bindings {dangling:?}");
+    }
+    if !opened.contains(&directed.surface_binding_id()) {
+        bail!(
+            "{context}: rebuild did not retain boundary binding {}",
+            directed.surface_binding_id()
+        );
+    }
+    if matching_release_except_binding(directed, output).is_none() {
+        bail!(
+            "{context}: the release transaction has no except_surface_binding_id backed by a \
+             binding with the same genuine opening position"
+        );
+    }
+    Ok(())
+}
+
+fn matching_release_except_binding(
+    directed: &Directed,
+    output: &BatchOutput,
+) -> Option<(uuid::Uuid, (i64, i64, i64))> {
+    output.binding_closures.iter().find_map(|closure| {
+        if closure.block_number != directed.release_block_number()
+            || closure.transaction_index < 0
+            || closure.log_index < 0
+        {
+            return None;
+        }
+        let exempt = closure.except_surface_binding_id?;
+        let binding = output
+            .surface_bindings
+            .iter()
+            .find(|binding| binding.surface_binding_id == exempt)?;
+        let opening = (
+            binding.block_number,
+            binding
+                .provenance
+                .get("transaction_index")
+                .and_then(Value::as_i64)?,
+            binding
+                .provenance
+                .get("log_index")
+                .and_then(Value::as_i64)?,
+        );
+        (opening
+            == (
+                closure.block_number,
+                closure.transaction_index,
+                closure.log_index,
+            ))
+            .then_some((exempt, opening))
+    })
 }
