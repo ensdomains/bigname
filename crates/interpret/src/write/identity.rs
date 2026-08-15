@@ -7,6 +7,7 @@ use sqlx::{Postgres, Transaction, types::Uuid};
 
 use crate::{InterpretError, Result};
 
+mod rows;
 mod transition;
 
 pub(super) async fn write_rows(
@@ -16,8 +17,7 @@ pub(super) async fn write_rows(
 ) -> Result<()> {
     transition::validate_boundaries(output)?;
     super::identity_names::write(transaction, output).await?;
-    write_token_lineages(transaction, output).await?;
-    write_resources(transaction, output).await?;
+    rows::write(transaction, output).await?;
     write_bindings(transaction, output, preserve_outside_range_closes).await
 }
 
@@ -26,146 +26,6 @@ pub(super) async fn write_transitions(
     output: &BatchOutput,
 ) -> Result<()> {
     transition::write(transaction, &output.migration_authority_transitions).await
-}
-
-async fn write_token_lineages(
-    transaction: &mut Transaction<'_, Postgres>,
-    output: &BatchOutput,
-) -> Result<()> {
-    for lineage in &output.token_lineages {
-        let written: Option<Uuid> = sqlx::query_scalar(
-            "
-            INSERT INTO token_lineages (
-                token_lineage_id, chain_id, block_hash, block_number,
-                provenance, canonicality_state
-            )
-            VALUES ($1, $2, $3, $4, $5, $6::canonicality_state)
-            ON CONFLICT (token_lineage_id) DO UPDATE
-            SET block_hash = CASE
-                    WHEN token_lineages.canonicality_state = 'orphaned'
-                        THEN EXCLUDED.block_hash
-                    ELSE token_lineages.block_hash
-                END,
-                block_number = CASE
-                    WHEN token_lineages.canonicality_state = 'orphaned'
-                        THEN EXCLUDED.block_number
-                    ELSE token_lineages.block_number
-                END,
-                provenance = CASE
-                    WHEN token_lineages.canonicality_state = 'orphaned'
-                        THEN EXCLUDED.provenance
-                    ELSE token_lineages.provenance
-                END,
-                canonicality_state = CASE
-                    WHEN token_lineages.canonicality_state = 'orphaned'
-                      OR (
-                          EXCLUDED.block_number = token_lineages.block_number
-                          AND EXCLUDED.block_hash = token_lineages.block_hash
-                      )
-                        THEN EXCLUDED.canonicality_state
-                    ELSE token_lineages.canonicality_state
-                END,
-                observed_at = CASE
-                    WHEN token_lineages.canonicality_state = 'orphaned'
-                        THEN now()
-                    ELSE token_lineages.observed_at
-                END
-            WHERE token_lineages.chain_id = EXCLUDED.chain_id
-              AND (
-                  token_lineages.canonicality_state = 'orphaned'
-                  OR (
-                      token_lineages.block_hash = EXCLUDED.block_hash
-                      AND token_lineages.block_number = EXCLUDED.block_number
-                      AND token_lineages.provenance = EXCLUDED.provenance
-                  )
-              )
-            RETURNING token_lineage_id
-            ",
-        )
-        .bind(lineage.token_lineage_id)
-        .bind(&lineage.chain_id)
-        .bind(&lineage.block_hash)
-        .bind(lineage.block_number)
-        .bind(&lineage.provenance)
-        .bind(&lineage.canonicality_state)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|error| InterpretError::database("failed to write token lineage", error))?;
-        if written.is_none() {
-            return Err(InterpretError::data_integrity(format!(
-                "token lineage {} is already bound to a different chain or different lineage data",
-                lineage.token_lineage_id
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn write_resources(
-    transaction: &mut Transaction<'_, Postgres>,
-    output: &BatchOutput,
-) -> Result<()> {
-    for resource in &output.resources {
-        let written: Option<Uuid> = sqlx::query_scalar(
-            "
-            INSERT INTO resources (
-                resource_id, token_lineage_id, chain_id, block_hash,
-                block_number, provenance, canonicality_state
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7::canonicality_state)
-            ON CONFLICT (resource_id) DO UPDATE
-            SET block_hash = CASE
-                    WHEN resources.canonicality_state = 'orphaned'
-                        THEN EXCLUDED.block_hash
-                    ELSE resources.block_hash
-                END,
-                block_number = CASE
-                    WHEN resources.canonicality_state = 'orphaned'
-                        THEN EXCLUDED.block_number
-                    ELSE resources.block_number
-                END,
-                provenance = CASE
-                    WHEN resources.canonicality_state = 'orphaned'
-                        THEN EXCLUDED.provenance
-                    ELSE resources.provenance
-                END,
-                canonicality_state = CASE
-                    WHEN resources.canonicality_state = 'orphaned'
-                      OR (
-                          EXCLUDED.block_number = resources.block_number
-                          AND EXCLUDED.block_hash = resources.block_hash
-                      )
-                        THEN EXCLUDED.canonicality_state
-                    ELSE resources.canonicality_state
-                END,
-                observed_at = CASE
-                    WHEN resources.canonicality_state = 'orphaned'
-                        THEN now()
-                    ELSE resources.observed_at
-                END
-            WHERE resources.chain_id = EXCLUDED.chain_id
-              AND resources.token_lineage_id IS NOT DISTINCT FROM EXCLUDED.token_lineage_id
-            RETURNING resource_id
-            ",
-        )
-        .bind(resource.resource_id)
-        .bind(resource.token_lineage_id)
-        .bind(&resource.chain_id)
-        .bind(&resource.block_hash)
-        .bind(resource.block_number)
-        .bind(&resource.provenance)
-        .bind(&resource.canonicality_state)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|error| InterpretError::database("failed to write resource", error))?;
-        if written.is_none() {
-            return Err(InterpretError::data_integrity(format!(
-                "resource {} is already bound to different lineage data",
-                resource.resource_id
-            )));
-        }
-    }
-    Ok(())
 }
 
 async fn write_bindings(

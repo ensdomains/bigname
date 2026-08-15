@@ -1,7 +1,10 @@
 use bigname_adapters::schema_v2::BatchOutput;
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, QueryBuilder, Transaction};
+use std::collections::HashSet;
 
 use crate::{InterpretError, NORMALIZATION_STATE_REPAIR_REASON, Result};
+
+use super::batching::{batch_row_context, conflict_free_batches};
 
 pub(super) async fn write(
     transaction: &mut Transaction<'_, Postgres>,
@@ -15,15 +18,30 @@ async fn write_preimages(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
 ) -> Result<()> {
-    for preimage in preimages_for_submission(output) {
-        let written: Option<String> = sqlx::query_scalar(
+    let preimages = preimages_for_submission(output).collect::<Vec<_>>();
+    for (start, batch) in conflict_free_batches(&preimages, |preimage| preimage.labelhash.clone()) {
+        let mut query = QueryBuilder::<Postgres>::new(
             "
             INSERT INTO label_preimages (
                 labelhash, raw_label, decoded_label, normalizer_version,
                 normalized_under_version, normalization_error,
                 source_kind, source_priority, provenance
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ",
+        );
+        query.push_values(batch, |mut row, preimage| {
+            row.push_bind(&preimage.labelhash)
+                .push_bind(&preimage.raw_label)
+                .push_bind(&preimage.decoded_label)
+                .push_bind(&preimage.normalizer_version)
+                .push_bind(preimage.normalized_under_version)
+                .push_bind(&preimage.normalization_error)
+                .push_bind(&preimage.source_kind)
+                .push_bind(preimage.source_priority)
+                .push_bind(&preimage.provenance);
+        });
+        query.push(
+            "
             ON CONFLICT (labelhash) DO UPDATE
             SET source_kind = CASE
                     WHEN EXCLUDED.source_priority >= label_preimages.source_priority
@@ -47,23 +65,32 @@ async fn write_preimages(
               AND label_preimages.normalization_error IS NOT DISTINCT FROM EXCLUDED.normalization_error
             RETURNING labelhash
             ",
-        )
-        .bind(&preimage.labelhash)
-        .bind(&preimage.raw_label)
-        .bind(&preimage.decoded_label)
-        .bind(&preimage.normalizer_version)
-        .bind(preimage.normalized_under_version)
-        .bind(&preimage.normalization_error)
-        .bind(&preimage.source_kind)
-        .bind(preimage.source_priority)
-        .bind(&preimage.provenance)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|error| InterpretError::database("failed to write raw label preimage", error))?;
-        if written.is_none() {
+        );
+        let written = query
+            .build_query_scalar::<String>()
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|error| {
+                let context =
+                    batch_row_context(start, batch.iter().map(|preimage| &preimage.labelhash));
+                InterpretError::database(
+                    format!("failed to write raw-label-preimage batch; {context}"),
+                    error,
+                )
+            })?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let conflicting = batch
+            .iter()
+            .enumerate()
+            .filter(|(_, preimage)| !written.contains(&preimage.labelhash))
+            .map(|(offset, preimage)| format!("{}={}", start + offset, preimage.labelhash))
+            .collect::<Vec<_>>();
+        if !conflicting.is_empty() {
             return Err(InterpretError::data_integrity(format!(
-                "label hash {} is already bound to different raw bytes or normalization state; {}",
-                preimage.labelhash, NORMALIZATION_STATE_REPAIR_REASON
+                "label hashes are already bound to different raw bytes or normalization state; conflicting batch rows [{}]; {}",
+                conflicting.join(", "),
+                NORMALIZATION_STATE_REPAIR_REASON
             )));
         }
     }
@@ -83,8 +110,10 @@ async fn write_surfaces(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
 ) -> Result<()> {
-    for surface in &output.name_surfaces {
-        let written: Option<String> = sqlx::query_scalar(
+    for (start, batch) in conflict_free_batches(&output.name_surfaces, |surface| {
+        surface.logical_name_id.clone()
+    }) {
+        let mut query = QueryBuilder::<Postgres>::new(
             "
             INSERT INTO name_surfaces (
                 logical_name_id, namespace, raw_name, raw_labels,
@@ -92,11 +121,30 @@ async fn write_surfaces(
                 visibility_state, normalization_errors, deactivation_reason,
                 deactivated_at, chain_id, block_hash, block_number,
                 provenance, canonicality_state
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16, $17::canonicality_state
-            )
+            ) ",
+        );
+        query.push_values(batch, |mut row, surface| {
+            row.push_bind(&surface.logical_name_id)
+                .push_bind(&surface.namespace)
+                .push_bind(&surface.raw_name)
+                .push_bind(&surface.raw_labels)
+                .push_bind(&surface.dns_encoded_name)
+                .push_bind(&surface.namehash)
+                .push_bind(&surface.labelhashes)
+                .push_bind(&surface.normalizer_version)
+                .push_bind(&surface.visibility_state)
+                .push_bind(&surface.normalization_errors)
+                .push_bind(&surface.deactivation_reason)
+                .push_bind(surface.deactivated_at)
+                .push_bind(&surface.chain_id)
+                .push_bind(&surface.block_hash)
+                .push_bind(surface.block_number)
+                .push_bind(&surface.provenance)
+                .push_bind(&surface.canonicality_state)
+                .push_unseparated("::canonicality_state");
+        });
+        query.push(
+            "
             ON CONFLICT (logical_name_id) DO UPDATE
             SET block_hash = CASE
                     WHEN name_surfaces.canonicality_state = 'orphaned'
@@ -151,31 +199,32 @@ async fn write_surfaces(
               AND name_surfaces.chain_id = EXCLUDED.chain_id
             RETURNING logical_name_id
             ",
-        )
-        .bind(&surface.logical_name_id)
-        .bind(&surface.namespace)
-        .bind(&surface.raw_name)
-        .bind(&surface.raw_labels)
-        .bind(&surface.dns_encoded_name)
-        .bind(&surface.namehash)
-        .bind(&surface.labelhashes)
-        .bind(&surface.normalizer_version)
-        .bind(&surface.visibility_state)
-        .bind(&surface.normalization_errors)
-        .bind(&surface.deactivation_reason)
-        .bind(surface.deactivated_at)
-        .bind(&surface.chain_id)
-        .bind(&surface.block_hash)
-        .bind(surface.block_number)
-        .bind(&surface.provenance)
-        .bind(&surface.canonicality_state)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|error| InterpretError::database("failed to write raw name identity", error))?;
-        if written.is_none() {
+        );
+        let written = query
+            .build_query_scalar::<String>()
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|error| {
+                let context =
+                    batch_row_context(start, batch.iter().map(|surface| &surface.logical_name_id));
+                InterpretError::database(
+                    format!("failed to write raw-name-identity batch; {context}"),
+                    error,
+                )
+            })?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let conflicting = batch
+            .iter()
+            .enumerate()
+            .filter(|(_, surface)| !written.contains(&surface.logical_name_id))
+            .map(|(offset, surface)| format!("{}={}", start + offset, surface.logical_name_id))
+            .collect::<Vec<_>>();
+        if !conflicting.is_empty() {
             return Err(InterpretError::data_integrity(format!(
-                "logical name ID {} is already bound to different raw identity or normalization state; {}",
-                surface.logical_name_id, NORMALIZATION_STATE_REPAIR_REASON
+                "logical name IDs are already bound to different raw identity or normalization state; conflicting batch rows [{}]; {}",
+                conflicting.join(", "),
+                NORMALIZATION_STATE_REPAIR_REASON
             )));
         }
     }
@@ -184,10 +233,13 @@ async fn write_surfaces(
 
 #[cfg(test)]
 mod tests {
-    use bigname_adapters::schema_v2::LabelPreimage;
+    use bigname_adapters::schema_v2::{LabelPreimage, NameSurface};
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
     use serde_json::json;
 
     use super::*;
+
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     fn preimage(raw_label: &[u8]) -> LabelPreimage {
         LabelPreimage {
@@ -215,4 +267,104 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(submitted, vec![b"alice".as_slice()]);
     }
+
+    #[tokio::test]
+    async fn values_boundary_and_idempotent_replay_preserve_name_rows() -> TestResult {
+        let database = TestDatabase::create(TestDatabaseConfig::new(
+            "interpret_identity_names_values_boundary",
+        ))
+        .await?;
+        for sql in [
+            include_str!("../../../../schema-v2/baseline/01_chain.sql"),
+            include_str!("../../../../schema-v2/baseline/03_identity.sql"),
+            include_str!("../../../../schema-v2/baseline/07_labels.sql"),
+        ] {
+            sqlx::raw_sql(sql).execute(database.pool()).await?;
+        }
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, block_number, block_timestamp, canonicality_state
+             ) VALUES ('batch-test', '0x01', 1, to_timestamp(1), 'canonical')",
+        )
+        .execute(database.pool())
+        .await?;
+        let output = BatchOutput {
+            label_preimages: (0..501)
+                .map(|index| {
+                    let label = format!("label-{index:03}");
+                    LabelPreimage {
+                        labelhash: format!("0xlabel{index:03}"),
+                        raw_label: label.as_bytes().to_vec(),
+                        decoded_label: Some(label),
+                        normalizer_version: "test".to_owned(),
+                        normalized_under_version: true,
+                        normalization_error: None,
+                        source_kind: "chain_observation".to_owned(),
+                        source_priority: 100,
+                        provenance: json!({"row": index}),
+                    }
+                })
+                .collect(),
+            name_surfaces: (0..501)
+                .map(|index| {
+                    let namehash = format!("0xname{index:03}");
+                    NameSurface {
+                        logical_name_id: format!("ens:{namehash}"),
+                        namespace: "ens".to_owned(),
+                        raw_name: format!("name-{index:03}.eth"),
+                        raw_labels: vec![format!("name-{index:03}"), "eth".to_owned()],
+                        dns_encoded_name: vec![index as u8],
+                        namehash,
+                        labelhashes: vec![format!("0xlabel{index:03}"), "0xeth".to_owned()],
+                        normalizer_version: "test".to_owned(),
+                        visibility_state: "active".to_owned(),
+                        normalization_errors: json!([]),
+                        deactivation_reason: None,
+                        deactivated_at: None,
+                        chain_id: "batch-test".to_owned(),
+                        block_hash: "0x01".to_owned(),
+                        block_number: 1,
+                        provenance: json!({"row": index}),
+                        canonicality_state: "canonical".to_owned(),
+                    }
+                })
+                .collect(),
+            ..BatchOutput::default()
+        };
+        let mut transaction = database.pool().begin().await?;
+        write(&mut transaction, &output).await?;
+        transaction.commit().await?;
+        let mut replay = database.pool().begin().await?;
+        write(&mut replay, &output).await?;
+        replay.commit().await?;
+
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+                 (SELECT count(*) FROM label_preimages),
+                 (SELECT count(*) FROM name_surfaces)",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(counts, (501, 501));
+        let last: (String, String, serde_json::Value) = sqlx::query_as(
+            "SELECT logical_name_id, raw_name, provenance
+             FROM name_surfaces ORDER BY logical_name_id DESC LIMIT 1",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            last,
+            (
+                "ens:0xname500".to_owned(),
+                "name-500.eth".to_owned(),
+                json!({"row": 500}),
+            )
+        );
+        database.cleanup().await?;
+        Ok(())
+    }
 }
+
+#[cfg(test)]
+#[path = "identity_names/coverage_tests.rs"]
+mod coverage_tests;

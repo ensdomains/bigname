@@ -268,10 +268,8 @@ async fn constraint_error_names_writer_batch_and_every_submitted_row() -> TestRe
     assert_eq!(error.kind(), crate::ErrorKind::DataIntegrity);
     let message = error.to_string();
     assert!(message.contains("normalized-event batch"), "{message}");
-    assert!(
-        message.contains("batch rows [0=valid, 1=invalid]"),
-        "{message}"
-    );
+    assert!(message.contains("0=valid"), "{message}");
+    assert!(message.contains("1=invalid"), "{message}");
     transaction.rollback().await?;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events")
         .fetch_one(database.pool())
@@ -331,6 +329,29 @@ async fn constraint_failure_stops_before_suffix_and_retry_keeps_sequence_semanti
             (5, "suffix".to_owned()),
         ]
     );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn preflight_error_caps_row_identities_and_reports_total() -> TestResult {
+    let database = database("interpret_normalized_preflight_context_cap").await?;
+    sqlx::query("DROP TABLE normalized_events")
+        .execute(database.pool())
+        .await?;
+    let submitted = (0..501)
+        .map(|index| event(&format!("preflight-{index:03}"), json!({})))
+        .collect::<Vec<_>>();
+    let mut transaction = database.pool().begin().await?;
+    let error = events(&mut transaction, &submitted)
+        .await
+        .expect_err("missing normalized table must fail preflight");
+    let message = error.to_string();
+    assert!(message.contains("0=preflight-000"), "{message}");
+    assert!(message.contains("499=preflight-499"), "{message}");
+    assert!(!message.contains("500=preflight-500"), "{message}");
+    assert!(message.contains("1 more; 501 total"), "{message}");
+    transaction.rollback().await?;
     database.cleanup().await?;
     Ok(())
 }
