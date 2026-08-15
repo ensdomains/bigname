@@ -7483,6 +7483,138 @@ async fn released_v2_regime_regrant_releases_into_a_fresh_tombstone() -> Result<
 }
 
 #[tokio::test]
+async fn equal_position_v1_residue_suppresses_regime_regrant_carry() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("project_authority_regime_equal_position_regrant").await?;
+    let chain = "authority-regime-equal-position-regrant";
+    let (logical_name_id, _) = seed_proofless_released_v2_authority(scratch.pool(), chain).await?;
+    // Boundary materialization emits lifecycle facts at block scope, so this v1
+    // fact deliberately shares the release's production `(block, NULL, NULL)`
+    // position; equal-position v1 activity counts as at-or-before the release
+    // and must keep the release out of the regime.
+    insert_event(
+        scratch.pool(),
+        chain,
+        6,
+        Some(&logical_name_id),
+        None,
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"expiry":9_999}),
+        json!({
+            "kind": "raw_block",
+            "chain_id": chain,
+            "block_hash": block_hash(chain, 6),
+            "block_number": 6,
+            "state_scope": "name_authority"
+        }),
+    )
+    .await?;
+    let boundary_positions: Vec<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT transaction_index, log_index FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND block_number = 6
+           AND event_kind IN ('RegistrationReleased', 'ExpiryChanged')
+         ORDER BY event_kind",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(boundary_positions, vec![(None, None), (None, None)]);
+    for block in 7..=8 {
+        insert_lineage_block(scratch.pool(), chain, block).await?;
+    }
+    insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
+    let projected: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, resource_id
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        projected,
+        (
+            "unsupported".into(),
+            Some("conflicting_current_ens_authority".into()),
+            None,
+        )
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn earlier_other_resource_grant_disqualifies_regime_carry() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_authority_regime_other_resource_grant").await?;
+    let chain = "authority-regime-other-resource-grant";
+    let (logical_name_id, _) = seed_proofless_released_v2_authority(scratch.pool(), chain).await?;
+    // A canonical ENSv2 grant on a different resource at-or-before the release
+    // means the release did not close out the whole v2 story: it must not
+    // qualify the name for the released-v2 regime.
+    let other_resource = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 5, 'canonical')",
+    )
+    .bind(other_resource)
+    .bind(chain)
+    .bind(block_hash(chain, 5))
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        5,
+        Some(&logical_name_id),
+        Some(&other_resource.to_string()),
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({"status":"registered","registrant":OWNER,"expiry":5_000_000_000_u64}),
+        json!({}),
+    )
+    .await?;
+    for block in 7..=8 {
+        insert_lineage_block(scratch.pool(), chain, block).await?;
+    }
+    insert_event(
+        scratch.pool(),
+        chain,
+        7,
+        Some(&logical_name_id),
+        None,
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"expiry":9_999}),
+        json!({}),
+    )
+    .await?;
+    insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
+    let projected: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, resource_id
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        projected,
+        (
+            "unsupported".into(),
+            Some("conflicting_current_ens_authority".into()),
+            None,
+        )
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_candidate_parity").await?;
     let chain = "authority-candidate-parity";
