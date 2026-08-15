@@ -1,3 +1,4 @@
+mod batching;
 mod discovery;
 mod identity;
 mod identity_names;
