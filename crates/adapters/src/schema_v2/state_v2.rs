@@ -557,6 +557,17 @@ impl State {
             .name
             .as_ref()
             .map(|name| name.logical_name_id.as_str());
+        if let Some(logical_name_id) = logical_name_id {
+            // The departing holder may own the surface's active resource; dirty the surviving
+            // co-holders so the next targeted refresh re-elects the winner a full walk would.
+            let co_holders = self
+                .v2_tokens_by_current_name_index
+                .get(logical_name_id)
+                .cloned();
+            for token_key in co_holders.into_iter().flatten() {
+                self.mark_v2_token_dirty(token_key);
+            }
+        }
         self.replace_v2_current_surface(logical_name_id, None);
     }
 

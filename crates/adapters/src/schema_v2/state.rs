@@ -95,6 +95,7 @@ pub(super) struct State {
     v2_dirty_registries: OrdSet<String>,
     v2_token_by_upstream_resource_index: OrdMap<(String, String), OrdSet<String>>,
     v2_token_by_name_index: OrdMap<(String, String), OrdSet<String>>,
+    v2_tokens_by_current_name_index: OrdMap<String, OrdSet<String>>,
     v2_entry_by_parent_label: OrdMap<(String, Vec<u8>), String>,
     v2_parent_claims: OrdMap<String, (String, Vec<u8>)>,
     v2_suffix_anchors: OrdMap<String, (String, Vec<String>)>,

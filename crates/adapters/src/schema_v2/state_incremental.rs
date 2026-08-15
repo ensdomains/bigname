@@ -43,6 +43,7 @@ impl State {
             v2_dirty_registries: OrdSet::new(),
             v2_token_by_upstream_resource_index: OrdMap::new(),
             v2_token_by_name_index: OrdMap::new(),
+            v2_tokens_by_current_name_index: OrdMap::new(),
             v2_entry_by_parent_label: OrdMap::new(),
             v2_parent_claims: OrdMap::new(),
             v2_resolver_hints: OrdMap::new(),

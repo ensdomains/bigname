@@ -51,6 +51,19 @@ fn v2_targeted_invalidation_matches_the_former_full_walk() {
         install_token(state, ROOT, "0x09", b"sub", 100);
     });
 }
+#[test]
+fn v2_duplicate_surface_refresh_is_visit_set_invariant() {
+    // Two registries anchored to the same suffix each hold a registered, resource-linked token
+    // labeled "alpha", so both compute the same logical name. Dirtying only one co-holder must
+    // elect the same active resource as a full walk.
+    assert_targeted_refresh_matches_full_walk(duplicate_surface_state(), |state| {
+        state.set_v2_resolver(ROOT, "0x01", Some("0xresolver".to_owned()));
+    });
+    // Releasing one co-holder must hand the surface's active resource to the survivor.
+    assert_targeted_refresh_matches_full_walk(duplicate_surface_state(), |state| {
+        state.release_v2_token(CHILD, "0x01");
+    });
+}
 fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl Fn(&mut State)) {
     baseline.refresh_dirty_v2_names(1);
     let mut targeted = baseline.clone();
@@ -260,6 +273,26 @@ fn anchors() -> Vec<(String, String, Vec<String>)> {
         vec!["eth".to_owned()],
     )]
 }
+fn duplicate_surface_state() -> State {
+    let mut state = State::new(
+        Vec::new(),
+        [ROOT, CHILD]
+            .iter()
+            .map(|address| {
+                (
+                    (*address).to_owned(),
+                    NAMESPACE.to_owned(),
+                    vec!["eth".to_owned()],
+                )
+            })
+            .collect(),
+    );
+    install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+    install_token(&mut state, CHILD, "0x01", b"alpha", 100);
+    state.link_v2_resource(ROOT, "0x01", "0xaa".to_owned(), Uuid::from_u128(1), None);
+    state.link_v2_resource(CHILD, "0x01", "0xbb".to_owned(), Uuid::from_u128(2), None);
+    state
+}
 fn nested_state(parent_expiry: u64) -> State {
     let mut state = anchored_state();
     install_token(&mut state, ROOT, "0x01", b"sub", parent_expiry);
@@ -330,6 +363,7 @@ fn prior_event(
 fn assert_v2_indexes_are_derived(state: &State) {
     let mut upstream = OrdMap::<(String, String), OrdSet<String>>::new();
     let mut names = OrdMap::<(String, String), OrdSet<String>>::new();
+    let mut current_names = OrdMap::<String, OrdSet<String>>::new();
     let mut expiries = OrdSet::new();
     for (token_key, token) in &state.v2_tokens {
         let (emitter, token_id) = token_key
@@ -347,11 +381,18 @@ fn assert_v2_indexes_are_derived(state: &State) {
                 .or_default()
                 .insert(token_key.clone());
         }
+        if let Some(name) = token.name.as_ref() {
+            current_names
+                .entry(name.logical_name_id.clone())
+                .or_default()
+                .insert(token_key.clone());
+        }
         if let Some(expiry) = token.expiry {
             expiries.insert((expiry, token_key.clone()));
         }
     }
     assert_eq!(state.v2_token_by_upstream_resource_index, upstream);
     assert_eq!(state.v2_token_by_name_index, names);
+    assert_eq!(state.v2_tokens_by_current_name_index, current_names);
     assert_eq!(state.v2_expiries, expiries);
 }

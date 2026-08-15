@@ -218,8 +218,16 @@ impl State {
                 current.shadow_name = shadow_name.clone();
                 self.replace_v2_token_indexes(&key, Some(&token), Some(&current));
             }
+            if changed
+                && let Some(previous) = previous.as_ref()
+                && let Some(resource_id) = self.v2_active_resource_winner(&previous.logical_name_id)
+            {
+                self.active_resources
+                    .insert(previous.logical_name_id.clone(), resource_id);
+            }
             if let Some(current) = name.as_ref()
-                && let Some(resource_id) = current_resource
+                && current_resource.is_some()
+                && let Some(resource_id) = self.v2_active_resource_winner(&current.logical_name_id)
             {
                 self.active_resources
                     .insert(current.logical_name_id.clone(), resource_id);
@@ -230,5 +238,24 @@ impl State {
             }
         }
         transitions
+    }
+
+    /// The active resource for a surface is the resource of the greatest token key among retained
+    /// holders that carry a registration and a linked resource — the winner an unconditional
+    /// re-assert produces on a full ascending walk — so a refresh elects the same resource for
+    /// any dirty set that closes over the surface's contention.
+    fn v2_active_resource_winner(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
+        self.v2_tokens_by_current_name_index
+            .get(logical_name_id)?
+            .iter()
+            .rev()
+            .find_map(|token_key| {
+                let token = self.v2_tokens.get(token_key)?;
+                token
+                    .registration
+                    .is_some()
+                    .then_some(token.resource_id)
+                    .flatten()
+            })
     }
 }
