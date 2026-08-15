@@ -787,6 +787,163 @@ async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Re
 }
 
 #[tokio::test]
+async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_tombstone(
+) -> Result<()> {
+    // The fixture retains the inventory row, declared resolver, and a live
+    // lookup topology for a released name: verified execution must not
+    // dispatch a provider call against the former resolver, and the response
+    // must match the canonical released path where projection dropped the
+    // inventory row.
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    let execution_block_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let lookup_pool = database.lookup_pool().await?;
+    let namehash = seed_schema_v2_ens_record_lookup(
+        &lookup_pool,
+        21_000_003,
+        execution_block_hash,
+        "2026-04-17T00:00:03Z",
+        "0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |row| {
+            row.namehash = namehash;
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+            row.declared_summary["registration"]["status"] = json!("released");
+            row.declared_summary["registration"]["released_at"] =
+                json!("2026-06-14T00:00:00Z");
+        },
+        |_, _, inventory| {
+            inventory.selectors = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "cacheable": true
+                }
+            ]);
+            inventory.entries = json!([
+                {
+                    "record_key": "addr:60",
+                    "record_family": "addr",
+                    "selector_key": "60",
+                    "status": "success",
+                    "value": {
+                        "coin_type": "60",
+                        "value": "0x0000000000000000000000000000000000000def"
+                    }
+                }
+            ]);
+            inventory.record_version_boundary["chain_position"]["block_hash"] =
+                json!(execution_block_hash);
+            inventory.chain_positions = json!({
+                "ethereum-mainnet": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+    )
+    .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_universal_resolver_addr60_response(
+            "0x0000000000000000000000000000000000000e0e",
+        ),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified released-tombstone name profile request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let retained_payload: Value = read_json(response).await?;
+
+    assert_eq!(retained_payload["meta"]["source"], json!("verified"));
+    let data = retained_payload["data"]
+        .as_object()
+        .expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("unsupported")));
+    assert_eq!(
+        data.get("unsupported_reason"),
+        Some(&json!("verified_records_not_supported"))
+    );
+    assert_eq!(data.get("registration_status"), Some(&json!("released")));
+    assert_eq!(
+        data.get("unsupported_fields"),
+        Some(&json!([
+            "addresses",
+            "content_hash",
+            "primary_address",
+            "text_records"
+        ]))
+    );
+    assert!(data.get("resolver").is_none());
+    assert!(data.get("addresses").is_none());
+    assert!(data.get("text_records").is_none());
+    assert!(data.get("content_hash").is_none());
+    assert!(data.get("primary_address").is_none());
+
+    // Canonical released path: projection dropped the inventory row. The
+    // retained-state response must be byte-equivalent.
+    sqlx::query("DELETE FROM bigname_phase.record_inventory_current WHERE resource_id = $1")
+        .bind(Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0101))
+        .execute(&database.pool)
+        .await?;
+    let canonical_response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified canonical released name profile request failed")?;
+    assert_eq!(canonical_response.status(), StatusCode::OK);
+    let canonical_payload: Value = read_json(canonical_response).await?;
+    assert_eq!(retained_payload, canonical_payload);
+
+    // The mock queue still holds its one response: any dispatch would have
+    // consumed it and finished the task with a recorded request.
+    rpc_handle.abort();
+    let dispatched = match rpc_handle.await {
+        Err(join_error) if join_error.is_cancelled() => Vec::new(),
+        other => other.context("mock primary-name RPC task failed")??,
+    };
+    assert!(
+        dispatched.is_empty(),
+        "released tombstone must not dispatch a verified lookup: {dispatched:?}"
+    );
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_classifies_no_binding_as_unregistered() -> Result<()> {
     let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
         row.surface_binding_id = None;
