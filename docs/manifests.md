@@ -415,12 +415,24 @@ until all referenced groups activate. A controller event outside such a batch
 uses the name-independent `controller_configuration` derivation group above.
 (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows; no transaction-level synthetic renewal is created. A resource-bearing registry observation retains its resource, and the bridge observation uses that already-materialized ENSv2 `resource_id`. When the reserved registry resource cannot be derived, both observations remain resource-less rather than inventing an anchor. A launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it does not materialize an ordinary ENSv1 resource or token lineage before later consumer activation. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
 
-The deployed launch sequence removes the public ENSv1 registration controllers
-and installs only the Graveyard and `ETHRenewerV1`; the setup script's deployer
-controller addition is inside its fork-rehearsal branch.
+The production migration driver revokes the superseded public ENSv1
+registration controllers and enables the Graveyard and `ETHRenewerV1` handoff
+controllers. On a network whose deployment set includes
+`TestnetV1PremigrationRegistrar`, the same driver also enables that
+premigration registrar — which registers names permissionlessly — as a v1
+controller and leaves it enabled after the handoff, so a testnet launch does
+not reduce the controller set to the two handoff controllers.
+(upstream: .refs/ens_v2/contracts/script/migration.ts:L1592-L1605 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/script/migration.ts:L2384-L2398 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/script/migration.ts:L4990-L5007 @ ens_v2@ccaeb58)
+Only the fork/test-helper topology is deployer-only: fork-mode devnet
+finalisation runs `activateV2`, which retires the v1 ETH controllers, grants
+the controller role to the Graveyard and `ETHRenewerV1`, and adds the deployer
+as a controller solely so the test mnemonic can drive v1 registration calls.
+(upstream: .refs/ens_v2/contracts/script/runDevnet.ts:L143-L153 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/script/setup.ts:L844-L888 @ ens_v2@ccaeb58)
 Production fixtures therefore reject a controller sequence copied from that
-fork-only topology as evidence of a fresh ENSv1 registration stream.
+fork/test-helper topology as evidence of a fresh ENSv1 registration stream.
 
 `MigrationHelper` at `0xd54a53c1567b26f9653c8565dccc39bceb6ab327`,
 starting at block `11163415`,
