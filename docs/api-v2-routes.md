@@ -846,13 +846,15 @@ Field ownership:
   historical `finality` values are rejected by the shared latest-state
   collection rule.
 - Response shape: `data` is an array of record-shaped name search results in
-  dictionary vocabulary. Once exact-name authority is activated, each result
-  is built only from the selected current registration. A migrated name uses
-  its ENSv2 owner, registrant, status, and expiry; a mixed-history name with no
-  provable current authority is omitted rather than exposing an arbitrary
-  registration. Search adds no row-local mixed-authority status, so callers use
-  name detail or batch lookup when they need an omitted name's explicit
-  coverage reason.
+  dictionary vocabulary. Slice 2D applies the selected exact-name authority to
+  search results; until then, a search row retains the pre-authority
+  registration selection rather than being filtered or reshaped by exact-name
+  authority. Once slice 2D is activated, each result is built only from the
+  selected current registration: a migrated name uses its ENSv2 owner,
+  registrant, status, and expiry, and a mixed-history name with no provable
+  current authority is omitted rather than exposing an arbitrary registration.
+  Search adds no row-local mixed-authority status, so callers use name detail
+  or batch lookup when they need an omitted name's explicit coverage reason.
 - Pagination behavior: standard collection pagination. Without an explicit
   namespace, the cursor binds the deployment-derived namespace set and is
   rejected if that set changes.
