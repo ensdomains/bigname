@@ -103,6 +103,10 @@ mod v2_registry_events {
         event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
         event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
         event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@ccaeb58)
+        event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
+        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58)
+        event ParentUpdated(address indexed parent, string label, address indexed sender);
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
         event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
     }
@@ -3771,6 +3775,134 @@ async fn ens_v2_resource_identity_and_terminal_binding_round_trip() -> Result<()
 }
 
 #[tokio::test]
+async fn quiet_v2_expiry_reorg_reseeds_from_the_new_readable_predecessor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_v2_expiry_reorg").await?;
+    let chain = "interpret-v2-expiry-reorg";
+    seed_v2_lifecycle_fixture(scratch.pool(), chain).await?;
+    let child = ANNOUNCED_REGISTRY;
+    sqlx::query(
+        "WITH root AS (
+             SELECT manifest.manifest_id, declaration.contract_instance_id
+             FROM manifest_versions manifest JOIN manifest_contract_instances declaration USING (manifest_id, chain_id)
+             WHERE manifest.chain_id = $1 AND declaration.role = 'registry'
+         ), instance AS (
+             INSERT INTO contract_instances VALUES ($2, $1, 'contract', '{}'::jsonb, now()) RETURNING contract_instance_id
+         ), address AS (
+             INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id, provenance)
+             SELECT instance.contract_instance_id, $1, $3, 0, root.manifest_id, '{}'::jsonb FROM root, instance
+         ), edge AS (
+             INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state, provenance)
+             SELECT $1, 'registry_announcement', root.contract_instance_id, instance.contract_instance_id, 'RegistryCreated', 'reachable_from_root', root.manifest_id, 0, $4, 'canonical', '{\"observation_key\":\"fixture-child\"}'::jsonb FROM root, instance
+         )
+         INSERT INTO manifest_discovery_rules (manifest_id, edge_kind, from_role, admission) SELECT manifest_id, 'subregistry', 'registry', 'linked_subregistry_event' FROM root",
+    )
+    .bind(chain)
+    .bind(Uuid::new_v4())
+    .bind(child)
+    .bind(block_hash(chain, 0))
+    .execute(scratch.pool())
+    .await?;
+    let registration = v2_registry_events::LabelRegistered {
+        tokenId: versioned_token("alice", 1),
+        labelHash: keccak256(b"alice"),
+        label: "alice".to_owned(),
+        owner: "0x0000000000000000000000000000000000000061".parse()?,
+        expiry: 2,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    sqlx::query(
+        "UPDATE raw_logs SET data = $2 WHERE chain_id = $1 AND block_number = 1 AND log_index = 0",
+    )
+    .bind(chain)
+    .bind(registration.data.to_vec())
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("DELETE FROM raw_logs WHERE chain_id = $1 AND block_number = 2")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    let topology = [
+        v2_registry_events::LabelRegistered {
+            tokenId: versioned_token("leaf", 1),
+            labelHash: keccak256(b"leaf"),
+            label: "leaf".into(),
+            owner: "0x0000000000000000000000000000000000000061".parse()?,
+            expiry: 100,
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data(),
+        v2_registry_events::TokenResource {
+            tokenId: versioned_token("leaf", 1),
+            resource: U256::from(6001),
+        }
+        .encode_log_data(),
+        v2_registry_events::SubregistryUpdated {
+            tokenId: versioned_token("alice", 1),
+            subregistry: child.parse()?,
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data(),
+        v2_registry_events::ParentUpdated {
+            parent: CONTRACT.parse()?,
+            label: "alice".into(),
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data(),
+    ];
+    for (offset, event) in topology.into_iter().enumerate() {
+        insert_log_at(
+            scratch.pool(),
+            chain,
+            1,
+            &format!("{chain}-transaction-1"),
+            i64::try_from(offset)? + 4,
+            if offset == 2 { CONTRACT } else { child },
+            event.topics(),
+            event.data.as_ref(),
+        )
+        .await?;
+    }
+    run_engine(scratch.pool(), chain, 1, 2, InterpretRunMode::Normal).await?;
+    assert_eq!(readable_v2_expiries(scratch.pool(), chain).await?.len(), 2);
+
+    let mut reorg = scratch.pool().begin().await?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = $1 AND block_number = 2")
+        .bind(chain).execute(&mut *reorg).await?;
+    sqlx::query(
+        "WITH replacements(block_hash, parent_hash, block_number, block_timestamp) AS (
+             VALUES ($2, $3, 2, 1), ($4, $2, 3, 2)
+         ) INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state) SELECT $1, block_hash, parent_hash,
+             block_number, to_timestamp(block_timestamp), 'canonical' FROM replacements",
+    )
+    .bind(chain)
+    .bind(format!("{chain}-replacement-2"))
+    .bind(block_hash(chain, 1))
+    .bind(format!("{chain}-replacement-3"))
+    .execute(&mut *reorg)
+    .await?;
+    reorg.commit().await?;
+    run_engine(scratch.pool(), chain, 2, 2, InterpretRunMode::Redo).await?;
+    assert_eq!(readable_v2_expiries(scratch.pool(), chain).await?.len(), 0);
+    run_engine(scratch.pool(), chain, 3, 3, InterpretRunMode::Normal).await?;
+    let incremental = readable_v2_expiries(scratch.pool(), chain).await?;
+    assert_eq!(
+        incremental
+            .iter()
+            .map(|(_, block, _)| *block)
+            .collect::<Vec<_>>(),
+        [3, 3]
+    );
+    run_engine(scratch.pool(), chain, 1, 3, InterpretRunMode::Redo).await?;
+    assert_eq!(
+        readable_v2_expiries(scratch.pool(), chain).await?,
+        incremental
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn compatible_later_name_observation_preserves_the_finalized_first_anchor() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_surface_anchor").await?;
     let chain = "interpret-surface-anchor";
@@ -4824,6 +4956,20 @@ async fn run_engine(
     Ok(())
 }
 
+async fn readable_v2_expiries(pool: &PgPool, chain_id: &str) -> Result<Vec<(String, i64, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT event.event_kind, event.block_number, event.event_identity
+         FROM normalized_events event JOIN chain_lineage lineage USING (chain_id, block_number, block_hash)
+         WHERE event.chain_id = $1 AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ORDER BY event.event_kind",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 async fn run_project(
     pool: &PgPool,
     chain_id: &str,
@@ -5392,6 +5538,10 @@ async fn seed_v2_lifecycle_fixture(pool: &PgPool, chain_id: &str) -> Result<()> 
                 "emitter_roles": ["registry"],
                 "normalized_events": ["TokenResourceLinked"]
             },
+            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@ccaeb58)
+            { "name": "SubregistryUpdated", "fragment": "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)", "emitter_roles": ["registry"], "normalized_events": ["SubregistryChanged"] },
+            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58)
+            { "name": "ParentUpdated", "fragment": "event ParentUpdated(address indexed parent, string label, address indexed sender)", "emitter_roles": ["registry"], "normalized_events": ["ParentChanged"] },
             {
                 "name": "EACRolesChanged",
                 "fragment": "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",

@@ -56,8 +56,13 @@ impl AdapterSessionRestore {
         Ok(())
     }
 
-    pub fn finish(mut self) -> AdapterSession {
-        self.state.finish_prior_event_restore();
+    pub fn finish(
+        mut self,
+        resume_predecessor_timestamp: Option<time::OffsetDateTime>,
+    ) -> AdapterSession {
+        self.state.finish_prior_event_restore(
+            resume_predecessor_timestamp.map(time::OffsetDateTime::unix_timestamp),
+        );
         AdapterSession {
             chain_id: self.chain_id,
             state: self.state,
@@ -116,6 +121,10 @@ impl PreparedAdapterBatch {
             &self.blocks,
         )?;
         self.committed_state.apply_prior_event_delta(delta);
+        if let Some(block) = self.blocks.last() {
+            self.committed_state
+                .commit_v2_batch_boundary(block.block_timestamp.unix_timestamp());
+        }
         Ok((
             self.output,
             AdapterSession {
@@ -365,10 +374,15 @@ fn assert_restores_exactly(
         &output.normalized_events,
         &input.blocks,
     )?;
-    let restored = AdapterSession {
+    let mut restored = AdapterSession {
         chain_id: input.chain_id,
         state: State::new(prior, catalog.v2_suffix_anchors()),
     };
+    if let Some(block) = input.blocks.last() {
+        restored
+            .state
+            .commit_v2_batch_boundary(block.block_timestamp.unix_timestamp());
+    }
     anyhow::ensure!(
         session == &restored,
         "live adapter session state differs from a fresh retained-event restore:\n\

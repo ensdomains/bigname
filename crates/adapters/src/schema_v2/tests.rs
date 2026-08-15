@@ -8074,21 +8074,24 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
     );
     assert_shadow_output(&first, &shadow_namehash, &raw_label, None);
 
-    let boundary = interpret_test_batch(BatchInput {
-        chain_id: CHAIN.to_owned(),
-        manifests: vec![manifest],
-        discovery_rules: rules(),
-        admissions: admissions(),
-        prior_events: first.normalized_events.iter().map(prior_event).collect(),
-        blocks: vec![RawBlockInput {
+    let (boundary, session) = interpret_test_batch_incremental(
+        BatchInput {
             chain_id: CHAIN.to_owned(),
-            block_hash: "shadow-expiry-boundary".to_owned(),
-            block_number: 7,
-            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(7),
-            canonicality_state: "canonical".to_owned(),
-        }],
-        raw_logs: Vec::new(),
-    })?;
+            manifests: vec![manifest.clone()],
+            discovery_rules: rules(),
+            admissions: admissions(),
+            prior_events: first.normalized_events.iter().map(prior_event).collect(),
+            blocks: vec![RawBlockInput {
+                chain_id: CHAIN.to_owned(),
+                block_hash: "shadow-expiry-boundary".to_owned(),
+                block_number: 7,
+                block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(7),
+                canonicality_state: "canonical".to_owned(),
+            }],
+            raw_logs: Vec::new(),
+        },
+        None,
+    )?;
     let shadow_id = format!("ens:{shadow_namehash}");
     assert!(
         boundary
@@ -8102,6 +8105,26 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
             .iter()
             .all(|event| { event.logical_name_id.as_deref() != Some(shadow_id.as_str()) })
     );
+    super::state::reset_v2_refresh_visits();
+    interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest],
+            discovery_rules: rules(),
+            admissions: admissions(),
+            prior_events: Vec::new(),
+            blocks: vec![RawBlockInput {
+                chain_id: CHAIN.to_owned(),
+                block_hash: "after-shadow-expiry".to_owned(),
+                block_number: 8,
+                block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(8),
+                canonicality_state: "canonical".to_owned(),
+            }],
+            raw_logs: Vec::new(),
+        },
+        Some(session),
+    )?;
+    assert_eq!(super::state::v2_refresh_visits(), 0);
     Ok(())
 }
 

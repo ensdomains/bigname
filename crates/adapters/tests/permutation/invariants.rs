@@ -5,10 +5,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
-    AddressAdmissionInput, BatchInput, BatchOutput, InterpreterStateRequest, InterpreterStateValue,
-    PriorEventInput, StateCacheCapacity, interpret_schema_v2_batch,
-    interpret_schema_v2_batch_incremental, prepare_schema_v2_batch_incremental, seam,
-    seam::ADMISSION_DISCOVERY_EDGE_KINDS,
+    AdapterSession, AddressAdmissionInput, BatchInput, BatchOutput, InterpreterStateRequest,
+    InterpreterStateValue, PriorEventInput, StateCacheCapacity, begin_schema_v2_adapter_restore,
+    interpret_schema_v2_batch, interpret_schema_v2_batch_incremental,
+    prepare_schema_v2_batch_incremental, seam, seam::ADMISSION_DISCOVERY_EDGE_KINDS,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -557,14 +557,10 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         bail!("{context}: incremental output differs from the fresh pass");
     }
     let retained = seam::fold_prior_events(Vec::new(), &fresh.normalized_events, &input.blocks)?;
-    let (_, restored) = interpret_schema_v2_batch_incremental(
-        BatchInput {
-            prior_events: retained,
-            blocks: Vec::new(),
-            raw_logs: Vec::new(),
-            ..input.clone()
-        },
-        None,
+    let restored = restore_adapter_session(
+        &input,
+        &retained,
+        input.blocks.last().map(|block| block.block_timestamp),
     )?;
     if live != restored {
         bail!("{context}: live adapter state differs from a compacted restore");
@@ -640,14 +636,10 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
                 "{context}: split batch {index} tiny-cache persisted state tails differ from unlimited capacity"
             );
         }
-        let (_, restored_session) = interpret_schema_v2_batch_incremental(
-            BatchInput {
-                prior_events: prior.clone(),
-                blocks: Vec::new(),
-                raw_logs: Vec::new(),
-                ..input.clone()
-            },
-            None,
+        let restored_session = restore_adapter_session(
+            &input,
+            &prior,
+            blocks.last().map(|block| block.block_timestamp),
         )?;
         if next != restored_session {
             bail!("{context}: split batch {index} live state differs from a compacted restore");
@@ -682,6 +674,22 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         artifacts,
         tiny_cache_misses,
     })
+}
+
+fn restore_adapter_session(
+    input: &BatchInput,
+    prior: &[PriorEventInput],
+    predecessor_timestamp: Option<time::OffsetDateTime>,
+) -> Result<AdapterSession> {
+    let mut restore = begin_schema_v2_adapter_restore(
+        input.chain_id.clone(),
+        input.manifests.clone(),
+        input.discovery_rules.clone(),
+        input.admissions.clone(),
+        StateCacheCapacity::Unlimited,
+    )?;
+    restore.apply_prior_events(prior.to_vec())?;
+    Ok(restore.finish(predecessor_timestamp))
 }
 
 fn requested_state_values(

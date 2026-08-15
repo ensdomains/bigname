@@ -63,7 +63,7 @@ fn registry(
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Interpreted> {
-    let initial_transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
+    let initial_transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     let mut initial_output = Interpreted::new();
     append_v2_name_transitions(
         &mut initial_output,
@@ -103,7 +103,7 @@ fn registry(
                 return Ok(initial_output);
             };
             state.set_v2_expiry(&raw.emitting_address, &token_id, e.newExpiry);
-            let transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
+            let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
             ensure_declared(selected, &["ExpiryChanged"])?;
             let after = state
                 .v2_token(&raw.emitting_address, &token_id)
@@ -156,7 +156,7 @@ fn registry(
                 &u256_word_hex(e.tokenId),
                 (e.subregistry != Address::ZERO).then(|| address.clone()),
             );
-            let transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
+            let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
             append_v2_name_transitions(&mut output, transitions, raw, "SubregistryUpdated", None);
             output.discovery.push(DiscoveryDraft::Edge {
                 edge_kind: "subregistry".to_owned(),
@@ -212,7 +212,7 @@ fn registry(
             let label = admitted_label(&raw_label);
             let parent = (e.parent != Address::ZERO).then(|| address_hex(e.parent));
             state.set_v2_parent_claim(&raw.emitting_address, parent.clone(), &raw_label);
-            let transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
+            let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
             let mut output = single_event(
                 "ParentChanged",
                 None,
@@ -337,7 +337,7 @@ fn label_event(
             .unwrap_or_default(),
         registered.then(|| event_state.clone()),
     );
-    let transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
+    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     let mut output = single_event(kind, logical_name_id, None, event_state);
     output.labels.push(LabelDraft {
         raw_label: label,
@@ -412,7 +412,7 @@ fn label_unregistered(
     )?;
     let token_id = u256_word_hex(event.tokenId);
     let linked = state.release_v2_token(&raw.emitting_address, &token_id);
-    let transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
+    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     // Registration events are partitioned by their emitting registry. PermissionedRegistry emits
     // LabelUnregistered from that registry's public unregister path.
     // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)

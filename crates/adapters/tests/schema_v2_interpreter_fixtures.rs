@@ -633,7 +633,7 @@ fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> R
         tiny_retained, retained,
         "{case_id}: tiny-cache persisted state tails differ from unlimited capacity"
     );
-    let mut streamed_restore = begin_schema_v2_adapter_restore(
+    let mut restore = begin_schema_v2_adapter_restore(
         input.chain_id.clone(),
         input.manifests.clone(),
         input.discovery_rules.clone(),
@@ -641,25 +641,12 @@ fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> R
         StateCacheCapacity::Unlimited,
     )?;
     for chunk in retained.chunks(2) {
-        streamed_restore.apply_prior_events(chunk.to_vec())?;
+        restore.apply_prior_events(chunk.to_vec())?;
     }
-    let streamed_session = streamed_restore.finish();
-    let (_, restored_session) = interpret_schema_v2_batch_incremental(
-        BatchInput {
-            prior_events: retained,
-            blocks: Vec::new(),
-            raw_logs: Vec::new(),
-            ..input
-        },
-        None,
-    )?;
+    let restored_session = restore.finish(input.blocks.last().map(|block| block.block_timestamp));
     assert_eq!(
         live_session, restored_session,
         "{case_id}: live incremental adapter state differs from a compacted restore"
-    );
-    assert_eq!(
-        streamed_session, restored_session,
-        "{case_id}: streamed cold restore differs from the one-shot restore"
     );
     Ok(incremental)
 }
@@ -741,15 +728,15 @@ fn interpret_physical_batches(
             "{case_id}: physical-batch tiny-cache state tails differ from unlimited capacity"
         );
         retained_prior = next_prior;
-        let (_, restored_session) = interpret_schema_v2_batch_incremental(
-            BatchInput {
-                prior_events: retained_prior.clone(),
-                blocks: Vec::new(),
-                raw_logs: Vec::new(),
-                ..restored_input
-            },
-            None,
+        let mut restore = begin_schema_v2_adapter_restore(
+            restored_input.chain_id.clone(),
+            restored_input.manifests.clone(),
+            restored_input.discovery_rules.clone(),
+            restored_input.admissions.clone(),
+            StateCacheCapacity::Unlimited,
         )?;
+        restore.apply_prior_events(retained_prior.clone())?;
+        let restored_session = restore.finish(blocks.last().map(|block| block.block_timestamp));
         assert_eq!(
             next_session, restored_session,
             "{case_id}: live state differs from retained-state restore after a physical batch"

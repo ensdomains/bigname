@@ -11,6 +11,7 @@ use crate::{InterpretError, Result};
 mod cache;
 mod migration;
 mod prior;
+mod resume;
 
 pub(crate) use cache::{PriorCache, fold as fold_prior_cache};
 pub(crate) use prior::prior_state_values;
@@ -107,9 +108,11 @@ pub(crate) async fn batch_input(
             })?;
             let restored_event_count =
                 prior::restore_events(&mut transaction, chain_id, from_block, &mut restore).await?;
+            let adapter_session =
+                resume::finish_restore(&mut transaction, chain_id, from_block, restore).await?;
             (
                 cache::freshly_loaded(orphaning_epoch),
-                restore.finish(),
+                adapter_session,
                 restored_event_count,
             )
         }

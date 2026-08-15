@@ -617,7 +617,12 @@ materialize every retained JSON value in one process allocation. If the chain
 process discards the whole interpreter session and rebuilds it from readable
 rows. It retains only the block anchors added since the last validation while
 the epoch is unchanged, rather than one dependency entry per historical state
-key.
+key. Interpret also supplies the timestamp of the resume position's readable
+predecessor block from `chain_lineage`; there is no predecessor at block zero
+or before the first retained lineage block. After replaying retained events,
+the adapter advances time-derived protocol state to that timestamp. Exact
+cold-restore reconstruction therefore depends on the predecessor remaining
+readable in the same input snapshot.
 
 Redo preparation restages only identities anchored inside the range, so an
 identity derived before it keeps its anchor even when an in-range event

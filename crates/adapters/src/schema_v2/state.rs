@@ -43,10 +43,19 @@ pub(super) struct V1WrapperData {
 #[path = "state_v2.rs"]
 mod v2;
 
+#[path = "state_v2_index.rs"]
+mod v2_index;
+
 #[path = "state_v2_refresh.rs"]
 mod v2_refresh;
 
+#[cfg(test)]
+#[path = "state_v2_tests.rs"]
+mod v2_tests;
+
 pub(super) use self::v2::{V2NameState, V2NameTransition, V2RawNameState, V2TokenState};
+#[cfg(test)]
+pub(super) use self::v2_index::{reset_v2_lookup_visits, v2_lookup_visits};
 #[cfg(test)]
 pub(super) use self::v2_refresh::{reset_v2_refresh_visits, v2_refresh_visits};
 
@@ -82,6 +91,10 @@ pub(super) struct State {
     active_resources: OrdMap<String, Uuid>,
     v2_tokens: OrdMap<String, V2TokenState>,
     v2_expiries: OrdSet<(u64, String)>,
+    v2_dirty_tokens: OrdSet<String>,
+    v2_dirty_registries: OrdSet<String>,
+    v2_token_by_upstream_resource_index: OrdMap<(String, String), OrdSet<String>>,
+    v2_token_by_name_index: OrdMap<(String, String), OrdSet<String>>,
     v2_entry_by_parent_label: OrdMap<(String, Vec<u8>), String>,
     v2_parent_claims: OrdMap<String, (String, Vec<u8>)>,
     v2_suffix_anchors: OrdMap<String, (String, Vec<String>)>,
