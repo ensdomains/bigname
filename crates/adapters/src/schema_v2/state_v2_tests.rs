@@ -6,6 +6,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 const ROOT: &str = "0x0000000000000000000000000000000000000042";
 const CHILD: &str = "0x0000000000000000000000000000000000000043";
+const THIRD: &str = "0x0000000000000000000000000000000000000044";
+const NEST_ROOT: &str = "0x0000000000000000000000000000000000000050";
+const NEST: &str = "0x0000000000000000000000000000000000000051";
 const NAMESPACE: &str = "ens";
 #[test]
 fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
@@ -63,6 +66,55 @@ fn v2_duplicate_surface_refresh_is_visit_set_invariant() {
     assert_targeted_refresh_matches_full_walk(duplicate_surface_state(), |state| {
         state.release_v2_token(CHILD, "0x01");
     });
+}
+#[test]
+fn v2_contested_surface_release_keeps_the_max_key_holder_resource() {
+    // Three registries anchored to the same suffix co-hold "alpha", giving the surface three
+    // asserting holders with distinct `emitter:token_id` keys. The election rule is absolute: the
+    // greatest token key among registered, resource-linked holders wins. Releasing the middle-key
+    // holder must leave the max-key holder's resource active — a min-key election would hand the
+    // surface to the smallest survivor instead.
+    let mut state = contested_surface_state(&[ROOT, CHILD, THIRD]);
+    state.refresh_dirty_v2_names(1);
+    let name = state
+        .v2_token(THIRD, "0x01")
+        .and_then(|token| token.name)
+        .expect("max-key co-holder names the contested surface");
+    state
+        .release_v2_token(CHILD, "0x01")
+        .expect("middle-key co-holder release");
+    state.refresh_dirty_v2_names(2);
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id, Some(Uuid::from_u128(3))))
+    );
+    assert_v2_indexes_are_derived(&state);
+}
+#[test]
+fn v2_changed_away_winner_hands_the_surface_to_the_surviving_holder() {
+    // A registry anchored at "eth" holds "alpha" via one resource, contested by a claim-path
+    // registry (anchored at the namespace root, its "eth" token claimed as the nested registry's
+    // parent) whose greater-key "alpha" holder owns the election. Dropping the parent claim
+    // changes the winner's computed name away from the surface; the refresh that visits only the
+    // departing holder must re-elect the survivor's resource rather than leave the surface with
+    // no active resource.
+    let mut state = claim_path_contested_state();
+    state.refresh_dirty_v2_names(1);
+    let name = state
+        .v2_token(NEST, "0x01")
+        .and_then(|token| token.name)
+        .expect("claim-path co-holder names the contested surface");
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id.clone(), Some(Uuid::from_u128(2))))
+    );
+    state.set_v2_parent_claim(NEST, None, b"eth");
+    state.refresh_dirty_v2_names(2);
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id, Some(Uuid::from_u128(1))))
+    );
+    assert_v2_indexes_are_derived(&state);
 }
 fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl Fn(&mut State)) {
     baseline.refresh_dirty_v2_names(1);
@@ -274,9 +326,15 @@ fn anchors() -> Vec<(String, String, Vec<String>)> {
     )]
 }
 fn duplicate_surface_state() -> State {
+    contested_surface_state(&[ROOT, CHILD])
+}
+/// One registered, resource-linked "alpha" holder per registry, all anchored to the same suffix,
+/// so every holder computes the same surface. Holder `n` (in registry order) carries resource
+/// `Uuid::from_u128(n + 1)`.
+fn contested_surface_state(registries: &[&str]) -> State {
     let mut state = State::new(
         Vec::new(),
-        [ROOT, CHILD]
+        registries
             .iter()
             .map(|address| {
                 (
@@ -287,10 +345,37 @@ fn duplicate_surface_state() -> State {
             })
             .collect(),
     );
+    for (ordinal, registry) in registries.iter().enumerate() {
+        install_token(&mut state, registry, "0x01", b"alpha", 100);
+        state.link_v2_resource(
+            registry,
+            "0x01",
+            format!("0x{:02x}", 0xaa + ordinal),
+            Uuid::from_u128(ordinal as u128 + 1),
+            None,
+        );
+    }
+    state
+}
+fn claim_path_contested_state() -> State {
+    let mut state = State::new(
+        Vec::new(),
+        vec![
+            (
+                ROOT.to_owned(),
+                NAMESPACE.to_owned(),
+                vec!["eth".to_owned()],
+            ),
+            (NEST_ROOT.to_owned(), NAMESPACE.to_owned(), Vec::new()),
+        ],
+    );
     install_token(&mut state, ROOT, "0x01", b"alpha", 100);
-    install_token(&mut state, CHILD, "0x01", b"alpha", 100);
     state.link_v2_resource(ROOT, "0x01", "0xaa".to_owned(), Uuid::from_u128(1), None);
-    state.link_v2_resource(CHILD, "0x01", "0xbb".to_owned(), Uuid::from_u128(2), None);
+    install_token(&mut state, NEST_ROOT, "0x01", b"eth", 100);
+    state.set_v2_subregistry(NEST_ROOT, "0x01", Some(NEST.to_owned()));
+    state.set_v2_parent_claim(NEST, Some(NEST_ROOT.to_owned()), b"eth");
+    install_token(&mut state, NEST, "0x01", b"alpha", 100);
+    state.link_v2_resource(NEST, "0x01", "0xbb".to_owned(), Uuid::from_u128(2), None);
     state
 }
 fn nested_state(parent_expiry: u64) -> State {
