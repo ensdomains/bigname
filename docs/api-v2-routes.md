@@ -363,6 +363,10 @@ Field ownership:
   `namehash`, `status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
+  For `source=indexed`, a row classified as
+  `current_authority_not_projected` remains `status=ok` for the identity and
+  registration fields that can be served, but omits `resolver`; retained
+  resolver-pointer evidence is not presented as current authority.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -444,7 +448,11 @@ Field ownership:
   values and reports each requested or inventory-derived key as
   `status=unsupported` with `conflicting_current_ens_authority` or
   `independent_ens_deployments_overlap`. Verified execution does not choose a
-  resolver for that unsupported name.
+  resolver for that unsupported name. `current_authority_not_projected`
+  likewise short-circuits `source=indexed`, `source=verified`, and
+  `source=auto` before provider execution: the response has no resolver values
+  and reports each requested or inventory-derived key as `status=unsupported`
+  with `inventory_not_available`.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 
@@ -931,7 +939,9 @@ Field ownership:
   mixed-history name with no provable current authority is omitted from all
   resolver listings rather than forced to `ok`. This nested collection adds no
   row-local mixed-authority status, so callers use name detail or batch lookup
-  for the explicit coverage reason.
+  for the explicit coverage reason. A row classified as
+  `current_authority_not_projected` is also absent from `bound_names`; retained
+  resolver-pointer evidence does not establish listing membership.
   `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
   while the corresponding `include=nodes`, `include=aliases`, and
   `include=roles` arrays are deterministic samples of at most 100 items. A

@@ -6774,6 +6774,193 @@ async fn authority_selector_dual_open_cross_arm_fixture() -> Result<()> {
 }
 
 #[tokio::test]
+async fn authority_selector_follows_post_migration_v2_binding_churn() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_authority_v2_binding_churn").await?;
+    let chain = "authority-v2-binding-churn";
+    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let (successor_binding, successor_resource, _) =
+        insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped")
+            .await?;
+    let churned_binding = Uuid::parse_str("00000000-0000-0000-0000-000000000020")?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(5)
+         WHERE surface_binding_id = $1",
+    )
+    .bind(successor_binding)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, chain_id, block_hash, block_number,
+             provenance, canonicality_state
+         )
+         SELECT $1, logical_name_id, resource_id, binding_kind, authority_arm,
+                to_timestamp(5), chain_id, $2, 5,
+                jsonb_build_object('transaction_index', 0, 'log_index', 0),
+                canonicality_state
+         FROM surface_bindings WHERE surface_binding_id = $3",
+    )
+    .bind(churned_binding)
+    .bind(block_hash(chain, 5))
+    .bind(successor_binding)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    let projected: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT surface_binding_id, resource_id
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(projected, (churned_binding, successor_resource));
+    assert_ne!(projected.0, successor_binding);
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn equal_position_v1_residue_suppresses_released_v2_authority() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_authority_equal_position_residue").await?;
+    let chain = "authority-equal-position-residue";
+    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    sqlx::query(
+        "UPDATE surface_bindings
+         SET authority_arm = 'ens_v2', active_to = to_timestamp(3)
+         WHERE chain_id = $1 AND logical_name_id = $2
+           AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND logical_name_id = $2
+           AND source_family LIKE 'ens_v1_%'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(scratch.pool())
+    .await?;
+    let released_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2
+         ORDER BY block_number DESC, surface_binding_id DESC LIMIT 1",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    insert_lineage_block(scratch.pool(), chain, 6).await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(6)
+         WHERE chain_id = $1 AND logical_name_id = $2
+           AND authority_arm = 'ens_v2' AND active_to IS NULL",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(scratch.pool())
+    .await?;
+    let boundary_ref = json!({
+        "kind": "raw_block",
+        "chain_id": chain,
+        "block_hash": block_hash(chain, 6),
+        "block_number": 6,
+        "state_scope": "name_authority"
+    });
+    // Boundary materialization emits lifecycle facts at block scope, so both
+    // facts deliberately share the production `(block, NULL, NULL)` position.
+    insert_event(
+        scratch.pool(),
+        chain,
+        6,
+        Some(&logical_name_id),
+        Some(&released_resource.to_string()),
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({"status":"released","released_at":6}),
+        boundary_ref.clone(),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        6,
+        Some(&logical_name_id),
+        None,
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"expiry":9_999}),
+        boundary_ref,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET derivation_kind = CASE event_kind
+             WHEN 'RegistrationReleased' THEN 'ens_v2_registry_resource_surface'
+             ELSE 'ens_v1_unwrapped_authority'
+         END
+         WHERE chain_id = $1 AND logical_name_id = $2 AND block_number = 6
+           AND event_kind IN ('RegistrationReleased', 'ExpiryChanged')",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(scratch.pool())
+    .await?;
+    let boundary_positions: Vec<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT transaction_index, log_index FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND block_number = 6
+           AND event_kind IN ('RegistrationReleased', 'ExpiryChanged')
+         ORDER BY event_kind",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(boundary_positions, vec![(None, None), (None, None)]);
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
+    let projected: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, resource_id
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        projected,
+        (
+            "unsupported".into(),
+            Some("conflicting_current_ens_authority".into()),
+            None,
+        )
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn authority_epoch_ignores_release_from_a_superseded_same_arm_resource() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_same_arm_resource").await?;
     let chain = "authority-same-arm-resource";
