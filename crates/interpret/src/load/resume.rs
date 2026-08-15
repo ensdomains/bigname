@@ -52,62 +52,163 @@ pub(super) async fn predecessor_timestamp(
 #[cfg(test)]
 mod tests {
     use bigname_adapters::schema_v2::{
-        ManifestInput, PriorEventInput, StateCacheCapacity, begin_schema_v2_adapter_restore,
+        AddressAdmissionInput, BatchInput, ManifestInput, PriorEventInput, RawBlockInput,
+        StateCacheCapacity, begin_schema_v2_adapter_restore, interpret_schema_v2_batch_incremental,
     };
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use sqlx::types::Uuid;
     use time::{Duration, OffsetDateTime};
 
     use super::*;
 
     type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+    const ROOT: &str = "0x0000000000000000000000000000000000000042";
+    const CHILD: &str = "0x0000000000000000000000000000000000000043";
 
     fn restore() -> bigname_adapters::schema_v2::AdapterSessionRestore {
         let mut restore = begin_schema_v2_adapter_restore(
             "resume-seed".to_owned(),
-            vec![ManifestInput {
-                manifest_id: 1,
-                manifest_version: 1,
-                namespace: "ens".to_owned(),
-                source_family: "ens_v2_registry_l1".to_owned(),
-                chain_id: "resume-seed".to_owned(),
-                deployment_label: "fixture".to_owned(),
-                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
-                payload_json: json!({"abi":{"events":[]}}).to_string(),
-            }],
+            vec![manifest()],
             Vec::new(),
-            Vec::new(),
+            admissions(),
             StateCacheCapacity::Unlimited,
         )
-        .expect("empty restore catalog");
+        .expect("restore catalog");
         restore
-            .apply_prior_events(vec![PriorEventInput {
-                retained_state_key: "registration".to_owned(),
-                chain_id: "resume-seed".to_owned(),
-                namespace: "ens".to_owned(),
-                logical_name_id: None,
-                resource_id: None,
-                event_kind: "RegistrationGranted".to_owned(),
-                source_family: "ens_v2_registry_l1".to_owned(),
-                manifest_version: 1,
-                source_manifest_id: Some(1),
-                state_scope: Some("0xregistry:-:0xtoken:-:LabelRegistered".to_owned()),
-                block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + Duration::SECOND),
-                after_state: json!({
-                    "source_event":"LabelRegistered",
-                    "token_id":"0xtoken",
-                    "raw_label_hex":"616c696365",
-                    "expiry":2,
-                }),
-            }])
-            .expect("retained ENSv2 token");
+            .apply_prior_events(vec![
+                prior_event(
+                    "parent-registration",
+                    "RegistrationGranted",
+                    ROOT,
+                    Some("0xparent"),
+                    None,
+                    json!({
+                        "source_event":"LabelRegistered",
+                        "token_id":"0xparent",
+                        "raw_label_hex":"737562",
+                        "expiry":2,
+                        "registry_contract_instance_id":Uuid::from_u128(1).to_string(),
+                    }),
+                ),
+                prior_event(
+                    "parent-subregistry",
+                    "SubregistryChanged",
+                    ROOT,
+                    Some("0xparent"),
+                    None,
+                    json!({"token_id":"0xparent", "subregistry":CHILD}),
+                ),
+                prior_event(
+                    "child-parent",
+                    "ParentChanged",
+                    CHILD,
+                    None,
+                    None,
+                    json!({"parent":ROOT, "raw_label_hex":"737562"}),
+                ),
+                prior_event(
+                    "child-registration",
+                    "RegistrationGranted",
+                    CHILD,
+                    Some("0xchild"),
+                    None,
+                    json!({
+                        "source_event":"LabelRegistered",
+                        "token_id":"0xchild",
+                        "raw_label_hex":"6c656166",
+                        "expiry":100,
+                        "registry_contract_instance_id":Uuid::from_u128(2).to_string(),
+                    }),
+                ),
+                prior_event(
+                    "child-resource",
+                    "TokenResourceLinked",
+                    CHILD,
+                    Some("0xchild"),
+                    Some(Uuid::from_u128(99)),
+                    json!({
+                        "token_id":"0xchild",
+                        "upstream_resource":"0x99",
+                    }),
+                ),
+            ])
+            .expect("retained nested ENSv2 state");
         restore
     }
 
-    #[tokio::test]
-    async fn canonical_predecessor_is_forwarded_to_adapter_restore() -> TestResult {
-        let database =
-            TestDatabase::create(TestDatabaseConfig::new("interpret_resume_seed")).await?;
+    fn manifest() -> ManifestInput {
+        ManifestInput {
+            manifest_id: 1,
+            manifest_version: 1,
+            namespace: "ens".to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            chain_id: "resume-seed".to_owned(),
+            deployment_label: "fixture".to_owned(),
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+            payload_json: json!({"abi":{"events":[]}}).to_string(),
+        }
+    }
+
+    fn admissions() -> Vec<AddressAdmissionInput> {
+        vec![
+            AddressAdmissionInput {
+                address: ROOT.to_owned(),
+                contract_instance_id: Uuid::from_u128(1),
+                source_manifest_id: Some(1),
+                role: Some("registry".to_owned()),
+                discovery_edge_kind: None,
+                discovery_from_contract_instance_id: None,
+                discovery_observation_key: None,
+                active_from_block: Some(0),
+                active_to_block: None,
+            },
+            AddressAdmissionInput {
+                address: CHILD.to_owned(),
+                contract_instance_id: Uuid::from_u128(2),
+                source_manifest_id: Some(1),
+                role: Some("registry".to_owned()),
+                discovery_edge_kind: Some("subregistry".to_owned()),
+                discovery_from_contract_instance_id: Some(Uuid::from_u128(1)),
+                discovery_observation_key: Some("fixture-subregistry".to_owned()),
+                active_from_block: Some(0),
+                active_to_block: None,
+            },
+        ]
+    }
+
+    fn prior_event(
+        retained_state_key: &str,
+        event_kind: &str,
+        emitter: &str,
+        token_id: Option<&str>,
+        resource_id: Option<Uuid>,
+        mut after_state: Value,
+    ) -> PriorEventInput {
+        if let Some(token_id) = token_id {
+            after_state["token_id"] = Value::String(token_id.to_owned());
+        }
+        PriorEventInput {
+            retained_state_key: retained_state_key.to_owned(),
+            chain_id: "resume-seed".to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id,
+            event_kind: event_kind.to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: Some(1),
+            state_scope: Some(format!(
+                "{emitter}:-:{}:-:{event_kind}",
+                token_id.unwrap_or("-")
+            )),
+            block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + Duration::SECOND),
+            after_state,
+        }
+    }
+
+    async fn database(prefix: &str) -> TestResult<TestDatabase> {
+        let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
         sqlx::raw_sql(include_str!("../../../../schema-v2/baseline/01_chain.sql"))
             .execute(database.pool())
             .await?;
@@ -121,7 +222,12 @@ mod tests {
         )
         .execute(database.pool())
         .await?;
+        Ok(database)
+    }
 
+    #[tokio::test]
+    async fn canonical_predecessor_is_forwarded_to_adapter_restore() -> TestResult {
+        let database = database("interpret_resume_seed").await?;
         let mut connection = database.pool().acquire().await?;
         let actual = finish_restore(&mut connection, "resume-seed", 3, restore()).await?;
         let expected = restore().finish(Some(OffsetDateTime::UNIX_EPOCH + Duration::seconds(3)));
@@ -141,6 +247,52 @@ mod tests {
                 .is_err()
         );
         drop(connection);
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quiet_predecessor_expiry_retracts_the_name_during_cold_restore() -> TestResult {
+        let database = database("interpret_quiet_expiry_seed").await?;
+        let mut connection = database.pool().acquire().await?;
+        // Retained topology ends at timestamp 1, the parent expires at 2, and the quiet readable
+        // predecessor is timestamp 3. The seed must consume that historical name retraction.
+        let seeded = finish_restore(&mut connection, "resume-seed", 3, restore()).await?;
+        let unseeded = restore().finish(None);
+        drop(connection);
+
+        let batch = || BatchInput {
+            chain_id: "resume-seed".to_owned(),
+            manifests: vec![manifest()],
+            discovery_rules: Vec::new(),
+            admissions: admissions(),
+            prior_events: Vec::new(),
+            blocks: vec![RawBlockInput {
+                chain_id: "resume-seed".to_owned(),
+                block_hash: "block-3".to_owned(),
+                block_number: 3,
+                block_timestamp: OffsetDateTime::UNIX_EPOCH + Duration::seconds(3),
+                canonicality_state: "canonical".to_owned(),
+            }],
+            raw_logs: Vec::new(),
+        };
+        let (seeded_output, _) = interpret_schema_v2_batch_incremental(batch(), Some(seeded))?;
+        let (unseeded_output, _) = interpret_schema_v2_batch_incremental(batch(), Some(unseeded))?;
+        let is_expiry = |event: &bigname_adapters::schema_v2::NormalizedEvent| {
+            event
+                .after_state
+                .get("source_event")
+                .and_then(Value::as_str)
+                == Some("RegistryPathExpired")
+        };
+        assert!(
+            seeded_output
+                .normalized_events
+                .iter()
+                .all(|event| !is_expiry(event))
+        );
+        assert!(unseeded_output.normalized_events.iter().any(is_expiry));
+
         database.cleanup().await?;
         Ok(())
     }

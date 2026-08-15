@@ -23,17 +23,46 @@ fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
 }
 #[test]
 fn v2_targeted_invalidation_matches_the_former_full_walk() {
-    let mut baseline = nested_state(100);
+    assert_targeted_refresh_matches_full_walk(nested_state(100), |state| {
+        state.set_v2_parent_claim(CHILD, None, b"sub");
+    });
+    assert_targeted_refresh_matches_full_walk(nested_state(100), |state| {
+        state.release_v2_token(ROOT, "0x01");
+    });
+    // Both defensive replacement branches are constructible through replace_v2_registration:
+    // relabeling the same live token replaces its old subregistry-bearing state, while minting a
+    // different token for the same live label displaces the old token.
+    assert_targeted_refresh_matches_full_walk(nested_state(100), |state| {
+        install_token(state, ROOT, "0x01", b"other", 100);
+    });
+    assert_targeted_refresh_matches_full_walk(nested_state(100), |state| {
+        install_token(state, ROOT, "0x09", b"sub", 100);
+    });
+}
+fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl Fn(&mut State)) {
     baseline.refresh_dirty_v2_names(1);
     let mut targeted = baseline.clone();
     let mut full_walk = baseline;
-    targeted.set_v2_parent_claim(CHILD, None, b"sub");
-    full_walk.set_v2_parent_claim(CHILD, None, b"sub");
+    mutate(&mut targeted);
+    mutate(&mut full_walk);
     let targeted_transitions = targeted.refresh_dirty_v2_names(2);
     let full_walk_transitions = full_walk.refresh_all_v2_names(2);
     assert_eq!(targeted_transitions, full_walk_transitions);
     assert_eq!(targeted, full_walk);
     assert_v2_indexes_are_derived(&targeted);
+}
+#[test]
+fn v2_dirty_drain_emits_transitions_in_ascending_token_key_order() {
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, "0x02", b"beta", 100);
+    install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+
+    let transitions = state.refresh_dirty_v2_names(1);
+    let keys = transitions
+        .iter()
+        .map(|transition| format!("{}:{}", transition.registry, transition.token_id))
+        .collect::<Vec<_>>();
+    assert_eq!(keys, [format!("{ROOT}:0x01"), format!("{ROOT}:0x02")]);
 }
 #[test]
 fn v2_expiry_crossing_refreshes_descendants_without_a_token_event() {

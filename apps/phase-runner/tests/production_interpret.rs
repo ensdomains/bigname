@@ -3775,7 +3775,7 @@ async fn ens_v2_resource_identity_and_terminal_binding_round_trip() -> Result<()
 }
 
 #[tokio::test]
-async fn quiet_v2_expiry_reorg_reseeds_from_the_new_readable_predecessor() -> Result<()> {
+async fn quiet_v2_expiry_reorg_matches_full_redo_on_the_winning_fork() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_v2_expiry_reorg").await?;
     let chain = "interpret-v2-expiry-reorg";
     seed_v2_lifecycle_fixture(scratch.pool(), chain).await?;
