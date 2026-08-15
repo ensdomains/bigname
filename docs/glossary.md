@@ -1069,6 +1069,12 @@ registration lifecycle is unregistered, but its authority epoch remains
 `ens_v2`; retained or later ENSv1 facts are history and cannot restore current
 registration, owner, resolver, expiry, or control. A later positive ENSv2
 registration continues within that v2 authority regime.
+Without an [authority proof](#authority-proof), this tombstone is established
+only by a qualifying release boundary — a release of the then-current ENSv2
+registration with no ENSv1 activity at or before it — and later ENSv1 facts do
+not retroactively validate a non-qualifying release. A release that does not
+qualify leaves no tombstone: the name resolves to explicit
+`current_authority_not_projected`.
 
 **Retained-history proof** — a schema-migration-era ENSv2 tuple (retention generation,
 discovery-admission epoch, proven-through block) used by the deleted
