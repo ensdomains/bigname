@@ -145,6 +145,102 @@ pub(super) async fn build(
                         COALESCE(lifecycle.log_index, -1)
                     )
               )
+        ), released_v2_regime AS (
+            -- Regime entry keys on a qualifying release's presence in epoch
+            -- history, never on it being the latest v2 lifecycle row: v1 facts
+            -- at or before the release suppress entry, later ones are residue.
+            SELECT release.logical_name_id
+            FROM project_events release
+            WHERE release.logical_name_id IS NOT NULL
+              AND release.resource_id IS NOT NULL
+              AND release.source_family IN (
+                  'ens_v2_root_l1', 'ens_v2_registry_l1',
+                  'ens_v2_registrar_l1'
+              )
+              AND release.event_kind = 'RegistrationReleased'
+              AND EXISTS (
+                  SELECT 1 FROM project_binding_candidates binding
+                  WHERE binding.logical_name_id = release.logical_name_id
+                    AND binding.authority_arm = 'ens_v2'
+                    AND binding.resource_id = release.resource_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_binding_candidates predecessor
+                  WHERE predecessor.logical_name_id = release.logical_name_id
+                    AND predecessor.authority_arm = 'ens_v1'
+                    AND (
+                        predecessor.block_number,
+                        COALESCE(
+                            (predecessor.provenance ->> 'transaction_index')::bigint, -1
+                        ),
+                        COALESCE(
+                            (predecessor.provenance ->> 'log_index')::bigint, -1
+                        )
+                    ) <= (
+                        release.block_number,
+                        COALESCE(release.transaction_index, -1),
+                        COALESCE(release.log_index, -1)
+                    )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_events predecessor
+                  WHERE predecessor.logical_name_id = release.logical_name_id
+                    AND predecessor.source_family LIKE 'ens_v1_%'
+                    AND predecessor.event_kind IN (
+                        'RegistrationGranted', 'RegistrationRenewed',
+                        'RegistrationReleased', 'RegistrationReserved',
+                        'ExpiryChanged', 'AuthorityTransferred',
+                        'TokenControlTransferred', 'AuthorityEpochChanged'
+                    )
+                    AND (
+                        predecessor.block_number,
+                        COALESCE(predecessor.transaction_index, -1),
+                        COALESCE(predecessor.log_index, -1)
+                    ) <= (
+                        release.block_number,
+                        COALESCE(release.transaction_index, -1),
+                        COALESCE(release.log_index, -1)
+                    )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_events predecessor_grant
+                  WHERE predecessor_grant.logical_name_id = release.logical_name_id
+                    AND predecessor_grant.source_family IN (
+                        'ens_v2_root_l1', 'ens_v2_registry_l1',
+                        'ens_v2_registrar_l1'
+                    )
+                    AND predecessor_grant.event_kind = 'RegistrationGranted'
+                    AND predecessor_grant.resource_id IS NOT NULL
+                    AND predecessor_grant.resource_id <> release.resource_id
+                    AND (
+                        predecessor_grant.block_number,
+                        COALESCE(predecessor_grant.transaction_index, -1),
+                        COALESCE(predecessor_grant.log_index, -1)
+                    ) <= (
+                        release.block_number,
+                        COALESCE(release.transaction_index, -1),
+                        COALESCE(release.log_index, -1)
+                    )
+              )
+              AND EXISTS (
+                  SELECT 1 FROM project_events regrant
+                  WHERE regrant.logical_name_id = release.logical_name_id
+                    AND regrant.source_family IN (
+                        'ens_v2_root_l1', 'ens_v2_registry_l1',
+                        'ens_v2_registrar_l1'
+                    )
+                    AND regrant.event_kind = 'RegistrationGranted'
+                    AND (
+                        regrant.block_number,
+                        COALESCE(regrant.transaction_index, -1),
+                        COALESCE(regrant.log_index, -1)
+                    ) > (
+                        release.block_number,
+                        COALESCE(release.transaction_index, -1),
+                        COALESCE(release.log_index, -1)
+                    )
+              )
+            GROUP BY release.logical_name_id
         ), transition_proof AS (
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id,
@@ -368,6 +464,7 @@ pub(super) async fn build(
                    CASE
                        WHEN proof.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN released.logical_name_id IS NOT NULL THEN 'ens_v2'
+                       WHEN regime.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN (
                            COALESCE(summary.has_ens_v1, false)
                            OR COALESCE(event_summary.has_ens_v1, false)
@@ -409,6 +506,7 @@ pub(super) async fn build(
             LEFT JOIN event_arm_summary event_summary USING (logical_name_id)
             LEFT JOIN proof USING (logical_name_id)
             LEFT JOIN released_v2_authority released USING (logical_name_id)
+            LEFT JOIN released_v2_regime regime USING (logical_name_id)
         ), selected AS (
             SELECT decision.*, binding.surface_binding_id AS selected_binding_id,
                    binding.resource_id AS selected_resource_id,

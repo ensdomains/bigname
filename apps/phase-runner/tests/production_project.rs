@@ -7304,6 +7304,185 @@ async fn proofless_v2_release_retains_closed_authority_after_later_v1_residue() 
 }
 
 #[tokio::test]
+async fn released_v2_regime_carries_regrant_after_v1_residue() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_authority_released_regime_regrant").await?;
+    let chain = "authority-released-regime-regrant";
+    let (logical_name_id, released_resource) =
+        seed_proofless_released_v2_authority(scratch.pool(), chain).await?;
+    for block in 7..=8 {
+        insert_lineage_block(scratch.pool(), chain, block).await?;
+    }
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        7,
+        Some(&logical_name_id),
+        None,
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"expiry":9_999}),
+        json!({}),
+    )
+    .await?;
+    run_project(
+        scratch.pool(),
+        chain,
+        Some(Marker {
+            number: 6,
+            hash: block_hash(chain, 6),
+        }),
+        RunMode::Normal,
+        7,
+        7,
+    )
+    .await?;
+    let residue_tombstone: (Uuid, Option<String>) = sqlx::query_as(
+        "SELECT resource_id, declared_summary #>> '{registration,status}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(residue_tombstone.0, released_resource);
+    assert_eq!(residue_tombstone.1.as_deref(), Some("released"));
+
+    let (regrant_binding, regrant_resource) =
+        insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
+    run_project(
+        scratch.pool(),
+        chain,
+        Some(Marker {
+            number: 7,
+            hash: block_hash(chain, 7),
+        }),
+        RunMode::Normal,
+        8,
+        8,
+    )
+    .await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let incremental: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_active_v2_regrant(&incremental, regrant_binding, regrant_resource);
+    assert!(
+        bigname_storage::load_name_current(scratch.pool(), &logical_name_id)
+            .await?
+            .is_some(),
+        "the re-granted ENSv2 registration must remain readable"
+    );
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let rebuilt: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        incremental, rebuilt,
+        "released-regime re-grant splits must equal a full rebuild"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn released_v2_regime_carries_regrant_without_v1_residue() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("project_authority_released_regime_clean_regrant").await?;
+    let chain = "authority-released-regime-clean-regrant";
+    let (logical_name_id, _) = seed_proofless_released_v2_authority(scratch.pool(), chain).await?;
+    for block in 7..=8 {
+        insert_lineage_block(scratch.pool(), chain, block).await?;
+    }
+    let (regrant_binding, regrant_resource) =
+        insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
+    let projected: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_active_v2_regrant(&projected, regrant_binding, regrant_resource);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn released_v2_regime_regrant_releases_into_a_fresh_tombstone() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_authority_released_regime_rerelease").await?;
+    let chain = "authority-released-regime-rerelease";
+    let (logical_name_id, released_resource) =
+        seed_proofless_released_v2_authority(scratch.pool(), chain).await?;
+    for block in 7..=10 {
+        insert_lineage_block(scratch.pool(), chain, block).await?;
+    }
+    let (regrant_binding, regrant_resource) =
+        insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        9,
+        Some(&logical_name_id),
+        Some(&regrant_resource.to_string()),
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({"status":"released","released_at":9}),
+        json!({}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(9)
+         WHERE surface_binding_id = $1",
+    )
+    .bind(regrant_binding)
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        10,
+        Some(&logical_name_id),
+        None,
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"expiry":9_999}),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 10).await?;
+    let projected: (Uuid, Value, Value, Option<String>) = sqlx::query_as(
+        "SELECT resource_id, declared_summary,
+                provenance -> 'authority_selection', unsupported_reason
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(projected.0, regrant_resource);
+    assert_ne!(projected.0, released_resource);
+    assert_eq!(projected.1["registration"]["status"], "released");
+    assert!(projected.1["registration"]["expiry"].is_null());
+    assert!(projected.1["registration"]["registrant"].is_null());
+    assert_eq!(projected.2["authority_arm"], "ens_v2");
+    assert_eq!(projected.2["lifecycle_state"], "unregistered");
+    assert!(projected.2.get("proof_kind").is_none());
+    assert_eq!(
+        projected.3.as_deref(),
+        Some("ensv2_exact_name_profile_shadow")
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_candidate_parity").await?;
     let chain = "authority-candidate-parity";
@@ -13452,6 +13631,148 @@ async fn seed_dual_open_cross_arm_fixture(
     .await?;
 
     Ok(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"])))
+}
+
+// A proofless released-v2-authority starting point: the fixture's v1 arm is
+// withdrawn (binding closed as v2, v1 events orphaned) and the v2 registration
+// is released at block 6 with no transition proof.
+async fn seed_proofless_released_v2_authority(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<(String, Uuid)> {
+    let logical_name_id = seed_dual_open_cross_arm_fixture(pool, chain, 4).await?;
+    InterpretEngine::new(pool.clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    sqlx::query(
+        "UPDATE surface_bindings
+         SET authority_arm = 'ens_v2', active_to = to_timestamp(3)
+         WHERE chain_id = $1 AND logical_name_id = $2
+           AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND logical_name_id = $2
+           AND source_family LIKE 'ens_v1_%'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(pool)
+    .await?;
+    let released_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2
+         ORDER BY block_number DESC, surface_binding_id DESC LIMIT 1",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    insert_lineage_block(pool, chain, 6).await?;
+    insert_event(
+        pool,
+        chain,
+        6,
+        Some(&logical_name_id),
+        Some(&released_resource.to_string()),
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({"status":"released","released_at":6}),
+        json!({}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(6)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'
+           AND active_to IS NULL",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(pool)
+    .await?;
+    Ok((logical_name_id, released_resource))
+}
+
+// A positive ENSv2 re-registration on a fresh resource, bound at `block`.
+async fn insert_v2_regrant(
+    pool: &PgPool,
+    chain: &str,
+    logical_name_id: &str,
+    block: i64,
+) -> Result<(Uuid, Uuid)> {
+    let regrant_binding = Uuid::new_v4();
+    let regrant_resource = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, $4, 'canonical')",
+    )
+    .bind(regrant_resource)
+    .bind(chain)
+    .bind(block_hash(chain, block))
+    .bind(block)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, chain_id, block_hash, block_number,
+             provenance, canonicality_state
+         )
+         SELECT $1, logical_name_id, $2, binding_kind, authority_arm,
+                to_timestamp($4), chain_id, $3, $4,
+                jsonb_build_object('transaction_index', 0, 'log_index', 0),
+                canonicality_state
+         FROM surface_bindings
+         WHERE chain_id = $5 AND logical_name_id = $6 AND authority_arm = 'ens_v2'
+         ORDER BY block_number DESC, surface_binding_id DESC
+         LIMIT 1",
+    )
+    .bind(regrant_binding)
+    .bind(regrant_resource)
+    .bind(block_hash(chain, block))
+    .bind(block)
+    .bind(chain)
+    .bind(logical_name_id)
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        chain,
+        block,
+        Some(logical_name_id),
+        Some(&regrant_resource.to_string()),
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({"status":"registered","registrant":OWNER,"expiry":5_000_000_000_u64}),
+        json!({}),
+    )
+    .await?;
+    Ok((regrant_binding, regrant_resource))
+}
+
+fn assert_active_v2_regrant(row: &Value, regrant_binding: Uuid, regrant_resource: Uuid) {
+    let summary = &row["declared_summary"]["registration"];
+    let selection = &row["provenance"]["authority_selection"];
+    assert_eq!(row["resource_id"], regrant_resource.to_string());
+    assert_eq!(row["surface_binding_id"], regrant_binding.to_string());
+    assert_eq!(summary["status"], "active");
+    assert_eq!(summary["registrant"], OWNER);
+    assert_eq!(summary["expiry"], 5_000_000_000_u64);
+    assert_eq!(selection["authority_arm"], "ens_v2");
+    assert_eq!(selection["lifecycle_state"], "registered");
+    assert!(selection.get("proof_kind").is_none());
+    assert_eq!(row["unsupported_reason"], "ensv2_exact_name_profile_shadow");
 }
 
 async fn insert_activated_authority_proof(
