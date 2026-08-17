@@ -1068,7 +1068,11 @@ ENSv2-authoritative registration is released or unregistered. Its current
 registration lifecycle is unregistered, but its authority epoch remains
 `ens_v2`; retained or later ENSv1 facts are history and cannot restore current
 registration, owner, resolver, expiry, or control. A later positive ENSv2
-registration continues within that v2 authority regime.
+registration continues within that v2 authority regime when the release's
+regime evidence is unambiguous. If earlier ENSv2 grants on other resources
+leave the release's lifecycle epoch ambiguous, a later re-registration
+combined with post-release ENSv1 residue resolves to an explicit
+mixed-authority conflict rather than continuing the regime.
 Without an [authority proof](#authority-proof), this tombstone is established
 only by a qualifying release boundary — a release of the then-current ENSv2
 registration with no ENSv1 activity at or before it — and later ENSv1 facts do
