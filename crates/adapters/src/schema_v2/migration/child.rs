@@ -201,9 +201,14 @@ fn derive_boundaries(
         // registration, whatever its sender.
         // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
         // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
-        let Some((cleanup_kind, cleanup)) =
-            v1_cleanup(output, &registration, &namehash, name_wrapper, graveyard)
-        else {
+        let Some((cleanup_kind, cleanup)) = v1_cleanup(
+            output,
+            &registration,
+            at,
+            &namehash,
+            name_wrapper,
+            graveyard,
+        ) else {
             continue;
         };
         let child_registry = known
@@ -266,10 +271,24 @@ fn derive_boundaries(
                 evidence.clone(),
             )?;
         }
+        // A child's ENSv1 authority ends at its cleanup, which precedes the registration in the
+        // same transaction. The emancipated branch's unwrap closes the child's wrapper binding
+        // there, so nothing is open at the registration's own position; selecting the predecessor
+        // relative to the boundary would name a binding that no longer exists. The locked branch
+        // only moves the token's owner and closes nothing, and resolves to the same binding either
+        // way, so both shapes record the cleanup and select against it.
+        let cleanup_at = required_position(&cleanup)?;
         let before = json!({
             "authority_epoch":"ens_v1",
             "logical_name_id":logical_name_id,
-            "selection":"active_immediately_before_boundary",
+            "selection":"active_immediately_before_predecessor_cleanup",
+            "predecessor_cleanup":{
+                "event_identity":cleanup.event_identity,
+                "source_event":cleanup.after_state.get("source_event"),
+                "block_number":cleanup_at.0,
+                "transaction_index":cleanup_at.1,
+                "log_index":cleanup_at.2,
+            },
             "resource":{
                 "anchor_kind":"wrapper_backed_child_control",
                 "contract_address":name_wrapper,
@@ -278,7 +297,7 @@ fn derive_boundaries(
                 "parent_namehash":parent.namehash,
                 "labelhash":labelhash,
                 "parent_migration_correlation_id":parent.correlation_id,
-                "selection":"current_wrapper_resource_immediately_before_boundary",
+                "selection":"current_wrapper_resource_immediately_before_predecessor_cleanup",
             },
         });
         let after = json!({
@@ -375,13 +394,21 @@ fn receiver_registered_itself(event: &NormalizedEvent) -> bool {
     matches!((sender, emitter), (Some(sender), Some(emitter)) if sender.eq_ignore_ascii_case(emitter))
 }
 
-/// The child's ENSv1 cleanup in the registration's own transaction: its wrapper token transferred
-/// to the Graveyard, or its node unwrapped into the Graveyard. Both are emitted by the ENSv1
-/// NameWrapper the migration manifest declares, so the evidence is manifest-anchored rather than
-/// inferred from whichever ENSv1 family a deployment happens to admit.
+/// The child's ENSv1 cleanup earlier in the registration's own transaction: its wrapper token
+/// transferred to the Graveyard, or its node unwrapped into the Graveyard. Both are emitted by the
+/// ENSv1 NameWrapper the migration manifest declares, so the evidence is manifest-anchored rather
+/// than inferred from whichever ENSv1 family a deployment happens to admit.
+///
+/// The receiver retires the ENSv1 name and only then injects the successor label, so a cleanup at
+/// or after the registration is not that sequence and proves nothing about it
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
 fn v1_cleanup(
     output: &BatchOutput,
     registration: &NormalizedEvent,
+    at: (i64, i64, i64),
     namehash: &str,
     name_wrapper: &str,
     graveyard: &str,
@@ -389,6 +416,7 @@ fn v1_cleanup(
     output.normalized_events.iter().find_map(|event| {
         if event.block_hash != registration.block_hash
             || event.transaction_hash != registration.transaction_hash
+            || required_position(event).ok()? >= at
             || !event
                 .raw_fact_ref
                 .get("emitting_address")

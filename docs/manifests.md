@@ -349,7 +349,9 @@ direct child registered by its already-migrated parent's own
 [migration registry](glossary.md#migration-registry-wrapperregistry), under the
 separately evidenced child rule below. That rule does not inherit the `.eth`
 second-level rule and never uses `ETH_NODE`; its predecessor is the child's
-ENSv1 NameWrapper position.
+ENSv1 NameWrapper position, selected immediately before the child's own ENSv1
+cleanup rather than immediately before the ENSv2 registration, because the
+emancipated shape's unwrap ends that position earlier in the same transaction.
 
 A name-independent controller change outside a per-name synchronized-renewal
 group uses `correlation_kind=controller_configuration`. Its stable derivation

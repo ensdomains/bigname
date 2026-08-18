@@ -649,6 +649,17 @@ ENSv1 NameWrapper immediately before its boundary, in both branches
 so a child has exactly one predecessor arm and the registrar-backed `.eth`
 second-level arm never applies to it.
 
+The child's predecessor is selected against its ENSv1 cleanup, not against the
+ENSv2 registration, and the boundary records where that cleanup happened —
+event identity, block, transaction index, and log index. The two differ for the
+`emancipated_child` shape: unwrapping the node closes the child's ENSv1 wrapper
+binding at the unwrap log, which precedes the registration in the same
+transaction, so no ENSv1 binding for that name is open at the registration's own
+position and a boundary-relative selector would name a binding that no longer
+exists. Parking a `locked_child`'s wrapper token only moves its owner and closes
+nothing, so both shapes resolve to the same binding under the cleanup-relative
+rule.
+
 Two `migration_path` values produce one, and each is admitted only with its own ENSv1
 predecessor cleanup in the registration's transaction. `locked_child` deploys a nested registry for
 the child and parks the child's wrapper token in the Graveyard without unwrapping it

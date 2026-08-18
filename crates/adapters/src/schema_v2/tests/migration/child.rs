@@ -254,10 +254,33 @@ fn assert_child_shape(
     assert_eq!(resource["wrapper_token_id"], child["namehash"]);
     assert_eq!(resource["parent_namehash"], parent["namehash"]);
     assert_eq!(resource["labelhash"], child["labelhash"]);
+    // The ENSv1 side of a child ends at its cleanup, not at the registration: an emancipated
+    // child's unwrap closes its wrapper binding earlier in the same transaction, so the boundary
+    // records where that cleanup happened and selects the binding active immediately before it.
     assert_eq!(
         resource["selection"],
-        "current_wrapper_resource_immediately_before_boundary"
+        "current_wrapper_resource_immediately_before_predecessor_cleanup"
     );
+    assert_eq!(
+        boundary.after_state["predecessor_binding"]["selection"],
+        "active_immediately_before_predecessor_cleanup"
+    );
+    let cleanup = &boundary.after_state["predecessor_binding"]["predecessor_cleanup"];
+    assert_eq!(cleanup["block_number"], child["migration_block"]);
+    assert!(
+        cleanup["log_index"].as_i64().unwrap()
+            < child["v2_registration_log_index"].as_i64().unwrap(),
+        "the recorded cleanup precedes the registration it backs"
+    );
+    assert_eq!(
+        cleanup["source_event"],
+        if child["migration_path"] == "locked_child" {
+            "TransferSingle"
+        } else {
+            "NameUnwrapped"
+        }
+    );
+    assert!(cleanup["event_identity"].as_str().is_some());
     assert_eq!(
         boundary.after_state["stored_expiry"],
         child["stored_expiry"]
@@ -961,6 +984,53 @@ fn a_cleanup_that_stops_short_of_the_graveyard_derives_no_boundary() -> anyhow::
     Ok(())
 }
 
+/// The ENSv1 unwrap of an emancipated child closes its wrapper binding at the unwrap log, which
+/// precedes the ENSv2 registration in the same transaction, so no ENSv1 binding for that name is
+/// open at the boundary's own position. That is why a child boundary records where its ENSv1
+/// cleanup happened: the binding a later activation has to close is the one active immediately
+/// before the cleanup. The locked shape differs — parking the wrapper token moves its owner without
+/// closing anything — and both are asserted here so the asymmetry stays visible.
+#[test]
+fn an_emancipated_child_closes_its_ensv1_binding_before_the_registration() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    for (name, closes) in [("C-02", true), ("C-01", false)] {
+        let scenario = &fixture["scenarios"][name];
+        let child = &scenario["child"];
+        let output = interpret_test_batch(batch(
+            scenario_logs(scenario, addresses, &["parent", "child"])?,
+            &fixture,
+            true,
+        ))?;
+        let logical_name_id = format!("ens:{}", child["namehash"].as_str().unwrap());
+        let registration = child["v2_registration_log_index"].as_i64().unwrap();
+        let closed = output
+            .binding_closures
+            .iter()
+            .filter(|closure| {
+                closure.logical_name_id == logical_name_id
+                    && closure.authority_arm == "ens_v1"
+                    && closure.block_number == child["migration_block"].as_i64().unwrap()
+            })
+            .map(|closure| closure.log_index)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            closed.iter().any(|index| *index < registration),
+            closes,
+            "{name}: ENSv1 binding closed before the registration"
+        );
+        assert!(
+            !output.surface_bindings.iter().any(|binding| {
+                binding.logical_name_id == logical_name_id
+                    && binding.authority_arm == "ens_v1"
+                    && binding.block_number == child["migration_block"].as_i64().unwrap()
+            }),
+            "{name}: the cleanup opens no replacement ENSv1 binding at the boundary"
+        );
+    }
+    Ok(())
+}
+
 /// The child's ENSv1 identity is derived from its parent registry's CREATE2 salt, while the ENSv2
 /// name the registration carries comes from the registry topology. A registry whose salt names one
 /// name and whose announcement places it under another leaves those two disagreeing, and no
@@ -1088,20 +1158,49 @@ fn a_cleanup_in_an_adjacent_transaction_proves_nothing() -> anyhow::Result<()> {
     let addresses = &fixture["addresses"];
     let block = scenario["child"]["migration_block"].as_i64().unwrap();
     let mut logs = scenario_logs(scenario, addresses, &["parent", "child"])?;
+    // The cleanup keeps its position ahead of the registration and only the transaction changes,
+    // so this pins transaction membership alone rather than ordering.
     let mut moved = 0;
     for log in &mut logs {
-        if is_v1_cleanup(log, addresses) && log.block_number == block {
+        if log.block_number == block && !is_v1_cleanup(log, addresses) {
             log.transaction_index = 1;
             log.transaction_hash = format!("transaction-{block}-1");
-            log.log_index += 40;
             moved += 1;
         }
     }
-    assert_eq!(moved, 2, "both cleanup hops move");
+    assert!(
+        moved > 0,
+        "the child's ENSv2 side moves to its own transaction"
+    );
     let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
     assert!(
         child_boundaries(&output).is_empty(),
         "the cleanup and the registration are one call or they are unrelated"
+    );
+    Ok(())
+}
+
+/// The receiver retires the ENSv1 name before it registers the successor — the wrapper token is
+/// parked, or the node unwrapped, and only then is the label injected into the registry
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+/// A cleanup logged after the registration is therefore not that sequence, whatever else it shows.
+#[test]
+fn a_cleanup_logged_after_the_registration_derives_no_boundary() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let mut child = scenario["child"].clone();
+    let after = child["v2_registration_log_index"].as_i64().unwrap() + 6;
+    child["cleanup_log_index"] = json!(after);
+    let mut logs = level_logs(&scenario["parent"], addresses)?;
+    logs.extend(level_logs(&child, addresses)?);
+    let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "the successor cannot be registered before the predecessor is retired"
     );
     Ok(())
 }
@@ -1131,7 +1230,10 @@ fn a_parent_controlled_registration_with_a_full_cleanup_is_still_not_a_migration
         child["registration_owner"].clone(),
     );
     object.insert("migration_path".to_owned(), json!("emancipated_child"));
-    object.insert("cleanup_log_index".to_owned(), json!(20));
+    // The cleanup precedes the registration, as a real receiver's would, so this pins the sender
+    // conjunct rather than the ordering one.
+    object.insert("cleanup_log_index".to_owned(), json!(10));
+    object.insert("v2_registration_log_index".to_owned(), json!(20));
     let mut logs = level_logs(&scenario["parent"], addresses)?;
     logs.extend(level_logs(&retired, addresses)?);
     let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;

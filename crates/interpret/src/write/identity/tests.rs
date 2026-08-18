@@ -360,6 +360,73 @@ async fn apply(pool: &sqlx::PgPool, output: &BatchOutput) -> crate::Result<()> {
     .map(|_| ())
 }
 
+async fn close_binding(pool: &sqlx::PgPool, id: u128, micros: i64) -> TestResult {
+    sqlx::query(
+        "UPDATE surface_bindings
+         SET active_to = timestamptz '1970-01-01 00:00:02Z' + $2 * interval '1 microsecond'
+         WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::from_u128(id))
+    .bind(micros)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Moves the boundary to a later log of its own transaction, so a predecessor closed earlier in
+/// that same transaction is representable.
+fn boundary_at_log_index(output: &mut BatchOutput, log_index: i64) {
+    output.migration_authority_transitions[0].log_index = log_index;
+    output
+        .normalized_events
+        .iter_mut()
+        .find(|event| event.event_kind == MIGRATION_APPLIED_EVENT_KIND)
+        .expect("activated migration boundary")
+        .log_index = Some(log_index);
+}
+
+/// The writer resolves the predecessor as a binding still open at the boundary's own position:
+/// `active_from` before it, and `active_to` unset or at/after it. A binding closed earlier in the
+/// boundary's own transaction — which is what an emancipated child's ENSv1 unwrap does to its
+/// wrapper binding — resolves to nothing, and the writer treats that as a data-integrity failure
+/// rather than a no-op. This is why a child boundary records the position of its ENSv1 cleanup:
+/// the binding slice 3B has to close is the one active immediately before that cleanup, not the one
+/// active immediately before the registration.
+#[tokio::test]
+async fn a_predecessor_closed_earlier_in_the_boundary_transaction_resolves_to_none() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    output.normalized_events.push(predecessor_evidence(
+        "same-batch-wrapper-evidence",
+        1,
+        WRAPPER,
+        json!({"authority_kind":"wrapper","node":"0xname"}),
+    ));
+    activate_with_selector(&mut output, wrapper_selector(WRAPPER))?;
+    boundary_at_log_index(&mut output, 5);
+
+    close_binding(pool, 11, 2).await?;
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(
+        error.contains("0 active ENSv1 predecessors"),
+        "a predecessor closed before the boundary is not resolvable: {error}"
+    );
+
+    // Closed at the boundary itself — the locked shape, whose wrapper token moves without the
+    // binding ever closing early — still resolves.
+    close_binding(pool, 11, 5).await?;
+    apply(pool, &output).await?;
+    assert_eq!(
+        active_to(pool, 11).await?,
+        Some(time::OffsetDateTime::from_unix_timestamp(2)? + time::Duration::microseconds(5)),
+        "the resolved predecessor is closed at the boundary"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn active_to(pool: &sqlx::PgPool, id: u128) -> TestResult<Option<time::OffsetDateTime>> {
     Ok(
         sqlx::query_scalar("SELECT active_to FROM surface_bindings WHERE surface_binding_id = $1")
@@ -757,7 +824,7 @@ async fn the_child_predecessor_anchor_is_refused_until_it_is_activated() -> Test
     child_selector["resource"]["anchor_kind"] = json!("wrapper_backed_child_control");
     child_selector["resource"]["parent_namehash"] = json!("0xparent");
     child_selector["resource"]["labelhash"] = json!("0xlabel");
-    activate_with_selector(&mut output, child_selector)?;
+    activate_with_selector(&mut output, child_selector.clone())?;
     let error = apply(pool, &output).await.unwrap_err().to_string();
     assert!(
         error.contains("invalid predecessor resource selector"),
@@ -767,6 +834,34 @@ async fn the_child_predecessor_anchor_is_refused_until_it_is_activated() -> Test
         active_to(pool, 11).await?,
         None,
         "a refused child anchor must not close the ENSv1 predecessor"
+    );
+
+    // The shape slice 3A actually records also selects its predecessor against the child's ENSv1
+    // cleanup rather than the boundary, which this writer likewise does not admit.
+    child_selector["selection"] = json!("active_immediately_before_predecessor_cleanup");
+    child_selector["predecessor_cleanup"] = json!({
+        "event_identity":"child-cleanup",
+        "source_event":"NameUnwrapped",
+        "block_number":2,
+        (TRANSACTION_INDEX_KEY):0,
+        (LOG_INDEX_KEY):0
+    });
+    child_selector["resource"]["selection"] =
+        json!("current_wrapper_resource_immediately_before_predecessor_cleanup");
+    let mut recorded = ordinary_open(13, 3, "ens_v2", 2);
+    recorded.normalized_events.push(predecessor_evidence(
+        "same-batch-wrapper-evidence",
+        1,
+        WRAPPER,
+        json!({"authority_kind":"wrapper","node":"0xname"}),
+    ));
+    activate_with_selector(&mut recorded, child_selector)?;
+    let error = apply(pool, &recorded).await.unwrap_err().to_string();
+    assert!(error.contains("invalid authority selector"), "{error}");
+    assert_eq!(
+        active_to(pool, 11).await?,
+        None,
+        "a refused child selector must not close the ENSv1 predecessor"
     );
     database.cleanup().await?;
     Ok(())
