@@ -24,6 +24,7 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    error::ErrorKind as RunnerErrorKind,
     heads::{BlockMarker, HeadMarkers, publish_heads},
     interpret_phase::InterpretPhase,
     phase::{
@@ -11552,6 +11553,38 @@ async fn mainnet_dual_current_aborts_the_generation_and_appends_one_audit_row() 
     scratch.cleanup().await
 }
 
+// A failed audit write must not mask or downgrade the invariant diagnosis: the
+// runner has to stop on the integrity failure, not retry it as transient.
+#[tokio::test]
+async fn a_failed_audit_write_keeps_the_non_retryable_invariant_failure() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_audit_unwritable").await?;
+    let chain = "project-dual-current-unwritable";
+    seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    sqlx::query("DROP TABLE project_generation_failures")
+        .execute(scratch.pool())
+        .await?;
+
+    let failure = run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the generation still fails");
+    assert_eq!(
+        failure.kind(),
+        RunnerErrorKind::DataIntegrity,
+        "an unwritable audit must not make the failure retryable"
+    );
+    let message = failure.to_string();
+    assert!(
+        message.contains("both authority arms"),
+        "the invariant diagnosis survives: {message}"
+    );
+    assert!(
+        message.contains("record projection generation failure"),
+        "the audit failure is reported alongside: {message}"
+    );
+
+    scratch.cleanup().await
+}
+
 // A post-audit Sepolia manifest declared for a different chain must not
 // reclassify this one: the deployment profile is per projected chain.
 #[tokio::test]
@@ -11561,9 +11594,13 @@ async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_profile() -> Result<
     seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
     declare_sepolia_post_audit_profile(scratch.pool(), "project-dual-current-elsewhere").await?;
 
-    run_project_phase(scratch.pool(), chain, 5)
+    let failure = run_project_phase(scratch.pool(), chain, 5)
         .await
         .expect_err("a foreign sepolia label must not disable the assertion");
+    assert!(
+        failure.to_string().contains("both authority arms"),
+        "unexpected failure: {failure}"
+    );
     assert_eq!(
         generation_failure_rows(scratch.pool(), chain).await?.len(),
         1,
@@ -14207,14 +14244,14 @@ async fn declare_sepolia_post_audit_profile(pool: &PgPool, chain: &str) -> Resul
         pool,
         "ens",
         chain,
-        "ens_v2_deployment_profile",
+        "ens_v2_root_l1",
         1,
         "ens_v2_sepolia_post_audit",
         &format!("tests/raw-{chain}-sepolia-post-audit.toml"),
         json!({
             "manifest_version": 1,
             "namespace": "ens",
-            "source_family": "ens_v2_deployment_profile",
+            "source_family": "ens_v2_root_l1",
             "chain": chain,
             "deployment_epoch": "ens_v2_sepolia_post_audit",
             "rollout_status": "active",

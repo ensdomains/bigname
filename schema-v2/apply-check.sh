@@ -1166,8 +1166,8 @@ BEGIN
 
     -- Add exact exceptions only after maintainer authorization.
     -- `project_generation_failures` is the contracted name of the append-only
-    -- projection-generation failure audit (docs/storage.md:133 and its
-    -- "Projection publication" contract); it is not retention-generation state.
+    -- projection-generation failure audit (docs/storage.md, table ownership and
+    -- "Projection publication"); it is not retention-generation state.
     WITH maintainer_authorized_allowlist(table_name) AS (
         VALUES ('project_generation_failures')
     )

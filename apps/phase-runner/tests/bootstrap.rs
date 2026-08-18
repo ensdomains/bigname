@@ -606,13 +606,18 @@ async fn load_table_structure(pool: &sqlx::PgPool) -> Result<Vec<String>> {
 
             UNION ALL
 
-            SELECT format('comment:%s:%s', attribute.attname, description.description)
+            SELECT format(
+                       'comment:%s:%s',
+                       COALESCE(attribute.attname, '<table>'),
+                       description.description
+                   )
             FROM pg_description description
             JOIN pg_class relation ON relation.oid = description.objoid
             JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-            JOIN pg_attribute attribute
+            LEFT JOIN pg_attribute attribute
               ON attribute.attrelid = relation.oid
              AND attribute.attnum = description.objsubid
+             AND description.objsubid > 0
             WHERE namespace.nspname = 'bigname_phase'
               AND relation.relname = 'project_generation_failures'
         ) structure

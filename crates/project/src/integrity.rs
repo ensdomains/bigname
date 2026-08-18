@@ -69,6 +69,9 @@ pub(crate) async fn assert_publishable(
             CROSS JOIN target_time
             JOIN project_events boundary
               ON boundary.normalized_event_id = authority.authority_proof_event_id
+             -- The transition proof is selected per name, so pinning the name
+             -- here is semantics-preserving and reaches the staged index.
+             AND boundary.logical_name_id = authority.logical_name_id
             JOIN LATERAL (
                 SELECT candidate.*
                 FROM project_binding_candidates candidate

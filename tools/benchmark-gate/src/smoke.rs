@@ -163,6 +163,7 @@ async fn initialize_schema_v2(pool: &PgPool) -> Result<()> {
         include_str!("../../../schema-v2/baseline/09_divergence.sql"),
         include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
         include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
+        include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
     ];
     let mut transaction = pool.begin().await?;
     sqlx::query("CREATE SCHEMA bigname_phase")

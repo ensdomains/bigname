@@ -177,7 +177,8 @@ row. The
 [projection generation failure](glossary.md#projection-generation-failure)
 audit schema-migration creates a table the same way and needs the same regrant,
 without that stop-the-runner requirement. PostgreSQL does not extend an earlier
-all-tables grant to tables created later. Do not reuse the writer credential in the verification URL:
+all-tables grant to tables created later. Do not reuse the writer credential in
+the verification URL:
 setting a writer session's default transaction to read-only does not remove
 that role's write authority, and startup rejects it.
 
