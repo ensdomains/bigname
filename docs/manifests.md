@@ -305,7 +305,7 @@ The following fixed contracts become direct declarations under
 The existing Sepolia ENSv1 BaseRegistrar at
 `0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85` is also declared as a
 correlation input, beginning at the Graveyard deployment block `11163400`,
-not at the registrar's original deployment. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/deployments/sepolia/Graveyard.json:L438 @ ens_v2@ccaeb58) Correlation is per name, never per transaction alone. Interpretation hashes the decoded bridge label bytes exactly as emitted; it does not normalize or rewrite them. That labelhash, interpreted as `uint256`, must equal the BaseRegistrar token ID. Interpretation then derives the `.eth` namehash from `ETH_NODE` and that labelhash and requires it to equal the v2 logical name/namehash. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L8 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L108 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L113 @ ens_v2@ccaeb58) The participating logs must have a valid path-specific order and come from the declared emitters and controller path; decoded expiry or duration values must agree for that path without reconstructing an expiry. A transaction-hash-only join is forbidden because one transaction can contain several labels through `syncWrapper` or a multi-item wrapper transfer. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L132 @ ens_v2@ccaeb58) Each name produces an independent correlation group, and unrelated co-located logs remain outside every group.
+not at the registrar's original deployment. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/deployments/sepolia/Graveyard.json:L438 @ ens_v2@ccaeb58) Correlation is per name, never per transaction alone. Interpretation hashes the decoded bridge label bytes exactly as emitted; it does not normalize or rewrite them. That labelhash, interpreted as `uint256`, must equal the BaseRegistrar token ID. Interpretation then derives the `.eth` namehash from `ETH_NODE` and that labelhash and requires it to equal the v2 logical name/namehash. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L8 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L108 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L113 @ ens_v2@ccaeb58) A direct child under an already-migrated parent uses the same check without `ETH_NODE`: interpretation derives the child namehash from the parent [migration registry](glossary.md#migration-registry-wrapperregistry)'s own migration evidence — the CREATE2 salt of the factory log that created that registry, which is the parent's namehash — together with the registered labelhash, and requires the result to equal the ENSv2 logical name/namehash the registry topology resolves for that label. A mismatch means the evidence chain is incomplete and no boundary is derived. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58) The participating logs must have a valid path-specific order and come from the declared emitters and controller path; decoded expiry or duration values must agree for that path without reconstructing an expiry. A transaction-hash-only join is forbidden because one transaction can contain several labels through `syncWrapper` or a multi-item wrapper transfer. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L132 @ ens_v2@ccaeb58) Each name produces an independent correlation group, and unrelated co-located logs remain outside every group.
 
 Each group carries `correlation_kind`. A synchronized bridge renewal uses
 `synchronized_renewal` and never emits `MigrationApplied`; a later renewal or
@@ -337,11 +337,19 @@ the transfer, while the v2 owner is caller-supplied payload data and may differ
 from the v1 registrant.
 (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L102-L114 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L20-L31 @ ens_v2@ccaeb58)
-Slice 2A covers only `.eth` second-level names: the unlocked path verifies a
-label token and derives its name under `ETH_NODE`, and the locked controller
-returns `ETH_NODE` as its wrapped root. No non-`.eth` transition is admitted.
+Slice 2A's controller-mediated shapes cover only `.eth` second-level names: the
+unlocked path verifies a label token and derives its name under `ETH_NODE`, and
+the locked controller returns `ETH_NODE` as its wrapped root. No transition
+through a migration controller is admitted for a name that is not an `.eth`
+second-level name.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L108-L113 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L80-L83 @ ens_v2@ccaeb58)
+Slice 3A admits the one further shape, which reaches no controller at all: a
+direct child registered by its already-migrated parent's own
+[migration registry](glossary.md#migration-registry-wrapperregistry), under the
+separately evidenced child rule below. That rule does not inherit the `.eth`
+second-level rule and never uses `ETH_NODE`; its predecessor is the child's
+ENSv1 NameWrapper position.
 
 A name-independent controller change outside a per-name synchronized-renewal
 group uses `correlation_kind=controller_configuration`. Its stable derivation
@@ -439,6 +447,11 @@ starting at block `11163415`,
 is declared as fixed deployment metadata. It emits no event and only orders
 transfers through the two controllers and already-migrated parent registries.
 Its order is unwrapped, unlocked-wrapped, locked-wrapped, then locked children.
+The helper is therefore unobservable: using it is optional, and the transfers it
+batches produce the same log sequence a caller would produce by sending the same
+transfers itself, so correlation never keys on the helper's participation.
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2@ccaeb58)
 The current family-wide watch planner assigns the
 ENSv2 migration manifest's complete topic set to this declared address. (upstream: .refs/ens_v2/contracts/deployments/sepolia/MigrationHelper.json:L2 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/MigrationHelper.json:L542 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L103 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L133 @ ens_v2@ccaeb58)
 
@@ -474,6 +487,76 @@ does not itself admit the target. (upstream: .refs/ens_v2/contracts/src/registry
 `0xcf9f4863a1b44216cfc0be65f4e47b2b9a043924`, starting at block `11163410`,
 is implementation metadata, not a root or a registry admission. It remains a declared
 address in the family-wide watch plan. (upstream: .refs/ens_v2/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/WrapperRegistryImpl.json:L3700 @ ens_v2@ccaeb58)
+
+Consumer slice 3A admits the same shape at any depth. The registry created for a
+locked child is deployed by its parent's registry, not by the locked migration
+controller, because `WrapperRegistry` inherits the same wrapper receiver, and the
+CREATE2 salt is the child's namehash.
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58)
+Such a registry is admitted exactly as a controller-deployed one is — from the
+registry's own `RegistryCreated` announcement plus the factory log naming that
+registry — so admitted depth is unbounded: second level, third level, fourth
+level, and below. Rule ownership still stays with `registry_announcement`, and
+the ordinary `RegistryCreated` event, indexability edge, and every
+independently derivable existing-family output above remain byte-for-byte
+unchanged.
+
+A direct child never reaches a migration controller: the already-migrated
+parent's registry is itself the receiver and registers the child into itself.
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58)
+The observable discriminator is that the child's `LabelRegistered` is emitted by
+the parent registry and its `sender` field equals that same emitting registry
+address, because the receiver re-enters through an external self-call restricted
+to itself; a second-level migration instead names a separate migration
+controller as `sender`.
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58)
+Correlation is per child registration, never per transaction membership: one
+transaction may carry a parent migration and several children, each with its own
+correlation ID and evidence chain. The parent registry's creation must precede
+the child's registration in full block, transaction-index, and log-index order,
+including within one transaction. `correlation_kind` is unchanged — a child
+group is an ordinary `authority_transition` group — and every child boundary and
+dependent effect carries `consumer_visibility=candidate`.
+
+Four shapes derive no child boundary, each as explicit non-support rather than a
+fallback, and a fifth never arises at all:
+
+- An unmigrated [migratable child](glossary.md#migratable-child) under a
+  migrated parent. It produces no ENSv2 registration event at all: the child
+  stays ENSv1-authoritative and the parent registry answers `getResolver` with
+  the ENSv1 fallback resolver, which is view-only state and emits no log.
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58)
+- A parent-controlled child that the parent's owner registers directly. The
+  registry permits that registration because the label is not protected as
+  migratable, so it is a real ordinary registry fact and, under consumer slice
+  2C, an authority proof — but it is never a child `MigrationApplied`.
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58)
+- A `ProxyDeployed` factory log without the `RegistryCreated` announcement of
+  the registry it names. That remains audit evidence and is not registry
+  admission.
+- A registration emitted by a registry that carries no
+  `migration_registry_creation` correlation. Parent discovery is then
+  incomplete and the emitter is an ordinary registry.
+
+`MigrationHelper` participation is the shape that never arises rather than one
+that is refused. The helper only forwards transfers and declares no event, so a
+batch it sends and the same transfers sent directly produce the same logs
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2@ccaeb58),
+and there is nothing for correlation to key on.
+
+Candidate output does not mean zero effect on Project. Admitting a child
+registry writes a `migration_registry_creation` discovery association, and
+Project's rebuild scope reads that table without a `consumer_visibility` filter,
+so names registered into a newly-admitted child registry enter delete-and-rebuild
+candidacy. What those rebuilds publish is unchanged: the child-registration
+authority proof also requires an activated parent boundary, and nothing outside
+the code-only activation seam writes one before slice 3B.
 
 Source-family ownership does not break the visibility barrier. The ordinary
 `RegistryCreated` event and `registry_announcement` indexability edge retain

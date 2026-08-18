@@ -4,17 +4,21 @@ use anyhow::Context;
 use serde_json::{Value, json};
 
 use super::{
-    BatchOutput, MigrationCandidateEffect, MigrationDiscoveryAssociation, NormalizedEvent,
-    catalog::Catalog, protocol::MigrationObservation,
+    BatchOutput, MigrationCandidateEffect, NormalizedEvent, catalog::Catalog,
+    protocol::MigrationObservation,
 };
 
+mod child;
+mod registry;
 mod support;
+use registry::correlate_registry_creation;
 #[cfg(any(test, feature = "test-activation"))]
 pub use support::inject_activated_transition_for_test;
 use support::*;
 
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
 const CANDIDATE: &str = "candidate";
+const TRANSITION_KIND: &str = "authority_transition";
 
 pub(super) fn correlate(
     catalog: &Catalog,
@@ -48,6 +52,7 @@ pub(super) fn correlate(
             .push(observation);
     }
     let mut boundaries = Vec::new();
+    let mut registries = Vec::new();
     for transaction_observations in by_transaction.values() {
         correlate_renewals(transaction_observations, output)?;
         correlate_controllers(name_wrapper, transaction_observations, output)?;
@@ -67,9 +72,21 @@ pub(super) fn correlate(
             output,
             &mut boundaries,
         )?;
+        registries.extend(registry_groups);
     }
 
     associate_restored_registry_effects(catalog, output)?;
+    // Child correlation runs over the whole batch, not one transaction: a child's parent registry
+    // is normally proven in an earlier transaction or an earlier batch entirely.
+    child::correlate_children(
+        catalog,
+        migration_source,
+        &observations,
+        &registries,
+        name_wrapper,
+        output,
+        &mut boundaries,
+    )?;
     // Logs from the ENSv1→ENSv2 migration source that do not match an admitted shape are omitted;
     // unrelated factory logs stay out.
     output.normalized_events.retain(|event| {
@@ -240,142 +257,6 @@ fn correlate_controllers(
     Ok(())
 }
 
-fn correlate_registry_creation(
-    catalog: &Catalog,
-    observations: &[&MigrationObservation],
-    locked_controller: &str,
-    output: &mut BatchOutput,
-) -> anyhow::Result<Vec<RegistryGroup>> {
-    let mut groups = Vec::new();
-    for factory in observations.iter().copied().filter(|observation| {
-        observation.event_name == "ProxyDeployed"
-            && observation
-                .decoded
-                .get("sender")
-                .and_then(Value::as_str)
-                .is_some_and(|sender| sender.eq_ignore_ascii_case(locked_controller))
-    }) {
-        let proxy = value_str(&factory.decoded, "proxy_address")?.to_ascii_lowercase();
-        let logical_name_id = format!("ens:{}", value_str(&factory.decoded, "salt")?);
-        let Some(registry_event) = output
-            .normalized_events
-            .iter()
-            .find(|event| {
-                event.source_family == "ens_v2_registry_l1"
-                    && event.event_kind == "RegistryCreated"
-                    && same_transaction(event, &factory.raw)
-                    && event
-                        .log_index
-                        .is_some_and(|index| index < factory.raw.log_index)
-                    && event
-                        .after_state
-                        .get("registry")
-                        .and_then(Value::as_str)
-                        .is_some_and(|address| address.eq_ignore_ascii_case(&proxy))
-            })
-            .cloned()
-        else {
-            continue;
-        };
-        let registry_instance = registry_event
-            .after_state
-            .get("contract_instance_id")
-            .and_then(Value::as_str)
-            .context("RegistryCreated event has no contract instance")?
-            .parse::<uuid::Uuid>()
-            .context("RegistryCreated contract instance is malformed")?;
-        let edge = output
-            .discovery_edges
-            .iter()
-            .find(|edge| {
-                edge.edge_kind == "registry_announcement"
-                    && edge.to_contract_instance_id == registry_instance
-                    && edge.active_from_block_hash
-                        == registry_event.block_hash.as_deref().unwrap_or("")
-            })
-            .cloned()
-            .context("RegistryCreated event has no ordinary registry-announcement edge")?;
-        let evidence = vec![
-            event_evidence(&registry_event),
-            observation_evidence(factory),
-        ];
-        let id = correlation_id(
-            "migration_registry_creation",
-            Some(&logical_name_id),
-            &evidence,
-        );
-        mark_direct_position(output, &factory.raw, &id);
-        associate_event(
-            output,
-            &registry_event.event_identity,
-            &id,
-            "migration_registry_creation",
-            evidence.clone(),
-        )?;
-        let source = catalog
-            .source(edge.source_manifest_id)
-            .context("registry-announcement edge has no active source manifest")?;
-        output
-            .migration_discovery_associations
-            .push(MigrationDiscoveryAssociation {
-                logical_edge_identity: logical_edge_identity(&edge, source)?,
-                migration_correlation_id: id.clone(),
-                registry_contract_instance_id: registry_instance,
-                registry_address: proxy.clone(),
-                source_manifest_id: edge.source_manifest_id,
-                evidence_refs: Value::Array(evidence.clone()),
-                chain_id: registry_event.chain_id.clone(),
-                block_number: required_position(&registry_event)?.0,
-                block_hash: registry_event
-                    .block_hash
-                    .clone()
-                    .expect("required position"),
-                transaction_hash: registry_event
-                    .transaction_hash
-                    .clone()
-                    .expect("required position"),
-                transaction_index: registry_event.transaction_index.expect("required position"),
-                log_index: registry_event.log_index.expect("required position"),
-                canonicality_state: registry_event.canonicality_state.clone(),
-                consumer_visibility: CANDIDATE.to_owned(),
-            });
-        groups.push(RegistryGroup {
-            correlation_id: id,
-            logical_name_id,
-            registry_address: proxy,
-            evidence,
-            completion_log_index: factory.raw.log_index,
-        });
-    }
-    for group in &groups {
-        let identities = output
-            .normalized_events
-            .iter()
-            .filter(|event| {
-                event.source_family != MIGRATION_FAMILY
-                    && event
-                        .raw_fact_ref
-                        .get("emitting_address")
-                        .and_then(Value::as_str)
-                        .is_some_and(|address| {
-                            address.eq_ignore_ascii_case(&group.registry_address)
-                        })
-            })
-            .map(|event| event.event_identity.clone())
-            .collect::<Vec<_>>();
-        for identity in identities {
-            associate_event(
-                output,
-                &identity,
-                &group.correlation_id,
-                "migration_registry_creation",
-                group.evidence.clone(),
-            )?;
-        }
-    }
-    Ok(groups)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn correlate_authority_transitions(
     migration_source: &super::manifest::ManifestSource,
@@ -507,13 +388,13 @@ fn correlate_authority_transitions(
         let successor_binding =
             value_str(&successor_binding_event.after_state, "surface_binding_id")?;
         evidence.extend(correlated_events.iter().map(event_evidence));
-        let id = correlation_id("authority_transition", Some(&logical_name_id), &evidence);
+        let id = correlation_id(TRANSITION_KIND, Some(&logical_name_id), &evidence);
         for event in &correlated_events {
             associate_event(
                 output,
                 &event.event_identity,
                 &id,
-                "authority_transition",
+                TRANSITION_KIND,
                 evidence.clone(),
             )?;
         }
@@ -544,7 +425,7 @@ fn correlate_authority_transitions(
             "source_event":"MigrationApplied",
             "logical_name_id":logical_name_id,
             "namehash":logical_name_id.split_once(':').map(|(_, hash)| hash),
-            "correlation_kind":"authority_transition",
+            "correlation_kind":TRANSITION_KIND,
             "migration_path":migration_path,
             "predecessor_binding":before,
             "successor_binding":{
@@ -579,7 +460,7 @@ fn correlate_authority_transitions(
             .push(MigrationCandidateEffect {
                 effect_identity: format!("migration-authority-transition:{id}"),
                 migration_correlation_ids: vec![id],
-                correlation_kind: "authority_transition".to_owned(),
+                correlation_kind: TRANSITION_KIND.to_owned(),
                 effect_kind: "surface_binding_transition".to_owned(),
                 proposed_effect: after,
                 evidence_refs: Value::Array(evidence),

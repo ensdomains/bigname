@@ -372,8 +372,9 @@ ranges in one transaction. Zero or multiple matching predecessors are integrity
 errors; it never ranks candidates. The zero case is corruption because both the
 registrar-token and wrapper-token migration entries require a transferable live
 ENSv1 token. This rule does not cover emancipated children: their transfer gate
-uses wrapper expiry rather than the parent's registrar grace boundary, so slice
-3A must define its own predecessor rule.
+uses wrapper expiry rather than the parent's registrar grace boundary. Slice 3A
+defines that separate predecessor rule under
+[child migration boundary](#child-migration-boundary).
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L103 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L48-L55 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
@@ -388,7 +389,11 @@ family. Per-name `correlation_kind` values are `authority_transition`,
 change that cannot be assigned to a name. Only an `authority_transition` group
 with the complete ENSv1→ENSv2 migration shape can produce a candidate
 [migration boundary](#migration-boundary); a renewal or cleanup group never
-does. The stable correlation ID is derived from `correlation_kind`, logical
+does. An `authority_transition` group covers both the controller-mediated
+`.eth` second-level shape and the direct-child shape that a
+[child migration boundary](#child-migration-boundary) uses; the child case adds
+no correlation kind. The stable correlation ID is derived from
+`correlation_kind`, logical
 name when applicable, anchor position, and complete evidence set, never from the
 transaction hash alone. A `controller_configuration` ID instead uses the
 registrar emitter, controller account, and event kind in place of a logical
@@ -591,6 +596,90 @@ contract deployment — one per migrated locked name, at any depth, all sharing 
 single implementation *family* rather than one implementation — instead of being
 fixed by manifest declaration. Code that identifies these registries by a single
 expected implementation address will miss upgraded ones.
+
+Two properties make these registries self-describing for ENSv1→ENSv2 migration
+correlation. Because the deployment salt above is the namehash of the name the
+registry holds children for, the registry's own creation evidence names its
+parent, with no `.eth` assumption at any depth. And when one of those children
+migrates, the registration is emitted by the parent registry itself, with
+`LabelRegistered`'s `sender` field equal to that same emitting registry address,
+because the receiver re-enters through an external self-call restricted to
+itself
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58).
+That is what separates a child migration from an ordinary registration made by
+the parent's owner, which names an ordinary account as `sender`.
+
+**Child migration boundary** — the [migration boundary](#migration-boundary)
+derived for a direct child of an already-migrated name. No migration controller
+is involved: the parent's own
+[migration registry](#migration-registry-wrapperregistry) receives the ENSv1
+NameWrapper token and registers the child into itself
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58),
+which is why the emitted-by-and-sent-by-the-same-registry shape described above
+is the discriminator. Its `correlation_kind` is the ordinary
+`authority_transition`; there is no child-specific correlation kind. The
+candidate `MigrationApplied` it produces is inert exactly like every other
+candidate: excluded from [Project](#projection) staging, scheduling no binding
+write, and changing no current child state.
+
+Inert output is not the same as inert cost. Admitting a child registry writes a
+`migration_registry_creation` discovery association, and Project's rebuild scope
+reads that table without a visibility filter, so names registered into a
+newly-admitted child registry enter delete-and-rebuild candidacy. What those
+rebuilds publish is unchanged, because the child-registration authority proof
+additionally requires an activated parent boundary, and nothing activates one
+before slice 3B.
+
+The child's ENSv1 predecessor uses its own anchor kind,
+`wrapper_backed_child_control`. That anchor points at the child's position in
+the ENSv1 NameWrapper — the NameWrapper address, plus the child namehash as both
+the node and the wrapper token ID — and carries the parent namehash, the
+registered labelhash, and the parent's own migration correlation ID. The child
+namehash is derived from the parent registry's migration evidence and that
+labelhash, never from `ETH_NODE`, and must equal the name the ENSv2 registry
+topology resolves for the label; where the two disagree, the child rule treats
+the evidence chain as incomplete and derives no boundary. Every migratable child is held in the
+ENSv1 NameWrapper immediately before its boundary, in both branches
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L140 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58),
+so a child has exactly one predecessor arm and the registrar-backed `.eth`
+second-level arm never applies to it.
+
+Two `migration_path` values produce one. `locked_child` deploys a nested
+registry for the child before registering it
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58);
+`emancipated_child` deploys no registry and instead unwraps the name into the
+Graveyard and injects it into the parent's existing registry
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L176 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+
+Four shapes are refused, and one more never arises. A parent owner registering
+an unprotected child label directly is a real registration and an authority
+proof, but never a child `MigrationApplied`
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58).
+An unmigrated [migratable child](#migratable-child) emits no ENSv2 registration
+at all and keeps resolving through the ENSv1 fallback resolver, which is
+view-only state that emits no log
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58).
+A `ProxyDeployed` factory log without the `RegistryCreated` announcement of the
+registry it names is audit evidence, not registry admission. And a registration
+emitted by a registry carrying no `migration_registry_creation` correlation
+means parent discovery is incomplete, so the emitter is an ordinary registry.
+`MigrationHelper` participation is the shape that never arises rather than one
+that is refused: the helper only forwards transfers and declares no event, so
+using it yields the same log sequence as sending those transfers directly
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2@ccaeb58),
+and there is nothing for correlation to key on in the first place.
+
+Activation is consumer slice 3B. Until then Interpret's activated-transition
+writer deliberately does not admit the `wrapper_backed_child_control` anchor:
+attempting to activate a child transition is an explicit data-integrity refusal
+rather than a silent fallback to the second-level predecessor rule.
 
 **Migratable child** — a child of an already-migrated name whose label its
 parent's [migration registry](#migration-registry-wrapperregistry) will not let

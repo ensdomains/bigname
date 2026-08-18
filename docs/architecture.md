@@ -280,7 +280,13 @@ not erase that established epoch; a reorg of its parent proof, registry
 association, topology-at-proof, or registration reconstructs the result from
 the surviving lineage. The positive registration is an authority proof only: it neither
 invents a `MigrationApplied` event nor creates ENSv1→ENSv2 migration history or a binding
-transition. That first ENSv2 registration supersedes the retained ENSv1 child
+transition. Consumer slice 3A does derive a child `MigrationApplied`, but only
+from a separate and separately evidenced shape — the parent's own migration
+registry registering the child into itself, with the parent identified by that
+registry's own migration evidence — and only as candidate output that changes no
+child state. The two paths do not meet: a bare positive child registration never
+becomes a child boundary, and this 2C proof path still invents nothing.
+That first ENSv2 registration supersedes the retained ENSv1 child
 binding for subsequent current-state selection; releasing it leaves the child
 with released v2 authority and does not reactivate the ENSv1 residue.
 

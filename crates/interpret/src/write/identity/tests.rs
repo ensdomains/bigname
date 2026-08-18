@@ -737,6 +737,41 @@ async fn wrapper_selector_is_enforced_by_the_transition_writer() -> TestResult {
     Ok(())
 }
 
+/// Slice 3A derives direct-child migration boundaries under their own predecessor anchor, as
+/// candidate output only. Activating one is slice 3B, so until then this writer must refuse the
+/// anchor outright rather than fall back to the `.eth` second-level wrapper rule, which would
+/// close the wrong ENSv1 binding.
+#[tokio::test]
+async fn the_child_predecessor_anchor_is_refused_until_it_is_activated() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    output.normalized_events.push(predecessor_evidence(
+        "same-batch-wrapper-evidence",
+        1,
+        WRAPPER,
+        json!({"authority_kind":"wrapper","node":"0xname"}),
+    ));
+    let mut child_selector = wrapper_selector(WRAPPER);
+    child_selector["resource"]["anchor_kind"] = json!("wrapper_backed_child_control");
+    child_selector["resource"]["parent_namehash"] = json!("0xparent");
+    child_selector["resource"]["labelhash"] = json!("0xlabel");
+    activate_with_selector(&mut output, child_selector)?;
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(
+        error.contains("invalid predecessor resource selector"),
+        "{error}"
+    );
+    assert_eq!(
+        active_to(pool, 11).await?,
+        None,
+        "a refused child anchor must not close the ENSv1 predecessor"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn ordinary_opens_close_only_their_own_arm() -> TestResult {
     let database = database().await?;

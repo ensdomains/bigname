@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use super::*;
 
+mod child;
+
 const MIGRATION_MANIFEST_ID: i64 = 100;
 const REGISTRY_MANIFEST_ID: i64 = 101;
 const V1_REGISTRY_MANIFEST_ID: i64 = 102;
@@ -32,7 +34,7 @@ fn catalog_fixture_records_reproducible_provenance_and_corrections() -> anyhow::
         fixture["provenance"]["derived_sources"]
             .as_array()
             .map(Vec::len),
-        Some(6)
+        Some(14)
     );
     assert!(
         fixture["corrections"]["registry_resolver_clear"]
@@ -2075,6 +2077,12 @@ fn batch(raw_logs: Vec<RawLogInput>, fixture: &Value, include_registry_setup: bo
             from_role: Some("registry".to_owned()),
             admission: "protocol_event".to_owned(),
         });
+        discovery_rules.push(DiscoveryRuleInput {
+            manifest_id: REGISTRY_MANIFEST_ID,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "reachable_from_root".to_owned(),
+        });
     }
     BatchInput {
         chain_id: CHAIN.to_owned(),
@@ -2234,6 +2242,12 @@ fn registry_manifest() -> ManifestInput {
                 "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
                 &["registry"],
                 &["ResolverChanged"],
+            ),
+            (
+                "SubregistryUpdated",
+                "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+                &["registry"],
+                &["SubregistryChanged"],
             ),
             (
                 "ParentUpdated",
