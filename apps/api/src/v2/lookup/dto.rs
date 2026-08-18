@@ -126,7 +126,8 @@ pub(crate) struct LookupRecord {
     pub(crate) primary_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chain_id: Option<u64>,
-    pub(crate) network: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) network: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) is_primary: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

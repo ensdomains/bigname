@@ -429,43 +429,50 @@ async fn create_identity_views(
         .map_err(|error| ProjectError::database("failed to stage resource identities", error))?;
 
     sqlx::query(
-        "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
-         SELECT DISTINCT ON (binding.logical_name_id)
-                binding.*
+        "CREATE TEMP TABLE project_binding_candidates ON COMMIT DROP AS
+         SELECT binding.*
          FROM surface_bindings binding
-         JOIN project_resources resource
+         JOIN project_surfaces surface
+           ON surface.logical_name_id = binding.logical_name_id
+         JOIN resources resource
            ON resource.resource_id = binding.resource_id
          JOIN chain_lineage lineage
            ON lineage.chain_id = binding.chain_id
           AND lineage.block_hash = binding.block_hash
           AND lineage.block_number = binding.block_number
+         JOIN chain_lineage resource_lineage
+           ON resource_lineage.chain_id = resource.chain_id
+          AND resource_lineage.block_hash = resource.block_hash
+          AND resource_lineage.block_number = resource.block_number
          WHERE binding.chain_id = $1
            AND binding.block_number <= $2
+           AND resource.chain_id = $1
+           AND resource.block_number <= $2
            AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND binding.active_from < (
-               SELECT block_timestamp + interval '1 second' FROM chain_lineage
-               WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2
+           AND resource_lineage.canonicality_state IN (
+               'canonical', 'safe', 'finalized'
            )
-           AND (
-               binding.active_to IS NULL
-               OR binding.active_to >= (
-                   SELECT block_timestamp + interval '1 second' FROM chain_lineage
-                   WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2
-               )
-           )
-         -- Interim for #318 slice 2A (docs/consumer-capabilities.md): when ENSv1 and
-         -- ENSv2 bindings are both open, recency selects the prior winner; slice 2C
-         -- replaces it with current-authority selection for the exact name.
-         ORDER BY binding.logical_name_id, binding.active_from DESC,
-                  binding.surface_binding_id DESC",
+         ORDER BY binding.logical_name_id, binding.block_number,
+                  COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1),
+                  COALESCE((binding.provenance ->> 'log_index')::bigint, -1),
+                  binding.surface_binding_id",
     )
     .bind(chain_id)
     .bind(target.number)
-    .bind(&target.hash)
     .execute(&mut **transaction)
     .await
-    .map_err(|error| ProjectError::database("failed to stage current bindings", error))?;
+    .map_err(|error| ProjectError::database("failed to stage binding candidates", error))?;
+
+    sqlx::query(
+        "CREATE INDEX ON project_binding_candidates (
+             logical_name_id, authority_arm, block_number
+         )",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to index binding candidates", error))?;
 
     Ok(())
 }

@@ -30,8 +30,9 @@ use super::{
 
 mod build;
 pub(crate) use build::{
-    VERIFIED_NOT_SUPPORTED_REASON, build_auto_name_records, build_indexed_name_records,
-    build_verified_name_records, indexed_records_requiring_verified_fallback,
+    VERIFIED_NOT_SUPPORTED_REASON, build_authority_unsupported_name_records,
+    build_auto_name_records, build_indexed_name_records, build_verified_name_records,
+    indexed_records_requiring_verified_fallback,
 };
 
 pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -183,93 +184,117 @@ pub(crate) async fn get_name_records(
         None => None,
     };
 
-    let (route_source, data) = match params.source {
-        RequestSource::Indexed => (
-            Source::Indexed,
-            build_indexed_name_records(
-                &row,
-                record_inventory.as_ref(),
-                requested_records,
-                include_inventory,
-            )?,
-        ),
-        RequestSource::Verified => {
-            let verified_lookup = load_verified_record_lookup(
-                &state,
-                &row,
-                record_inventory.as_ref(),
-                requested_records.unwrap_or_default(),
-                &mut selected_snapshot,
-            )
-            .await?;
-            (
-                Source::Verified,
-                build_verified_name_records(
+    let authority_unsupported = build_authority_unsupported_name_records(
+        &row,
+        record_inventory.as_ref(),
+        requested_records,
+        include_inventory,
+    )?;
+    let (route_source, data) = if let Some(data) = authority_unsupported {
+        let source = match params.source {
+            RequestSource::Verified => Source::Verified,
+            RequestSource::Indexed | RequestSource::Auto => Source::Indexed,
+        };
+        (source, data)
+    } else {
+        match params.source {
+            RequestSource::Indexed => (
+                Source::Indexed,
+                build_indexed_name_records(
                     &row,
                     record_inventory.as_ref(),
                     requested_records,
-                    verified_lookup,
                     include_inventory,
                 )?,
-            )
-        }
-        RequestSource::Auto => {
-            let records = requested_records.unwrap_or_default();
-            if records.is_empty() {
-                (
-                    Source::Indexed,
-                    build_indexed_name_records(
-                        &row,
-                        record_inventory.as_ref(),
-                        requested_records,
-                        include_inventory,
-                    )?,
-                )
-            } else {
-                let mut fallback_records = indexed_records_requiring_verified_fallback(
-                    &row,
-                    record_inventory.as_ref(),
-                    records,
-                )?;
-                if namespace == BASENAMES_NAMESPACE && !fallback_records.is_empty() {
-                    #[cfg(test)]
-                    auto_fallback_test_hooks::run(&state.pool).await?;
-                    (selected_snapshot, row, record_inventory) = load_name_records_snapshot_state(
-                        &state,
-                        &namespace,
-                        &normalized.normalized_name,
-                        params.at.as_ref(),
-                        params.finality,
-                        true,
-                    )
-                    .await?;
-                    let refreshed_fallback_records = indexed_records_requiring_verified_fallback(
-                        &row,
-                        record_inventory.as_ref(),
-                        records,
-                    )?;
-                    if refreshed_fallback_records.is_empty() {
-                        return Err(V2Error::stale(
-                            "name records changed while preparing verified fallback; retry the request",
-                        ));
-                    }
-                    fallback_records = refreshed_fallback_records;
-                }
+            ),
+            RequestSource::Verified => {
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
                     record_inventory.as_ref(),
-                    &fallback_records,
+                    requested_records.unwrap_or_default(),
                     &mut selected_snapshot,
                 )
                 .await?;
-                build_auto_name_records(
-                    &row,
-                    record_inventory.as_ref(),
-                    records,
-                    verified_lookup,
-                    include_inventory,
-                )?
+                (
+                    Source::Verified,
+                    build_verified_name_records(
+                        &row,
+                        record_inventory.as_ref(),
+                        requested_records,
+                        verified_lookup,
+                        include_inventory,
+                    )?,
+                )
+            }
+            RequestSource::Auto => {
+                let records = requested_records.unwrap_or_default();
+                if records.is_empty() {
+                    (
+                        Source::Indexed,
+                        build_indexed_name_records(
+                            &row,
+                            record_inventory.as_ref(),
+                            requested_records,
+                            include_inventory,
+                        )?,
+                    )
+                } else {
+                    let mut fallback_records = indexed_records_requiring_verified_fallback(
+                        &row,
+                        record_inventory.as_ref(),
+                        records,
+                    )?;
+                    if namespace == BASENAMES_NAMESPACE && !fallback_records.is_empty() {
+                        #[cfg(test)]
+                        auto_fallback_test_hooks::run(&state.pool).await?;
+                        (selected_snapshot, row, record_inventory) =
+                            load_name_records_snapshot_state(
+                                &state,
+                                &namespace,
+                                &normalized.normalized_name,
+                                params.at.as_ref(),
+                                params.finality,
+                                true,
+                            )
+                            .await?;
+                        let refreshed_fallback_records =
+                            indexed_records_requiring_verified_fallback(
+                                &row,
+                                record_inventory.as_ref(),
+                                records,
+                            )?;
+                        if refreshed_fallback_records.is_empty()
+                            || build_authority_unsupported_name_records(
+                                &row,
+                                record_inventory.as_ref(),
+                                requested_records,
+                                include_inventory,
+                            )?
+                            .is_some()
+                        {
+                            return Err(V2Error::stale(
+                                "name records changed while preparing verified fallback; retry the request",
+                            ));
+                        }
+                        fallback_records = refreshed_fallback_records;
+                    }
+                    let verified_lookup = load_verified_record_lookup(
+                        &state,
+                        &row,
+                        record_inventory.as_ref(),
+                        &fallback_records,
+                        &mut selected_snapshot,
+                    )
+                    .await?;
+                    build_auto_name_records(
+                        &row,
+                        record_inventory.as_ref(),
+                        records,
+                        verified_lookup,
+                        include_inventory,
+                    )?
+                }
             }
         }
     };

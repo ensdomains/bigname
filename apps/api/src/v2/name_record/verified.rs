@@ -6,6 +6,7 @@ use crate::AppState;
 use crate::v2::support::{
     PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey, parse_resolution_record_key,
 };
+use crate::v2::vocab::shared_product_reason;
 
 use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
@@ -13,8 +14,9 @@ use super::super::{
         RecordAnswer, VERIFIED_NOT_SUPPORTED_REASON, build_verified_name_records,
         ensure_verified_record_limit, load_verified_record_lookup_for_resource,
     },
+    vocab::RegistrationStatus,
 };
-use super::{NameRecord, build_name_record, string_field};
+use super::{NameRecord, build_name_record, name_registration_fields, string_field};
 
 pub(super) struct VerifiedNameRecord {
     pub(super) record: NameRecord,
@@ -28,6 +30,9 @@ pub(super) async fn build_name_record_for_source(
     selected_snapshot: &mut SelectedSnapshot,
     source: Source,
 ) -> V2Result<VerifiedNameRecord> {
+    if let Some(record) = unsupported_name_record(row)? {
+        return Ok(VerifiedNameRecord { record });
+    }
     match source {
         Source::Indexed => Ok(VerifiedNameRecord {
             record: build_name_record(row, record_inventory, chain_id, Status::Ok)?,
@@ -39,6 +44,55 @@ pub(super) async fn build_name_record_for_source(
     }
 }
 
+fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>> {
+    if string_field(row.coverage.get("status")).as_deref() != Some("unsupported") {
+        return Ok(None);
+    }
+    let reason = string_field(row.coverage.get("unsupported_reason"))
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| "unsupported_reason_missing".to_owned());
+    if !matches!(
+        reason.as_str(),
+        "conflicting_current_ens_authority" | "independent_ens_deployments_overlap"
+    ) {
+        return Ok(None);
+    }
+    let reason = shared_product_reason(
+        &reason,
+        "rejected exact-name reason containing pipeline vocabulary",
+        "failed to map exact-name reason vocabulary",
+    )?;
+    Ok(Some(NameRecord {
+        registration_id: None,
+        token_id: None,
+        owner: None,
+        manager: None,
+        registrant: None,
+        registered_at: None,
+        created_at: None,
+        expires_at: None,
+        registration_status: None,
+        wrapper_state: None,
+        wrapper_fuses: None,
+        name: row.normalized_name.clone(),
+        display_name: row.canonical_display_name.clone(),
+        namespace: row.namespace.clone(),
+        namehash: row.namehash.clone(),
+        resolver: None,
+        addresses: None,
+        text_records: None,
+        content_hash: None,
+        primary_name: None,
+        primary_address: None,
+        chain_id: None,
+        network: None,
+        status: Status::Unsupported,
+        unsupported_reason: Some(reason),
+        failure_reason: None,
+        unsupported_fields: Vec::new(),
+    }))
+}
+
 async fn build_verified_name_record(
     state: &AppState,
     row: &NameCurrentRow,
@@ -46,6 +100,14 @@ async fn build_verified_name_record(
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<VerifiedNameRecord> {
+    // Mirror build_name_record's released-tombstone strip before deriving the
+    // requested records: retained inventory or resolver state must not steer a
+    // provider lookup for a released name, so the path collapses to the same
+    // outcome as the canonical inventory-less tombstone.
+    let record_inventory = record_inventory.filter(|_| {
+        name_registration_fields(Some(row), &row.namespace).registration_status
+            != RegistrationStatus::Released
+    });
     let requested_records = profile_verified_requested_records(record_inventory)?;
     let verified_lookup = load_verified_record_lookup_for_resource(
         state,

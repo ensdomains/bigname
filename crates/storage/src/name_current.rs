@@ -64,7 +64,14 @@ pub const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
               'safe'::bigname_phase.canonicality_state,
               'finalized'::bigname_phase.canonicality_state
           )
-          AND binding.active_to IS NULL
+          AND (
+              binding.active_to IS NULL
+              OR (
+                  nc.provenance #>> '{authority_selection,authority_arm}' = 'ens_v2'
+                  AND nc.provenance #>> '{authority_selection,lifecycle_state}' =
+                      'unregistered'
+              )
+          )
           AND (
               nc.token_lineage_id IS NULL
               OR (

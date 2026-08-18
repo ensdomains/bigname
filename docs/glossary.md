@@ -49,18 +49,36 @@ behind a `resource_id`; the id survives changes within one anchor and rotates
 when authority moves to a different anchor. An *observation anchor* is the
 exact chain/block identity a stored row was observed at.
 
-**Authority epoch** (`authority_epoch`) — which protocol authority regime
-backs a name at a given time, scoped per namespace: for `ens` names the value
-is `ens_v1` or `ens_v2` per name and time, while `basenames` authority lives in
-the registry/registrar/resolver system on Base
+**Authority epoch** (`authority_epoch`) — the interval during which one
+protocol arm supplies every current field for one logical name. For `ens`
+names the selected `authority_arm` is `ens_v1` or `ens_v2`; `basenames`
+authority lives in the registry/registrar/resolver system on Base
 (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
-and has no ENSv1/ENSv2 era split. `surface_bindings.authority_arm` stores the
-corresponding closed value (`ens_v1`, `ens_v2`, or `basenames`) on each binding;
-it makes ordinary interval conflicts arm-specific and is supplied by adapters,
-never inferred in SQL. The related `AuthorityEpochChanged`
+and has no ENSv1/ENSv2 era split. `surface_bindings.authority_arm` is the sole
+arm vocabulary and stores the closed value `ens_v1`, `ens_v2`, or `basenames`
+on each binding. It makes ordinary interval conflicts arm-specific and is
+supplied by adapters, never inferred in SQL. Project stages the selected arm,
+binding, resource, start position, lifecycle state, and proof together; field
+selection cannot rank events from different arms or combine them in one
+`name_current` row. The related `AuthorityEpochChanged`
 normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
+
+**Authority proof** — the evidence that selects an authority epoch before any
+current field is chosen. For an ENSv1→ENSv2 boundary it is the activated
+`MigrationApplied` event that Interpret already matched one-to-one with a
+validated [migration authority transition](#migration-authority-transition);
+Project trusts its successor binding, resource, position, and ENSv1→ENSv2 migration correlation ID rather than
+repeating raw ENSv1→ENSv2 migration correlation. A current positive ENSv2 child registration in an
+admitted [migration registry](#migration-registry-wrapperregistry) below a
+proven migrated parent is the other proof. The readable canonical
+`migration_registry_creation` association classifies that registry but does not
+establish authority by itself. Once the positive registration establishes the
+child epoch, later topology or manifest changes do not erase it. That child proof does not synthesize
+`MigrationApplied`, ENSv1→ENSv2 migration history, or a binding transition. Candidate
+events, reservations, event recency, binding UUID order, and `active_from`
+order are not authority proof.
 
 **Backfill coverage fact** — a schema-migration-era record that asserted one completed
 old-runtime backfill job fetched all matching logs over one block interval.
@@ -310,6 +328,15 @@ the fixed contracts and event shapes described in
 [`manifests.md`](manifests.md#ensv2-migration-family-admission-plan); public
 mixed-history ownership remains capability-gated separately. Distinct from
 bigname's own *schema-migration* history; see the note at the top of this file.
+
+**Migration authority transition** (`MigrationAuthorityTransition`) —
+Interpret's validated operation for changing one exact logical name from an
+`ens_v1` predecessor binding to a concrete `ens_v2` successor binding at an
+activated [migration boundary](#migration-boundary). It is the only writer
+allowed to cross those `authority_arm` values. The transition and its activated
+`MigrationApplied` event correspond one-to-one, so Project consumes the event's
+already-validated successor, position, and correlation ID without correlating
+raw ENSv1→ENSv2 migration evidence again.
 
 **Migration boundary** (ENSv1→ENSv2 authority boundary) — the candidate
 `MigrationApplied` normalized event records the position at which one logical
@@ -1027,6 +1054,31 @@ resource
 (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@ccaeb58).
 Permissions and control history key to the resource, never to the name string
 or token id.
+
+**Resource audit context** (`resource_audit`) — a resource-keyed read that
+shows retained permissions or history without claiming that the resource is
+the logical name's selected current authority. An explicit registration or
+resource lookup and an address-filtered permission row use this context; an
+optional display name does not turn them into current-name results. Superseded
+ENSv1 resources remain queryable in resource audit context after ENSv2 becomes
+authoritative.
+
+**Released v2 authority** — the authority tombstone left when an
+ENSv2-authoritative registration is released or unregistered. Its current
+registration lifecycle is unregistered, but its authority epoch remains
+`ens_v2`; retained or later ENSv1 facts are history and cannot restore current
+registration, owner, resolver, expiry, or control. A later positive ENSv2
+registration continues within that v2 authority regime when the release's
+regime evidence is unambiguous. If earlier ENSv2 grants on other resources
+leave the release's lifecycle epoch ambiguous, a later re-registration
+combined with post-release ENSv1 residue resolves to an explicit
+mixed-authority conflict rather than continuing the regime.
+Without an [authority proof](#authority-proof), this tombstone is established
+only by a qualifying release boundary — a release of the then-current ENSv2
+registration with no ENSv1 activity at or before it — and later ENSv1 facts do
+not retroactively validate a non-qualifying release. A release that does not
+qualify leaves no tombstone: the name resolves to explicit
+`current_authority_not_projected`.
 
 **Retained-history proof** — a schema-migration-era ENSv2 tuple (retention generation,
 discovery-admission epoch, proven-through block) used by the deleted

@@ -220,7 +220,7 @@ The event identity is a plain value rather than a foreign key. A redo deletes
 normalized events in its range before replay, but retains association rows whose
 lineage is already orphaned as fork evidence; such a row may therefore have no
 normalized-event parent. Replay re-creates the canonical-path event under the
-same identity. Project and product history readers ignore association rows;
+same identity. Project and product history readers ignore event-association rows;
 diagnostic readers treat the normalized-event join as optional and can read a
 retained association from its own position and `chain_lineage` anchor.
 
@@ -230,8 +230,13 @@ intake carveout. A migration-created registry's independently admitted
 announcement position, because it records indexability only and the watch plan
 traverses it. Interpret attaches the `migration_registry_creation` candidate
 relationship in `migration_discovery_associations`, keyed to that ordinary edge;
-the association does not change the edge's columns or active range and is never
-Project input. Correlation-dependent parent, topology, identity, role,
+the association does not change the edge's columns or active range. Slice 2C's
+authority selector is the sole Project exception: after an activated transition
+has proved the parent migrated, it may use the readable canonical
+`migration_registry_creation` association to classify the independently
+admitted registry that emitted a positive child registration. The association's
+candidate visibility remains diagnostic; it neither establishes child authority
+by itself nor activates any correlation-dependent effect. Correlation-dependent parent, topology, identity, role,
 registration, renewal, and normalized-event effects from the watched registry
 remain candidate until activation. Association with the migration group is not
 sufficient to reclassify an effect that the ordinary edge and raw event produce
@@ -716,7 +721,7 @@ handoff, `project_redo_resolver_evidence`, contains pre-delete resolver
 references rather than staged projection rows and is consumed by the matching
 redo or later normal catch-up publication.
 
-Consumer slice 2C adds one diagnostic exception to durable staging, not to
+Consumer slice 2E adds one diagnostic exception to durable staging, not to
 projection ownership. A post-reconciliation dual-current invariant makes the
 Project transaction return a structured failure before `publish::swap`; that
 transaction rolls back completely. The phase runner then appends one

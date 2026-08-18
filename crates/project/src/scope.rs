@@ -4,6 +4,7 @@ use crate::{
     Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
 };
 
+mod authority;
 mod primary;
 mod resolver;
 mod retracted;
@@ -32,6 +33,15 @@ pub(crate) async fn initialize(
 
     stage_changed_events(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_direct_scope(transaction, chain_id, window.from_block, window.to_block).await?;
+    authority::include_changed_child_proofs(
+        transaction,
+        chain_id,
+        window.from_block,
+        window.to_block,
+        target.number,
+        window.retain_retracted,
+    )
+    .await?;
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
     if window.retain_retracted {
         retracted::seed(transaction, chain_id, window.from_block, window.to_block).await?;
@@ -61,6 +71,8 @@ pub(crate) async fn initialize(
     // Topology must consume that final name set before event-history staging begins.
     // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
+    authority::include_topology_dependents(transaction, chain_id, target.number).await?;
+    close_binding_scope(transaction, chain_id, target).await?;
     resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
     resolver::classify_unchanged(transaction, chain_id).await?;
     resolver::include_permission_resources(transaction, chain_id, target.number).await?;
@@ -451,6 +463,7 @@ async fn close_binding_scope(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    authority::include_latest_arm_resources(transaction, chain_id, target.number).await?;
     sqlx::query(
         "INSERT INTO project_scope_resources
          SELECT binding.resource_id

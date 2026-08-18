@@ -67,7 +67,8 @@ pub(crate) struct NameRecord {
     pub(crate) created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
-    pub(crate) registration_status: RegistrationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) registration_status: Option<RegistrationStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_state: Option<WrapperState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,7 +91,8 @@ pub(crate) struct NameRecord {
     pub(crate) primary_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chain_id: Option<u64>,
-    pub(crate) network: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) network: Option<String>,
     pub(crate) status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unsupported_reason: Option<String>,
@@ -191,6 +193,10 @@ pub(crate) fn build_name_record(
     status: Status,
 ) -> V2Result<NameRecord> {
     let registration = name_registration_fields(Some(row), &row.namespace);
+    // The projection deletes a released name's inventory row and resolver
+    // pointer; never serve either even if state loss leaves them attached.
+    let released_tombstone = registration.registration_status == RegistrationStatus::Released;
+    let record_inventory = record_inventory.filter(|_| !released_tombstone);
     let unsupported_fields = unsupported_fields(record_inventory);
     let field_supported = |field: &str| {
         !unsupported_fields
@@ -212,6 +218,11 @@ pub(crate) fn build_name_record(
         .flatten();
     let (wrapper_state, wrapper_fuses) = wrapper_metadata(&row.declared_summary)?
         .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
+    let resolver = (!released_tombstone
+        && string_field(row.coverage.get("unsupported_reason")).as_deref()
+            != Some("current_authority_not_projected"))
+    .then(|| resolver(&row.declared_summary))
+    .flatten();
 
     Ok(NameRecord {
         registration_id: row.resource_id.map(|value| value.to_string()),
@@ -222,14 +233,14 @@ pub(crate) fn build_name_record(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
-        registration_status: registration.registration_status,
+        registration_status: Some(registration.registration_status),
         wrapper_state,
         wrapper_fuses,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
-        resolver: resolver(&row.declared_summary),
+        resolver,
         addresses,
         text_records,
         content_hash,
@@ -243,7 +254,7 @@ pub(crate) fn build_name_record(
         ),
         primary_address,
         chain_id,
-        network: network(row),
+        network: Some(network(row)),
         status,
         unsupported_reason: None,
         failure_reason: None,

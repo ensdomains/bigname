@@ -1,5 +1,6 @@
 mod address_names;
 mod children;
+mod name_authority;
 mod name_current;
 mod name_topology;
 mod permissions;
@@ -17,6 +18,7 @@ pub(crate) async fn build_all(
     target: &crate::Marker,
     full_rebuild: bool,
 ) -> Result<()> {
+    name_authority::build(transaction, chain_id, target).await?;
     permissions::build(transaction, chain_id, target).await?;
     name_current::build(transaction, chain_id, target).await?;
     resolver::build(transaction, chain_id, target, full_rebuild).await?;
