@@ -38,6 +38,7 @@ struct MigrationRegistry {
     position: (i64, i64, i64),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn correlate_children(
     catalog: &Catalog,
     migration_source: &ManifestSource,
@@ -131,6 +132,8 @@ fn restored_registry(
     catalog
         .migration_registry_correlations(address, block_number)
         .into_iter()
+        // Correlations arrive ordered by ID, so picking the first is deterministic; an address
+        // carrying two migration correlations would be a discovery defect, not a choice to make.
         .find_map(|correlation| {
             let factory = correlation.evidence.iter().find(|entry| {
                 entry.get("kind").and_then(Value::as_str) == Some("raw_log")
@@ -198,17 +201,26 @@ fn derive_boundaries(
         // registration, whatever its sender.
         // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
         // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
-        let Some(cleanup) = v1_cleanup(output, &registration, &namehash, name_wrapper, graveyard)
+        let Some((cleanup_kind, cleanup)) =
+            v1_cleanup(output, &registration, &namehash, name_wrapper, graveyard)
         else {
             continue;
         };
         let child_registry = known
             .values()
             .find(|candidate| candidate.namehash == namehash && candidate.position < at);
-        let migration_path = if child_registry.is_some() {
-            "locked_child"
-        } else {
-            "emancipated_child"
+        // Each branch upstream performs its own cleanup and its own registry handling together,
+        // and there is no third branch, so the two halves must agree. Classifying by registry
+        // presence alone would relabel a locked child whose registry evidence is missing as an
+        // emancipated one, inventing a shape the chain does not show.
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58)
+        let migration_path = match (cleanup_kind, child_registry.is_some()) {
+            (Cleanup::Parked, true) => "locked_child",
+            (Cleanup::Unwrapped, false) => "emancipated_child",
+            _ => continue,
         };
         let mut evidence = parent.evidence.clone();
         if let Some(child_registry) = child_registry {
@@ -373,32 +385,49 @@ fn v1_cleanup(
     namehash: &str,
     name_wrapper: &str,
     graveyard: &str,
-) -> Option<NormalizedEvent> {
-    output
-        .normalized_events
-        .iter()
-        .find(|event| {
-            event.block_hash == registration.block_hash
-                && event.transaction_hash == registration.transaction_hash
-                && event
-                    .raw_fact_ref
-                    .get("emitting_address")
-                    .and_then(Value::as_str)
-                    .is_some_and(|address| address.eq_ignore_ascii_case(name_wrapper))
-                && retired_into(event, namehash, graveyard)
-        })
-        .cloned()
+) -> Option<(Cleanup, NormalizedEvent)> {
+    output.normalized_events.iter().find_map(|event| {
+        if event.block_hash != registration.block_hash
+            || event.transaction_hash != registration.transaction_hash
+            || !event
+                .raw_fact_ref
+                .get("emitting_address")
+                .and_then(Value::as_str)
+                .is_some_and(|address| address.eq_ignore_ascii_case(name_wrapper))
+        {
+            return None;
+        }
+        retired_into(event, namehash, graveyard).map(|kind| (kind, event.clone()))
+    })
 }
 
-fn retired_into(event: &NormalizedEvent, namehash: &str, graveyard: &str) -> bool {
+/// How a child's ENSv1 control ended, which upstream pairs with whether that child receives a
+/// registry of its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cleanup {
+    /// The wrapper token parked in the Graveyard, still wrapped — the locked branch.
+    Parked,
+    /// The node unwrapped into the Graveyard — the emancipated branch.
+    Unwrapped,
+}
+
+fn retired_into(event: &NormalizedEvent, namehash: &str, graveyard: &str) -> Option<Cleanup> {
     let field = |key: &str| event.after_state.get(key).and_then(Value::as_str);
-    let parked = event.event_kind == "TokenControlTransferred"
+    let into_graveyard =
+        |key: &str| field(key).is_some_and(|address| address.eq_ignore_ascii_case(graveyard));
+    if event.event_kind == "TokenControlTransferred"
         && field("namehash") == Some(namehash)
-        && field("to").is_some_and(|to| to.eq_ignore_ascii_case(graveyard));
-    let unwrapped = field("source_event") == Some("NameUnwrapped")
+        && into_graveyard("to")
+    {
+        return Some(Cleanup::Parked);
+    }
+    if field("source_event") == Some("NameUnwrapped")
         && field("node") == Some(namehash)
-        && field("owner").is_some_and(|owner| owner.eq_ignore_ascii_case(graveyard));
-    parked || unwrapped
+        && into_graveyard("owner")
+    {
+        return Some(Cleanup::Unwrapped);
+    }
+    None
 }
 
 fn child_namehash(parent_namehash: &str, labelhash: &str) -> anyhow::Result<String> {

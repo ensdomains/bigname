@@ -135,7 +135,7 @@ fn v1_predecessor_logs(level: &Value, addresses: &Value) -> anyhow::Result<Vec<R
         .encode_log_data(),
         level["wrap_block"].as_i64().unwrap(),
         0,
-        0,
+        level["wrap_log_index"].as_i64().unwrap_or(0),
         wrapper,
     )];
     let token = U256::from_be_bytes(node.0);
@@ -155,9 +155,10 @@ fn v1_predecessor_logs(level: &Value, addresses: &Value) -> anyhow::Result<Vec<R
             wrapper,
         )
     };
-    logs.push(hop(owner, registry, 0));
+    let cleanup = level["cleanup_log_index"].as_i64().unwrap_or(0);
+    logs.push(hop(owner, registry, cleanup));
     if level["migration_path"] == "locked_child" {
-        logs.push(hop(registry, graveyard, 1));
+        logs.push(hop(registry, graveyard, cleanup + 1));
     } else {
         logs.push(raw_at_transaction(
             super::super::NameUnwrapped {
@@ -167,7 +168,7 @@ fn v1_predecessor_logs(level: &Value, addresses: &Value) -> anyhow::Result<Vec<R
             .encode_log_data(),
             block,
             0,
-            1,
+            cleanup + 1,
             wrapper,
         ));
     }
@@ -508,6 +509,23 @@ fn a_child_registered_before_its_parent_registry_exists_proves_nothing() -> anyh
         child_boundaries(&output).is_empty(),
         "a registry cannot be a migration parent before its own creation position"
     );
+
+    // The same with the parent registry's announcement moved past the child too, so the whole
+    // creation — announcement and factory log — follows the registration it would have to precede.
+    locked["registry_created_log_index"] =
+        json!(child["v2_registration_log_index"].as_i64().unwrap() + 16);
+    let mut logs = level_logs(&locked, addresses)?;
+    logs.extend(level_logs(&child, addresses)?);
+    for log in &mut logs {
+        if log.block_number == scenario["migration_block"].as_i64().unwrap() {
+            log.transaction_hash = "helper-batch".to_owned();
+        }
+    }
+    let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "creation position, not transaction membership, decides what a parent can back"
+    );
     Ok(())
 }
 
@@ -819,66 +837,43 @@ fn two_children_of_one_parent_in_one_transaction_keep_separate_identities() -> a
     let parent_registry = locked["registry"].as_str().unwrap().to_owned();
     let mut logs = level_logs(&locked, addresses)?;
     logs.extend(level_logs(&first, addresses)?);
-    // A second locked child of the same parent, later in the same transaction. Its ENSv1 side is
-    // built the same way the ported children's is, so it is a child migration in full.
+    // A second locked child of the same parent, later in the same transaction, built as a full
+    // level so it carries its own registry evidence and its own log positions — two children never
+    // share a position, so the test survives any future position-keyed identity or dedup rule.
     let second_label = "two";
-    let second_token = versioned_token(second_label, 0);
-    let base = first["v2_registration_log_index"].as_i64().unwrap() + 10;
-    let mut parent_labels = locked["labels"]
+    let second_node = namehash_under(&locked["namehash"], second_label)?;
+    let mut second_labels = first["labels"]
         .as_array()
         .cloned()
-        .unwrap_or_else(|| vec![json!("h01l"), json!("eth")]);
-    parent_labels.insert(0, json!(second_label));
-    let second_node = {
-        let mut input = [0_u8; 64];
-        input[..32].copy_from_slice(
-            locked["namehash"]
-                .as_str()
-                .unwrap()
-                .parse::<B256>()?
-                .as_slice(),
-        );
-        input[32..].copy_from_slice(keccak256(second_label.as_bytes()).as_slice());
-        format!("{:#x}", keccak256(input))
-    };
+        .expect("ported label path");
+    second_labels[0] = json!(second_label);
+    let base = first["v2_registration_log_index"].as_i64().unwrap() + 10;
     let second = json!({
-        "labels": parent_labels,
+        "label": second_label,
+        "labelhash": format!("{:#x}", keccak256(second_label.as_bytes())),
         "namehash": second_node,
+        "labels": second_labels,
+        "v2_token_id": versioned_token(second_label, 0).to_string(),
+        "stored_expiry": first["stored_expiry"],
+        "registration_sender": parent_registry,
+        "registration_owner": first["registration_owner"],
+        "emitting_registry": parent_registry,
         "migration_block": scenario["migration_block"],
+        "v2_registration_log_index": base,
+        "registry": "0x00000000000000000000000000000000000002ee",
+        "factory_salt": U256::from_be_bytes(second_node.parse::<B256>()?.0).to_string(),
+        "factory_sender": parent_registry,
+        "factory_log_index": base - 2,
+        "registry_created_log_index": base - 4,
         "wrap_block": first["wrap_block"],
+        "wrap_log_index": 20,
+        "cleanup_log_index": 20,
         "wrap_fuses": first["wrap_fuses"],
         "wrap_expiry": first["wrap_expiry"],
         "wrapped_owner": first["wrapped_owner"],
-        "emitting_registry": parent_registry,
         "migration_path": "locked_child",
     });
-    logs.extend(v1_predecessor_logs(&second, addresses)?);
-    logs.push(raw_at_transaction(
-        super::super::v2_registry::LabelRegistered {
-            tokenId: second_token,
-            labelHash: keccak256(second_label.as_bytes()),
-            label: second_label.to_owned(),
-            owner: Address::from([0x11; 20]),
-            expiry: first["stored_expiry"].as_u64().unwrap(),
-            sender: parent_registry.parse()?,
-        }
-        .encode_log_data(),
-        scenario["migration_block"].as_i64().unwrap(),
-        0,
-        base,
-        &parent_registry,
-    ));
-    logs.push(raw_at_transaction(
-        super::super::v2_registry::TokenResource {
-            tokenId: second_token,
-            resource: second_token,
-        }
-        .encode_log_data(),
-        scenario["migration_block"].as_i64().unwrap(),
-        0,
-        base + 2,
-        &parent_registry,
-    ));
+    logs.extend(level_logs(&second, addresses)?);
     for log in &mut logs {
         if log.block_number == scenario["migration_block"].as_i64().unwrap() {
             log.transaction_hash = "helper-batch".to_owned();
@@ -933,6 +928,323 @@ fn a_self_claim_without_v1_cleanup_derives_no_boundary() -> anyhow::Result<()> {
     assert!(
         child_boundaries(&output).is_empty(),
         "a self-claim with no ENSv1 predecessor cleanup proves no migration"
+    );
+    Ok(())
+}
+
+/// The receiver takes custody of the wrapper token before parking it, so a child's cleanup is two
+/// hops. Only the second reaches the Graveyard, and only the second ends ENSv1 control: custody
+/// moving to the receiver alone leaves the name live under ENSv1
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+#[test]
+fn a_cleanup_that_stops_short_of_the_graveyard_derives_no_boundary() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let logs = scenario_logs(scenario, addresses, &["parent", "child"])?;
+    let block = scenario["child"]["migration_block"].as_i64().unwrap();
+    let graveyard_hop = logs
+        .iter()
+        .filter(|log| is_v1_cleanup(log, addresses) && log.block_number == block)
+        .map(|log| log.log_index)
+        .max()
+        .expect("the child's cleanup hops");
+    let logs = logs
+        .into_iter()
+        .filter(|log| !(is_v1_cleanup(log, addresses) && log.log_index == graveyard_hop))
+        .collect::<Vec<_>>();
+    let output = interpret_test_batch(batch(logs, &fixture, true))?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "custody moving to the receiver is not the end of ENSv1 authority"
+    );
+    Ok(())
+}
+
+/// The child's ENSv1 identity is derived from its parent registry's CREATE2 salt, while the ENSv2
+/// name the registration carries comes from the registry topology. A registry whose salt names one
+/// name and whose announcement places it under another leaves those two disagreeing, and no
+/// boundary is provable: the evidence would retire an ENSv1 name the registration never claimed.
+#[test]
+fn a_parent_salt_that_disagrees_with_the_registry_topology_derives_no_boundary()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let elsewhere = &fixture["scenarios"]["C-02"]["parent"]["namehash"];
+    let salt = |node: &str| -> anyhow::Result<String> {
+        Ok(U256::from_be_bytes(node.parse::<B256>()?.0).to_string())
+    };
+    let mut parent = scenario["parent"].clone();
+    parent["factory_salt"] = json!(salt(elsewhere.as_str().unwrap())?);
+    // The child's own ENSv1 side and nested registry follow the name the parent's salt implies, so
+    // every conjunct except the topology agreement holds.
+    let derived = namehash_under(elsewhere, scenario["child"]["label"].as_str().unwrap())?;
+    let mut child = scenario["child"].clone();
+    child["factory_salt"] = json!(salt(&derived)?);
+    child["namehash"] = json!(derived);
+    child["labels"] = json!([
+        scenario["child"]["label"].as_str().unwrap(),
+        fixture["scenarios"]["C-02"]["parent"]["label"]
+            .as_str()
+            .unwrap(),
+        "eth"
+    ]);
+    let mut logs = level_logs(&parent, addresses)?;
+    logs.extend(level_logs(&child, addresses)?);
+    let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "a child's ENSv1 identity and its ENSv2 name have to be the same name"
+    );
+    Ok(())
+}
+
+/// The emancipated branch unwraps into the Graveyard specifically; an unwrap that hands the node
+/// back to its owner is an ordinary ENSv1 act that leaves control where it was
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+#[test]
+fn an_unwrap_that_misses_the_graveyard_derives_no_boundary() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-02"];
+    let addresses = &fixture["addresses"];
+    let child = &scenario["child"];
+    let mut logs = level_logs(&scenario["parent"], addresses)?;
+    logs.extend(
+        level_logs(child, addresses)?
+            .into_iter()
+            .filter(|log| !is_v1_cleanup(log, addresses)),
+    );
+    logs.extend(
+        v1_predecessor_logs(child, addresses)?
+            .into_iter()
+            .filter(|log| log.block_number != child["migration_block"].as_i64().unwrap()),
+    );
+    logs.push(raw_at_transaction(
+        super::super::NameUnwrapped {
+            node: child["namehash"].as_str().unwrap().parse()?,
+            owner: child["wrapped_owner"].as_str().unwrap().parse()?,
+        }
+        .encode_log_data(),
+        child["migration_block"].as_i64().unwrap(),
+        0,
+        1,
+        addresses["name_wrapper"].as_str().unwrap(),
+    ));
+    let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "an unwrap back to the owner retires nothing"
+    );
+    Ok(())
+}
+
+/// A receiver migrates several children in one transaction, so a cleanup sharing the registration's
+/// transaction proves nothing on its own: the evidence has to be the registered child's own node.
+#[test]
+fn a_sibling_cleanup_in_the_same_transaction_proves_nothing() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let child = &scenario["child"];
+    let sibling_label = "sibling";
+    let mut sibling_labels = child["labels"].as_array().cloned().expect("ported labels");
+    sibling_labels[0] = json!(sibling_label);
+    let mut sibling = child.clone();
+    let object = sibling.as_object_mut().expect("fixture level");
+    object.insert("labels".to_owned(), Value::Array(sibling_labels));
+    object.insert(
+        "namehash".to_owned(),
+        json!(namehash_under(
+            &scenario["parent"]["namehash"],
+            sibling_label
+        )?),
+    );
+    object.insert("wrap_log_index".to_owned(), json!(6));
+    object.insert("cleanup_log_index".to_owned(), json!(6));
+    // The registered child keeps its registry and its registration; only its own cleanup is gone,
+    // replaced by a sibling's complete one in the same transaction.
+    let mut logs = scenario_logs(scenario, addresses, &["parent", "child"])?
+        .into_iter()
+        .filter(|log| !is_v1_cleanup(log, addresses))
+        .collect::<Vec<_>>();
+    logs.extend(v1_predecessor_logs(&sibling, addresses)?);
+    let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "a cleanup binds to the node it retires, not to the transaction it sits in"
+    );
+    Ok(())
+}
+
+/// The receiver performs the child's cleanup and its ENSv2 registration in one call, so a cleanup
+/// in a neighbouring transaction is a different act — an ordinary ENSv1 wind-down that happens to
+/// share a block — and cannot back the registration
+/// (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@ccaeb58).
+#[test]
+fn a_cleanup_in_an_adjacent_transaction_proves_nothing() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let block = scenario["child"]["migration_block"].as_i64().unwrap();
+    let mut logs = scenario_logs(scenario, addresses, &["parent", "child"])?;
+    let mut moved = 0;
+    for log in &mut logs {
+        if is_v1_cleanup(log, addresses) && log.block_number == block {
+            log.transaction_index = 1;
+            log.transaction_hash = format!("transaction-{block}-1");
+            log.log_index += 40;
+            moved += 1;
+        }
+    }
+    assert_eq!(moved, 2, "both cleanup hops move");
+    let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "the cleanup and the registration are one call or they are unrelated"
+    );
+    Ok(())
+}
+
+/// `C-06` with the cleanup it never had: even a complete ENSv1 wind-down cannot make a
+/// parent-owner-controlled registration a migration. Upstream reverts that call, and the sender the
+/// registry reports is the only thing separating the two
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58).
+#[test]
+fn a_parent_controlled_registration_with_a_full_cleanup_is_still_not_a_migration()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-06"];
+    let addresses = &fixture["addresses"];
+    let child = &scenario["child"];
+    let mut retired = child.clone();
+    let object = retired.as_object_mut().expect("fixture level");
+    object.insert(
+        "labels".to_owned(),
+        json!(["sub", scenario["parent"]["label"].as_str().unwrap(), "eth"]),
+    );
+    object.insert("wrap_block".to_owned(), json!(228));
+    object.insert("wrap_fuses".to_owned(), json!(65_536));
+    object.insert("wrap_expiry".to_owned(), child["stored_expiry"].clone());
+    object.insert(
+        "wrapped_owner".to_owned(),
+        child["registration_owner"].clone(),
+    );
+    object.insert("migration_path".to_owned(), json!("emancipated_child"));
+    object.insert("cleanup_log_index".to_owned(), json!(20));
+    let mut logs = level_logs(&scenario["parent"], addresses)?;
+    logs.extend(level_logs(&retired, addresses)?);
+    let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "only the receiver registering the child into itself is migration evidence"
+    );
+    Ok(())
+}
+
+/// A child whose parent registry was proven in an earlier batch, and whose own ENSv1 wrap sits in
+/// an earlier batch still. Both halves have to survive the restart: the parent's admission is
+/// recovered from stored discovery evidence, and the wrapper state that makes the cleanup readable
+/// comes back with the interpreter session. Both child shapes are split, because the locked branch
+/// reads its cleanup out of retained wrapper state while the emancipated branch's unwrap carries
+/// its node in the log.
+#[test]
+fn a_child_converges_when_its_parent_and_wrap_are_in_earlier_batches() -> anyhow::Result<()> {
+    for scenario in ["C-01", "C-02"] {
+        assert_split_convergence(scenario)?;
+    }
+    Ok(())
+}
+
+fn assert_split_convergence(name: &str) -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"][name];
+    let addresses = &fixture["addresses"];
+    let all = scenario_logs(scenario, addresses, &["parent", "child"])?;
+    let expected = owned(child_boundaries(&interpret_test_batch(batch(
+        all.clone(),
+        &fixture,
+        true,
+    ))?));
+    assert_eq!(expected.len(), 1);
+    let split = scenario["child"]["migration_block"].as_i64().unwrap();
+    let mut carried = Vec::new();
+    let mut session = None;
+    let mut seen = Vec::new();
+    for (start, end) in [(i64::MIN, split), (split, i64::MAX)] {
+        let mut input = batch(
+            all.iter()
+                .filter(|log| log.block_number >= start && log.block_number < end)
+                .cloned()
+                .collect(),
+            &fixture,
+            true,
+        );
+        input.admissions.extend(carried.clone());
+        let (output, next) = interpret_test_batch_incremental(input, session)?;
+        carry_admissions(&output, &mut carried);
+        session = Some(next);
+        seen.extend(owned(child_boundaries(&output)));
+    }
+    assert_eq!(
+        seen, expected,
+        "a split between the wrap and the migration must derive the same boundary, ID, and evidence"
+    );
+    Ok(())
+}
+
+fn namehash_under(parent: &Value, label: &str) -> anyhow::Result<String> {
+    let mut input = [0_u8; 64];
+    input[..32].copy_from_slice(parent.as_str().unwrap().parse::<B256>()?.as_slice());
+    input[32..].copy_from_slice(keccak256(label.as_bytes()).as_slice());
+    Ok(format!("{:#x}", keccak256(input)))
+}
+
+/// The same level with its ENSv2 registry evidence removed: no factory log, no announcement, no
+/// subregistry link. Everything else, including the ENSv1 cleanup, is untouched.
+fn without_registry_evidence(level: &Value) -> Value {
+    let mut level = level.clone();
+    let object = level.as_object_mut().expect("fixture level");
+    for key in [
+        "registry",
+        "factory_salt",
+        "factory_sender",
+        "factory_log_index",
+        "registry_created_log_index",
+        "subregistry_log_index",
+    ] {
+        object.remove(key);
+    }
+    level
+}
+
+/// Upstream pairs each child branch with its own receiver shape: the locked branch parks the
+/// wrapper token in the Graveyard *and* deploys the child's registry, while the emancipated branch
+/// unwraps into the Graveyard and deploys nothing. There is no third branch.
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58)
+/// So a parked wrapper token with no registry evidence is an incomplete chain, not an emancipated
+/// child — classifying it by registry presence alone would silently relabel it.
+#[test]
+fn locked_cleanup_without_registry_evidence_derives_nothing() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-01"];
+    let addresses = &fixture["addresses"];
+    let mut logs = level_logs(&scenario["parent"], addresses)?;
+    logs.extend(level_logs(
+        &without_registry_evidence(&scenario["child"]),
+        addresses,
+    )?);
+    let output = interpret_test_batch(batch(ordered(logs), &fixture, true))?;
+    let derived = child_boundaries(&output);
+    assert!(
+        derived.is_empty(),
+        "a parked wrapper token without the child's registry is an incomplete chain, but derived {:?}",
+        derived
+            .iter()
+            .map(|boundary| boundary.after_state["migration_path"].clone())
+            .collect::<Vec<_>>()
     );
     Ok(())
 }
