@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::{ProjectError, Result, builders, publish, scope, stage};
+use crate::{ProjectError, Result, builders, integrity, publish, scope, stage};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Marker {
@@ -75,6 +75,7 @@ impl Engine {
         .await?;
         stage::inputs(&mut transaction, &request.chain_id, &target, full_rebuild).await?;
         builders::build_all(&mut transaction, &request.chain_id, &target, full_rebuild).await?;
+        integrity::assert_publishable(&mut transaction, &request.chain_id, &target).await?;
         let row_count = publish::swap(&mut transaction, &request.chain_id, full_rebuild).await?;
         transaction.commit().await.map_err(|error| {
             ProjectError::database("failed to commit atomic project publication", error)

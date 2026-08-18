@@ -169,7 +169,9 @@ approved phase-schema rebuild or additive schema-migration that creates a
 table. In particular, after applying the attestation-audit schema-migration for
 the [manifest-authority marker](glossary.md#manifest-authority-marker), run the
 `GRANT SELECT ON ALL TABLES` statement again before
-starting the runner. Stop every old phase-runner and one-shot redo process
+starting the runner. The
+[projection generation failure](glossary.md#projection-generation-failure)
+audit schema-migration creates a table the same way and needs the same regrant. Stop every old phase-runner and one-shot redo process
 before applying this schema-migration, and keep them stopped until the new
 binary is ready. An old binary recognizes the marker prefix but does not bind
 its boolean attestation to the new generation token or write the durable audit

@@ -139,8 +139,22 @@ impl Phase for ProjectPhase {
                         ProjectRunMode::Redo
                     },
                 })
-                .await
-                .map_err(runner_error)?;
+                .await;
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if let Some(evidence) = error.generation_failure_evidence() {
+                        crate::project_failure_audit::persist(
+                            &self.pool,
+                            &context.chain_id,
+                            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+                            evidence,
+                        )
+                        .await?;
+                    }
+                    return Err(runner_error(error));
+                }
+            };
             if let Some(hydrator) = &self.hydrator {
                 hydrator
                     .hydrate_if_canonical_head(&context.chain_id, &outcome.current)

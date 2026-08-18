@@ -17,6 +17,7 @@ pub mod live_phase;
 pub mod metrics;
 pub mod phase;
 pub mod phase_lock;
+mod project_failure_audit;
 pub mod project_phase;
 mod redo_completion;
 mod redo_failure;
