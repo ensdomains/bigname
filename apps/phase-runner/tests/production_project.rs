@@ -11552,6 +11552,60 @@ async fn mainnet_dual_current_aborts_the_generation_and_appends_one_audit_row() 
     scratch.cleanup().await
 }
 
+// A post-audit Sepolia manifest declared for a different chain must not
+// reclassify this one: the deployment profile is per projected chain.
+#[tokio::test]
+async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_profile() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_foreign_label").await?;
+    let chain = "project-dual-current-foreign";
+    seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), "project-dual-current-elsewhere").await?;
+
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("a foreign sepolia label must not disable the assertion");
+    assert_eq!(
+        generation_failure_rows(scratch.pool(), chain).await?.len(),
+        1,
+        "the mainnet assertion still records its evidence"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_mixed_corpus_reason() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_foreign_reason").await?;
+    let chain = "project-dual-current-foreign-reason";
+    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), "project-dual-current-elsewhere").await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+
+    run_project_phase(scratch.pool(), chain, 5).await?;
+
+    let reason: Option<String> = sqlx::query_scalar(
+        "SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        reason.as_deref(),
+        Some("conflicting_current_ens_authority"),
+        "a proofless mainnet mixed corpus keeps its own reason"
+    );
+
+    scratch.cleanup().await
+}
+
 // The false-positive guard: a Mainnet name whose predecessor binding closed at
 // the boundary is the ordinary migrated shape and must keep publishing.
 #[tokio::test]

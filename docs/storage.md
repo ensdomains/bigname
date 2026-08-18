@@ -726,10 +726,16 @@ projection ownership. A post-reconciliation dual-current invariant makes the
 Project transaction return a structured failure before `publish::swap`; that
 transaction rolls back completely. The phase runner then appends one
 `project_generation_failures` audit row in a separate transaction. The row is
-keyed by chain, target block number/hash, interpreter content hash, and failure
-kind, and stores both binding/resource identities, the activated boundary event
+keyed by chain, target block number/hash, interpreter content hash, failure
+kind, and a deterministic fingerprint of the conflict, and stores both
+binding/resource identities, the activated boundary event
 identity, every relevant block/transaction/log position, and the canonicality
-observed at failure. It marks the target generation not ready. A later reorg or
+observed at failure. The fingerprint is part of the key so that a retry of the
+same semantic failure records nothing, while a different conflict surfacing at
+the same target still appends its own evidence rather than being swallowed. One
+failed generation writes one row, deterministically for the
+lexicographically-first conflicting name; any further conflicting name surfaces
+on a later attempt. It marks the target generation not ready. A later reorg or
 successful generation never deletes the audit row: its recorded block hashes
 remain resolvable through lineage as canonical or orphaned, and a later success
 is a separate generation. Operator diagnostics may read this table; product
