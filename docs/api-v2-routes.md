@@ -363,6 +363,10 @@ Field ownership:
   `namehash`, `status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
+  For `source=indexed`, a row classified as
+  `current_authority_not_projected` remains `status=ok` for the identity and
+  registration fields that can be served, but omits `resolver`; retained
+  resolver-pointer evidence is not presented as current authority.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -444,7 +448,11 @@ Field ownership:
   values and reports each requested or inventory-derived key as
   `status=unsupported` with `conflicting_current_ens_authority` or
   `independent_ens_deployments_overlap`. Verified execution does not choose a
-  resolver for that unsupported name.
+  resolver for that unsupported name. `current_authority_not_projected`
+  likewise short-circuits `source=indexed`, `source=verified`, and
+  `source=auto` before provider execution: the response has no resolver values
+  and reports each requested or inventory-derived key as `status=unsupported`
+  with `inventory_not_available`.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 
@@ -795,12 +803,10 @@ Field ownership:
   retries. Malformed addresses return `400 invalid_input`.
   `source=indexed` does not enter verified-execution rate or concurrency
   admission; omitted `source` and `source=verified` do because they run the
-  fresh lookup. Once exact-name authority is activated, forward verification
-  of a claimed mixed-history name with no provable current authority returns a
-  verified `status=unsupported` answer with
-  `conflicting_current_ens_authority` or
-  `independent_ens_deployments_overlap`; it does not verify against an
-  arbitrarily selected resolver.
+  fresh lookup. Exact-name authority does not yet govern primary-name forward
+  verification. Slice 2D applies the selected authority to this route; until
+  then, a mixed-history claim retains the pre-authority verified lookup
+  behavior rather than returning an exact-name unsupported reason.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`
@@ -846,13 +852,15 @@ Field ownership:
   historical `finality` values are rejected by the shared latest-state
   collection rule.
 - Response shape: `data` is an array of record-shaped name search results in
-  dictionary vocabulary. Once exact-name authority is activated, each result
-  is built only from the selected current registration. A migrated name uses
-  its ENSv2 owner, registrant, status, and expiry; a mixed-history name with no
-  provable current authority is omitted rather than exposing an arbitrary
-  registration. Search adds no row-local mixed-authority status, so callers use
-  name detail or batch lookup when they need an omitted name's explicit
-  coverage reason.
+  dictionary vocabulary. Slice 2D applies the selected exact-name authority to
+  search results; until then, a search row retains the pre-authority
+  registration selection rather than being filtered or reshaped by exact-name
+  authority. Once slice 2D is activated, each result is built only from the
+  selected current registration: a migrated name uses its ENSv2 owner,
+  registrant, status, and expiry, and a mixed-history name with no provable
+  current authority is omitted rather than exposing an arbitrary registration.
+  Search adds no row-local mixed-authority status, so callers use name detail
+  or batch lookup when they need an omitted name's explicit coverage reason.
 - Pagination behavior: standard collection pagination. Without an explicit
   namespace, the cursor binds the deployment-derived namespace set and is
   rejected if that set changes.
@@ -952,7 +960,9 @@ Field ownership:
   mixed-history name with no provable current authority is omitted from all
   resolver listings rather than forced to `ok`. This nested collection adds no
   row-local mixed-authority status, so callers use name detail or batch lookup
-  for the explicit coverage reason.
+  for the explicit coverage reason. A row classified as
+  `current_authority_not_projected` is also absent from `bound_names`; retained
+  resolver-pointer evidence does not establish listing membership.
   `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
   while the corresponding `include=nodes`, `include=aliases`, and
   `include=roles` arrays are deterministic samples of at most 100 items. A

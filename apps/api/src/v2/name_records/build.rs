@@ -21,6 +21,54 @@ use super::{NameRecords, RecordAnswer, VerifiedRecordLookup};
 const INDEXED_INVENTORY_UNAVAILABLE_REASON: &str = "inventory_not_available";
 pub(crate) const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
 
+pub(crate) fn build_authority_unsupported_name_records(
+    row: &NameCurrentRow,
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+    requested_records: Option<&[ResolutionRecordKey]>,
+    include_inventory: bool,
+) -> V2Result<Option<NameRecords>> {
+    let Some(reason) = authority_unsupported_reason(row)? else {
+        return Ok(None);
+    };
+    let records = requested_records
+        .map(|records| {
+            records
+                .iter()
+                .map(|record| Ok((record.record_key.clone(), unsupported_answer(&reason)?)))
+                .collect::<V2Result<BTreeMap<_, _>>>()
+        })
+        .transpose()?;
+    Ok(Some(NameRecords {
+        namespace: row.namespace.clone(),
+        resolver: None,
+        addresses: BTreeMap::new(),
+        text_records: BTreeMap::new(),
+        content_hash: None,
+        records,
+        inventory: include_inventory
+            .then(|| inventory_summary(record_inventory, requested_records)),
+    }))
+}
+
+fn authority_unsupported_reason(row: &NameCurrentRow) -> V2Result<Option<String>> {
+    if string_field(row.coverage.get("status")).as_deref() != Some("unsupported") {
+        return Ok(None);
+    }
+    let Some(reason) = string_field(row.coverage.get("unsupported_reason")) else {
+        return Ok(None);
+    };
+    if reason == "current_authority_not_projected" {
+        return Ok(Some(INDEXED_INVENTORY_UNAVAILABLE_REASON.to_owned()));
+    }
+    if !matches!(
+        reason.as_str(),
+        "conflicting_current_ens_authority" | "independent_ens_deployments_overlap"
+    ) {
+        return Ok(None);
+    }
+    Ok(Some(product_record_reason(&reason)?))
+}
+
 pub(crate) fn build_indexed_name_records(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,

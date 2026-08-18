@@ -463,7 +463,12 @@ reclassify an effect: a `ParentUpdated`, role, registration, renewal, topology,
 or normalized-event output that `ens_v2_registry_l1` derives from the ordinary
 edge and raw event without ENSv1→ENSv2 migration correlation remains ordinary and
 byte-for-byte unchanged. Only the additional meaning that depends on the
-correlation is candidate. A later
+correlation is candidate. Consumer slice 2C adds one narrow Project read: after
+an activated parent boundary, the exact-name authority selector may require the
+readable ordinary edge and its canonical `migration_registry_creation`
+association to classify the emitter of a positive child registration. Neither
+row is authority proof by itself, and no product route consumes either row
+directly. A later
 `SubregistryUpdated` remains the bidirectional parent-child topology edge and
 does not itself admit the target. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L128 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L130 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L131 @ ens_v2@ccaeb58) The implementation at
 `0xcf9f4863a1b44216cfc0be65f4e47b2b9a043924`, starting at block `11163410`,
@@ -479,8 +484,9 @@ correlation kind. Every correlation-dependent downstream effect keeps that
 group's `migration_correlation_ids` and `consumer_visibility` even though it
 interprets under `ens_v2_registry_l1`. Candidate effects do not update ordinary
 identity, topology, or consumer state; the ordinary indexability edge is the
-explicit exception because the watch plan consumes it rather than Project or a
-product route.
+explicit slice-1 exception because the watch plan consumes it. Slice 2C's
+authority-selector read above does not expose the edge or association as a
+product row.
 
 Independent admission takes precedence. An existing-family normalized event
 that the active manifest and discovery rules already produce without the

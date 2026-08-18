@@ -135,8 +135,14 @@ outcomes, or durable traces.
   the ignored association row carries the candidate relationship.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
-  not a product projection. Project still ignores its
-  `migration_discovery_associations` row and every candidate downstream effect.
+  not a product projection. Project ignores every candidate downstream effect.
+  Its authority selector is the sole exception for the corresponding
+  `migration_discovery_associations` row: after an activated parent transition,
+  it may use that row together with the readable ordinary edge and the parent
+  topology current at the registration/proof position to classify a positive
+  ENSv2 child-registration [authority proof](glossary.md#authority-proof), as
+  specified by the storage contract. The association cannot establish authority
+  by itself.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection
@@ -156,8 +162,12 @@ outcomes, or durable traces.
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
 
 `surface_bindings` remains identity history rather than a `_current`
-projection. Exact-name reads select the active binding for the surface and
-selected position.
+projection. Exact-name reads first select the logical name's
+[`authority epoch`](glossary.md#authority-epoch), then select fields only from
+that epoch's binding and resources at the requested position. An activated
+ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
+that [released v2 authority](glossary.md#released-v2-authority) does not fall
+back to an active retained ENSv1 binding.
 
 ## Exact-name projection
 

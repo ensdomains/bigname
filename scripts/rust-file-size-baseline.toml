@@ -16,6 +16,11 @@ loc = 603
 justification = "Per-family v1 restore arms stay in one file so replay equivalence against the live arms is reviewed in one place; the masked-write snapshot-sync invariant comment pushed the file past the gate, and it stays well under the review threshold."
 
 [[files]]
+path = "crates/project/src/builders/name_authority.rs"
+loc = 683
+justification = "The exact-name authority selector keeps proof, released tombstone, and released-regime arm rules in one auditable query; the released-regime clause belongs next to the tombstone rules whose positions it shares, and the file stays under the review threshold."
+
+[[files]]
 path = "crates/storage/src/record_inventory/snapshot_reads.rs"
 loc = 612
 justification = "Snapshot admission, anchor fallback, and canonical-lineage proof remain together; this slice ratchets the file below its base allowance without expanding its responsibilities."
