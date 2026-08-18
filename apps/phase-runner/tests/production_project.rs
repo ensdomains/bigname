@@ -11553,6 +11553,63 @@ async fn mainnet_dual_current_aborts_the_generation_and_appends_one_audit_row() 
     scratch.cleanup().await
 }
 
+// The one ON CONFLICT semantic the storage contract promises: a retry at the
+// same target appends a different name's conflict instead of swallowing it.
+#[tokio::test]
+async fn a_second_conflicting_name_appends_its_own_evidence_at_the_same_target() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_second_name").await?;
+    let chain = "project-dual-current-second-name";
+    let first = seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    let second = clone_dual_current_conflict(scratch.pool(), chain, &first, "bob").await?;
+
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("two conflicting names still block publication");
+    let recorded = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(recorded.len(), 1, "one failed generation writes one row");
+    let blocked = recorded[0].5.clone();
+    let lexicographically_first = first.clone().min(second.clone());
+    assert_eq!(
+        blocked, lexicographically_first,
+        "the recorded conflict is deterministic"
+    );
+
+    // Resolve only the recorded name; the other conflict remains.
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(4)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&blocked)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the remaining conflict still blocks the same target");
+    let appended = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(
+        appended.len(),
+        2,
+        "a different conflict at the same target appends its own evidence"
+    );
+    let names: Vec<String> = appended.iter().map(|row| row.5.clone()).collect();
+    assert!(
+        names.contains(&first) && names.contains(&second),
+        "{names:?}"
+    );
+    assert!(
+        appended.iter().all(|row| row.0 == 5),
+        "both rows belong to the same target"
+    );
+    assert_ne!(
+        appended[0].4, appended[1].4,
+        "distinct conflicts fingerprint distinctly"
+    );
+
+    scratch.cleanup().await
+}
+
 // A failed audit write must not mask or downgrade the invariant diagnosis: the
 // runner has to stop on the integrity failure, not retry it as transient.
 #[tokio::test]
@@ -11935,6 +11992,101 @@ async fn seed_mainnet_dual_current_conflict(pool: &PgPool, chain: &str) -> Resul
         })
         .await?;
     insert_activated_authority_proof(pool, chain, &logical_name_id, "unwrapped").await?;
+    Ok(logical_name_id)
+}
+
+// Clones a seeded dual-current corpus onto a second logical name at the same
+// target, so one generation faces two independent conflicts.
+async fn clone_dual_current_conflict(
+    pool: &PgPool,
+    chain: &str,
+    source_logical_name_id: &str,
+    label: &str,
+) -> Result<String> {
+    let namehash = format!("{:#x}", raw_namehash(&[label.as_bytes(), b"eth"]));
+    let labelhash = format!("{:#x}", keccak256(label.as_bytes()));
+    let logical_name_id = format!("ens:{namehash}");
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         )
+         SELECT $2, namespace, $3 || '.eth', ARRAY[$3, 'eth'], dns_encoded_name,
+                $4, ARRAY[$5] || labelhashes[2:], normalizer_version,
+                visibility_state, chain_id, block_hash, block_number,
+                canonicality_state
+         FROM name_surfaces WHERE logical_name_id = $1",
+    )
+    .bind(source_logical_name_id)
+    .bind(&logical_name_id)
+    .bind(label)
+    .bind(&namehash)
+    .bind(&labelhash)
+    .execute(pool)
+    .await?;
+
+    let bindings: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT surface_binding_id, authority_arm FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND active_to IS NULL
+         ORDER BY authority_arm",
+    )
+    .bind(chain)
+    .bind(source_logical_name_id)
+    .fetch_all(pool)
+    .await?;
+    let mut successor_binding = None;
+    for (source_binding, arm) in &bindings {
+        let cloned = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, active_to, chain_id, block_hash,
+                 block_number, provenance, canonicality_state
+             )
+             SELECT $1, $2, resource_id, binding_kind, authority_arm, active_from,
+                    active_to, chain_id, block_hash, block_number, provenance,
+                    canonicality_state
+             FROM surface_bindings WHERE surface_binding_id = $3",
+        )
+        .bind(cloned)
+        .bind(&logical_name_id)
+        .bind(source_binding)
+        .execute(pool)
+        .await?;
+        if arm == "ens_v2" {
+            successor_binding = Some(cloned);
+        }
+    }
+    let successor_binding = successor_binding.expect("the clone keeps an open ENSv2 arm");
+
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             transaction_hash, transaction_index, log_index, raw_fact_ref,
+             derivation_kind, canonicality_state, before_state, after_state,
+             migration_correlation_ids, consumer_visibility
+         )
+         SELECT event_identity || ':' || $2, namespace, $2, resource_id, event_kind,
+                source_family, manifest_version, chain_id, block_number, block_hash,
+                transaction_hash, transaction_index, log_index, raw_fact_ref,
+                derivation_kind, canonicality_state, before_state,
+                jsonb_set(
+                    after_state, '{successor_binding,binding_id}', to_jsonb($3::text)
+                ),
+                migration_correlation_ids, consumer_visibility
+         FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $4
+           AND event_kind = 'MigrationApplied'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .bind(successor_binding.to_string())
+    .bind(source_logical_name_id)
+    .execute(pool)
+    .await?;
+
     Ok(logical_name_id)
 }
 

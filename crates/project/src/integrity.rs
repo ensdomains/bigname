@@ -19,7 +19,7 @@ pub struct GenerationFailureEvidence {
 }
 
 /// Fail the generation when a Mainnet name still holds current bindings on both
-/// authority arms after its proven activated boundary.
+/// authority arms after its proven activated ENSv1->ENSv2 migration boundary.
 ///
 /// Bindings are evaluated at end-of-target-block, which is the transaction- and
 /// block-level reconciliation tolerance: transients inside one migration
@@ -82,7 +82,14 @@ pub(crate) async fn assert_publishable(
                       candidate.active_to IS NULL
                       OR candidate.active_to >= target_time.cutoff
                   )
-                ORDER BY candidate.block_number DESC, candidate.surface_binding_id DESC
+                ORDER BY candidate.block_number DESC,
+                         COALESCE(
+                             (candidate.provenance ->> 'transaction_index')::bigint, -1
+                         ) DESC,
+                         COALESCE(
+                             (candidate.provenance ->> 'log_index')::bigint, -1
+                         ) DESC,
+                         candidate.surface_binding_id DESC
                 LIMIT 1
             ) predecessor ON TRUE
             JOIN LATERAL (
@@ -95,11 +102,19 @@ pub(crate) async fn assert_publishable(
                       candidate.active_to IS NULL
                       OR candidate.active_to >= target_time.cutoff
                   )
-                ORDER BY candidate.block_number DESC, candidate.surface_binding_id DESC
+                ORDER BY candidate.block_number DESC,
+                         COALESCE(
+                             (candidate.provenance ->> 'transaction_index')::bigint, -1
+                         ) DESC,
+                         COALESCE(
+                             (candidate.provenance ->> 'log_index')::bigint, -1
+                         ) DESC,
+                         candidate.surface_binding_id DESC
                 LIMIT 1
             ) successor ON TRUE
             WHERE authority.deployment_profile = 'mainnet'
-              -- Only the transition proof. A positive ENSv2 child registration
+              -- Only the ENSv1->ENSv2 migration transition proof. A positive
+              -- ENSv2 child registration
               -- supersedes the retained ENSv1 child binding without closing it,
               -- so an open predecessor there is expected rather than anomalous;
               -- the child invariant belongs to slice 3B.
@@ -192,7 +207,7 @@ pub(crate) async fn assert_publishable(
     Err(ProjectError::generation_failure(
         format!(
             "chain {chain_id} name {logical_name_id} holds current bindings on both \
-             authority arms after its activated migration boundary; \
+             authority arms after its activated ENSv1\u{2192}ENSv2 migration boundary; \
              projection generation for block {} is not publishable",
             target.number
         ),
