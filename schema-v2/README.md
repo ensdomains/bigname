@@ -203,7 +203,7 @@ and
 [no-outcome-cache decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision)
 authorize this table as the only durable execution-adjacent store.
 
-## Ingest cursors, phase state, and authority attestations
+## Ingest cursors, phase state, authority attestations, and failure audits
 
 `ingest_cursors` stores one cursor for each chain source, and `chain_phase_state` stores one state row for each of the five phases, including the verify phase trust level and an explicit `paused` state for the capacity guard. Explicit redo fields retain the requested range, a cursor separate from normal progress, and a snapshot of the pre-redo lifecycle state; the marker remains until redo succeeds and blocks normal resume after an interruption. While an operator marker remains, `last_error` records the most recent failed redo attempt. A system-required downstream marker instead retains its ownership prefix and appends the most recent attempt failure so restart continues automatic repair. When a later redo completes, that attempt error is cleared and any pre-redo lifecycle error is restored. A normal verification mismatch also uses `last_error`; it records the block, field, stored value, and reference value without a new table or column.
 
@@ -218,9 +218,10 @@ block number and hash, interpreter content hash, failure kind, and a
 deterministic fingerprint of the conflict, plus an evidence payload carrying the
 conflicting binding and resource identities, the activated boundary event, each
 block, transaction, and log position, and the canonicality observed at failure.
-The fingerprint keeps a retried generation from recording a second row for the
-same conflict, and neither a later successful generation nor a reorg deletes an
-existing row. Operator diagnostics read this table; product routes do not.
+The fingerprint keeps a retried projection generation from recording a second
+row for the same conflict, and neither a later successful projection generation
+nor a reorg deletes an existing row. Operator diagnostics may read this table;
+product routes may not.
 
 The phase runner writes all four tables. The runner, redo command, health checks, and status path read cursor and phase state; redo restart also reads the attestation audit. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes the cursor and phase-state tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines provider-trusted, independently cross-checked, and node-checked status. The production verifier maps Base's dRPC comparison to `cross_checked`, Ethereum Mainnet's local reth comparison to `node_checked`, and the provider-trusted Ethereum Sepolia dRPC intake extent to `quick_synced`; the phase runner rejects a level stronger than the chain-specific verification path earned before persistence. Base's dRPC cross-check extent stops at the Coinbase-to-dRPC ingest seam, and a partial verify redo retains the level for the whole recorded extent. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
 

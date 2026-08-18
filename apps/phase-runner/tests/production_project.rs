@@ -18,7 +18,7 @@ use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, RunMode as InterpretRunMode,
 };
 use bigname_manifests::load_repository;
-use bigname_project::{BatchRequest, Engine, Marker, RunMode};
+use bigname_project::{BatchRequest, DUAL_CURRENT_EXACT_NAME_AUTHORITY, Engine, Marker, RunMode};
 use bigname_storage::{NameCurrentRow, SurfaceBindingKind, resolution_verified_support_boundary};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
@@ -11522,7 +11522,7 @@ async fn mainnet_dual_current_aborts_the_generation_and_appends_one_audit_row() 
     assert_eq!(target_block, 5);
     assert_eq!(target_hash, block_hash(chain, 5));
     assert_eq!(content_hash, INTERPRETER_CONTENT_HASH);
-    assert_eq!(failure_kind, "dual_current_exact_name_authority");
+    assert_eq!(failure_kind, DUAL_CURRENT_EXACT_NAME_AUTHORITY);
     assert_eq!(fingerprint.len(), 64);
     assert_eq!(name, logical_name_id);
     assert_eq!(evidence["predecessor"]["authority_arm"], json!("ens_v1"));

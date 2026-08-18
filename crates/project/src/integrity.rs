@@ -99,6 +99,10 @@ pub(crate) async fn assert_publishable(
                 LIMIT 1
             ) successor ON TRUE
             WHERE authority.deployment_profile = 'mainnet'
+              -- Only the transition proof. A positive ENSv2 child registration
+              -- supersedes the retained ENSv1 child binding without closing it,
+              -- so an open predecessor there is expected rather than anomalous;
+              -- the child invariant belongs to slice 3B.
               AND authority.authority_proof_kind = 'migration_authority_transition'
               AND authority.authority_proof_event_identity IS NOT NULL
               AND boundary.block_number <= $2
