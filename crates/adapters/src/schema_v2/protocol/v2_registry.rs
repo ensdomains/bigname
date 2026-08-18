@@ -412,10 +412,14 @@ fn label_event(
             source_kind: format!("{}_label", selected.event.name),
             preimage_metadata: None,
         });
-        output.binding_closures.push(BindingClosureDraft {
-            logical_name_id: name.logical_name_id,
-            authority_arm: "ens_v2".to_owned(),
-        });
+        // Closures are arm-wide per logical name, so only a registration assert may clear the
+        // name's stale bindings; a reservation would close another holder's live binding.
+        if registered {
+            output.binding_closures.push(BindingClosureDraft {
+                logical_name_id: name.logical_name_id,
+                authority_arm: "ens_v2".to_owned(),
+            });
+        }
     }
     for (replaced_token, previous) in &replaced {
         append_terminal_boundaries(

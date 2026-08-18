@@ -8586,12 +8586,9 @@ fn reserved_child_on_a_claim_path_keeps_reservation_scope_through_topology_legs(
         "the retained-resource confirmation must stay a plain link"
     );
 
-    // The label adapter closes the direct name unconditionally, so the re-reservation at block 10
-    // carries its own closure today; that block stays out of the exact pin.
     let mut closures = output
         .binding_closures
         .iter()
-        .filter(|closure| closure.block_number != 10)
         .map(|closure| (closure.block_number, closure.logical_name_id.as_str()))
         .collect::<Vec<_>>();
     closures.sort();
@@ -8607,12 +8604,171 @@ fn reserved_child_on_a_claim_path_keeps_reservation_scope_through_topology_legs(
         "binding-closure drift: {:#?}",
         output.binding_closures
     );
+    Ok(())
+}
+
+#[test]
+fn a_reservation_never_closes_another_holders_binding_on_the_same_name() -> anyhow::Result<()> {
+    // Two admitted registries anchored to the same suffix both compute "kid.eth": one holds it
+    // through a registered, resource-linked token; the other only reserves the label. Binding
+    // closures are arm-wide per logical name, so a closure emitted for the reservation lands on
+    // the *other* registry's live binding — and the election is unmoved (a reservation cannot win
+    // a surface), so nothing reopens it. A reservation must leave no surface-binding effect.
+    const RIVAL: &str = "0x0000000000000000000000000000000000000069";
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let held = versioned_token("kid", 1);
+    let reserved = versioned_token("kid", 0);
+    let rival_grant = versioned_token("kid", 2);
+    let manifest = manifest_with_events(
+        69,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "LabelReserved",
+                "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationReserved"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["registry"],
+                &["TokenResourceLinked"],
+            ),
+        ],
+    );
+    let mut rival_admission = admission(69, "registry");
+    rival_admission.address = RIVAL.to_owned();
+    rival_admission.contract_instance_id = super::common::contract_id(CHAIN, RIVAL);
+    let batch = |rival_log: RawLogInput| BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(69, "registry"), rival_admission.clone()],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: held,
+                    labelHash: keccak256(b"kid"),
+                    label: "kid".to_owned(),
+                    owner,
+                    expiry: 5_000,
+                    sender,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::TokenResource {
+                    tokenId: held,
+                    resource: U256::from(0xaa),
+                }
+                .encode_log_data(),
+                1,
+                1,
+                CONTRACT,
+            ),
+            rival_log,
+        ],
+    };
+    let output = interpret_test_batch(batch(raw_at(
+        v2_registry::LabelReserved {
+            tokenId: reserved,
+            labelHash: keccak256(b"kid"),
+            label: "kid".to_owned(),
+            expiry: 5_000,
+            sender,
+        }
+        .encode_log_data(),
+        2,
+        0,
+        RIVAL,
+    )))?;
+
+    let kid = format!(
+        "ens:{}",
+        super::common::namehash(&["kid".to_owned(), "eth".to_owned()])
+    );
+    let held_binding = output
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.logical_name_id == kid)
+        .expect("the registered, resource-linked holder binds the name")
+        .clone();
+    assert_eq!(
+        output.surface_bindings.len(),
+        1,
+        "a reservation must never open a surface binding: {:#?}",
+        output.surface_bindings
+    );
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.event_kind == "RegistrationReserved" && event.block_number == Some(2)
+        }),
+        "the reservation must still normalize: {:#?}",
+        output.normalized_events
+    );
+    assert!(
+        !output
+            .normalized_events
+            .iter()
+            .any(|event| event.block_number == Some(2)
+                && matches!(event.event_kind.as_str(), "SurfaceBound" | "SurfaceUnbound")),
+        "a reservation must move no surface lifecycle: {:#?}",
+        output.normalized_events
+    );
+    let persisted = simulate_binding_writer(&output);
+    let held_row = persisted
+        .iter()
+        .find(|row| row.surface_binding_id == held_binding.surface_binding_id)
+        .expect("the holder's binding is written");
+    assert_eq!(
+        held_row.active_to, None,
+        "the reservation closed a different holder's live binding: {persisted:#?}"
+    );
     assert!(
         output
             .binding_closures
             .iter()
-            .filter(|closure| closure.block_number == 10)
-            .all(|closure| closure.logical_name_id == kid)
+            .all(|closure| closure.block_number != 2),
+        "a reservation must emit no binding closure: {:#?}",
+        output.binding_closures
+    );
+
+    // Control: a real registration on the same name keeps its stale-binding clear.
+    let control = interpret_test_batch(batch(raw_at(
+        v2_registry::LabelRegistered {
+            tokenId: rival_grant,
+            labelHash: keccak256(b"kid"),
+            label: "kid".to_owned(),
+            owner,
+            expiry: 5_000,
+            sender,
+        }
+        .encode_log_data(),
+        2,
+        0,
+        RIVAL,
+    )))?;
+    assert!(
+        control
+            .binding_closures
+            .iter()
+            .any(|closure| closure.logical_name_id == kid && closure.block_number == 2),
+        "a registration assert must still clear stale bindings on its name: {:#?}",
+        control.binding_closures
     );
     Ok(())
 }
@@ -11744,6 +11900,135 @@ fn assert_batch_referential_integrity(
         );
     }
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct SimulatedBinding {
+    surface_binding_id: Uuid,
+    logical_name_id: String,
+    chain_id: String,
+    authority_arm: String,
+    position: (i64, i64, i64),
+    active_from: OffsetDateTime,
+    active_to: Option<OffsetDateTime>,
+    canonicality_state: String,
+}
+
+impl SimulatedBinding {
+    fn live(&self) -> bool {
+        matches!(
+            self.canonicality_state.as_str(),
+            "canonical" | "safe" | "finalized"
+        )
+    }
+}
+
+/// Replays the identity binding writer (`crates/interpret/src/write/identity.rs`) over one batch's
+/// emitted drafts against an empty table, so an adapter fixture can assert which persisted rows a
+/// batch leaves open. Closures are arm-wide over `logical_name_id + chain_id + authority_arm`:
+/// nothing narrows them to the token that emitted them.
+fn simulate_binding_writer(output: &BatchOutput) -> Vec<SimulatedBinding> {
+    enum Operation<'a> {
+        Close(&'a BindingClosure),
+        Open(&'a SurfaceBinding),
+    }
+    let index = |provenance: &serde_json::Value, key: &str| {
+        provenance
+            .get(key)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(-1)
+    };
+    let mut operations = output
+        .binding_closures
+        .iter()
+        .map(|closure| {
+            (
+                (
+                    closure.block_number,
+                    closure.transaction_index,
+                    closure.log_index,
+                    0,
+                ),
+                Operation::Close(closure),
+            )
+        })
+        .chain(output.surface_bindings.iter().map(|binding| {
+            (
+                (
+                    binding.block_number,
+                    index(&binding.provenance, seam::TRANSACTION_INDEX_KEY),
+                    index(&binding.provenance, seam::LOG_INDEX_KEY),
+                    1,
+                ),
+                Operation::Open(binding),
+            )
+        }))
+        .collect::<Vec<_>>();
+    operations.sort_by_key(|(order, _)| *order);
+    let mut rows: Vec<SimulatedBinding> = Vec::new();
+    for ((block_number, transaction_index, log_index, _), operation) in operations {
+        let position = (block_number, transaction_index, log_index);
+        match operation {
+            Operation::Close(closure) => {
+                for row in rows.iter_mut().filter(|row| {
+                    row.live()
+                        && row.logical_name_id == closure.logical_name_id
+                        && row.chain_id == closure.chain_id
+                        && row.authority_arm == closure.authority_arm
+                        && row.position < position
+                        && closure.except_surface_binding_id != Some(row.surface_binding_id)
+                }) {
+                    let clamped = closure
+                        .active_to
+                        .max(row.active_from + time::Duration::microseconds(1));
+                    if row.active_to.is_none_or(|active_to| active_to > clamped) {
+                        row.active_to = Some(clamped);
+                    }
+                }
+            }
+            Operation::Open(binding) => {
+                let peer = |row: &SimulatedBinding| {
+                    row.live()
+                        && row.logical_name_id == binding.logical_name_id
+                        && row.chain_id == binding.chain_id
+                        && row.authority_arm == binding.authority_arm
+                        && row.surface_binding_id != binding.surface_binding_id
+                };
+                let predecessor = rows
+                    .iter()
+                    .filter(|row| peer(row) && row.position < position)
+                    .max_by_key(|row| (row.position, row.surface_binding_id))
+                    .map(|row| row.active_from);
+                let active_from = seam::binding_open_time(binding.active_from, predecessor);
+                let successor = rows
+                    .iter()
+                    .filter(|row| peer(row) && row.position > position)
+                    .min_by_key(|row| (row.position, row.surface_binding_id))
+                    .map(|row| row.active_from);
+                for row in rows.iter_mut().filter(|row| {
+                    peer(row)
+                        && row.position < position
+                        && row.active_from < active_from
+                        && row
+                            .active_to
+                            .is_none_or(|active_to| active_to > active_from)
+                }) {
+                    row.active_to = Some(active_from);
+                }
+                rows.push(SimulatedBinding {
+                    surface_binding_id: binding.surface_binding_id,
+                    logical_name_id: binding.logical_name_id.clone(),
+                    chain_id: binding.chain_id.clone(),
+                    authority_arm: binding.authority_arm.clone(),
+                    position,
+                    active_from,
+                    active_to: successor,
+                    canonicality_state: binding.canonicality_state.clone(),
+                });
+            }
+        }
+    }
+    rows
 }
 
 type EventSpec<'a> = (&'a str, &'a str, &'a [&'a str], &'a [&'a str]);
