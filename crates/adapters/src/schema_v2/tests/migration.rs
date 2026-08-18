@@ -2288,3 +2288,419 @@ fn admission_at(
         active_to_block: None,
     }
 }
+
+#[test]
+fn graveyard_class_expiry_with_foreign_owner_is_not_cleanup_evidence() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let cleanup = &fixture["scenarios"]["G-02"];
+    let addresses = &fixture["addresses"];
+    let output = interpret_test_batch(batch(
+        vec![raw_at_transaction(
+            with_topic0(
+                BaseNameRegistered {
+                    id: decimal_u256(&cleanup["token_id"])? + U256::from(4),
+                    owner: Address::from([0x66; 20]),
+                    expires: decimal_u256(&cleanup["cleanup_expiry"])?,
+                }
+                .encode_log_data(),
+                keccak256(b"NameRegistered(uint256,address,uint256)"),
+            ),
+            cleanup["cleanup_block"].as_i64().unwrap(),
+            0,
+            0,
+            addresses["base_registrar"].as_str().unwrap(),
+        )],
+        &fixture,
+        false,
+    ))?;
+    assert!(
+        output.normalized_events.is_empty(),
+        "the cleanup expiry class without the Graveyard owner is not cleanup evidence: {:#?}",
+        output.normalized_events
+    );
+    Ok(())
+}
+
+#[test]
+fn aligned_v1_expiry_keeps_base_renewal_out_of_v2_evidence() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let renewal_block = scenario["renewal_block"].as_i64().unwrap();
+    let aligned = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let output = interpret_test_batch(batch(
+        vec![
+            reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
+            expiry_updated_at(addresses, v2_token, aligned, renewal_block, 1),
+            base_renewed_at(
+                addresses,
+                decimal_u256(&scenario["base_token_id"])?,
+                aligned,
+                renewal_block,
+                2,
+            ),
+            bridge_renewed_at(
+                addresses,
+                v2_token,
+                label,
+                scenario["duration"].as_u64().unwrap(),
+                aligned,
+                renewal_block,
+                3,
+            ),
+        ],
+        &fixture,
+        true,
+    ))?;
+    assert_synchronized_pair(&output);
+    let base_expiry = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v2_migration_l1" && event.event_kind == "ExpiryChanged"
+        })
+        .expect("BaseRegistrar expiry arm");
+    assert!(
+        output
+            .migration_event_associations
+            .iter()
+            .all(|association| association.event_identity != base_expiry.event_identity),
+        "aligned migration-family arms must not self-match into the v2 evidence set"
+    );
+    Ok(())
+}
+
+#[test]
+fn bulk_renewals_with_a_shared_expiry_correlate_per_name_envelopes() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let second_label = "r01b";
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let second_v2_token = versioned_token(second_label, 0);
+    let second_base_token = U256::from_be_bytes(*keccak256(second_label.as_bytes()));
+    let renewal_block = scenario["renewal_block"].as_i64().unwrap();
+    let shared_expiry = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let duration = scenario["duration"].as_u64().unwrap();
+    let v1_expiry = scenario["v1_expiry"].as_u64().unwrap();
+    let output = interpret_test_batch(batch(
+        vec![
+            reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
+            reserved_at(
+                addresses,
+                second_v2_token,
+                second_label,
+                1_822_787_383,
+                226,
+                2,
+            ),
+            expiry_updated_at(addresses, v2_token, shared_expiry, renewal_block, 1),
+            base_renewed_at(
+                addresses,
+                decimal_u256(&scenario["base_token_id"])?,
+                v1_expiry,
+                renewal_block,
+                2,
+            ),
+            bridge_renewed_at(
+                addresses,
+                v2_token,
+                label,
+                duration,
+                shared_expiry,
+                renewal_block,
+                3,
+            ),
+            expiry_updated_at(addresses, second_v2_token, shared_expiry, renewal_block, 4),
+            base_renewed_at(
+                addresses,
+                second_base_token,
+                v1_expiry + 7,
+                renewal_block,
+                5,
+            ),
+            bridge_renewed_at(
+                addresses,
+                second_v2_token,
+                second_label,
+                duration,
+                shared_expiry,
+                renewal_block,
+                6,
+            ),
+        ],
+        &fixture,
+        true,
+    ))?;
+    let renewals = migration_renewals(&output);
+    assert_eq!(renewals.len(), 4, "events: {:#?}", output.normalized_events);
+    assert!(
+        renewals
+            .iter()
+            .all(|event| event.after_state["lifecycle_classification"] != "historical_renewal"),
+        "events: {:#?}",
+        output.normalized_events
+    );
+    let correlation = |log_index: i64| {
+        let event = renewals
+            .iter()
+            .find(|event| event.log_index == Some(log_index))
+            .unwrap_or_else(|| panic!("correlated renewal arm at log {log_index}"));
+        assert_eq!(event.migration_correlation_ids.len(), 1);
+        event.migration_correlation_ids[0].clone()
+    };
+    assert_eq!(correlation(2), correlation(3));
+    assert_eq!(correlation(5), correlation(6));
+    assert_ne!(
+        correlation(3),
+        correlation(6),
+        "each bulk-renewed name keeps its own envelope"
+    );
+    Ok(())
+}
+
+#[test]
+fn later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let renewal_block = scenario["renewal_block"].as_i64().unwrap();
+    let expiry = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let output = interpret_test_batch(batch(
+        vec![
+            reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
+            expiry_updated_at(addresses, v2_token, expiry, renewal_block, 1),
+            base_renewed_at(
+                addresses,
+                decimal_u256(&scenario["base_token_id"])?,
+                scenario["v1_expiry"].as_u64().unwrap(),
+                renewal_block,
+                2,
+            ),
+            bridge_renewed_at(
+                addresses,
+                v2_token,
+                label,
+                scenario["duration"].as_u64().unwrap(),
+                expiry,
+                renewal_block,
+                3,
+            ),
+            expiry_updated_at(addresses, v2_token, expiry, renewal_block, 4),
+        ],
+        &fixture,
+        true,
+    ))?;
+    assert_synchronized_pair(&output);
+    let echo = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v2_registry_l1"
+                && event.event_kind == "ExpiryChanged"
+                && event.log_index == Some(4)
+        })
+        .expect("idempotent registry echo after the bridge log");
+    assert!(
+        output
+            .migration_event_associations
+            .iter()
+            .all(|association| association.event_identity != echo.event_identity),
+        "a post-bridge echo must stay outside the envelope"
+    );
+    Ok(())
+}
+
+#[test]
+fn same_transaction_noise_leaves_the_renewal_correlation_id_unchanged() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let base_token = decimal_u256(&scenario["base_token_id"])?;
+    let renewal_block = scenario["renewal_block"].as_i64().unwrap();
+    let expiry = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let duration = scenario["duration"].as_u64().unwrap();
+    let v1_expiry = scenario["v1_expiry"].as_u64().unwrap();
+    let real_legs = |logs: &mut Vec<RawLogInput>| {
+        logs.extend([
+            expiry_updated_at(addresses, v2_token, expiry, renewal_block, 2),
+            base_renewed_at(addresses, base_token, v1_expiry, renewal_block, 3),
+            bridge_renewed_at(
+                addresses,
+                v2_token,
+                label,
+                duration,
+                expiry,
+                renewal_block,
+                4,
+            ),
+        ]);
+    };
+    let mut plain_logs = vec![reserved_at(
+        addresses,
+        v2_token,
+        label,
+        1_822_787_383,
+        226,
+        1,
+    )];
+    real_legs(&mut plain_logs);
+    let mut noisy_logs = vec![
+        reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
+        expiry_updated_at(addresses, v2_token, 111_222_333, renewal_block, 0),
+        reserved_at(addresses, v2_token, label, expiry, renewal_block, 1),
+    ];
+    real_legs(&mut noisy_logs);
+    let plain = interpret_test_batch(batch(plain_logs, &fixture, true))?;
+    let noisy = interpret_test_batch(batch(noisy_logs, &fixture, true))?;
+    let plain_id = assert_synchronized_pair(&plain);
+    let noisy_id = assert_synchronized_pair(&noisy);
+    assert_eq!(
+        noisy_id, plain_id,
+        "same-transaction noise must not enter the correlation evidence"
+    );
+    Ok(())
+}
+
+fn reserved_at(
+    addresses: &Value,
+    token: U256,
+    label: &str,
+    expiry: u64,
+    block: i64,
+    log_index: i64,
+) -> RawLogInput {
+    raw_at_transaction(
+        super::v2_registry::LabelReserved {
+            tokenId: token,
+            labelHash: keccak256(label.as_bytes()),
+            label: label.to_owned(),
+            expiry,
+            sender: Address::from([0x22; 20]),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        addresses["eth_registry"].as_str().unwrap(),
+    )
+}
+
+fn expiry_updated_at(
+    addresses: &Value,
+    token: U256,
+    new_expiry: u64,
+    block: i64,
+    log_index: i64,
+) -> RawLogInput {
+    raw_at_transaction(
+        super::v2_registry::ExpiryUpdated {
+            tokenId: token,
+            newExpiry: new_expiry,
+            sender: Address::from([0x22; 20]),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        addresses["eth_registry"].as_str().unwrap(),
+    )
+}
+
+fn base_renewed_at(
+    addresses: &Value,
+    base_token: U256,
+    expires: u64,
+    block: i64,
+    log_index: i64,
+) -> RawLogInput {
+    raw_at_transaction(
+        with_topic0(
+            BaseNameRenewed {
+                id: base_token,
+                expires: U256::from(expires),
+            }
+            .encode_log_data(),
+            keccak256(b"NameRenewed(uint256,uint256)"),
+        ),
+        block,
+        0,
+        log_index,
+        addresses["base_registrar"].as_str().unwrap(),
+    )
+}
+
+fn bridge_renewed_at(
+    addresses: &Value,
+    token: U256,
+    label: &str,
+    duration: u64,
+    new_expiry: u64,
+    block: i64,
+    log_index: i64,
+) -> RawLogInput {
+    raw_at_transaction(
+        with_topic0(
+            BridgeNameRenewed {
+                tokenId: token,
+                label: label.to_owned(),
+                duration,
+                newExpiry: new_expiry,
+                paymentToken: Address::from([0x33; 20]),
+                referrer: B256::ZERO,
+                amount: U256::from(640_000_005_u64),
+            }
+            .encode_log_data(),
+            keccak256(b"NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)"),
+        ),
+        block,
+        0,
+        log_index,
+        addresses["renewal_bridge"].as_str().unwrap(),
+    )
+}
+
+fn migration_renewals(output: &BatchOutput) -> Vec<&NormalizedEvent> {
+    output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.source_family == "ens_v2_migration_l1"
+                && event.event_kind == "RegistrationRenewed"
+        })
+        .collect()
+}
+
+/// Asserts one intact base+bridge synchronized-renewal envelope and returns its correlation id.
+fn assert_synchronized_pair(output: &BatchOutput) -> String {
+    let renewals = migration_renewals(output);
+    assert_eq!(renewals.len(), 2, "events: {:#?}", output.normalized_events);
+    assert!(
+        renewals
+            .iter()
+            .all(|event| event.after_state["lifecycle_classification"] != "historical_renewal"),
+        "events: {:#?}",
+        output.normalized_events
+    );
+    let bridge = renewals
+        .iter()
+        .find(|event| event.after_state.get("duration").is_some())
+        .expect("bridge renewal arm");
+    let base = renewals
+        .iter()
+        .find(|event| event.after_state.get("duration").is_none())
+        .expect("BaseRegistrar renewal arm");
+    assert_eq!(bridge.migration_correlation_ids.len(), 1);
+    assert_eq!(
+        base.migration_correlation_ids,
+        bridge.migration_correlation_ids
+    );
+    bridge.migration_correlation_ids[0].clone()
+}
