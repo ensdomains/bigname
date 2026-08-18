@@ -175,22 +175,22 @@ impl State {
             });
             let previous = token.name.clone();
             let previous_shadow = token.shadow_name.clone();
+            let current_resource = token
+                .registration
+                .is_some()
+                .then_some(token.resource_id)
+                .flatten();
             let changed = previous != name || previous_shadow != shadow_name;
             if changed {
                 let previous_surface = previous.as_ref().map(|name| name.logical_name_id.clone());
                 let current_surface = name.as_ref().map(|name| name.logical_name_id.clone());
                 if let Some(previous) = previous.as_ref()
+                    && token.registration.is_some()
                     && token.resource_id.is_some_and(|resource_id| {
                         self.active_resources.get(&previous.logical_name_id) == Some(&resource_id)
                     })
                 {
                     self.active_resources.remove(&previous.logical_name_id);
-                }
-                if let Some(current) = name.as_ref()
-                    && let Some(resource_id) = token.resource_id
-                {
-                    self.active_resources
-                        .insert(current.logical_name_id.clone(), resource_id);
                 }
                 transitions.push(V2NameTransition {
                     registry: emitter.to_owned(),
@@ -218,11 +218,44 @@ impl State {
                 current.shadow_name = shadow_name.clone();
                 self.replace_v2_token_indexes(&key, Some(&token), Some(&current));
             }
+            if changed
+                && let Some(previous) = previous.as_ref()
+                && let Some(resource_id) = self.v2_active_resource_winner(&previous.logical_name_id)
+            {
+                self.active_resources
+                    .insert(previous.logical_name_id.clone(), resource_id);
+            }
+            if let Some(current) = name.as_ref()
+                && current_resource.is_some()
+                && let Some(resource_id) = self.v2_active_resource_winner(&current.logical_name_id)
+            {
+                self.active_resources
+                    .insert(current.logical_name_id.clone(), resource_id);
+            }
             if let Some(current) = self.v2_tokens.get_mut(&key) {
                 current.name = name;
                 current.shadow_name = shadow_name;
             }
         }
         transitions
+    }
+
+    /// The active resource for a surface is the resource of the greatest token key among retained
+    /// holders that carry a registration and a linked resource — the winner an unconditional
+    /// re-assert produces on a full ascending walk — so a refresh elects the same resource for
+    /// any dirty set that closes over the surface's contention.
+    fn v2_active_resource_winner(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
+        self.v2_tokens_by_current_name_index
+            .get(logical_name_id)?
+            .iter()
+            .rev()
+            .find_map(|token_key| {
+                let token = self.v2_tokens.get(token_key)?;
+                token
+                    .registration
+                    .is_some()
+                    .then_some(token.resource_id)
+                    .flatten()
+            })
     }
 }

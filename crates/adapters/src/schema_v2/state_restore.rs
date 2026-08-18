@@ -1,6 +1,5 @@
 use super::{model::PriorEventInput, protocol::v1::unmasked_word, state::State};
-use serde_json::Value;
-use uuid::Uuid;
+use {serde_json::Value, uuid::Uuid};
 pub(super) fn rebuild_v2_indexes(state: &mut State) {
     state.rebuild_v2_token_indexes();
 }
@@ -63,6 +62,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
                 expiry,
                 (event.event_kind == "RegistrationGranted").then(|| event.after_state.clone()),
             );
+            state.restore_v2_unbound_resource(emitter, token, event);
         }
         "TokenResourceLinked" => {
             let (Some(token), Some(resource_id)) = (token, event.resource_id) else {

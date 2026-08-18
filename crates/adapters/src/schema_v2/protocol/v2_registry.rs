@@ -12,7 +12,10 @@ use crate::{
     evm_abi::{address_hex, decode_event_log, decode_event_log_data_as, hex_string, u256_word_hex},
     schema_v2::{
         catalog::Selected,
-        common::{admitted_label, decoded_label},
+        common::{
+            admitted_label, decoded_label, ens_v2_registry_resource_id,
+            ens_v2_registry_token_lineage_id,
+        },
         model::RawLogInput,
         state::{State, V2TokenState},
     },
@@ -22,7 +25,7 @@ use super::{
     BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, LabelDraft, NameDraft,
     ResourceDraft, ShadowNameDraft, ensure_declared,
 };
-use topology::{append_terminal_boundaries, append_v2_name_transitions};
+use topology::{append_terminal_boundaries, append_v2_name_transitions, discovery_observation_key};
 
 pub(super) fn boundary_expiration(
     transition: crate::schema_v2::state::V2NameTransition,
@@ -124,15 +127,17 @@ fn registry(
                 event_state.clone(),
             );
             output.events[0].explicit_before = Some(json!({"expiry":before.expiry}));
-            output.events.push(EventDraft {
-                event_kind: "RegistrationRenewed".to_owned(),
-                logical_name_id,
-                resource_id: after.resource_id,
-                identity_suffix: format!("RegistrationRenewed:{token_id}"),
-                explicit_before: Some(json!({"expiry":before.expiry})),
-                after_state: event_state,
-                state_scope: String::new(),
-            });
+            if after.registration.is_some() {
+                output.events.push(EventDraft {
+                    event_kind: "RegistrationRenewed".to_owned(),
+                    logical_name_id,
+                    resource_id: after.resource_id,
+                    identity_suffix: format!("RegistrationRenewed:{token_id}"),
+                    explicit_before: Some(json!({"expiry":before.expiry})),
+                    after_state: event_state,
+                    state_scope: String::new(),
+                });
+            }
             append_v2_name_transitions(&mut output, transitions, raw, "ExpiryUpdated", None);
             Ok(output)
         }
@@ -310,7 +315,17 @@ fn label_event(
     let direct_name = name.is_some();
     let logical_name_id = name.as_ref().map(|name| name.logical_name_id.clone());
     let token_id = u256_word_hex(token_id);
-    let event_state = merge(
+    let reservation_resource = (!registered && token_id.ends_with("00000000")).then(|| {
+        let resource_id =
+            ens_v2_registry_resource_id(&raw.chain_id, selected.contract_instance_id, &token_id);
+        let token_lineage_id = ens_v2_registry_token_lineage_id(
+            &raw.chain_id,
+            selected.contract_instance_id,
+            &token_id,
+        );
+        (token_id.clone(), resource_id, token_lineage_id)
+    });
+    let mut event_state = merge(
         after,
         json!({
             "label": surface_label,
@@ -325,6 +340,18 @@ fn label_event(
             "registry_contract_instance_id": selected.contract_instance_id.to_string(),
         }),
     );
+    if let Some((upstream_resource, resource_id, token_lineage_id)) = reservation_resource.as_ref()
+    {
+        event_state = merge(
+            event_state,
+            json!({
+                "upstream_resource":upstream_resource,
+                "resource_id":resource_id.to_string(),
+                "token_lineage_id":token_lineage_id.to_string(),
+                "reservation_resource":true,
+            }),
+        );
+    }
     let replaced = state.replace_v2_registration(
         &raw.emitting_address,
         &token_id,
@@ -337,8 +364,37 @@ fn label_event(
             .unwrap_or_default(),
         registered.then(|| event_state.clone()),
     );
+    if let Some((upstream_resource, resource_id, token_lineage_id)) = reservation_resource {
+        state.attach_v2_unbound_resource(
+            &raw.emitting_address,
+            &token_id,
+            upstream_resource,
+            resource_id,
+            Some(token_lineage_id),
+        );
+    }
+    let linked = state
+        .v2_token(&raw.emitting_address, &token_id)
+        .expect("label event installs its token state");
+    if let (Some(upstream_resource), Some(resource_id)) =
+        (linked.upstream_resource.as_ref(), linked.resource_id)
+    {
+        event_state = merge(
+            event_state,
+            json!({
+                "upstream_resource":upstream_resource,
+                "resource_id":resource_id.to_string(),
+            }),
+        );
+    }
     let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
-    let mut output = single_event(kind, logical_name_id, None, event_state);
+    let mut output = single_event(kind, logical_name_id, linked.resource_id, event_state);
+    if let Some(resource_id) = linked.resource_id {
+        output.resources.push(ResourceDraft {
+            resource_id,
+            token_lineage_id: linked.token_lineage_id,
+        });
+    }
     output.labels.push(LabelDraft {
         raw_label: label,
         source_kind: format!("{}_label", selected.event.name),
@@ -347,8 +403,8 @@ fn label_event(
         output.names.push(NameDraft {
             labels: name.labels,
             namehash: name.namehash,
-            resource_id: None,
-            token_lineage_id: None,
+            resource_id: linked.resource_id,
+            token_lineage_id: linked.token_lineage_id,
             surface_binding_id: None,
             bind: false,
             binding_kind: "declared_registry_path".to_owned(),
@@ -356,10 +412,14 @@ fn label_event(
             source_kind: format!("{}_label", selected.event.name),
             preimage_metadata: None,
         });
-        output.binding_closures.push(BindingClosureDraft {
-            logical_name_id: name.logical_name_id,
-            authority_arm: "ens_v2".to_owned(),
-        });
+        // Closures are arm-wide per logical name, so only a registration assert may clear the
+        // name's stale bindings; a reservation would close another holder's live binding.
+        if registered {
+            output.binding_closures.push(BindingClosureDraft {
+                logical_name_id: name.logical_name_id,
+                authority_arm: "ens_v2".to_owned(),
+            });
+        }
     }
     for (replaced_token, previous) in &replaced {
         append_terminal_boundaries(
@@ -500,20 +560,6 @@ fn upgraded(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<Interprete
     Ok(output)
 }
 
-fn discovery_observation_key(raw: &RawLogInput, token_id: U256, resolver: bool) -> String {
-    let mut bytes = token_id.to_be_bytes::<32>();
-    bytes[28..].fill(0);
-    let base = format!(
-        "{}:{:#x}",
-        raw.emitting_address.to_ascii_lowercase(),
-        U256::from_be_bytes(bytes)
-    );
-    if resolver {
-        format!("resolver:{base}")
-    } else {
-        base
-    }
-}
 fn nullable_address(address: Address) -> Value {
     if address == Address::ZERO {
         Value::Null

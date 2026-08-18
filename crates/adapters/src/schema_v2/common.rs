@@ -26,6 +26,16 @@ pub(super) fn ens_v2_registry_resource_id(
     ))
 }
 
+pub(super) fn ens_v2_registry_token_lineage_id(
+    chain_id: &str,
+    contract_instance_id: Uuid,
+    upstream_resource: &str,
+) -> Uuid {
+    stable_uuid(&format!(
+        "ens-v2-token-lineage:{chain_id}:{contract_instance_id}:{upstream_resource}"
+    ))
+}
+
 pub(super) fn ens_v2_resolver_resource_id(
     chain_id: &str,
     contract_instance_id: Uuid,

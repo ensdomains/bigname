@@ -126,6 +126,17 @@ Resource-centric permissions follow the same lifecycle: while one ENSv1 authorit
 
 Two public surfaces may bind to the same `resource_id`. Permissions and role history stay attached to the resource; surface-specific reads keep their own binding provenance.
 
+An ownerless version-zero ENSv2 reservation establishes an unbound registry-entry
+`resource_id` and token-lineage identity before any token mint. Their existence
+alone is not a registration, current authority, or `SurfaceBinding`. A later
+successful claim for that registry entry reuses the identities, and its
+`TokenResource` emission confirms the resource. A reservation whose version
+bits prevent deriving that resource remains resource-less.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L468 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629-L647 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@ccaeb58)
+
 ### Token regeneration with stable authority
 
 Token regeneration does not change `logical_name_id`, and it does not require a new `resource_id` when the backing authority is the same. Token attributes change within the token-lineage history rather than becoming the primary identity.

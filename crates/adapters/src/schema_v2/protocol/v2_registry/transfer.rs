@@ -11,7 +11,7 @@ use crate::{
     evm_abi::{address_hex, decode_event_log, u256_word_hex},
     schema_v2::{
         catalog::Selected,
-        common::{ens_v2_registry_resource_id, stable_uuid},
+        common::{ens_v2_registry_resource_id, ens_v2_registry_token_lineage_id, stable_uuid},
         model::RawLogInput,
         protocol::{
             EventDraft, Interpreted, NameDraft, ResourceDraft, ensure_declared,
@@ -35,6 +35,13 @@ pub(super) fn token_resource(
     let (resource_id, token_lineage_id) = upstream_identity(raw, selected, event.resource);
     let token_id = u256_word_hex(event.tokenId);
     let resource_word = u256_word_hex(event.resource);
+    if let Some(reserved) = state.v2_token(&raw.emitting_address, &token_id)
+        && reserved
+            .resource_id
+            .is_some_and(|reserved_id| reserved_id != resource_id)
+    {
+        bail!("TokenResource for reserved token {token_id} does not confirm its retained resource");
+    }
     let linked = state.link_v2_resource(
         &raw.emitting_address,
         &token_id,
@@ -64,7 +71,9 @@ pub(super) fn token_resource(
         resource_id,
         token_lineage_id,
     });
-    if let Some(name) = linked.name {
+    if linked.registration.is_some()
+        && let Some(name) = linked.name
+    {
         let surface_binding_id = stable_uuid(&format!(
             "ens-v2-surface-binding:{}:{}:{}:{}",
             raw.chain_id, selected.contract_instance_id, resource_word, name.logical_name_id,
@@ -399,10 +408,11 @@ fn upstream_identity(
         &upstream_resource,
     );
     let token_lineage_id = (resource != U256::ZERO).then(|| {
-        stable_uuid(&format!(
-            "ens-v2-token-lineage:{}:{}:{}",
-            raw.chain_id, selected.contract_instance_id, upstream_resource
-        ))
+        ens_v2_registry_token_lineage_id(
+            &raw.chain_id,
+            selected.contract_instance_id,
+            &upstream_resource,
+        )
     });
     (resource_id, token_lineage_id)
 }

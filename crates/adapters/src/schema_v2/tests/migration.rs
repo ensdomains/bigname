@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{collections::BTreeSet, str::FromStr};
 
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
@@ -560,17 +560,6 @@ fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> an
             addresses["eth_registry"].as_str().unwrap(),
         ),
         raw_at_transaction(
-            super::v2_registry::TokenResource {
-                tokenId: v2_token,
-                resource: v2_token,
-            }
-            .encode_log_data(),
-            226,
-            0,
-            2,
-            addresses["eth_registry"].as_str().unwrap(),
-        ),
-        raw_at_transaction(
             super::v2_registry::ExpiryUpdated {
                 tokenId: v2_token,
                 newExpiry: scenario["decoded_v2_expiry"].as_u64().unwrap(),
@@ -629,7 +618,7 @@ fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> an
         .iter()
         .filter(|event| event.event_kind == "ExpiryChanged")
         .collect::<Vec<_>>();
-    assert_eq!(renewals.len(), 3, "events: {:#?}", output.normalized_events);
+    assert_eq!(renewals.len(), 2, "events: {:#?}", output.normalized_events);
     assert_eq!(expiries.len(), 2, "events: {:#?}", output.normalized_events);
     assert_eq!(
         renewals
@@ -638,10 +627,11 @@ fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> an
             .count(),
         2
     );
-    assert!(renewals.iter().any(|event| {
-        event.source_family == "ens_v2_registry_l1"
-            && event.after_state["expiry"] == scenario["decoded_v2_expiry"]
-    }));
+    assert!(
+        !renewals
+            .iter()
+            .any(|event| event.source_family == "ens_v2_registry_l1")
+    );
     assert!(
         !output
             .normalized_events
@@ -649,11 +639,13 @@ fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> an
             .any(|event| event.event_kind == "MigrationApplied")
     );
     assert!(
-        renewals
+        !output
+            .normalized_events
             .iter()
-            .filter(|event| event.source_family == "ens_v2_registry_l1")
-            .all(|event| event.resource_id.is_some())
+            .any(|event| event.event_kind == "RegistrationGranted")
     );
+    assert_eq!(output.token_lineages.len(), 1);
+    assert!(output.surface_bindings.is_empty());
     assert!(
         expiries
             .iter()
@@ -674,10 +666,10 @@ fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> an
                 && event.after_state.get("duration").is_none()
         })
         .expect("BaseRegistrar renewal");
-    let registry = renewals
+    let registry = expiries
         .iter()
         .find(|event| event.source_family == "ens_v2_registry_l1")
-        .expect("v2 registry renewal");
+        .expect("v2 registry expiry arm");
     assert_eq!(bridge.resource_id, registry.resource_id);
     assert!(base.resource_id.is_none());
     assert_eq!(
@@ -716,8 +708,116 @@ fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> an
         "candidate"
     );
 
+    let versioned_token = v2_token + U256::from(1);
+    let mut versioned_logs = logs.clone();
+    versioned_logs[0] = raw_at_transaction(
+        super::v2_registry::LabelReserved {
+            tokenId: versioned_token,
+            labelHash: keccak256(label.as_bytes()),
+            label: label.to_owned(),
+            expiry: 1_822_787_383,
+            sender,
+        }
+        .encode_log_data(),
+        226,
+        0,
+        1,
+        addresses["eth_registry"].as_str().unwrap(),
+    );
+    versioned_logs[1] = raw_at_transaction(
+        super::v2_registry::ExpiryUpdated {
+            tokenId: versioned_token,
+            newExpiry: scenario["decoded_v2_expiry"].as_u64().unwrap(),
+            sender,
+        }
+        .encode_log_data(),
+        renewal_block,
+        0,
+        1,
+        addresses["eth_registry"].as_str().unwrap(),
+    );
+    versioned_logs[3] = raw_at_transaction(
+        with_topic0(
+            BridgeNameRenewed {
+                tokenId: versioned_token,
+                label: label.to_owned(),
+                duration: scenario["duration"].as_u64().unwrap(),
+                newExpiry: scenario["decoded_v2_expiry"].as_u64().unwrap(),
+                paymentToken: payment,
+                referrer: B256::ZERO,
+                amount: U256::from(640_000_005_u64),
+            }
+            .encode_log_data(),
+            alloy_primitives::keccak256(
+                b"NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)",
+            ),
+        ),
+        renewal_block,
+        0,
+        3,
+        addresses["renewal_bridge"].as_str().unwrap(),
+    );
+    let versioned = interpret_test_batch(batch(versioned_logs, &fixture, true))?;
+    let versioned_renewals = versioned
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "RegistrationRenewed")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        versioned_renewals
+            .iter()
+            .filter(|event| event.source_family == "ens_v2_migration_l1")
+            .count(),
+        2,
+        "a versioned reserved entry still retains both synchronized-renewal arms"
+    );
+    assert!(
+        versioned_renewals
+            .iter()
+            .all(|event| { event.after_state["lifecycle_classification"] != "historical_renewal" })
+    );
+    assert!(
+        versioned_renewals
+            .iter()
+            .all(|event| event.resource_id.is_none()),
+        "a non-derived reservation must not invent resource anchors for either renewal arm"
+    );
+    let versioned_registry = versioned
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "ExpiryChanged"
+                && event.source_family == "ens_v2_registry_l1"
+                && event.after_state["expiry"] == scenario["decoded_v2_expiry"]
+        })
+        .expect("resource-less registry expiry arm");
+    assert!(versioned_registry.resource_id.is_none());
+    let correlation_ids = versioned_renewals
+        .iter()
+        .flat_map(|event| event.migration_correlation_ids.iter())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        correlation_ids.len(),
+        1,
+        "resource-less renewal arms must share one correlation identity"
+    );
+    let correlation_id = *correlation_ids.iter().next().unwrap();
+    assert!(versioned_renewals.iter().all(|event| {
+        event.migration_correlation_ids.as_slice() == [correlation_id.to_owned()]
+    }));
+    assert!(
+        versioned
+            .migration_event_associations
+            .iter()
+            .any(|association| {
+                association.event_identity == versioned_registry.event_identity
+                    && association.migration_correlation_id == correlation_id.as_str()
+                    && association.correlation_kind == "synchronized_renewal"
+            })
+    );
+
     let mut nonstandard_delta = logs.clone();
-    nonstandard_delta[3] = raw_at_transaction(
+    nonstandard_delta[2] = raw_at_transaction(
         with_topic0(
             BaseNameRenewed {
                 id: base_token,
@@ -738,7 +838,7 @@ fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> an
             .iter()
             .filter(|event| event.event_kind == "RegistrationRenewed")
             .count(),
-        3,
+        2,
         "decoded per-resource expiries must not be rejected by a reconstructed fixed offset"
     );
 
@@ -818,6 +918,378 @@ fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> an
             "each repeated renewal must use its own BaseRegistrar/bridge envelope"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn reserved_facts_survive_claim_and_incremental_rebuild_boundaries() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let token = decimal_u256(&scenario["v2_token_id"])?;
+    let base_token = decimal_u256(&scenario["base_token_id"])?;
+    let owner = Address::from([0x41; 20]);
+    let sender = Address::from([0x42; 20]);
+    let resolver = Address::from([0x43; 20]);
+    let expiry = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let stages = vec![
+        vec![raw_at_transaction(
+            super::v2_registry::LabelReserved {
+                tokenId: token,
+                labelHash: keccak256(label.as_bytes()),
+                label: label.to_owned(),
+                expiry: expiry - 100,
+                sender,
+            }
+            .encode_log_data(),
+            226,
+            0,
+            0,
+            addresses["eth_registry"].as_str().unwrap(),
+        )],
+        vec![raw_at_transaction(
+            super::v2_registry::ResolverUpdated {
+                tokenId: token,
+                resolver,
+                sender,
+            }
+            .encode_log_data(),
+            226,
+            0,
+            1,
+            addresses["eth_registry"].as_str().unwrap(),
+        )],
+        vec![raw_at_transaction(
+            super::v2_registry::ExpiryUpdated {
+                tokenId: token,
+                newExpiry: expiry,
+                sender,
+            }
+            .encode_log_data(),
+            227,
+            0,
+            0,
+            addresses["eth_registry"].as_str().unwrap(),
+        )],
+        vec![
+            raw_at_transaction(
+                super::v1_registrar::Transfer {
+                    from: address(addresses, "unlocked_controller")?,
+                    to: address(addresses, "graveyard")?,
+                    tokenId: base_token,
+                }
+                .encode_log_data(),
+                228,
+                0,
+                0,
+                addresses["base_registrar"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                super::v2_registry::LabelRegistered {
+                    tokenId: token,
+                    labelHash: keccak256(label.as_bytes()),
+                    label: label.to_owned(),
+                    owner,
+                    expiry,
+                    sender: address(addresses, "unlocked_controller")?,
+                }
+                .encode_log_data(),
+                228,
+                0,
+                1,
+                addresses["eth_registry"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                super::v2_registry::TokenResource {
+                    tokenId: token,
+                    resource: token,
+                }
+                .encode_log_data(),
+                228,
+                0,
+                2,
+                addresses["eth_registry"].as_str().unwrap(),
+            ),
+        ],
+        vec![raw_at_transaction(
+            super::v2_registry::ExpiryUpdated {
+                tokenId: token,
+                newExpiry: expiry + 1,
+                sender,
+            }
+            .encode_log_data(),
+            229,
+            0,
+            0,
+            addresses["eth_registry"].as_str().unwrap(),
+        )],
+        vec![raw_at_transaction(
+            with_topic0(
+                BaseNameRenewed {
+                    id: base_token,
+                    expires: U256::from(scenario["v1_expiry"].as_u64().unwrap() + 1),
+                }
+                .encode_log_data(),
+                keccak256(b"NameRenewed(uint256,uint256)"),
+            ),
+            230,
+            0,
+            0,
+            addresses["base_registrar"].as_str().unwrap(),
+        )],
+    ];
+
+    let (preclaim, preclaim_session) = interpret_test_batch_incremental(
+        batch(
+            stages[..3].iter().flatten().cloned().collect(),
+            &fixture,
+            true,
+        ),
+        None,
+    )?;
+    let reserved = preclaim
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationReserved")
+        .expect("reservation evidence");
+    let resource_id = reserved
+        .resource_id
+        .expect("reserved registry-entry resource");
+    for event in preclaim.normalized_events.iter().filter(|event| {
+        matches!(
+            event.event_kind.as_str(),
+            "ResolverChanged" | "ExpiryChanged"
+        )
+    }) {
+        assert_eq!(event.resource_id, Some(resource_id));
+    }
+    assert!(!preclaim.normalized_events.iter().any(|event| {
+        matches!(
+            event.event_kind.as_str(),
+            "RegistrationGranted" | "RegistrationRenewed" | "AuthorityTransferred"
+        )
+    }));
+    assert_eq!(preclaim.token_lineages.len(), 1);
+    assert!(preclaim.surface_bindings.is_empty());
+
+    let block = |number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+    };
+    let prior_events = seam::fold_prior_events(
+        Vec::new(),
+        &preclaim.normalized_events,
+        &[block(226), block(227)],
+    )?;
+    let mut restored_claim_input = batch(stages[3].clone(), &fixture, true);
+    restored_claim_input.prior_events = prior_events;
+    let restored_claim = interpret_test_batch(restored_claim_input)?;
+    let (session_claim, _) = interpret_test_batch_incremental(
+        batch(stages[3].clone(), &fixture, true),
+        Some(preclaim_session),
+    )?;
+    assert_eq!(
+        restored_claim.normalized_events,
+        session_claim.normalized_events
+    );
+    assert_eq!(restored_claim.resources, session_claim.resources);
+    assert_eq!(restored_claim.token_lineages, session_claim.token_lineages);
+    assert_eq!(
+        restored_claim.migration_event_associations,
+        session_claim.migration_event_associations
+    );
+
+    let all_logs = stages.iter().flatten().cloned().collect::<Vec<_>>();
+    let (full, full_session) =
+        interpret_test_batch_incremental(batch(all_logs, &fixture, true), None)?;
+    let resource_lineages = full
+        .resources
+        .iter()
+        .filter(|resource| resource.resource_id == resource_id)
+        .map(|resource| resource.token_lineage_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        resource_lineages,
+        std::collections::BTreeSet::from([Some(preclaim.token_lineages[0].token_lineage_id)]),
+        "a persisted reserved resource cannot acquire different lineage metadata at claim"
+    );
+    let claim = full
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationGranted"
+                && event.after_state["source_event"] == "LabelRegistered"
+        })
+        .expect("reserved entry claim");
+    assert_eq!(claim.resource_id, Some(resource_id));
+    assert_eq!(claim.after_state["expiry"], expiry);
+    assert_eq!(
+        full.normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "MigrationApplied")
+            .count(),
+        1
+    );
+    let residue = full
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationRenewed"
+                && event.after_state["lifecycle_classification"] == "historical_renewal"
+        })
+        .expect("post-migration ENSv1 renewal residue");
+    assert!(residue.resource_id.is_none());
+
+    let mut mismatched_claim = stages[3].clone();
+    mismatched_claim[2] = raw_at_transaction(
+        super::v2_registry::TokenResource {
+            tokenId: token,
+            resource: token + U256::from(1),
+        }
+        .encode_log_data(),
+        228,
+        0,
+        2,
+        addresses["eth_registry"].as_str().unwrap(),
+    );
+    let mismatched_logs = stages[..3]
+        .iter()
+        .flatten()
+        .cloned()
+        .chain(mismatched_claim)
+        .collect();
+    let mismatch = interpret_test_batch(batch(mismatched_logs, &fixture, true))
+        .expect_err("TokenResource must confirm the resource retained from reservation");
+    assert!(format!("{mismatch:#}").contains("does not confirm"));
+
+    let mut incremental_events = Vec::new();
+    let mut incremental_associations = Vec::new();
+    let mut session = None;
+    for stage in stages {
+        let (output, next) =
+            interpret_test_batch_incremental(batch(stage, &fixture, true), session)?;
+        incremental_events.extend(output.normalized_events);
+        incremental_associations.extend(output.migration_event_associations);
+        session = Some(next);
+    }
+    assert_eq!(incremental_events, full.normalized_events);
+    assert_eq!(incremental_associations, full.migration_event_associations);
+    let probe = raw_at_transaction(
+        super::v2_registry::ExpiryUpdated {
+            tokenId: token,
+            newExpiry: expiry + 2,
+            sender,
+        }
+        .encode_log_data(),
+        231,
+        0,
+        0,
+        addresses["eth_registry"].as_str().unwrap(),
+    );
+    let (full_probe, _) = interpret_test_batch_incremental(
+        batch(vec![probe.clone()], &fixture, true),
+        Some(full_session),
+    )?;
+    let (incremental_probe, _) =
+        interpret_test_batch_incremental(batch(vec![probe], &fixture, true), session)?;
+    assert_eq!(incremental_probe, full_probe);
+    assert!(full_probe.normalized_events.iter().all(|event| {
+        !matches!(
+            event.event_kind.as_str(),
+            "ExpiryChanged" | "RegistrationRenewed"
+        ) || event.resource_id == Some(resource_id)
+    }));
+    Ok(())
+}
+
+#[test]
+fn premigration_reservation_flood_is_ownerless_and_linear() -> anyhow::Result<()> {
+    const RESERVATIONS: usize = 256;
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let sender = Address::from([0x51; 20]);
+    let mut logs = Vec::with_capacity(RESERVATIONS);
+    for index in 0..RESERVATIONS {
+        let label = format!("premigration-{index}");
+        let mut token = keccak256(label.as_bytes()).0;
+        token[28..].fill(0);
+        logs.push(raw_at_transaction(
+            super::v2_registry::LabelReserved {
+                tokenId: U256::from_be_bytes(token),
+                labelHash: keccak256(label.as_bytes()),
+                label,
+                expiry: 2_000_000_000,
+                sender,
+            }
+            .encode_log_data(),
+            226,
+            0,
+            i64::try_from(index).unwrap(),
+            addresses["eth_registry"].as_str().unwrap(),
+        ));
+    }
+    crate::schema_v2::state::reset_v2_refresh_visits();
+    let (output, _) = interpret_test_batch_incremental(batch(logs, &fixture, true), None)?;
+    assert_eq!(
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "RegistrationReserved")
+            .count(),
+        RESERVATIONS
+    );
+    assert!(!output.normalized_events.iter().any(|event| {
+        matches!(
+            event.event_kind.as_str(),
+            "RegistrationGranted" | "RegistrationRenewed" | "AuthorityTransferred" | "SurfaceBound"
+        )
+    }));
+    assert_eq!(output.token_lineages.len(), RESERVATIONS);
+    assert_eq!(
+        output.label_preimages.len(),
+        RESERVATIONS + 1,
+        "the shared .eth preimage must be submitted once per adapter batch"
+    );
+    assert!(output.surface_bindings.is_empty());
+    assert!(
+        crate::schema_v2::state::v2_refresh_visits() <= RESERVATIONS * 3,
+        "reservation refresh must remain linear"
+    );
+
+    let label = "versioned-reservation";
+    let mut versioned_token = keccak256(label.as_bytes()).0;
+    versioned_token[28..].fill(0);
+    versioned_token[31] = 1;
+    let versioned = interpret_test_batch(batch(
+        vec![raw_at_transaction(
+            super::v2_registry::LabelReserved {
+                tokenId: U256::from_be_bytes(versioned_token),
+                labelHash: keccak256(label.as_bytes()),
+                label: label.to_owned(),
+                expiry: 2_000_000_000,
+                sender,
+            }
+            .encode_log_data(),
+            226,
+            1,
+            0,
+            addresses["eth_registry"].as_str().unwrap(),
+        )],
+        &fixture,
+        true,
+    ))?;
+    let reservation = versioned
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationReserved")
+        .expect("versioned reservation evidence");
+    assert!(reservation.resource_id.is_none());
+    assert!(versioned.resources.is_empty());
+    assert!(versioned.token_lineages.is_empty());
     Ok(())
 }
 
@@ -913,11 +1385,11 @@ fn catalog_wrapper_sync_uses_a_separate_name_wrapper_controller_envelope() -> an
         addresses["base_registrar"].as_str().unwrap(),
     );
     let unrelated_output = interpret_test_batch(batch(unrelated_logs, &fixture, false))?;
-    assert!(!unrelated_output.normalized_events.iter().any(|event| {
-        matches!(
+    assert!(unrelated_output.normalized_events.iter().all(|event| {
+        !matches!(
             event.event_kind.as_str(),
             "RegistrationRenewed" | "ExpiryChanged"
-        )
+        ) || event.after_state["lifecycle_classification"] == "historical_renewal"
     }));
     assert!(unrelated_output.resources.is_empty());
     assert!(unrelated_output.token_lineages.is_empty());
@@ -934,11 +1406,11 @@ fn catalog_wrapper_sync_uses_a_separate_name_wrapper_controller_envelope() -> an
         addresses["base_registrar"].as_str().unwrap(),
     );
     let mismatched_output = interpret_test_batch(batch(mismatched_logs, &fixture, false))?;
-    assert!(!mismatched_output.normalized_events.iter().any(|event| {
-        matches!(
+    assert!(mismatched_output.normalized_events.iter().all(|event| {
+        !matches!(
             event.event_kind.as_str(),
             "RegistrationRenewed" | "ExpiryChanged"
-        )
+        ) || event.after_state["lifecycle_classification"] == "historical_renewal"
     }));
     assert!(mismatched_output.resources.is_empty());
     assert!(mismatched_output.token_lineages.is_empty());
@@ -1045,16 +1517,119 @@ fn incomplete_catalog_lookalikes_never_prove_a_migration_boundary() -> anyhow::R
             event.event_kind == "RegistrationReleased"
                 && event.consumer_visibility == "candidate"
                 && event.after_state["owner"] == addresses["graveyard"]
+                && event.after_state["lifecycle_classification"] == "graveyard_cleanup"
+                && event.after_state["authority_effect"] == "none"
         }),
         "events: {:#?}",
         output.normalized_events
     );
-    assert!(
-        !output
-            .normalized_events
-            .iter()
-            .any(|event| event.event_kind == "RegistrationRenewed")
+    let historical_renewal = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationRenewed")
+        .expect("unmatched launch-bounded renewal remains historical evidence");
+    assert_eq!(
+        historical_renewal.after_state["lifecycle_classification"],
+        "historical_renewal"
     );
+    assert_eq!(historical_renewal.after_state["authority_effect"], "none");
+    assert!(historical_renewal.resource_id.is_none());
+    assert!(!output.normalized_events.iter().any(|event| {
+        matches!(
+            event.event_kind.as_str(),
+            "RegistrationGranted" | "RegistrarNameRegistered" | "AuthorityTransferred"
+        )
+    }));
+    assert!(output.resources.is_empty());
+    assert!(output.token_lineages.is_empty());
+    assert!(output.surface_bindings.is_empty());
+
+    let ordinary_expiry = interpret_test_batch(batch(
+        vec![raw_at_transaction(
+            with_topic0(
+                BaseNameRegistered {
+                    id: decimal_u256(&cleanup["token_id"])? + U256::from(1),
+                    owner: address(addresses, "graveyard")?,
+                    expires: U256::from(2_000_000_000_u64),
+                }
+                .encode_log_data(),
+                keccak256(b"NameRegistered(uint256,address,uint256)"),
+            ),
+            cleanup["cleanup_block"].as_i64().unwrap(),
+            0,
+            0,
+            addresses["base_registrar"].as_str().unwrap(),
+        )],
+        &fixture,
+        false,
+    ))?;
+    assert!(
+        ordinary_expiry.normalized_events.is_empty(),
+        "Graveyard ownership without the terminal expiry class is not cleanup evidence"
+    );
+
+    let terminal_lookalike = interpret_test_batch(batch(
+        vec![raw_at_transaction(
+            with_topic0(
+                BaseNameRegistered {
+                    id: decimal_u256(&cleanup["token_id"])? + U256::from(3),
+                    owner: address(addresses, "graveyard")?,
+                    expires: decimal_u256(&cleanup["cleanup_expiry"])? + U256::from(1),
+                }
+                .encode_log_data(),
+                keccak256(b"NameRegistered(uint256,address,uint256)"),
+            ),
+            cleanup["cleanup_block"].as_i64().unwrap(),
+            0,
+            0,
+            addresses["base_registrar"].as_str().unwrap(),
+        )],
+        &fixture,
+        false,
+    ))?;
+    assert!(
+        terminal_lookalike.normalized_events.is_empty(),
+        "a controller registration to the Graveyard with a different high expiry is not cleanup"
+    );
+
+    let fork_deployer = Address::from([0x99; 20]);
+    let fork_rehearsal = interpret_test_batch(batch(
+        vec![
+            raw_at_transaction(
+                ControllerAdded {
+                    controller: fork_deployer,
+                }
+                .encode_log_data(),
+                cleanup["cleanup_block"].as_i64().unwrap(),
+                0,
+                0,
+                addresses["base_registrar"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                with_topic0(
+                    BaseNameRegistered {
+                        id: decimal_u256(&cleanup["token_id"])? + U256::from(2),
+                        owner: Address::from([0x98; 20]),
+                        expires: U256::from(2_000_000_000_u64),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+                cleanup["cleanup_block"].as_i64().unwrap(),
+                1,
+                0,
+                addresses["base_registrar"].as_str().unwrap(),
+            ),
+        ],
+        &fixture,
+        false,
+    ))?;
+    assert!(fork_rehearsal.normalized_events.iter().all(|event| {
+        !matches!(
+            event.event_kind.as_str(),
+            "RegistrationGranted" | "RegistrarNameRegistered" | "RegistrationRenewed"
+        )
+    }));
     Ok(())
 }
 
@@ -1494,6 +2069,12 @@ fn batch(raw_logs: Vec<RawLogInput>, fixture: &Value, include_registry_setup: bo
             from_role: Some("registry".to_owned()),
             admission: "reachable_from_root".to_owned(),
         });
+        discovery_rules.push(DiscoveryRuleInput {
+            manifest_id: REGISTRY_MANIFEST_ID,
+            edge_kind: "resolver".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "protocol_event".to_owned(),
+        });
     }
     BatchInput {
         chain_id: CHAIN.to_owned(),
@@ -1511,12 +2092,20 @@ fn registry_only_batch(raw_logs: Vec<RawLogInput>, fixture: &Value) -> BatchInpu
     BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest()],
-        discovery_rules: vec![DiscoveryRuleInput {
-            manifest_id: REGISTRY_MANIFEST_ID,
-            edge_kind: "registry_announcement".to_owned(),
-            from_role: Some("registry".to_owned()),
-            admission: "reachable_from_root".to_owned(),
-        }],
+        discovery_rules: vec![
+            DiscoveryRuleInput {
+                manifest_id: REGISTRY_MANIFEST_ID,
+                edge_kind: "registry_announcement".to_owned(),
+                from_role: Some("registry".to_owned()),
+                admission: "reachable_from_root".to_owned(),
+            },
+            DiscoveryRuleInput {
+                manifest_id: REGISTRY_MANIFEST_ID,
+                edge_kind: "resolver".to_owned(),
+                from_role: Some("registry".to_owned()),
+                admission: "protocol_event".to_owned(),
+            },
+        ],
         admissions: vec![admission_at(
             REGISTRY_MANIFEST_ID,
             "registry",
@@ -1641,6 +2230,12 @@ fn registry_manifest() -> ManifestInput {
                 &["ExpiryChanged", "RegistrationRenewed"],
             ),
             (
+                "ResolverUpdated",
+                "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
+                &["registry"],
+                &["ResolverChanged"],
+            ),
+            (
                 "ParentUpdated",
                 "event ParentUpdated(address indexed parent, string label, address indexed sender)",
                 &["registry"],
@@ -1692,4 +2287,420 @@ fn admission_at(
         active_from_block: Some(0),
         active_to_block: None,
     }
+}
+
+#[test]
+fn graveyard_class_expiry_with_foreign_owner_is_not_cleanup_evidence() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let cleanup = &fixture["scenarios"]["G-02"];
+    let addresses = &fixture["addresses"];
+    let output = interpret_test_batch(batch(
+        vec![raw_at_transaction(
+            with_topic0(
+                BaseNameRegistered {
+                    id: decimal_u256(&cleanup["token_id"])? + U256::from(4),
+                    owner: Address::from([0x66; 20]),
+                    expires: decimal_u256(&cleanup["cleanup_expiry"])?,
+                }
+                .encode_log_data(),
+                keccak256(b"NameRegistered(uint256,address,uint256)"),
+            ),
+            cleanup["cleanup_block"].as_i64().unwrap(),
+            0,
+            0,
+            addresses["base_registrar"].as_str().unwrap(),
+        )],
+        &fixture,
+        false,
+    ))?;
+    assert!(
+        output.normalized_events.is_empty(),
+        "the cleanup expiry class without the Graveyard owner is not cleanup evidence: {:#?}",
+        output.normalized_events
+    );
+    Ok(())
+}
+
+#[test]
+fn aligned_v1_expiry_keeps_base_renewal_out_of_v2_evidence() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let renewal_block = scenario["renewal_block"].as_i64().unwrap();
+    let aligned = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let output = interpret_test_batch(batch(
+        vec![
+            reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
+            expiry_updated_at(addresses, v2_token, aligned, renewal_block, 1),
+            base_renewed_at(
+                addresses,
+                decimal_u256(&scenario["base_token_id"])?,
+                aligned,
+                renewal_block,
+                2,
+            ),
+            bridge_renewed_at(
+                addresses,
+                v2_token,
+                label,
+                scenario["duration"].as_u64().unwrap(),
+                aligned,
+                renewal_block,
+                3,
+            ),
+        ],
+        &fixture,
+        true,
+    ))?;
+    assert_synchronized_pair(&output);
+    let base_expiry = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v2_migration_l1" && event.event_kind == "ExpiryChanged"
+        })
+        .expect("BaseRegistrar expiry arm");
+    assert!(
+        output
+            .migration_event_associations
+            .iter()
+            .all(|association| association.event_identity != base_expiry.event_identity),
+        "aligned migration-family arms must not self-match into the v2 evidence set"
+    );
+    Ok(())
+}
+
+#[test]
+fn bulk_renewals_with_a_shared_expiry_correlate_per_name_envelopes() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let second_label = "r01b";
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let second_v2_token = versioned_token(second_label, 0);
+    let second_base_token = U256::from_be_bytes(*keccak256(second_label.as_bytes()));
+    let renewal_block = scenario["renewal_block"].as_i64().unwrap();
+    let shared_expiry = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let duration = scenario["duration"].as_u64().unwrap();
+    let v1_expiry = scenario["v1_expiry"].as_u64().unwrap();
+    let output = interpret_test_batch(batch(
+        vec![
+            reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
+            reserved_at(
+                addresses,
+                second_v2_token,
+                second_label,
+                1_822_787_383,
+                226,
+                2,
+            ),
+            expiry_updated_at(addresses, v2_token, shared_expiry, renewal_block, 1),
+            base_renewed_at(
+                addresses,
+                decimal_u256(&scenario["base_token_id"])?,
+                v1_expiry,
+                renewal_block,
+                2,
+            ),
+            bridge_renewed_at(
+                addresses,
+                v2_token,
+                label,
+                duration,
+                shared_expiry,
+                renewal_block,
+                3,
+            ),
+            expiry_updated_at(addresses, second_v2_token, shared_expiry, renewal_block, 4),
+            base_renewed_at(
+                addresses,
+                second_base_token,
+                v1_expiry + 7,
+                renewal_block,
+                5,
+            ),
+            bridge_renewed_at(
+                addresses,
+                second_v2_token,
+                second_label,
+                duration,
+                shared_expiry,
+                renewal_block,
+                6,
+            ),
+        ],
+        &fixture,
+        true,
+    ))?;
+    let renewals = migration_renewals(&output);
+    assert_eq!(renewals.len(), 4, "events: {:#?}", output.normalized_events);
+    assert!(
+        renewals
+            .iter()
+            .all(|event| event.after_state["lifecycle_classification"] != "historical_renewal"),
+        "events: {:#?}",
+        output.normalized_events
+    );
+    let correlation = |log_index: i64| {
+        let event = renewals
+            .iter()
+            .find(|event| event.log_index == Some(log_index))
+            .unwrap_or_else(|| panic!("correlated renewal arm at log {log_index}"));
+        assert_eq!(event.migration_correlation_ids.len(), 1);
+        event.migration_correlation_ids[0].clone()
+    };
+    assert_eq!(correlation(2), correlation(3));
+    assert_eq!(correlation(5), correlation(6));
+    assert_ne!(
+        correlation(3),
+        correlation(6),
+        "each bulk-renewed name keeps its own envelope"
+    );
+    Ok(())
+}
+
+#[test]
+fn later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let renewal_block = scenario["renewal_block"].as_i64().unwrap();
+    let expiry = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let output = interpret_test_batch(batch(
+        vec![
+            reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
+            expiry_updated_at(addresses, v2_token, expiry, renewal_block, 1),
+            base_renewed_at(
+                addresses,
+                decimal_u256(&scenario["base_token_id"])?,
+                scenario["v1_expiry"].as_u64().unwrap(),
+                renewal_block,
+                2,
+            ),
+            bridge_renewed_at(
+                addresses,
+                v2_token,
+                label,
+                scenario["duration"].as_u64().unwrap(),
+                expiry,
+                renewal_block,
+                3,
+            ),
+            expiry_updated_at(addresses, v2_token, expiry, renewal_block, 4),
+        ],
+        &fixture,
+        true,
+    ))?;
+    assert_synchronized_pair(&output);
+    let echo = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v2_registry_l1"
+                && event.event_kind == "ExpiryChanged"
+                && event.log_index == Some(4)
+        })
+        .expect("idempotent registry echo after the bridge log");
+    assert!(
+        output
+            .migration_event_associations
+            .iter()
+            .all(|association| association.event_identity != echo.event_identity),
+        "a post-bridge echo must stay outside the envelope"
+    );
+    Ok(())
+}
+
+#[test]
+fn same_transaction_noise_leaves_the_renewal_correlation_id_unchanged() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let base_token = decimal_u256(&scenario["base_token_id"])?;
+    let renewal_block = scenario["renewal_block"].as_i64().unwrap();
+    let expiry = scenario["decoded_v2_expiry"].as_u64().unwrap();
+    let duration = scenario["duration"].as_u64().unwrap();
+    let v1_expiry = scenario["v1_expiry"].as_u64().unwrap();
+    let real_legs = |logs: &mut Vec<RawLogInput>| {
+        logs.extend([
+            expiry_updated_at(addresses, v2_token, expiry, renewal_block, 2),
+            base_renewed_at(addresses, base_token, v1_expiry, renewal_block, 3),
+            bridge_renewed_at(
+                addresses,
+                v2_token,
+                label,
+                duration,
+                expiry,
+                renewal_block,
+                4,
+            ),
+        ]);
+    };
+    let mut plain_logs = vec![reserved_at(
+        addresses,
+        v2_token,
+        label,
+        1_822_787_383,
+        226,
+        1,
+    )];
+    real_legs(&mut plain_logs);
+    let mut noisy_logs = vec![
+        reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
+        expiry_updated_at(addresses, v2_token, 111_222_333, renewal_block, 0),
+        reserved_at(addresses, v2_token, label, expiry, renewal_block, 1),
+    ];
+    real_legs(&mut noisy_logs);
+    let plain = interpret_test_batch(batch(plain_logs, &fixture, true))?;
+    let noisy = interpret_test_batch(batch(noisy_logs, &fixture, true))?;
+    let plain_id = assert_synchronized_pair(&plain);
+    let noisy_id = assert_synchronized_pair(&noisy);
+    assert_eq!(
+        noisy_id, plain_id,
+        "same-transaction noise must not enter the correlation evidence"
+    );
+    Ok(())
+}
+
+fn reserved_at(
+    addresses: &Value,
+    token: U256,
+    label: &str,
+    expiry: u64,
+    block: i64,
+    log_index: i64,
+) -> RawLogInput {
+    raw_at_transaction(
+        super::v2_registry::LabelReserved {
+            tokenId: token,
+            labelHash: keccak256(label.as_bytes()),
+            label: label.to_owned(),
+            expiry,
+            sender: Address::from([0x22; 20]),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        addresses["eth_registry"].as_str().unwrap(),
+    )
+}
+
+fn expiry_updated_at(
+    addresses: &Value,
+    token: U256,
+    new_expiry: u64,
+    block: i64,
+    log_index: i64,
+) -> RawLogInput {
+    raw_at_transaction(
+        super::v2_registry::ExpiryUpdated {
+            tokenId: token,
+            newExpiry: new_expiry,
+            sender: Address::from([0x22; 20]),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        addresses["eth_registry"].as_str().unwrap(),
+    )
+}
+
+fn base_renewed_at(
+    addresses: &Value,
+    base_token: U256,
+    expires: u64,
+    block: i64,
+    log_index: i64,
+) -> RawLogInput {
+    raw_at_transaction(
+        with_topic0(
+            BaseNameRenewed {
+                id: base_token,
+                expires: U256::from(expires),
+            }
+            .encode_log_data(),
+            keccak256(b"NameRenewed(uint256,uint256)"),
+        ),
+        block,
+        0,
+        log_index,
+        addresses["base_registrar"].as_str().unwrap(),
+    )
+}
+
+fn bridge_renewed_at(
+    addresses: &Value,
+    token: U256,
+    label: &str,
+    duration: u64,
+    new_expiry: u64,
+    block: i64,
+    log_index: i64,
+) -> RawLogInput {
+    raw_at_transaction(
+        with_topic0(
+            BridgeNameRenewed {
+                tokenId: token,
+                label: label.to_owned(),
+                duration,
+                newExpiry: new_expiry,
+                paymentToken: Address::from([0x33; 20]),
+                referrer: B256::ZERO,
+                amount: U256::from(640_000_005_u64),
+            }
+            .encode_log_data(),
+            keccak256(b"NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)"),
+        ),
+        block,
+        0,
+        log_index,
+        addresses["renewal_bridge"].as_str().unwrap(),
+    )
+}
+
+fn migration_renewals(output: &BatchOutput) -> Vec<&NormalizedEvent> {
+    output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.source_family == "ens_v2_migration_l1"
+                && event.event_kind == "RegistrationRenewed"
+        })
+        .collect()
+}
+
+/// Asserts one intact base+bridge synchronized-renewal envelope and returns its correlation id.
+fn assert_synchronized_pair(output: &BatchOutput) -> String {
+    let renewals = migration_renewals(output);
+    assert_eq!(renewals.len(), 2, "events: {:#?}", output.normalized_events);
+    assert!(
+        renewals
+            .iter()
+            .all(|event| event.after_state["lifecycle_classification"] != "historical_renewal"),
+        "events: {:#?}",
+        output.normalized_events
+    );
+    let bridge = renewals
+        .iter()
+        .find(|event| event.after_state.get("duration").is_some())
+        .expect("bridge renewal arm");
+    let base = renewals
+        .iter()
+        .find(|event| event.after_state.get("duration").is_none())
+        .expect("BaseRegistrar renewal arm");
+    assert_eq!(bridge.migration_correlation_ids.len(), 1);
+    assert_eq!(
+        base.migration_correlation_ids,
+        bridge.migration_correlation_ids
+    );
+    bridge.migration_correlation_ids[0].clone()
 }

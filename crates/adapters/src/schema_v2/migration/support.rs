@@ -118,11 +118,38 @@ pub(super) fn mark_direct_position(
     }
 }
 
+pub(super) fn mark_direct_historical(
+    output: &mut BatchOutput,
+    raw: &crate::schema_v2::RawLogInput,
+    id: &str,
+    lifecycle_classification: &str,
+) {
+    mark_direct_position(output, raw, id);
+    for event in &mut output.normalized_events {
+        if event.source_family == MIGRATION_FAMILY && same_position(event, raw) {
+            let state = event
+                .after_state
+                .as_object_mut()
+                .expect("migration event state is an object");
+            state.insert(
+                "lifecycle_classification".to_owned(),
+                Value::String(lifecycle_classification.to_owned()),
+            );
+            state.insert("historical".to_owned(), Value::Bool(true));
+            state.insert(
+                "authority_effect".to_owned(),
+                Value::String("none".to_owned()),
+            );
+        }
+    }
+}
+
 pub(super) fn correlate_cleanups(
     observations: &[&MigrationObservation],
     graveyard: &str,
     output: &mut BatchOutput,
 ) -> anyhow::Result<()> {
+    const GRAVEYARD_CLEANUP_EXPIRY: u64 = 18_446_744_073_701_775_615;
     for observation in observations.iter().copied().filter(|observation| {
         observation.event_name == "NameRegistered"
             && observation.emitter_role.as_deref() == Some("ens_v1_base_registrar")
@@ -131,11 +158,37 @@ pub(super) fn correlate_cleanups(
                 .get("owner")
                 .and_then(Value::as_str)
                 .is_some_and(|owner| owner.eq_ignore_ascii_case(graveyard))
+            && observation.decoded.get("expiry").and_then(Value::as_u64)
+                == Some(GRAVEYARD_CLEANUP_EXPIRY)
     }) {
         let logical_name_id = logical_name_from_decoded(&observation.decoded)?;
         let evidence = vec![observation_evidence(observation)];
         let id = correlation_id("graveyard_cleanup", Some(&logical_name_id), &evidence);
-        mark_direct_position(output, &observation.raw, &id);
+        mark_direct_historical(output, &observation.raw, &id, "graveyard_cleanup");
+    }
+    Ok(())
+}
+
+pub(super) fn correlate_historical_renewals(
+    observations: &[&MigrationObservation],
+    output: &mut BatchOutput,
+) -> anyhow::Result<()> {
+    for observation in observations.iter().copied().filter(|observation| {
+        observation.event_name == "NameRenewed"
+            && observation.emitter_role.as_deref() == Some("ens_v1_base_registrar")
+    }) {
+        let already_correlated = output.normalized_events.iter().any(|event| {
+            event.source_family == MIGRATION_FAMILY
+                && same_position(event, &observation.raw)
+                && !event.migration_correlation_ids.is_empty()
+        });
+        if already_correlated {
+            continue;
+        }
+        let logical_name_id = logical_name_from_decoded(&observation.decoded)?;
+        let evidence = vec![observation_evidence(observation)];
+        let id = correlation_id("historical_renewal", Some(&logical_name_id), &evidence);
+        mark_direct_historical(output, &observation.raw, &id, "historical_renewal");
     }
     Ok(())
 }
@@ -311,7 +364,7 @@ pub(super) fn same_transaction(
         && event.transaction_hash.as_deref() == Some(raw.transaction_hash.as_str())
 }
 
-fn same_position(event: &NormalizedEvent, raw: &crate::schema_v2::RawLogInput) -> bool {
+pub(super) fn same_position(event: &NormalizedEvent, raw: &crate::schema_v2::RawLogInput) -> bool {
     same_transaction(event, raw) && event.log_index == Some(raw.log_index)
 }
 

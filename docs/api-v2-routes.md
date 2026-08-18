@@ -521,8 +521,12 @@ Field ownership:
   shared latest-state collection rule.
 - Response shape: `data` is an array of dedicated lean event rows:
   `{type, name, namespace, registration_id, block_number, timestamp,
-  transaction_hash, log_index}`. `registration_id` is present only when the
-  event row is registration-resource anchored. Rows never include before/after
+  transaction_hash, log_index}`. `registration_id` carries actual registration
+  lifecycle identity and is `null` when the event is not associated with a
+  registration; reservation facts never carry one. The shared event-identity
+  contract, including the committed companion change that adds `resource_id`
+  for the underlying resource identity, is documented under
+  [`GET /v2/events`](#get-v2events). Rows never include before/after
   state, raw normalized-event payloads, or a `data` change object. Friendly
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`.
@@ -818,8 +822,10 @@ Field ownership:
   comma-separated set of `owner`, `manager`, and `registrant`; `any`
   normalizes to all three values. Rows match when any listed relation matches.
 - Response shape: `data` is an array of compact event rows using the shared
-  friendly `type` vocabulary. The correlation-scoped candidate visibility rule
-  from name history also applies here: slice 1 changes no address-history row,
+  friendly `type` vocabulary and the event-identity contract documented under
+  [`GET /v2/events`](#get-v2events). The correlation-scoped candidate
+  visibility rule from name history also applies here: slice 1 changes no
+  address-history row,
   and slice 2 consumer activation admits correlation-dependent rows. An
   independently admitted ordinary row remains visible while its candidate
   association remains diagnostics-only. Storage applies
@@ -891,15 +897,28 @@ Field ownership:
   and `namespace` is omitted, namespace is inferred from the name; `namespace`
   defaults to `ens` only when there is no name filter.
 - Response shape: `data` is an array of compact event rows with friendly
-  `type` vocabulary. Raw upstream event kinds are diagnostics-only. The
+  `type` vocabulary. Raw upstream event kinds are diagnostics-only. Event-row
+  identity uses two fields with distinct meanings. `registration_id` is actual
+  registration lifecycle identity: it is set only when the event is associated
+  with a registration lifecycle and is `null` otherwise. `resource_id` carries
+  the underlying resource identity, including non-registration resources such
+  as reserved entries. A reservation fact carries `resource_id` but never
+  `registration_id`; resource identity is not registration authority. The
+  served API currently exposes the old single-field shape, with
+  `registration_id` only; the field change is the committed contract and lands
+  in an immediate companion change. The
   slice-2 consumer activation contract maps each
   [migration correlation group's](glossary.md#migration-correlation-group)
   renewal-bridge and correlated registrar normalized rows to `renewal` and
   `expiry`, Graveyard claims to `release`, and controller membership changes
   to `permission`. Mapping is per normalized source event and resource anchor,
-  not per transaction: one synchronized renewal transaction can therefore
-  contain three `renewal` rows and two `expiry` rows; no synthetic collapsed
-  renewal is created. The candidate `MigrationApplied` and
+  not per transaction. A synchronized renewal emits one row for each real
+  lifecycle owner/resource participating in renewal, so one synchronized
+  renewal transaction contains two `renewal` rows — the renewal-bridge arm and
+  the ENSv1-registrar arm — and two `expiry` rows. Reservation-scoped state
+  changes remain reservation/resource facts and do not produce registration
+  renewal rows; no synthetic collapsed renewal is created. The candidate
+  `MigrationApplied` and
   `ContractDiscovered` kinds have no product event type. During slice 1, every
   correlation-dependent row carrying `consumer_visibility=candidate` is excluded
   even if its familiar event kind would otherwise map above or its source family

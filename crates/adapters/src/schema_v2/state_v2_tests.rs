@@ -6,6 +6,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 const ROOT: &str = "0x0000000000000000000000000000000000000042";
 const CHILD: &str = "0x0000000000000000000000000000000000000043";
+const THIRD: &str = "0x0000000000000000000000000000000000000044";
+const NEST_ROOT: &str = "0x0000000000000000000000000000000000000050";
+const NEST: &str = "0x0000000000000000000000000000000000000051";
 const NAMESPACE: &str = "ens";
 #[test]
 fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
@@ -23,6 +26,18 @@ fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
 }
 #[test]
 fn v2_targeted_invalidation_matches_the_former_full_walk() {
+    assert_targeted_refresh_matches_full_walk(reserved_state(), |state| {
+        state.attach_v2_unbound_resource(
+            ROOT,
+            "0x01",
+            "0x99".to_owned(),
+            Uuid::from_u128(99),
+            Some(Uuid::from_u128(100)),
+        );
+    });
+    assert_targeted_refresh_matches_full_walk(reserved_resource_state(), |state| {
+        install_token(state, ROOT, "0x01", b"alpha", 200);
+    });
     assert_targeted_refresh_matches_full_walk(nested_state(100), |state| {
         state.set_v2_parent_claim(CHILD, None, b"sub");
     });
@@ -38,6 +53,68 @@ fn v2_targeted_invalidation_matches_the_former_full_walk() {
     assert_targeted_refresh_matches_full_walk(nested_state(100), |state| {
         install_token(state, ROOT, "0x09", b"sub", 100);
     });
+}
+#[test]
+fn v2_duplicate_surface_refresh_is_visit_set_invariant() {
+    // Two registries anchored to the same suffix each hold a registered, resource-linked token
+    // labeled "alpha", so both compute the same logical name. Dirtying only one co-holder must
+    // elect the same active resource as a full walk.
+    assert_targeted_refresh_matches_full_walk(duplicate_surface_state(), |state| {
+        state.set_v2_resolver(ROOT, "0x01", Some("0xresolver".to_owned()));
+    });
+    // Releasing one co-holder must hand the surface's active resource to the survivor.
+    assert_targeted_refresh_matches_full_walk(duplicate_surface_state(), |state| {
+        state.release_v2_token(CHILD, "0x01");
+    });
+}
+#[test]
+fn v2_contested_surface_release_keeps_the_max_key_holder_resource() {
+    // Three registries anchored to the same suffix co-hold "alpha", giving the surface three
+    // asserting holders with distinct `emitter:token_id` keys. The election rule is absolute: the
+    // greatest token key among registered, resource-linked holders wins. Releasing the middle-key
+    // holder must leave the max-key holder's resource active — a min-key election would hand the
+    // surface to the smallest survivor instead.
+    let mut state = contested_surface_state(&[ROOT, CHILD, THIRD]);
+    state.refresh_dirty_v2_names(1);
+    let name = state
+        .v2_token(THIRD, "0x01")
+        .and_then(|token| token.name)
+        .expect("max-key co-holder names the contested surface");
+    state
+        .release_v2_token(CHILD, "0x01")
+        .expect("middle-key co-holder release");
+    state.refresh_dirty_v2_names(2);
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id, Some(Uuid::from_u128(3))))
+    );
+    assert_v2_indexes_are_derived(&state);
+}
+#[test]
+fn v2_changed_away_winner_hands_the_surface_to_the_surviving_holder() {
+    // A registry anchored at "eth" holds "alpha" via one resource, contested by a claim-path
+    // registry (anchored at the namespace root, its "eth" token claimed as the nested registry's
+    // parent) whose greater-key "alpha" holder owns the election. Dropping the parent claim
+    // changes the winner's computed name away from the surface; the refresh that visits only the
+    // departing holder must re-elect the survivor's resource rather than leave the surface with
+    // no active resource.
+    let mut state = claim_path_contested_state();
+    state.refresh_dirty_v2_names(1);
+    let name = state
+        .v2_token(NEST, "0x01")
+        .and_then(|token| token.name)
+        .expect("claim-path co-holder names the contested surface");
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id.clone(), Some(Uuid::from_u128(2))))
+    );
+    state.set_v2_parent_claim(NEST, None, b"eth");
+    state.refresh_dirty_v2_names(2);
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id, Some(Uuid::from_u128(1))))
+    );
+    assert_v2_indexes_are_derived(&state);
 }
 fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl Fn(&mut State)) {
     baseline.refresh_dirty_v2_names(1);
@@ -126,6 +203,28 @@ fn v2_reverse_indexes_resolve_hits_misses_regeneration_and_release() {
     assert!(has_upstream(&state, "0x99"));
     state.release_v2_token(ROOT, "0x02").expect("token release");
     assert!(!has_upstream(&state, "0x99") && !has_name(&state, "0x02", &logical_name_id));
+    assert_v2_indexes_are_derived(&state);
+}
+#[test]
+fn v2_reserved_resource_is_indexed_without_an_active_binding_and_survives_claim() {
+    let mut state = reserved_resource_state();
+    let reserved = state.v2_token(ROOT, "0x01").expect("reserved token state");
+    let name = reserved.name.as_ref().expect("reserved name facts");
+    assert_v2_indexes_are_derived(&state);
+    assert!(has_upstream(&state, "0x99"));
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id.clone(), None))
+    );
+    install_token(&mut state, ROOT, "0x01", b"alpha", 200);
+    state.refresh_dirty_v2_names(3);
+    let claimed = state.v2_token(ROOT, "0x01").expect("claimed token state");
+    assert_eq!(claimed.resource_id, reserved.resource_id);
+    assert_eq!(claimed.token_lineage_id, reserved.token_lineage_id);
+    assert_eq!(
+        state.name_link_by_namehash(NAMESPACE, &name.namehash),
+        Some((name.logical_name_id.clone(), Some(Uuid::from_u128(99))))
+    );
     assert_v2_indexes_are_derived(&state);
 }
 #[test]
@@ -226,12 +325,91 @@ fn anchors() -> Vec<(String, String, Vec<String>)> {
         vec!["eth".to_owned()],
     )]
 }
+fn duplicate_surface_state() -> State {
+    contested_surface_state(&[ROOT, CHILD])
+}
+/// One registered, resource-linked "alpha" holder per registry, all anchored to the same suffix,
+/// so every holder computes the same surface. Holder `n` (in registry order) carries resource
+/// `Uuid::from_u128(n + 1)`.
+fn contested_surface_state(registries: &[&str]) -> State {
+    let mut state = State::new(
+        Vec::new(),
+        registries
+            .iter()
+            .map(|address| {
+                (
+                    (*address).to_owned(),
+                    NAMESPACE.to_owned(),
+                    vec!["eth".to_owned()],
+                )
+            })
+            .collect(),
+    );
+    for (ordinal, registry) in registries.iter().enumerate() {
+        install_token(&mut state, registry, "0x01", b"alpha", 100);
+        state.link_v2_resource(
+            registry,
+            "0x01",
+            format!("0x{:02x}", 0xaa + ordinal),
+            Uuid::from_u128(ordinal as u128 + 1),
+            None,
+        );
+    }
+    state
+}
+fn claim_path_contested_state() -> State {
+    let mut state = State::new(
+        Vec::new(),
+        vec![
+            (
+                ROOT.to_owned(),
+                NAMESPACE.to_owned(),
+                vec!["eth".to_owned()],
+            ),
+            (NEST_ROOT.to_owned(), NAMESPACE.to_owned(), Vec::new()),
+        ],
+    );
+    install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+    state.link_v2_resource(ROOT, "0x01", "0xaa".to_owned(), Uuid::from_u128(1), None);
+    install_token(&mut state, NEST_ROOT, "0x01", b"eth", 100);
+    state.set_v2_subregistry(NEST_ROOT, "0x01", Some(NEST.to_owned()));
+    state.set_v2_parent_claim(NEST, Some(NEST_ROOT.to_owned()), b"eth");
+    install_token(&mut state, NEST, "0x01", b"alpha", 100);
+    state.link_v2_resource(NEST, "0x01", "0xbb".to_owned(), Uuid::from_u128(2), None);
+    state
+}
 fn nested_state(parent_expiry: u64) -> State {
     let mut state = anchored_state();
     install_token(&mut state, ROOT, "0x01", b"sub", parent_expiry);
     state.set_v2_subregistry(ROOT, "0x01", Some(CHILD.to_owned()));
     state.set_v2_parent_claim(CHILD, Some(ROOT.to_owned()), b"sub");
     install_token(&mut state, CHILD, "0x02", b"leaf", 100);
+    state
+}
+fn reserved_state() -> State {
+    let mut state = anchored_state();
+    state.replace_v2_registration(
+        ROOT,
+        "0x01",
+        Uuid::from_u128(1),
+        NAMESPACE,
+        b"alpha",
+        100,
+        None,
+    );
+    state.refresh_dirty_v2_names(1);
+    state
+}
+fn reserved_resource_state() -> State {
+    let mut state = reserved_state();
+    state.attach_v2_unbound_resource(
+        ROOT,
+        "0x01",
+        "0x99".to_owned(),
+        Uuid::from_u128(99),
+        Some(Uuid::from_u128(100)),
+    );
+    state.refresh_dirty_v2_names(2);
     state
 }
 fn install_token(state: &mut State, emitter: &str, token_id: &str, raw_label: &[u8], expiry: u64) {
@@ -270,6 +448,7 @@ fn prior_event(
 fn assert_v2_indexes_are_derived(state: &State) {
     let mut upstream = OrdMap::<(String, String), OrdSet<String>>::new();
     let mut names = OrdMap::<(String, String), OrdSet<String>>::new();
+    let mut current_names = OrdMap::<String, OrdSet<String>>::new();
     let mut expiries = OrdSet::new();
     for (token_key, token) in &state.v2_tokens {
         let (emitter, token_id) = token_key
@@ -287,11 +466,18 @@ fn assert_v2_indexes_are_derived(state: &State) {
                 .or_default()
                 .insert(token_key.clone());
         }
+        if let Some(name) = token.name.as_ref() {
+            current_names
+                .entry(name.logical_name_id.clone())
+                .or_default()
+                .insert(token_key.clone());
+        }
         if let Some(expiry) = token.expiry {
             expiries.insert((expiry, token_key.clone()));
         }
     }
     assert_eq!(state.v2_token_by_upstream_resource_index, upstream);
     assert_eq!(state.v2_token_by_name_index, names);
+    assert_eq!(state.v2_tokens_by_current_name_index, current_names);
     assert_eq!(state.v2_expiries, expiries);
 }

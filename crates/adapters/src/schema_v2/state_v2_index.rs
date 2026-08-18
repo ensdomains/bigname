@@ -21,6 +21,7 @@ impl State {
     pub(in crate::schema_v2) fn rebuild_v2_token_indexes(&mut self) {
         self.v2_token_by_upstream_resource_index.clear();
         self.v2_token_by_name_index.clear();
+        self.v2_tokens_by_current_name_index.clear();
         let tokens = self
             .v2_tokens
             .iter()
@@ -89,6 +90,7 @@ impl State {
             remove_token_indexes(
                 &mut self.v2_token_by_upstream_resource_index,
                 &mut self.v2_token_by_name_index,
+                &mut self.v2_tokens_by_current_name_index,
                 token_key,
                 previous,
             );
@@ -97,6 +99,7 @@ impl State {
             insert_token_indexes(
                 &mut self.v2_token_by_upstream_resource_index,
                 &mut self.v2_token_by_name_index,
+                &mut self.v2_tokens_by_current_name_index,
                 token_key,
                 current,
             );
@@ -107,6 +110,7 @@ impl State {
 fn insert_token_indexes(
     upstream_index: &mut OrdMap<(String, String), OrdSet<String>>,
     name_index: &mut OrdMap<(String, String), OrdSet<String>>,
+    current_name_index: &mut OrdMap<String, OrdSet<String>>,
     token_key: &str,
     token: &V2TokenState,
 ) {
@@ -125,11 +129,18 @@ fn insert_token_indexes(
             .or_default()
             .insert(token_key.to_owned());
     }
+    if let Some(name) = token.name.as_ref() {
+        current_name_index
+            .entry(name.logical_name_id.clone())
+            .or_default()
+            .insert(token_key.to_owned());
+    }
 }
 
 fn remove_token_indexes(
     upstream_index: &mut OrdMap<(String, String), OrdSet<String>>,
     name_index: &mut OrdMap<(String, String), OrdSet<String>>,
+    current_name_index: &mut OrdMap<String, OrdSet<String>>,
     token_key: &str,
     token: &V2TokenState,
 ) {
@@ -149,6 +160,9 @@ fn remove_token_indexes(
             &(token_id.to_owned(), logical_name_id),
             token_key,
         );
+    }
+    if let Some(name) = token.name.as_ref() {
+        remove_index_key(current_name_index, &name.logical_name_id, token_key);
     }
 }
 

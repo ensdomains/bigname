@@ -275,6 +275,7 @@ fn interpret_loaded(
             raw.block_hash
         );
     }
+    super::identity::compact_reserved_label_preimages(&mut output)?;
     super::protocol::reconcile_batch(&mut output);
     super::migration::correlate(catalog, migration_observations, &mut output)?;
     Ok(output)

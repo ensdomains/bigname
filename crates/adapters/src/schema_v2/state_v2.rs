@@ -88,6 +88,16 @@ impl State {
         let token_key = v2_key(&emitter, token_id);
         let mut replaced = Vec::new();
         let previous = self.v2_tokens.remove(&token_key);
+        let retained_reservation_resource = previous.as_ref().filter(|previous| {
+            previous.registration.is_none()
+                && registration.is_some()
+                && previous.raw_label.as_deref() == Some(raw_label)
+        });
+        let upstream_resource =
+            retained_reservation_resource.and_then(|previous| previous.upstream_resource.clone());
+        let resource_id = retained_reservation_resource.and_then(|previous| previous.resource_id);
+        let token_lineage_id =
+            retained_reservation_resource.and_then(|previous| previous.token_lineage_id);
         if let Some(previous) = previous.as_ref() {
             self.replace_v2_token_indexes(&token_key, Some(previous), None);
             self.replace_v2_expiry_index(&token_key, previous.expiry, None);
@@ -123,17 +133,19 @@ impl State {
                 .unwrap_or(replaced_key);
             replaced.push((displaced_token, displaced));
         }
-        self.v2_tokens.insert(
-            token_key.clone(),
-            V2TokenState {
-                registry_contract_instance_id,
-                namespace: Some(namespace.to_owned()),
-                raw_label: Some(raw_label.to_vec()),
-                expiry: Some(expiry),
-                registration,
-                ..V2TokenState::default()
-            },
-        );
+        let current = V2TokenState {
+            registry_contract_instance_id,
+            namespace: Some(namespace.to_owned()),
+            raw_label: Some(raw_label.to_vec()),
+            expiry: Some(expiry),
+            registration,
+            upstream_resource,
+            resource_id,
+            token_lineage_id,
+            ..V2TokenState::default()
+        };
+        self.v2_tokens.insert(token_key.clone(), current.clone());
+        self.replace_v2_token_indexes(&token_key, None, Some(&current));
         self.replace_v2_expiry_index(&token_key, None, Some(expiry));
         self.mark_v2_token_component_dirty(&token_key);
         replaced
@@ -323,12 +335,63 @@ impl State {
         };
         self.replace_v2_token_indexes(&key, previous.as_ref(), Some(&state));
         self.mark_v2_token_dirty(key);
-        if let Some(name) = state.name.as_ref() {
+        if state.registration.is_some()
+            && let Some(name) = state.name.as_ref()
+        {
             self.known_surfaces.insert(name.logical_name_id.clone());
             self.active_resources
                 .insert(name.logical_name_id.clone(), resource_id);
         }
         state
+    }
+
+    pub(in crate::schema_v2) fn attach_v2_unbound_resource(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        upstream_resource: String,
+        resource_id: Uuid,
+        token_lineage_id: Option<Uuid>,
+    ) -> V2TokenState {
+        let key = v2_key(emitter, token_id);
+        let previous = self.v2_tokens.get(&key).cloned();
+        let current = {
+            let entry = self.v2_tokens.entry(key.clone()).or_default();
+            entry.upstream_resource = Some(upstream_resource);
+            entry.resource_id = Some(resource_id);
+            entry.token_lineage_id = token_lineage_id;
+            entry.clone()
+        };
+        self.replace_v2_token_indexes(&key, previous.as_ref(), Some(&current));
+        self.mark_v2_token_dirty(key);
+        current
+    }
+
+    pub(in crate::schema_v2) fn restore_v2_unbound_resource(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        event: &crate::schema_v2::model::PriorEventInput,
+    ) {
+        if let (Some(resource_id), Some(upstream_resource)) = (
+            event.resource_id,
+            event
+                .after_state
+                .get("upstream_resource")
+                .and_then(Value::as_str),
+        ) {
+            self.attach_v2_unbound_resource(
+                emitter,
+                token_id,
+                upstream_resource.to_owned(),
+                resource_id,
+                event
+                    .after_state
+                    .get("token_lineage_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok()),
+            );
+        }
     }
 
     pub(in crate::schema_v2) fn v2_token(
@@ -494,6 +557,17 @@ impl State {
             .name
             .as_ref()
             .map(|name| name.logical_name_id.as_str());
+        if let Some(logical_name_id) = logical_name_id {
+            // The departing holder may own the surface's active resource; dirty the surviving
+            // co-holders so the next targeted refresh re-elects the winner a full walk would.
+            let co_holders = self
+                .v2_tokens_by_current_name_index
+                .get(logical_name_id)
+                .cloned();
+            for token_key in co_holders.into_iter().flatten() {
+                self.mark_v2_token_dirty(token_key);
+            }
+        }
         self.replace_v2_current_surface(logical_name_id, None);
     }
 
