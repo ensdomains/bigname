@@ -12,6 +12,7 @@ mod child;
 const MIGRATION_MANIFEST_ID: i64 = 100;
 const REGISTRY_MANIFEST_ID: i64 = 101;
 const V1_REGISTRY_MANIFEST_ID: i64 = 102;
+const V1_WRAPPER_MANIFEST_ID: i64 = 103;
 
 sol! {
     event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation);
@@ -2049,8 +2050,14 @@ fn unlocked_name_logs(
 
 fn batch(raw_logs: Vec<RawLogInput>, fixture: &Value, include_registry_setup: bool) -> BatchInput {
     let addresses = &fixture["addresses"];
-    let mut manifests = vec![migration_manifest()];
+    let mut manifests = vec![migration_manifest(), wrapper_manifest()];
     let mut admissions = migration_admissions(addresses);
+    admissions.push(admission_at(
+        V1_WRAPPER_MANIFEST_ID,
+        "name_wrapper",
+        addresses["name_wrapper"].as_str().unwrap(),
+        7,
+    ));
     let mut discovery_rules = Vec::new();
     if include_registry_setup
         || raw_logs.iter().any(|raw| {
@@ -2254,6 +2261,43 @@ fn registry_manifest() -> ManifestInput {
                 "event ParentUpdated(address indexed parent, string label, address indexed sender)",
                 &["registry"],
                 &["ParentChanged"],
+            ),
+        ],
+    )
+}
+
+/// The ENSv1 NameWrapper the migration manifest names as a correlation address. A child's
+/// predecessor cleanup is emitted here, so a batch that carries a child migration carries these.
+fn wrapper_manifest() -> ManifestInput {
+    manifest_with_events(
+        V1_WRAPPER_MANIFEST_ID,
+        "ens",
+        "ens_v1_wrapper_l1",
+        &[
+            (
+                "NameWrapped",
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                &["name_wrapper"],
+                &[
+                    "TokenControlTransferred",
+                    "ExpiryChanged",
+                    "PermissionScopeChanged",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "PreimageObserved",
+                ],
+            ),
+            (
+                "TransferSingle",
+                "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)",
+                &["name_wrapper"],
+                &["TokenControlTransferred", "PermissionScopeChanged"],
+            ),
+            (
+                "NameUnwrapped",
+                "event NameUnwrapped(bytes32 indexed node, address owner)",
+                &["name_wrapper"],
+                &["SurfaceUnbound", "AuthorityEpochChanged"],
             ),
         ],
     )

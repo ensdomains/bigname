@@ -44,6 +44,7 @@ pub(super) fn correlate_children(
     observations: &[MigrationObservation],
     groups: &[RegistryGroup],
     name_wrapper: &str,
+    graveyard: &str,
     output: &mut BatchOutput,
     boundaries: &mut Vec<NormalizedEvent>,
 ) -> anyhow::Result<()> {
@@ -56,6 +57,7 @@ pub(super) fn correlate_children(
         catalog,
         migration_source,
         name_wrapper,
+        graveyard,
         &known,
         output,
         boundaries,
@@ -147,10 +149,12 @@ fn restored_registry(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn derive_boundaries(
     catalog: &Catalog,
     migration_source: &ManifestSource,
     name_wrapper: &str,
+    graveyard: &str,
     known: &BTreeMap<String, MigrationRegistry>,
     output: &mut BatchOutput,
     boundaries: &mut Vec<NormalizedEvent>,
@@ -188,6 +192,16 @@ fn derive_boundaries(
         if registration.logical_name_id.as_deref() != Some(logical_name_id.as_str()) {
             continue;
         }
+        // A boundary asserts that ENSv1 authority ended. Only the child's own ENSv1 cleanup shows
+        // that: the receiver parks a locked child's wrapper token in the Graveyard, and unwraps an
+        // emancipated child into it. Without that evidence the self-claim is an ordinary ENSv2
+        // registration, whatever its sender.
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
+        let Some(cleanup) = v1_cleanup(output, &registration, &namehash, name_wrapper, graveyard)
+        else {
+            continue;
+        };
         let child_registry = known
             .values()
             .find(|candidate| candidate.namehash == namehash && candidate.position < at);
@@ -200,6 +214,7 @@ fn derive_boundaries(
         if let Some(child_registry) = child_registry {
             evidence.extend(child_registry.evidence.clone());
         }
+        evidence.push(event_evidence(&cleanup));
         let correlated = output
             .normalized_events
             .iter()
@@ -346,6 +361,44 @@ fn receiver_registered_itself(event: &NormalizedEvent) -> bool {
         .get("emitting_address")
         .and_then(Value::as_str);
     matches!((sender, emitter), (Some(sender), Some(emitter)) if sender.eq_ignore_ascii_case(emitter))
+}
+
+/// The child's ENSv1 cleanup in the registration's own transaction: its wrapper token transferred
+/// to the Graveyard, or its node unwrapped into the Graveyard. Both are emitted by the ENSv1
+/// NameWrapper the migration manifest declares, so the evidence is manifest-anchored rather than
+/// inferred from whichever ENSv1 family a deployment happens to admit.
+fn v1_cleanup(
+    output: &BatchOutput,
+    registration: &NormalizedEvent,
+    namehash: &str,
+    name_wrapper: &str,
+    graveyard: &str,
+) -> Option<NormalizedEvent> {
+    output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.block_hash == registration.block_hash
+                && event.transaction_hash == registration.transaction_hash
+                && event
+                    .raw_fact_ref
+                    .get("emitting_address")
+                    .and_then(Value::as_str)
+                    .is_some_and(|address| address.eq_ignore_ascii_case(name_wrapper))
+                && retired_into(event, namehash, graveyard)
+        })
+        .cloned()
+}
+
+fn retired_into(event: &NormalizedEvent, namehash: &str, graveyard: &str) -> bool {
+    let field = |key: &str| event.after_state.get(key).and_then(Value::as_str);
+    let parked = event.event_kind == "TokenControlTransferred"
+        && field("namehash") == Some(namehash)
+        && field("to").is_some_and(|to| to.eq_ignore_ascii_case(graveyard));
+    let unwrapped = field("source_event") == Some("NameUnwrapped")
+        && field("node") == Some(namehash)
+        && field("owner").is_some_and(|owner| owner.eq_ignore_ascii_case(graveyard));
+    parked || unwrapped
 }
 
 fn child_namehash(parent_namehash: &str, labelhash: &str) -> anyhow::Result<String> {

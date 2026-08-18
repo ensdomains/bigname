@@ -84,6 +84,7 @@ pub(super) fn correlate(
         &observations,
         &registries,
         name_wrapper,
+        &graveyard,
         output,
         &mut boundaries,
     )?;

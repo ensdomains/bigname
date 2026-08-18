@@ -515,6 +515,17 @@ controller as `sender`.
 (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58)
+A child boundary additionally requires the child's own ENSv1 predecessor cleanup
+in the registration's transaction, which is what shows ENSv1 authority ended
+rather than merely that an ENSv2 registration happened. `locked_child` parks the
+child's wrapper token in the Graveyard without unwrapping it
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58);
+`emancipated_child` unwraps the child's node into the Graveyard
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+Both are emitted by the ENSv1 NameWrapper the migration manifest declares as a
+correlation address, so the requirement is manifest-anchored. A self-claim
+carrying neither derives no boundary.
+
 Correlation is per child registration, never per transaction membership: one
 transaction may carry a parent migration and several children, each with its own
 correlation ID and evidence chain. The parent registry's creation must precede
@@ -523,8 +534,8 @@ including within one transaction. `correlation_kind` is unchanged — a child
 group is an ordinary `authority_transition` group — and every child boundary and
 dependent effect carries `consumer_visibility=candidate`.
 
-Four shapes derive no child boundary, each as explicit non-support rather than a
-fallback, and a fifth never arises at all:
+Five shapes derive no child boundary, each as explicit non-support rather than a
+fallback, and a sixth never arises at all:
 
 - An unmigrated [migratable child](glossary.md#migratable-child) under a
   migrated parent. It produces no ENSv2 registration event at all: the child
@@ -543,6 +554,8 @@ fallback, and a fifth never arises at all:
 - A registration emitted by a registry that carries no
   `migration_registry_creation` correlation. Parent discovery is then
   incomplete and the emitter is an ordinary registry.
+- A self-claim with no ENSv1 predecessor cleanup for the child in the same
+  transaction. Nothing shows an ENSv1 authority ended, so nothing was migrated.
 
 `MigrationHelper` participation is the shape that never arises rather than one
 that is refused. The helper only forwards transfers and declares no event, so a

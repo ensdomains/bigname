@@ -649,15 +649,22 @@ ENSv1 NameWrapper immediately before its boundary, in both branches
 so a child has exactly one predecessor arm and the registrar-backed `.eth`
 second-level arm never applies to it.
 
-Two `migration_path` values produce one. `locked_child` deploys a nested
-registry for the child before registering it
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58);
-`emancipated_child` deploys no registry and instead unwraps the name into the
-Graveyard and injects it into the parent's existing registry
+Two `migration_path` values produce one, and each is admitted only with its own ENSv1
+predecessor cleanup in the registration's transaction. `locked_child` deploys a nested registry for
+the child and parks the child's wrapper token in the Graveyard without unwrapping it
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58);
+`emancipated_child` deploys no registry and instead unwraps the child's node into the Graveyard,
+injecting it into the parent's existing registry
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L176 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+A boundary asserts that ENSv1 authority ended, and only that cleanup shows it, so a self-claim
+carrying neither — a label with no ENSv1 history — derives no boundary and stays an ordinary ENSv2
+registration.
 
-Four shapes are refused, and one more never arises. A parent owner registering
+Five shapes are refused, and one more never arises. A self-claim with no ENSv1
+predecessor cleanup is not a migration, whatever its sender. A parent owner registering
 an unprotected child label directly is a real registration and an authority
 proof, but never a child `MigrationApplied`
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58)

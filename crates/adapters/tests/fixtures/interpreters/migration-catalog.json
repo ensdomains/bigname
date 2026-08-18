@@ -131,7 +131,16 @@
         "registry_created_log_index": 4,
         "subregistry_log_index": 14,
         "expected_boundary": true,
-        "migration_path": "locked_child"
+        "migration_path": "locked_child",
+        "labels": [
+          "sub",
+          "c01",
+          "eth"
+        ],
+        "wrap_block": 228,
+        "wrap_fuses": 65537,
+        "wrap_expiry": 1825206570,
+        "wrapped_owner": "0x90f79bf6eb2c4f870365e785982e1f101e93b906"
       }
     },
     "C-02": {
@@ -165,7 +174,16 @@
         "v2_registration_log_index": 6,
         "namehash": "0x71ab5dace1dfe0544aef251000d31277840fa35e615523b6a430c1ebb882b55e",
         "expected_boundary": true,
-        "migration_path": "emancipated_child"
+        "migration_path": "emancipated_child",
+        "labels": [
+          "sub",
+          "c02",
+          "eth"
+        ],
+        "wrap_block": 228,
+        "wrap_fuses": 65536,
+        "wrap_expiry": 1825206571,
+        "wrapped_owner": "0x90f79bf6eb2c4f870365e785982e1f101e93b906"
       }
     },
     "C-03": {
@@ -205,7 +223,16 @@
         "registry_created_log_index": 4,
         "subregistry_log_index": 14,
         "expected_boundary": true,
-        "migration_path": "locked_child"
+        "migration_path": "locked_child",
+        "labels": [
+          "sub",
+          "c03",
+          "eth"
+        ],
+        "wrap_block": 228,
+        "wrap_fuses": 327681,
+        "wrap_expiry": 1825206572,
+        "wrapped_owner": "0x90f79bf6eb2c4f870365e785982e1f101e93b906"
       },
       "renewal": {
         "block": 238,
@@ -290,7 +317,16 @@
         "registry_created_log_index": 4,
         "subregistry_log_index": 14,
         "expected_boundary": true,
-        "migration_path": "locked_child"
+        "migration_path": "locked_child",
+        "labels": [
+          "a",
+          "c04",
+          "eth"
+        ],
+        "wrap_block": 228,
+        "wrap_fuses": 65537,
+        "wrap_expiry": 1825206573,
+        "wrapped_owner": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
       },
       "grandchild": {
         "label": "b",
@@ -310,7 +346,17 @@
         "registry_created_log_index": 4,
         "subregistry_log_index": 14,
         "expected_boundary": true,
-        "migration_path": "locked_child"
+        "migration_path": "locked_child",
+        "labels": [
+          "b",
+          "a",
+          "c04",
+          "eth"
+        ],
+        "wrap_block": 229,
+        "wrap_fuses": 65537,
+        "wrap_expiry": 1825206573,
+        "wrapped_owner": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
       }
     },
     "C-05": {
@@ -401,7 +447,16 @@
         "expected_boundary": true,
         "migration_path": "locked_child",
         "subregistry_log_index": 46,
-        "registration_owner": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+        "registration_owner": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+        "labels": [
+          "sub",
+          "h01l",
+          "eth"
+        ],
+        "wrap_block": 233,
+        "wrap_fuses": 65537,
+        "wrap_expiry": 1825206576,
+        "wrapped_owner": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
       }
     },
     "H-04": {
