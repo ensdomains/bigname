@@ -210,8 +210,9 @@ authorize this table as the only durable execution-adjacent store.
 `manifest_authority_attestations` is the append-only audit for an operator-authorized Interpret redo that discharges a [manifest-authority marker](../docs/glossary.md#manifest-authority-marker). The marker-discharge transaction inserts one row for the chain, phase, invalidation generation, authority fingerprint, effective redo range, runner instance, and attestation time. The `(chain_id, phase_name, generation_token)` key prevents a second audit row for the same discharge. The phase runner emits telemetry from this row after commit and reads it again when resuming the matching interrupted redo.
 
 `project_generation_failures` is the append-only audit for a
-[projection generation](../docs/glossary.md#projection-generation-failure) that a
-projection-blocking invariant aborted. After the Project transaction rolls back,
+[projection generation](../docs/glossary.md#projection-generation) that a
+projection-blocking invariant aborted, recording one
+[projection generation failure](../docs/glossary.md#projection-generation-failure). After the Project transaction rolls back,
 the phase runner inserts one row in its own transaction for the chain, target
 block number and hash, interpreter content hash, failure kind, and a
 deterministic fingerprint of the conflict, plus an evidence payload carrying the

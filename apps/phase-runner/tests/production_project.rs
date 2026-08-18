@@ -11552,6 +11552,40 @@ async fn mainnet_dual_current_aborts_the_generation_and_appends_one_audit_row() 
     scratch.cleanup().await
 }
 
+// The false-positive guard: a Mainnet name whose predecessor binding closed at
+// the boundary is the ordinary migrated shape and must keep publishing.
+#[tokio::test]
+async fn a_closed_predecessor_publishes_on_mainnet_without_an_audit_row() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_migrated").await?;
+    let chain = "project-dual-current-migrated";
+    let logical_name_id = seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(4)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project_phase(scratch.pool(), chain, 5).await?;
+
+    let published: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(&logical_name_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(published, 1, "the migrated name still publishes on mainnet");
+    assert!(
+        generation_failure_rows(scratch.pool(), chain)
+            .await?
+            .is_empty(),
+        "a closed predecessor is not an invariant failure"
+    );
+
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn sepolia_profile_publishes_the_same_dual_current_corpus() -> Result<()> {
     let scratch = ScratchDatabase::create("project_dual_current_sepolia").await?;
@@ -11705,6 +11739,28 @@ async fn the_failure_fingerprint_is_stable_across_repeated_generations() -> Resu
     let chain = "project-dual-current-fingerprint";
     seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
 
+    // An incremental generation resuming past a clean target reaches the same
+    // conflict and fingerprints it identically to a full rebuild.
+    let incremental = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.into(),
+            target_block: 5,
+            affected_from_block: 4,
+            affected_to_block: 5,
+            resume_current: Some(Marker {
+                number: 3,
+                hash: block_hash(chain, 3),
+            }),
+            mode: RunMode::Normal,
+        })
+        .await
+        .expect_err("the incremental generation reaches the same conflict");
+    let incremental_fingerprint = incremental
+        .generation_failure_evidence()
+        .expect("the incremental failure carries evidence")
+        .failure_fingerprint
+        .clone();
+
     let mut fingerprints = Vec::new();
     for target in [5, 5, 4] {
         let error = Engine::new(scratch.pool().clone())
@@ -11730,6 +11786,10 @@ async fn the_failure_fingerprint_is_stable_across_repeated_generations() -> Resu
     assert_eq!(
         fingerprints[1].1, fingerprints[2].1,
         "the fingerprint covers the conflict, not the target block"
+    );
+    assert_eq!(
+        incremental_fingerprint, fingerprints[0].1,
+        "an incremental generation fingerprints the conflict like a full rebuild"
     );
 
     scratch.cleanup().await

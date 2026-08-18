@@ -36,15 +36,6 @@ pub(crate) async fn assert_publishable(
                    canonicality_state
             FROM chain_lineage
             WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3
-        ), open_bindings AS (
-            SELECT binding.*
-            FROM project_binding_candidates binding
-            CROSS JOIN target_time
-            WHERE binding.active_from < target_time.cutoff
-              AND (
-                  binding.active_to IS NULL
-                  OR binding.active_to >= target_time.cutoff
-              )
         ), conflict AS (
             SELECT authority.logical_name_id,
                    predecessor.surface_binding_id AS predecessor_binding_id,
@@ -80,17 +71,27 @@ pub(crate) async fn assert_publishable(
               ON boundary.normalized_event_id = authority.authority_proof_event_id
             JOIN LATERAL (
                 SELECT candidate.*
-                FROM open_bindings candidate
+                FROM project_binding_candidates candidate
                 WHERE candidate.logical_name_id = authority.logical_name_id
                   AND candidate.authority_arm = 'ens_v1'
+                  AND candidate.active_from < target_time.cutoff
+                  AND (
+                      candidate.active_to IS NULL
+                      OR candidate.active_to >= target_time.cutoff
+                  )
                 ORDER BY candidate.block_number DESC, candidate.surface_binding_id DESC
                 LIMIT 1
             ) predecessor ON TRUE
             JOIN LATERAL (
                 SELECT candidate.*
-                FROM open_bindings candidate
+                FROM project_binding_candidates candidate
                 WHERE candidate.logical_name_id = authority.logical_name_id
                   AND candidate.authority_arm = 'ens_v2'
+                  AND candidate.active_from < target_time.cutoff
+                  AND (
+                      candidate.active_to IS NULL
+                      OR candidate.active_to >= target_time.cutoff
+                  )
                 ORDER BY candidate.block_number DESC, candidate.surface_binding_id DESC
                 LIMIT 1
             ) successor ON TRUE

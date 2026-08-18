@@ -143,16 +143,24 @@ impl Phase for ProjectPhase {
             let outcome = match outcome {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    if let Some(evidence) = error.generation_failure_evidence() {
-                        crate::project_failure_audit::persist(
+                    let audit_error = match error.generation_failure_evidence() {
+                        Some(evidence) => crate::project_failure_audit::persist(
                             &self.pool,
                             &context.chain_id,
                             bigname_content_hash::INTERPRETER_CONTENT_HASH,
                             evidence,
                         )
-                        .await?;
-                    }
-                    return Err(runner_error(error));
+                        .await
+                        .err(),
+                        None => None,
+                    };
+                    let failure = runner_error(error);
+                    // The invariant diagnosis outlives a failed audit write.
+                    return Err(match audit_error {
+                        Some(audit_error) => failure
+                            .with_secondary("record projection generation failure", audit_error),
+                        None => failure,
+                    });
                 }
             };
             if let Some(hydrator) = &self.hydrator {

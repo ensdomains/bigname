@@ -169,14 +169,15 @@ approved phase-schema rebuild or additive schema-migration that creates a
 table. In particular, after applying the attestation-audit schema-migration for
 the [manifest-authority marker](glossary.md#manifest-authority-marker), run the
 `GRANT SELECT ON ALL TABLES` statement again before
-starting the runner. The
-[projection generation failure](glossary.md#projection-generation-failure)
-audit schema-migration creates a table the same way and needs the same regrant. Stop every old phase-runner and one-shot redo process
-before applying this schema-migration, and keep them stopped until the new
+starting the runner. Stop every old phase-runner and one-shot redo process
+before applying that schema-migration, and keep them stopped until the new
 binary is ready. An old binary recognizes the marker prefix but does not bind
 its boolean attestation to the new generation token or write the durable audit
-row. PostgreSQL does not extend an earlier all-tables grant to tables created
-later. Do not reuse the writer credential in the verification URL:
+row. The
+[projection generation failure](glossary.md#projection-generation-failure)
+audit schema-migration creates a table the same way and needs the same regrant,
+without that stop-the-runner requirement. PostgreSQL does not extend an earlier
+all-tables grant to tables created later. Do not reuse the writer credential in the verification URL:
 setting a writer session's default transaction to read-only does not remove
 that role's write authority, and startup rejects it.
 
