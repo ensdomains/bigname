@@ -305,7 +305,12 @@ publishes no partial generation, and fails readiness for that target
 generation. After the Project transaction rolls back, the phase runner writes a
 separate append-only `project_generation_failures` diagnostic audit row with
 both binding and resource identities, the boundary event, and the block,
-transaction, and log position of each. Reorgs retain the row and make its stored
+transaction, and log position of each. The assertion examines the names that
+generation derives, not the whole chain, so a clean run proves the invariant
+only for its own affected scope. On the normal path that is contained: a failed
+generation never advances the resume cursor, so the window holding the conflict
+is re-derived until it is repaired. An operator redo over a range that excludes
+the conflicted name still publishes. Reorgs retain the row and make its stored
 block hashes explicitly orphaned through lineage; a later successful generation
 does not erase the failure. Neither slice chooses by recency. A mixed
 Mainnet corpus with no provable boundary is explicit `unsupported` with

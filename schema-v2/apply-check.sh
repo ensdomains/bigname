@@ -161,7 +161,8 @@ for migration_file in \
     "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
     "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
     "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql" \
-    "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql"
+    "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
+    "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -291,7 +292,9 @@ for migration_file in \
     "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
     "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
-    "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql"
+    "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
+    "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
+    "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -1078,6 +1081,7 @@ BEGIN
             ('name_current'),
             ('name_surfaces'),
             ('normalized_events'),
+            ('project_generation_failures'),
             ('project_redo_resolver_evidence'),
             ('permissions_current'),
             ('permissions_current_resource_summary'),
@@ -1131,6 +1135,7 @@ BEGIN
             ('name_current'),
             ('name_surfaces'),
             ('normalized_events'),
+            ('project_generation_failures'),
             ('project_redo_resolver_evidence'),
             ('permissions_current'),
             ('permissions_current_resource_summary'),
@@ -1160,9 +1165,11 @@ BEGIN
     END IF;
 
     -- Add exact exceptions only after maintainer authorization.
+    -- `project_generation_failures` is the contracted name of the append-only
+    -- projection-generation failure audit (docs/storage.md, table ownership and
+    -- "Projection publication"); it is not retention-generation state.
     WITH maintainer_authorized_allowlist(table_name) AS (
-        SELECT NULL::text
-        WHERE FALSE
+        VALUES ('project_generation_failures')
     )
     SELECT string_agg(actual.table_name, ', ' ORDER BY actual.table_name)
     INTO forbidden_tables

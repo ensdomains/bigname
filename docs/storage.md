@@ -130,7 +130,7 @@ mandatory full Interpret and Project redos.
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
-| `project_generation_failures` (planned) | phase runner after Project rollback | Append-only audit evidence for a projection-blocking invariant failure; never a product projection. |
+| `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions | Active live/indexed resolver disagreements; diagnostic only. |
 
 Adapters provide interpretation behavior. They do not write projections. API
@@ -725,15 +725,23 @@ Consumer slice 2E adds one diagnostic exception to durable staging, not to
 projection ownership. A post-reconciliation dual-current invariant makes the
 Project transaction return a structured failure before `publish::swap`; that
 transaction rolls back completely. The phase runner then appends one
-`project_generation_failures` audit row in a separate transaction. The row is
-keyed by chain, target block number/hash, interpreter content hash, and failure
-kind, and stores both binding/resource identities, the activated boundary event
+[projection generation failure](glossary.md#projection-generation-failure) row
+to `project_generation_failures` in a separate transaction. The row is
+keyed by chain, target block number/hash, interpreter content hash, failure
+kind, and a deterministic fingerprint of the conflict, and stores both
+binding/resource identities, the activated boundary event
 identity, every relevant block/transaction/log position, and the canonicality
-observed at failure. It marks the target generation not ready. A later reorg or
-successful generation never deletes the audit row: its recorded block hashes
+observed at failure. The fingerprint is part of the key so that a retry of the
+same semantic failure records nothing, while a different conflict surfacing at
+the same target still appends its own evidence rather than being swallowed. One
+failed [projection generation](glossary.md#projection-generation) writes one
+row, deterministically for the lexicographically-first conflicting name; any
+further conflicting name surfaces on a later attempt. It marks the target
+projection generation not ready. A later reorg or successful projection
+generation never deletes the audit row: its recorded block hashes
 remain resolvable through lineage as canonical or orphaned, and a later success
-is a separate generation. Operator diagnostics may read this table; product
-routes may not.
+is a separate projection generation. Operator diagnostics may read this table;
+product routes may not.
 
 Projection rows carry:
 

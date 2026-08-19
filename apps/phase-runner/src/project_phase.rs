@@ -139,8 +139,30 @@ impl Phase for ProjectPhase {
                         ProjectRunMode::Redo
                     },
                 })
-                .await
-                .map_err(runner_error)?;
+                .await;
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let audit_error = match error.generation_failure_evidence() {
+                        Some(evidence) => crate::project_failure_audit::persist(
+                            &self.pool,
+                            &context.chain_id,
+                            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+                            evidence,
+                        )
+                        .await
+                        .err(),
+                        None => None,
+                    };
+                    let failure = runner_error(error);
+                    // The invariant diagnosis outlives a failed audit write.
+                    return Err(match audit_error {
+                        Some(audit_error) => failure
+                            .with_secondary("record projection generation failure", audit_error),
+                        None => failure,
+                    });
+                }
+            };
             if let Some(hydrator) = &self.hydrator {
                 hydrator
                     .hydrate_if_canonical_head(&context.chain_id, &outcome.current)
