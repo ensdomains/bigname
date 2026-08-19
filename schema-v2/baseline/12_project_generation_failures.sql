@@ -16,7 +16,10 @@ CREATE TABLE IF NOT EXISTS project_generation_failures (
     CHECK (target_block_number >= 0),
     CHECK (btrim(target_block_hash) <> ''),
     CHECK (btrim(interpreter_content_hash) <> ''),
-    CHECK (failure_kind = 'dual_current_exact_name_authority'),
+    CHECK (failure_kind IN (
+        'dual_current_exact_name_authority',
+        'dual_current_child_authority'
+    )),
     CHECK (failure_fingerprint ~ '^[0-9a-f]{64}$'),
     CHECK (btrim(logical_name_id) <> ''),
     CHECK (jsonb_typeof(evidence) = 'object')

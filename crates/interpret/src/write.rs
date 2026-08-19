@@ -358,7 +358,36 @@ async fn reopen_bindings_closed_in_range(
                    COALESCE(
                        event.after_state ->> '{SURFACE_BINDING_ID_KEY}',
                        event.after_state #>> '{{successor_binding,binding_id}}'
-                   ) AS opened_binding_id
+                   ) AS opened_binding_id,
+                   -- The arm the event's own evidence closes. An ordinary open or unbind closes
+                   -- only its own arm, so that arm is the one the event names: the binding it
+                   -- opened, or failing that its resource. A migration boundary is deliberately
+                   -- cross-arm and records the predecessor arm it closes. Without exact evidence
+                   -- the event reopens nothing rather than guessing an arm from position or
+                   -- source family.
+                   COALESCE(
+                       event.after_state #>> '{{predecessor_binding,authority_epoch}}',
+                       (
+                           SELECT CASE
+                               WHEN count(DISTINCT opened.authority_arm) = 1
+                                   THEN min(opened.authority_arm)
+                           END
+                           FROM surface_bindings opened
+                           WHERE opened.chain_id = event.chain_id
+                             AND opened.logical_name_id = event.logical_name_id
+                             AND CASE
+                                 WHEN COALESCE(
+                                     event.after_state ->> '{SURFACE_BINDING_ID_KEY}',
+                                     event.after_state #>> '{{successor_binding,binding_id}}'
+                                 ) IS NOT NULL
+                                     THEN opened.surface_binding_id::text = COALESCE(
+                                         event.after_state ->> '{SURFACE_BINDING_ID_KEY}',
+                                         event.after_state #>> '{{successor_binding,binding_id}}'
+                                     )
+                                 ELSE opened.resource_id = event.resource_id
+                             END
+                       )
+                   ) AS closed_arm
             FROM normalized_events event
             JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
@@ -383,6 +412,7 @@ async fn reopen_bindings_closed_in_range(
             FROM surface_bindings binding
             JOIN closing_events event
               ON event.logical_name_id = binding.logical_name_id
+             AND event.closed_arm = binding.authority_arm
              AND binding.active_to = {REDO_BINDING_CLOSE_CLAMP_SQL}
              AND (
                     (

@@ -451,7 +451,8 @@ async fn insert_close_event(
          ) VALUES ('close-event', 'ens', $1, $2, 'test', 1, 'ethereum', 2,
                    '0x02', '0xtx', 0, $4, 'ens_v2_migration', 'canonical',
                    CASE WHEN $5 THEN jsonb_build_object(
-                       'successor_binding', jsonb_build_object('binding_id', $3::text)
+                       'successor_binding', jsonb_build_object('binding_id', $3::text),
+                       'predecessor_binding', jsonb_build_object('authority_epoch', 'ens_v1')
                    ) ELSE jsonb_build_object('{SURFACE_BINDING_ID_KEY}', $3::text) END)",
     ))
     .bind(NAME)
@@ -804,15 +805,53 @@ async fn wrapper_selector_is_enforced_by_the_transition_writer() -> TestResult {
     Ok(())
 }
 
-/// Slice 3A derives direct-child migration boundaries under their own predecessor anchor, as
-/// candidate output only. Activating one is slice 3B, so until then this writer must refuse the
-/// anchor outright rather than fall back to the `.eth` second-level wrapper rule, which would
-/// close the wrong ENSv1 binding.
-#[tokio::test]
-async fn the_child_predecessor_anchor_is_refused_until_it_is_activated() -> TestResult {
-    let database = database().await?;
-    let pool = database.pool();
-    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+const CLEANUP_LOG_INDEX: i64 = 3;
+const BOUNDARY_LOG_INDEX: i64 = 5;
+
+/// The shape slice 3A records for a direct child: its own anchor in the ENSv1 NameWrapper, and a
+/// predecessor selected against the child's ENSv1 cleanup rather than the ENSv2 registration.
+fn child_selector() -> serde_json::Value {
+    json!({
+        "authority_epoch":"ens_v1",
+        "logical_name_id":NAME,
+        "selection":"active_immediately_before_predecessor_cleanup",
+        "predecessor_cleanup":{
+            "event_identity":"child-cleanup",
+            "source_event":"NameUnwrapped",
+            "block_number":2,
+            (TRANSACTION_INDEX_KEY):0,
+            (LOG_INDEX_KEY):CLEANUP_LOG_INDEX
+        },
+        "resource":{
+            "anchor_kind":"wrapper_backed_child_control",
+            "contract_address":WRAPPER,
+            "wrapper_token_id":"0xname",
+            "namehash":"0xname",
+            "parent_namehash":"0xparent",
+            "labelhash":"0xlabel",
+            "parent_migration_correlation_id":"0xparentcorrelation",
+            "selection":"current_wrapper_resource_immediately_before_predecessor_cleanup"
+        }
+    })
+}
+
+fn cleanup_event(source_event: &str, log_index: i64) -> NormalizedEvent {
+    let mut event = predecessor_evidence(
+        "child-cleanup",
+        1,
+        WRAPPER,
+        json!({"source_event":source_event,"authority_kind":"wrapper","node":"0xname"}),
+    );
+    event.block_number = Some(2);
+    event.block_hash = Some("0x02".to_owned());
+    event.transaction_hash = Some("0xtx".to_owned());
+    event.log_index = Some(log_index);
+    event
+}
+
+/// One activated child boundary with its recorded cleanup, the ENSv1 wrapper evidence its anchor
+/// resolves through, and the ENSv2 successor the registration opens.
+fn child_activation(selector: serde_json::Value) -> TestResult<BatchOutput> {
     let mut output = ordinary_open(12, 2, "ens_v2", 2);
     output.normalized_events.push(predecessor_evidence(
         "same-batch-wrapper-evidence",
@@ -820,51 +859,143 @@ async fn the_child_predecessor_anchor_is_refused_until_it_is_activated() -> Test
         WRAPPER,
         json!({"authority_kind":"wrapper","node":"0xname"}),
     ));
-    let mut child_selector = wrapper_selector(WRAPPER);
-    child_selector["resource"]["anchor_kind"] = json!("wrapper_backed_child_control");
-    child_selector["resource"]["parent_namehash"] = json!("0xparent");
-    child_selector["resource"]["labelhash"] = json!("0xlabel");
-    activate_with_selector(&mut output, child_selector.clone())?;
-    let error = apply(pool, &output).await.unwrap_err().to_string();
-    assert!(
-        error.contains("invalid predecessor resource selector"),
-        "{error}"
-    );
-    assert_eq!(
-        active_to(pool, 11).await?,
-        None,
-        "a refused child anchor must not close the ENSv1 predecessor"
-    );
+    output
+        .normalized_events
+        .push(cleanup_event("NameUnwrapped", CLEANUP_LOG_INDEX));
+    activate_with_selector(&mut output, selector)?;
+    boundary_at_log_index(&mut output, BOUNDARY_LOG_INDEX);
+    Ok(output)
+}
 
-    // The shape slice 3A actually records also selects its predecessor against the child's ENSv1
-    // cleanup rather than the boundary, which this writer likewise does not admit.
-    child_selector["selection"] = json!("active_immediately_before_predecessor_cleanup");
-    child_selector["predecessor_cleanup"] = json!({
-        "event_identity":"child-cleanup",
-        "source_event":"NameUnwrapped",
-        "block_number":2,
-        (TRANSACTION_INDEX_KEY):0,
-        (LOG_INDEX_KEY):0
-    });
-    child_selector["resource"]["selection"] =
-        json!("current_wrapper_resource_immediately_before_predecessor_cleanup");
-    let mut recorded = ordinary_open(13, 3, "ens_v2", 2);
-    recorded.normalized_events.push(predecessor_evidence(
-        "same-batch-wrapper-evidence",
-        1,
-        WRAPPER,
-        json!({"authority_kind":"wrapper","node":"0xname"}),
-    ));
-    activate_with_selector(&mut recorded, child_selector)?;
-    let error = apply(pool, &recorded).await.unwrap_err().to_string();
-    assert!(error.contains("invalid authority selector"), "{error}");
+/// A child's ENSv1 authority ends at its cleanup, which precedes the registration in the same
+/// transaction. The activated transition therefore resolves and closes the predecessor there: the
+/// emancipated shape's unwrap already closed the wrapper binding at that log, and closing at the
+/// later registration would re-extend it.
+#[tokio::test]
+async fn an_activated_child_boundary_closes_its_predecessor_at_the_recorded_cleanup() -> TestResult
+{
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    let output = child_activation(child_selector())?;
+
+    // Closed exactly at the cleanup still resolves; one microsecond earlier does not.
+    close_binding(pool, 11, CLEANUP_LOG_INDEX - 1).await?;
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(error.contains("0 active ENSv1 predecessors"), "{error}");
+
+    close_binding(pool, 11, CLEANUP_LOG_INDEX).await?;
+    apply(pool, &output).await?;
     assert_eq!(
         active_to(pool, 11).await?,
-        None,
-        "a refused child selector must not close the ENSv1 predecessor"
+        Some(
+            time::OffsetDateTime::from_unix_timestamp(2)?
+                + time::Duration::microseconds(CLEANUP_LOG_INDEX)
+        ),
+        "the predecessor closes at the cleanup, not at the boundary"
     );
     database.cleanup().await?;
     Ok(())
+}
+
+/// The recorded cleanup is the wire input the whole child rule rests on, so every field of it has
+/// to match an event that exists exactly as described. "Some earlier wrapper event" is not
+/// equivalent evidence, and neither selector may be resolved through the other's rule.
+#[tokio::test]
+async fn a_child_boundary_refuses_inexact_cleanup_evidence() -> TestResult {
+    let boundary_relative = {
+        let mut selector = child_selector();
+        selector["selection"] = json!("active_immediately_before_boundary");
+        selector
+    };
+    let second_level_anchor = {
+        let mut selector = child_selector();
+        selector["resource"]["anchor_kind"] = json!("wrapper_backed_control");
+        selector
+    };
+    let cases: Vec<(&str, serde_json::Value, &str)> = vec![
+        (
+            "boundary-relative child anchor",
+            boundary_relative,
+            "invalid authority selector",
+        ),
+        (
+            "second-level anchor with a cleanup",
+            second_level_anchor,
+            "invalid authority selector",
+        ),
+        (
+            "cleanup at the registration",
+            mutate(|selector| {
+                selector["predecessor_cleanup"][LOG_INDEX_KEY] = json!(BOUNDARY_LOG_INDEX);
+            }),
+            "invalid predecessor resource selector",
+        ),
+        (
+            "cleanup in another transaction",
+            mutate(|selector| {
+                selector["predecessor_cleanup"][TRANSACTION_INDEX_KEY] = json!(1);
+            }),
+            "invalid predecessor resource selector",
+        ),
+        (
+            "missing parent evidence",
+            mutate(|selector| {
+                selector["resource"]["parent_migration_correlation_id"] = json!("");
+            }),
+            "invalid predecessor resource selector",
+        ),
+        (
+            "wrong cleanup event identity",
+            mutate(|selector| {
+                selector["predecessor_cleanup"]["event_identity"] = json!("other-cleanup");
+            }),
+            "no exact ENSv1 predecessor cleanup",
+        ),
+        (
+            "wrong cleanup source event",
+            mutate(|selector| {
+                selector["predecessor_cleanup"]["source_event"] = json!("TransferSingle");
+            }),
+            "no exact ENSv1 predecessor cleanup",
+        ),
+        (
+            "wrong cleanup log index",
+            mutate(|selector| {
+                selector["predecessor_cleanup"][LOG_INDEX_KEY] = json!(CLEANUP_LOG_INDEX - 1);
+            }),
+            "no exact ENSv1 predecessor cleanup",
+        ),
+        (
+            "wrong wrapper anchor",
+            mutate(|selector| {
+                selector["resource"]["contract_address"] =
+                    json!("0x0000000000000000000000000000000000000bad");
+            }),
+            "no exact ENSv1 predecessor cleanup",
+        ),
+    ];
+    for (case, selector, expected) in cases {
+        let database = database().await?;
+        let pool = database.pool();
+        insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+        let output = child_activation(selector)?;
+        let error = apply(pool, &output).await.unwrap_err().to_string();
+        assert!(error.contains(expected), "{case}: {error}");
+        assert_eq!(
+            active_to(pool, 11).await?,
+            None,
+            "{case} must not close the ENSv1 predecessor"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+fn mutate(edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+    let mut selector = child_selector();
+    edit(&mut selector);
+    selector
 }
 
 #[tokio::test]
@@ -917,6 +1048,73 @@ async fn partial_redo_ignores_a_surviving_successor_in_another_arm() -> TestResu
     crate::write::reopen_bindings_closed_in_range(&mut transaction, "ethereum", 2, 2).await?;
     transaction.commit().await?;
     assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A redo reopen undoes the close a closing event caused, so it must match the arm that event's own
+/// evidence names. Two bindings of one name closed at the same instant on different arms are
+/// distinguishable only by that predicate ([#471](https://github.com/ensdomains/bigname/issues/471)).
+#[tokio::test]
+async fn redo_reopen_matches_the_closing_event_arm() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_binding(pool, 21, NAME, 3, "ens_v2").await?;
+    // One ENSv1 open closes the ENSv1 predecessor; the ENSv2 binding is closed at the same instant
+    // by hand, which is the coincidence the arm-blind join could not tell apart.
+    apply(pool, &ordinary_open(12, 2, "ens_v1", 2)).await?;
+    let clamp = active_to(pool, 11)
+        .await?
+        .expect("ENSv1 predecessor closed");
+    sqlx::query("UPDATE surface_bindings SET active_to = $2 WHERE surface_binding_id = $1")
+        .bind(Uuid::from_u128(21))
+        .bind(clamp)
+        .execute(pool)
+        .await?;
+    insert_close_event(pool, SURFACE_BOUND_EVENT_KIND, Some(12), 1, false).await?;
+
+    let mut transaction = pool.begin().await?;
+    crate::write::orphan_bindings_started_in_range(&mut transaction, "ethereum", 2, 2).await?;
+    crate::write::reopen_bindings_closed_in_range(&mut transaction, "ethereum", 2, 2).await?;
+    transaction.commit().await?;
+    assert_eq!(
+        active_to(pool, 11).await?,
+        None,
+        "the closing event's own arm reopens"
+    );
+    assert_eq!(
+        active_to(pool, 21).await?,
+        Some(clamp),
+        "the other arm's binding stays closed"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The binding upsert's identity guard is loud, not silent: a same-identifier row whose name,
+/// resource, kind, or arm disagrees updates nothing and the writer raises rather than continuing
+/// ([#471](https://github.com/ensdomains/bigname/issues/471)'s second finding).
+#[tokio::test]
+async fn a_conflicting_binding_identity_fails_loudly() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    let error = apply(pool, &ordinary_open(11, 1, "ens_v2", 2))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("already bound to different identity data"),
+        "{error}"
+    );
+    let arm: String = sqlx::query_scalar(
+        "SELECT authority_arm FROM surface_bindings WHERE surface_binding_id=$1",
+    )
+    .bind(Uuid::from_u128(11))
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(arm, "ens_v1", "the conflicting write changed nothing");
     database.cleanup().await?;
     Ok(())
 }
