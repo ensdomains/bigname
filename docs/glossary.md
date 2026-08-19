@@ -1045,6 +1045,25 @@ table may carry explicitly documented Project-owned maintenance fields that
 readers never select and that an affected row rebuild clears. The schema-v2
 Project phase is the only projection writer.
 
+**Projection generation** — one Project run that derives and publishes the
+affected projection set for a target block in a single transaction. Always
+qualify it: the bare word *generation* is taken by the schema-migration-era
+[raw-log retention generation](#generation-raw-log-retention-generation), which
+is unrelated.
+
+**Projection generation failure** (`project_generation_failures`) — the
+append-only diagnostic row the phase runner appends when a projection-blocking
+invariant aborts a projection generation before publication. The generation
+transaction rolls back and publishes nothing; the evidence is then written in a
+separate transaction, so it survives the rollback. A row records the chain, the
+target block, the interpreter build, the invariant that failed, and the
+identities, positions, and canonicality observed at failure. It marks that
+target's projection generation not ready. A retried generation adds no second
+row for the same conflict, and neither a later success nor a reorg deletes one:
+an orphaned block hash stays resolvable through lineage, which is how a stale
+row is told apart from a live one. Operator diagnostics read this table; product
+routes do not.
+
 **Raw facts** — the stored record of what was observed on chain: selected
 logs and the transaction/receipt fields needed to decode them. Their content is
 append-only, edited only by explicit, documented corrections;

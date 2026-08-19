@@ -468,3 +468,162 @@ async fn bootstrap_rejects_structural_drift_in_an_existing_phase_schema() -> Res
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn generation_failure_audit_matches_between_baseline_and_schema_migration() -> Result<()> {
+    let migrated = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_generation_failure_migrated")
+            .pool_max_connections(2)
+            .parse_context("failed to parse migrated failure-audit database URL")
+            .admin_connect_context("failed to connect migrated failure-audit admin pool")
+            .pool_connect_context("failed to connect migrated failure-audit pool"),
+    )
+    .await?;
+    let mut transaction = migrated.pool().begin().await?;
+    sqlx::query("CREATE SCHEMA bigname_phase")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+        .execute(&mut *transaction)
+        .await?;
+    for sql in [
+        include_str!("../../../schema-v2/baseline/01_chain.sql"),
+        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
+        include_str!("../../../schema-v2/baseline/03_identity.sql"),
+        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
+        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../../schema-v2/baseline/06_projections.sql"),
+        include_str!("../../../schema-v2/baseline/07_labels.sql"),
+        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
+        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
+        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+        include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_phase_state (
+             chain_id, phase_name, input_content_hash,
+             current_block_number, current_block_hash
+         ) VALUES (
+             'failure-audit-resume', 'project', 'resume-marker', 41, 'resume-hash'
+         )",
+    )
+    .execute(migrated.pool())
+    .await?;
+    let absent_before: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_phase.project_generation_failures') IS NULL",
+    )
+    .fetch_one(migrated.pool())
+    .await?;
+    assert!(absent_before);
+
+    bigname_storage::MIGRATOR.run(migrated.pool()).await?;
+    let migrated_structure = load_table_structure(migrated.pool()).await?;
+    let resume: (i64, String) = sqlx::query_as(
+        "SELECT current_block_number, current_block_hash
+         FROM bigname_phase.chain_phase_state
+         WHERE chain_id = 'failure-audit-resume' AND phase_name = 'project'",
+    )
+    .fetch_one(migrated.pool())
+    .await?;
+    assert_eq!(
+        resume,
+        (41, "resume-hash".to_owned()),
+        "the resume cursor survives the schema migration"
+    );
+
+    let installed = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_generation_failure_baseline")
+            .pool_max_connections(2)
+            .parse_context("failed to parse baseline failure-audit database URL")
+            .admin_connect_context("failed to connect baseline failure-audit admin pool")
+            .pool_connect_context("failed to connect baseline failure-audit pool"),
+    )
+    .await?;
+    initialize_schema_v2(installed.pool()).await?;
+    let installed_structure = load_table_structure(installed.pool()).await?;
+
+    assert!(
+        !installed_structure.is_empty(),
+        "the baseline installs the failure-audit table"
+    );
+    assert_eq!(
+        migrated_structure, installed_structure,
+        "the schema migration and the baseline define one identical table"
+    );
+
+    installed.cleanup().await?;
+    migrated.cleanup().await
+}
+
+async fn load_table_structure(pool: &sqlx::PgPool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT object_identity
+        FROM (
+            SELECT format(
+                       'column:%s:%s:%s:%s:%s',
+                       attribute.attnum,
+                       attribute.attname,
+                       pg_catalog.format_type(attribute.atttypid, attribute.atttypmod),
+                       attribute.attnotnull,
+                       COALESCE(pg_get_expr(default_value.adbin, default_value.adrelid), '')
+                   ) AS object_identity
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            JOIN pg_attribute attribute ON attribute.attrelid = relation.oid
+            LEFT JOIN pg_attrdef default_value
+              ON default_value.adrelid = relation.oid
+             AND default_value.adnum = attribute.attnum
+            WHERE namespace.nspname = 'bigname_phase'
+              AND relation.relname = 'project_generation_failures'
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+
+            UNION ALL
+
+            SELECT format(
+                       'constraint:%s:%s',
+                       constraint_row.conname,
+                       pg_get_constraintdef(constraint_row.oid)
+                   )
+            FROM pg_constraint constraint_row
+            JOIN pg_class relation ON relation.oid = constraint_row.conrelid
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'bigname_phase'
+              AND relation.relname = 'project_generation_failures'
+
+            UNION ALL
+
+            SELECT format('index:%s', pg_get_indexdef(index_row.indexrelid))
+            FROM pg_index index_row
+            JOIN pg_class relation ON relation.oid = index_row.indrelid
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'bigname_phase'
+              AND relation.relname = 'project_generation_failures'
+
+            UNION ALL
+
+            SELECT format(
+                       'comment:%s:%s',
+                       COALESCE(attribute.attname, '<table>'),
+                       description.description
+                   )
+            FROM pg_description description
+            JOIN pg_class relation ON relation.oid = description.objoid
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            LEFT JOIN pg_attribute attribute
+              ON attribute.attrelid = relation.oid
+             AND attribute.attnum = description.objsubid
+             AND description.objsubid > 0
+            WHERE namespace.nspname = 'bigname_phase'
+              AND relation.relname = 'project_generation_failures'
+        ) structure
+        ORDER BY object_identity
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
+}

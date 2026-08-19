@@ -30,6 +30,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "name_current",
     "name_surfaces",
     "normalized_events",
+    "project_generation_failures",
     "project_redo_resolver_evidence",
     "permissions_current",
     "permissions_current_resource_summary",
@@ -90,6 +91,10 @@ const BASELINE: &[(&str, &str)] = &[
     (
         "manifest authority attestations",
         include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
+    ),
+    (
+        "project generation failures",
+        include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
     ),
 ];
 

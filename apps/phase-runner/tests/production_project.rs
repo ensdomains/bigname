@@ -18,15 +18,19 @@ use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, RunMode as InterpretRunMode,
 };
 use bigname_manifests::load_repository;
-use bigname_project::{BatchRequest, Engine, Marker, RunMode};
+use bigname_project::{BatchRequest, DUAL_CURRENT_EXACT_NAME_AUTHORITY, Engine, Marker, RunMode};
 use bigname_storage::{NameCurrentRow, SurfaceBindingKind, resolution_verified_support_boundary};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    error::ErrorKind as RunnerErrorKind,
     heads::{BlockMarker, HeadMarkers, publish_heads},
     interpret_phase::InterpretPhase,
-    phase::{BlockRange, LoopbackPhase, PhaseName, PhaseSet},
+    phase::{
+        BlockRange, LoopbackPhase, Phase, PhaseContext, PhaseName, PhaseResume, PhaseSet,
+        RunMode as PhaseRunMode,
+    },
     project_phase::ProjectPhase,
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
@@ -6703,6 +6707,7 @@ async fn authority_selector_dual_open_cross_arm_fixture() -> Result<()> {
         let scratch = ScratchDatabase::create(database_prefix).await?;
         let logical_name_id =
             seed_dual_open_cross_arm_fixture(scratch.pool(), chain, v2_block).await?;
+        declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
         InterpretEngine::new(scratch.pool().clone())
             .run_batch(InterpretRequest {
                 chain_id: chain.into(),
@@ -6778,6 +6783,7 @@ async fn authority_selector_follows_post_migration_v2_binding_churn() -> Result<
     let scratch = ScratchDatabase::create("project_authority_v2_binding_churn").await?;
     let chain = "authority-v2-binding-churn";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
             chain_id: chain.into(),
@@ -7619,6 +7625,7 @@ async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -
     let scratch = ScratchDatabase::create("project_authority_candidate_parity").await?;
     let chain = "authority-candidate-parity";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 1).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
             chain_id: chain.into(),
@@ -11486,6 +11493,619 @@ async fn run_project(
     Ok(())
 }
 
+#[tokio::test]
+async fn mainnet_dual_current_aborts_the_generation_and_appends_one_audit_row() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_audit").await?;
+    let chain = "project-dual-current-audit";
+    let logical_name_id = seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+
+    let failure = run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("a mainnet dual-current name must not publish");
+    assert!(
+        failure.to_string().contains("both authority arms"),
+        "unexpected failure: {failure}"
+    );
+
+    let published: i64 = sqlx::query_scalar("SELECT count(*) FROM name_current")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(
+        published, 0,
+        "an aborted generation publishes no partial rows"
+    );
+
+    let rows = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(rows.len(), 1);
+    let (target_block, target_hash, content_hash, failure_kind, fingerprint, name, evidence) =
+        rows[0].clone();
+    assert_eq!(target_block, 5);
+    assert_eq!(target_hash, block_hash(chain, 5));
+    assert_eq!(content_hash, INTERPRETER_CONTENT_HASH);
+    assert_eq!(failure_kind, DUAL_CURRENT_EXACT_NAME_AUTHORITY);
+    assert_eq!(fingerprint.len(), 64);
+    assert_eq!(name, logical_name_id);
+    assert_eq!(evidence["predecessor"]["authority_arm"], json!("ens_v1"));
+    assert_eq!(evidence["successor"]["authority_arm"], json!("ens_v2"));
+    assert_eq!(
+        evidence["target"]["block_hash"],
+        json!(block_hash(chain, 5))
+    );
+    assert!(evidence["boundary"]["event_identity"].is_string());
+    assert!(evidence["boundary"]["block_hash"].is_string());
+    for arm in ["predecessor", "successor"] {
+        assert!(evidence[arm]["surface_binding_id"].is_string(), "{arm}");
+        assert!(evidence[arm]["resource_id"].is_string(), "{arm}");
+        assert!(evidence[arm]["block_number"].is_number(), "{arm}");
+        assert!(evidence[arm]["canonicality_state"].is_string(), "{arm}");
+    }
+
+    let retry = run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the retried generation still fails");
+    assert!(retry.to_string().contains("both authority arms"));
+    assert_eq!(
+        generation_failure_rows(scratch.pool(), chain).await?,
+        rows,
+        "a retried generation records no second row for the same conflict"
+    );
+
+    scratch.cleanup().await
+}
+
+// The one ON CONFLICT semantic the storage contract promises: a retry at the
+// same target appends a different name's conflict instead of swallowing it.
+#[tokio::test]
+async fn a_second_conflicting_name_appends_its_own_evidence_at_the_same_target() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_second_name").await?;
+    let chain = "project-dual-current-second-name";
+    let first = seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    let second = clone_dual_current_conflict(scratch.pool(), chain, &first, "bob").await?;
+
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("two conflicting names still block publication");
+    let recorded = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(recorded.len(), 1, "one failed generation writes one row");
+    let blocked = recorded[0].5.clone();
+    let lexicographically_first = first.clone().min(second.clone());
+    assert_eq!(
+        blocked, lexicographically_first,
+        "the recorded conflict is deterministic"
+    );
+
+    // Resolve only the recorded name; the other conflict remains.
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(4)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&blocked)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the remaining conflict still blocks the same target");
+    let appended = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(
+        appended.len(),
+        2,
+        "a different conflict at the same target appends its own evidence"
+    );
+    let names: Vec<String> = appended.iter().map(|row| row.5.clone()).collect();
+    assert!(
+        names.contains(&first) && names.contains(&second),
+        "{names:?}"
+    );
+    assert!(
+        appended.iter().all(|row| row.0 == 5),
+        "both rows belong to the same target"
+    );
+    assert_ne!(
+        appended[0].4, appended[1].4,
+        "distinct conflicts fingerprint distinctly"
+    );
+
+    scratch.cleanup().await
+}
+
+// A failed audit write must not mask or downgrade the invariant diagnosis: the
+// runner has to stop on the integrity failure, not retry it as transient.
+#[tokio::test]
+async fn a_failed_audit_write_keeps_the_non_retryable_invariant_failure() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_audit_unwritable").await?;
+    let chain = "project-dual-current-unwritable";
+    seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    sqlx::query("DROP TABLE project_generation_failures")
+        .execute(scratch.pool())
+        .await?;
+
+    let failure = run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the generation still fails");
+    assert_eq!(
+        failure.kind(),
+        RunnerErrorKind::DataIntegrity,
+        "an unwritable audit must not make the failure retryable"
+    );
+    let message = failure.to_string();
+    assert!(
+        message.contains("both authority arms"),
+        "the invariant diagnosis survives: {message}"
+    );
+    assert!(
+        message.contains("record projection generation failure"),
+        "the audit failure is reported alongside: {message}"
+    );
+
+    scratch.cleanup().await
+}
+
+// A post-audit Sepolia manifest declared for a different chain must not
+// reclassify this one: the deployment profile is per projected chain.
+#[tokio::test]
+async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_profile() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_foreign_label").await?;
+    let chain = "project-dual-current-foreign";
+    seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), "project-dual-current-elsewhere").await?;
+
+    let failure = run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("a foreign sepolia label must not disable the assertion");
+    assert!(
+        failure.to_string().contains("both authority arms"),
+        "unexpected failure: {failure}"
+    );
+    assert_eq!(
+        generation_failure_rows(scratch.pool(), chain).await?.len(),
+        1,
+        "the mainnet assertion still records its evidence"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_mixed_corpus_reason() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_foreign_reason").await?;
+    let chain = "project-dual-current-foreign-reason";
+    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), "project-dual-current-elsewhere").await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+
+    run_project_phase(scratch.pool(), chain, 5).await?;
+
+    let reason: Option<String> = sqlx::query_scalar(
+        "SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        reason.as_deref(),
+        Some("conflicting_current_ens_authority"),
+        "a proofless mainnet mixed corpus keeps its own reason"
+    );
+
+    scratch.cleanup().await
+}
+
+// The false-positive guard: a Mainnet name whose predecessor binding closed at
+// the boundary is the ordinary migrated shape and must keep publishing.
+#[tokio::test]
+async fn a_closed_predecessor_publishes_on_mainnet_without_an_audit_row() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_migrated").await?;
+    let chain = "project-dual-current-migrated";
+    let logical_name_id = seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(4)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project_phase(scratch.pool(), chain, 5).await?;
+
+    let published: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(&logical_name_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(published, 1, "the migrated name still publishes on mainnet");
+    assert!(
+        generation_failure_rows(scratch.pool(), chain)
+            .await?
+            .is_empty(),
+        "a closed predecessor is not an invariant failure"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn sepolia_profile_publishes_the_same_dual_current_corpus() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_sepolia").await?;
+    let chain = "project-dual-current-sepolia";
+    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped").await?;
+
+    run_project_phase(scratch.pool(), chain, 5).await?;
+
+    let published: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(&logical_name_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(published, 1, "sepolia keeps selecting past the boundary");
+    assert!(
+        generation_failure_rows(scratch.pool(), chain)
+            .await?
+            .is_empty(),
+        "the assertion is Mainnet-scoped"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn generation_failure_audit_survives_orphaning_and_a_later_success() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_reorg").await?;
+    let chain = "project-dual-current-reorg";
+    let logical_name_id = seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the conflicting generation fails");
+    let recorded = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(recorded.len(), 1);
+    let captured_at_failure = recorded[0].6["predecessor"]["canonicality_state"]
+        .as_str()
+        .expect("the evidence captures the canonicality observed at failure")
+        .to_owned();
+    assert!(
+        ["canonical", "safe", "finalized"].contains(&captured_at_failure.as_str()),
+        "the conflicting binding was readable when the generation failed: \
+         {captured_at_failure}"
+    );
+
+    // A reorg orphans the conflicting ENSv1 binding, which leaves the staged
+    // candidate set and resolves the conflict.
+    sqlx::query(
+        "UPDATE surface_bindings SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project_phase(scratch.pool(), chain, 5).await?;
+
+    let published: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(&logical_name_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(published, 1, "the next generation publishes");
+    assert_eq!(
+        generation_failure_rows(scratch.pool(), chain).await?,
+        recorded,
+        "a later success never deletes or rewrites the audit row"
+    );
+    let (binding_state, lineage_state): (String, String) = sqlx::query_as(
+        "SELECT binding.canonicality_state::text, lineage.canonicality_state::text
+         FROM project_generation_failures failure
+         JOIN surface_bindings binding
+           ON binding.surface_binding_id =
+              (failure.evidence -> 'predecessor' ->> 'surface_binding_id')::uuid
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = failure.chain_id
+          AND lineage.block_hash = failure.target_block_hash
+         WHERE failure.chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        binding_state, "orphaned",
+        "the retained evidence names the now-orphaned binding"
+    );
+    assert!(
+        ["canonical", "safe", "finalized"].contains(&lineage_state.as_str()),
+        "the recorded target hash stays resolvable through lineage: {lineage_state}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_crash_before_the_audit_insert_records_the_evidence_on_retry() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_crash").await?;
+    let chain = "project-dual-current-crash";
+    seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+
+    // The generation transaction rolls back on its own; a crash before the
+    // phase appends its evidence leaves no row behind.
+    let rolled_back = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.into(),
+            target_block: 5,
+            affected_from_block: 0,
+            affected_to_block: 5,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await
+        .expect_err("the generation aborts before publish");
+    assert!(rolled_back.generation_failure_evidence().is_some());
+    assert!(
+        generation_failure_rows(scratch.pool(), chain)
+            .await?
+            .is_empty(),
+        "the generation transaction writes no evidence itself"
+    );
+    let published: i64 = sqlx::query_scalar("SELECT count(*) FROM name_current")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(published, 0);
+
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the retried generation still fails");
+    assert_eq!(
+        generation_failure_rows(scratch.pool(), chain).await?.len(),
+        1
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn the_failure_fingerprint_is_stable_across_repeated_generations() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_dual_current_fingerprint").await?;
+    let chain = "project-dual-current-fingerprint";
+    seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
+
+    // An incremental generation resuming past a clean target reaches the same
+    // conflict and fingerprints it identically to a full rebuild.
+    let incremental = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.into(),
+            target_block: 5,
+            affected_from_block: 4,
+            affected_to_block: 5,
+            resume_current: Some(Marker {
+                number: 3,
+                hash: block_hash(chain, 3),
+            }),
+            mode: RunMode::Normal,
+        })
+        .await
+        .expect_err("the incremental generation reaches the same conflict");
+    let incremental_fingerprint = incremental
+        .generation_failure_evidence()
+        .expect("the incremental failure carries evidence")
+        .failure_fingerprint
+        .clone();
+
+    let mut fingerprints = Vec::new();
+    for target in [5, 5, 4] {
+        let error = Engine::new(scratch.pool().clone())
+            .run_batch(BatchRequest {
+                chain_id: chain.into(),
+                target_block: target,
+                affected_from_block: 0,
+                affected_to_block: target,
+                resume_current: None,
+                mode: RunMode::Normal,
+            })
+            .await
+            .expect_err("the conflict blocks every target past the boundary");
+        let evidence = error
+            .generation_failure_evidence()
+            .expect("the failure carries evidence");
+        fingerprints.push((target, evidence.failure_fingerprint.clone()));
+    }
+    assert_eq!(
+        fingerprints[0].1, fingerprints[1].1,
+        "the same conflict fingerprints identically across rebuilds"
+    );
+    assert_eq!(
+        fingerprints[1].1, fingerprints[2].1,
+        "the fingerprint covers the conflict, not the target block"
+    );
+    assert_eq!(
+        incremental_fingerprint, fingerprints[0].1,
+        "an incremental generation fingerprints the conflict like a full rebuild"
+    );
+
+    scratch.cleanup().await
+}
+
+// Drives the Project phase rather than the engine directly: the post-rollback
+// audit write belongs to the phase, not to the generation transaction.
+async fn run_project_phase(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+) -> phase_runner::error::RunnerResult<()> {
+    let marker = BlockMarker::new(target, block_hash(chain, target))?;
+    ProjectPhase::new(pool.clone())
+        .run_batch(PhaseContext {
+            chain_id: chain.to_owned(),
+            phase: PhaseName::Project,
+            mode: PhaseRunMode::Normal,
+            redo_attempt: None,
+            sources: Arc::from([SourceConfig::new(
+                chain,
+                "rpc",
+                "rpc",
+                SeedBasis::NewSignatureRange,
+                0,
+                "http://127.0.0.1:1",
+            )?]),
+            available_heads: Some(HeadMarkers {
+                latest: marker,
+                safe: None,
+                finalized: None,
+            }),
+            live_handoff: None,
+            resume: PhaseResume::default(),
+        })
+        .await?;
+    Ok(())
+}
+
+// A Mainnet corpus whose ENSv1 and ENSv2 bindings both stay current past an
+// activated migration boundary. No deployment-profile manifest is declared, so
+// the chain classifies as mainnet and the publication assertion applies.
+async fn seed_mainnet_dual_current_conflict(pool: &PgPool, chain: &str) -> Result<String> {
+    let logical_name_id = seed_dual_open_cross_arm_fixture(pool, chain, 4).await?;
+    InterpretEngine::new(pool.clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    insert_activated_authority_proof(pool, chain, &logical_name_id, "unwrapped").await?;
+    Ok(logical_name_id)
+}
+
+// Clones a seeded dual-current corpus onto a second logical name at the same
+// target, so one generation faces two independent conflicts.
+async fn clone_dual_current_conflict(
+    pool: &PgPool,
+    chain: &str,
+    source_logical_name_id: &str,
+    label: &str,
+) -> Result<String> {
+    let namehash = format!("{:#x}", raw_namehash(&[label.as_bytes(), b"eth"]));
+    let labelhash = format!("{:#x}", keccak256(label.as_bytes()));
+    let logical_name_id = format!("ens:{namehash}");
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         )
+         SELECT $2, namespace, $3 || '.eth', ARRAY[$3, 'eth'], dns_encoded_name,
+                $4, ARRAY[$5] || labelhashes[2:], normalizer_version,
+                visibility_state, chain_id, block_hash, block_number,
+                canonicality_state
+         FROM name_surfaces WHERE logical_name_id = $1",
+    )
+    .bind(source_logical_name_id)
+    .bind(&logical_name_id)
+    .bind(label)
+    .bind(&namehash)
+    .bind(&labelhash)
+    .execute(pool)
+    .await?;
+
+    let bindings: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT surface_binding_id, authority_arm FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND active_to IS NULL
+         ORDER BY authority_arm",
+    )
+    .bind(chain)
+    .bind(source_logical_name_id)
+    .fetch_all(pool)
+    .await?;
+    let mut successor_binding = None;
+    for (source_binding, arm) in &bindings {
+        let cloned = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, active_to, chain_id, block_hash,
+                 block_number, provenance, canonicality_state
+             )
+             SELECT $1, $2, resource_id, binding_kind, authority_arm, active_from,
+                    active_to, chain_id, block_hash, block_number, provenance,
+                    canonicality_state
+             FROM surface_bindings WHERE surface_binding_id = $3",
+        )
+        .bind(cloned)
+        .bind(&logical_name_id)
+        .bind(source_binding)
+        .execute(pool)
+        .await?;
+        if arm == "ens_v2" {
+            successor_binding = Some(cloned);
+        }
+    }
+    let successor_binding = successor_binding.expect("the clone keeps an open ENSv2 arm");
+
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             transaction_hash, transaction_index, log_index, raw_fact_ref,
+             derivation_kind, canonicality_state, before_state, after_state,
+             migration_correlation_ids, consumer_visibility
+         )
+         SELECT event_identity || ':' || $2, namespace, $2, resource_id, event_kind,
+                source_family, manifest_version, chain_id, block_number, block_hash,
+                transaction_hash, transaction_index, log_index, raw_fact_ref,
+                derivation_kind, canonicality_state, before_state,
+                jsonb_set(
+                    after_state, '{successor_binding,binding_id}', to_jsonb($3::text)
+                ),
+                migration_correlation_ids, consumer_visibility
+         FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $4
+           AND event_kind = 'MigrationApplied'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .bind(successor_binding.to_string())
+    .bind(source_logical_name_id)
+    .execute(pool)
+    .await?;
+
+    Ok(logical_name_id)
+}
+
+async fn generation_failure_rows(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<Vec<(i64, String, String, String, String, String, Value)>> {
+    Ok(sqlx::query_as(
+        "SELECT target_block_number, target_block_hash, interpreter_content_hash,
+                failure_kind, failure_fingerprint, logical_name_id, evidence
+         FROM project_generation_failures
+         WHERE chain_id = $1
+         ORDER BY target_block_number, failure_fingerprint",
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await?)
+}
+
 async fn projection_counts(pool: &PgPool) -> Result<(i64, i64, i64, i64, i64, i64, i64, i64)> {
     Ok(sqlx::query_as(
         "SELECT
@@ -13765,6 +14385,40 @@ async fn seed_dual_open_cross_arm_fixture(
     Ok(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"])))
 }
 
+// An inert manifest whose deployment epoch makes the projection classify the
+// chain under the sepolia deployment profile. Selection coverage that leaves
+// both authority arms open past an activated boundary declares it: the same
+// corpus on Mainnet is unpublishable under the dual-current assertion. It must
+// be declared before the first projection so a profile-sensitive field cannot
+// change mid-test.
+async fn declare_sepolia_post_audit_profile(pool: &PgPool, chain: &str) -> Result<()> {
+    insert_namespaced_manifest(
+        pool,
+        "ens",
+        chain,
+        "ens_v2_root_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        &format!("tests/raw-{chain}-sepolia-post-audit.toml"),
+        json!({
+            "manifest_version": 1,
+            "namespace": "ens",
+            "source_family": "ens_v2_root_l1",
+            "chain": chain,
+            "deployment_epoch": "ens_v2_sepolia_post_audit",
+            "rollout_status": "active",
+            "normalizer_version": NORMALIZER,
+            "capability_flags": {},
+            "roots": [],
+            "contracts": [],
+            "discovery_rules": [],
+            "abi": {"events": [], "calls": []}
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
 // A proofless released-v2-authority starting point: the fixture's v1 arm is
 // withdrawn (binding closed as v2, v1 events orphaned) and the v2 registration
 // is released at block 6 with no transition proof.
@@ -13975,6 +14629,7 @@ async fn seed_authority_lifecycle_fixture(
     migration_path: &str,
 ) -> Result<(String, String)> {
     let logical_name_id = seed_dual_open_cross_arm_fixture(pool, chain, 4).await?;
+    declare_sepolia_post_audit_profile(pool, chain).await?;
     InterpretEngine::new(pool.clone())
         .run_batch(InterpretRequest {
             chain_id: chain.into(),
