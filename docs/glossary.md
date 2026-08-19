@@ -651,7 +651,7 @@ second-level arm never applies to it.
 
 The child's predecessor is selected against its ENSv1 cleanup, not against the
 ENSv2 registration, and the boundary records where that cleanup happened —
-event identity, block, transaction index, and log index. The two differ for the
+event identity, source event, block, transaction index, and log index. The two differ for the
 `emancipated_child` shape: unwrapping the node closes the child's ENSv1 wrapper
 binding at the unwrap log, which precedes the registration in the same
 transaction, so no ENSv1 binding for that name is open at the registration's own

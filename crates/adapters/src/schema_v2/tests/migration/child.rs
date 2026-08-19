@@ -1247,18 +1247,25 @@ fn a_parent_controlled_registration_with_a_full_cleanup_is_still_not_a_migration
 /// A child whose parent registry was proven in an earlier batch, and whose own ENSv1 wrap sits in
 /// an earlier batch still. Both halves have to survive the restart: the parent's admission is
 /// recovered from stored discovery evidence, and the wrapper state that makes the cleanup readable
-/// comes back with the interpreter session. Both child shapes are split, because the locked branch
-/// reads its cleanup out of retained wrapper state while the emancipated branch's unwrap carries
-/// its node in the log.
+/// comes back with the interpreter session. The three-batch shape separates those two halves —
+/// wrap, then parent admission, then the child's migration — so a session-state regression that
+/// only bites when they are batched apart cannot hide behind the parent's own batch. Both child
+/// shapes are split, because the locked branch reads its cleanup out of retained wrapper state
+/// while the emancipated branch's unwrap carries its node in the log.
 #[test]
 fn a_child_converges_when_its_parent_and_wrap_are_in_earlier_batches() -> anyhow::Result<()> {
-    for scenario in ["C-01", "C-02"] {
-        assert_split_convergence(scenario)?;
+    for name in ["C-01", "C-02"] {
+        let fixture = fixture()?;
+        let scenario = &fixture["scenarios"][name];
+        let parent = scenario["parent"]["migration_block"].as_i64().unwrap();
+        let child = scenario["child"]["migration_block"].as_i64().unwrap();
+        assert_split_convergence(name, &[child])?;
+        assert_split_convergence(name, &[parent, child])?;
     }
     Ok(())
 }
 
-fn assert_split_convergence(name: &str) -> anyhow::Result<()> {
+fn assert_split_convergence(name: &str, splits: &[i64]) -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"][name];
     let addresses = &fixture["addresses"];
@@ -1269,11 +1276,14 @@ fn assert_split_convergence(name: &str) -> anyhow::Result<()> {
         true,
     ))?));
     assert_eq!(expected.len(), 1);
-    let split = scenario["child"]["migration_block"].as_i64().unwrap();
+    let bounds = std::iter::once(i64::MIN)
+        .chain(splits.iter().copied())
+        .zip(splits.iter().copied().chain(std::iter::once(i64::MAX)))
+        .collect::<Vec<_>>();
     let mut carried = Vec::new();
     let mut session = None;
     let mut seen = Vec::new();
-    for (start, end) in [(i64::MIN, split), (split, i64::MAX)] {
+    for (start, end) in bounds {
         let mut input = batch(
             all.iter()
                 .filter(|log| log.block_number >= start && log.block_number < end)
@@ -1290,7 +1300,7 @@ fn assert_split_convergence(name: &str) -> anyhow::Result<()> {
     }
     assert_eq!(
         seen, expected,
-        "a split between the wrap and the migration must derive the same boundary, ID, and evidence"
+        "{name} split at {splits:?} must derive the same boundary, ID, and evidence"
     );
     Ok(())
 }
