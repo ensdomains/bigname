@@ -280,7 +280,13 @@ not erase that established epoch; a reorg of its parent proof, registry
 association, topology-at-proof, or registration reconstructs the result from
 the surviving lineage. The positive registration is an authority proof only: it neither
 invents a `MigrationApplied` event nor creates ENSv1→ENSv2 migration history or a binding
-transition. That first ENSv2 registration supersedes the retained ENSv1 child
+transition. Consumer slice 3A does derive a child `MigrationApplied`, but only
+from a separate and separately evidenced shape — the parent's own migration
+registry registering the child into itself, with the parent identified by that
+registry's own migration evidence — and only as candidate output that changes no
+child state. The two paths do not meet: a bare positive child registration never
+becomes a child boundary, and this 2C proof path still invents nothing.
+That first ENSv2 registration supersedes the retained ENSv1 child
 binding for subsequent current-state selection; releasing it leaves the child
 with released v2 authority and does not reactivate the ENSv1 residue.
 
@@ -592,11 +598,16 @@ ENSv2 mappings:
   the declared unlocked or locked ENSv1→ENSv2 migration controller claims an
   existing reservation through `register(..., expiry = 0)`.
   (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L152 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L164 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L89 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L110 @ ens_v2@ccaeb58) For a child, the already-discovered migration registry receives the
-  wrapper transfer and registers that child in itself. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58) Slice 1 does not derive a `MigrationApplied` boundary or other correlation-dependent effects for this child shape. That derivation is deferred to the direct-child authority slice and tracked on issue #318. Reverted transactions produce no boundary.
+  wrapper transfer and registers that child in itself. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58) Consumer slice 3A derives a candidate `MigrationApplied` boundary and its correlation-dependent effects for this child shape, requiring the child's own ENSv1 predecessor cleanup in the same transaction — its wrapper token parked in the Graveyard, or its node unwrapped into the Graveyard — so a self-claim without an ENSv1 predecessor derives nothing. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58) Activating that boundary into a `SurfaceBinding` transition remains deferred to the children publication slice and tracked on issue #318. Reverted transactions produce no boundary.
 - `MigrationApplied` is self-sufficient. Its payload identifies
   `logical_name_id` and namehash; `correlation_kind=authority_transition`;
-  `migration_path` as `unwrapped`,
-  `unlocked_wrapped`, or `locked_wrapped`; predecessor binding, resource, and
+  `migration_path` as `unwrapped`, `unlocked_wrapped`, or `locked_wrapped` for a
+  controller-mediated `.eth` second-level name, or `locked_child` or
+  `emancipated_child` for a direct child registered by its parent's own
+  migration registry
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58);
+  predecessor binding, resource, and
   `ens_v1` authority epoch; successor binding, resource, and `ens_v2` authority
   epoch; successor registry contract instance; the successful v2 registration
   block, transaction, and log position; the decoded stored expiry; the complete

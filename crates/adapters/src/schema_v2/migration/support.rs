@@ -2,6 +2,7 @@ use alloy_primitives::keccak256;
 use anyhow::Context;
 use serde_json::{Value, json};
 
+use super::registry::CORRELATION_KIND as REGISTRY_CORRELATION_KIND;
 use super::{CANDIDATE, MIGRATION_FAMILY};
 use crate::schema_v2::{
     BatchOutput, MigrationEventAssociation, NormalizedEvent, catalog::Catalog,
@@ -15,6 +16,9 @@ pub(super) struct RegistryGroup {
     pub(super) registry_address: String,
     pub(super) evidence: Vec<Value>,
     pub(super) completion_log_index: i64,
+    /// Block, transaction index, and log index of the factory log. Child correlation spans
+    /// transactions and blocks, so it orders against the full position rather than the log index.
+    pub(super) completion_position: (i64, i64, i64),
 }
 
 pub(super) fn associate_restored_registry_effects(
@@ -45,7 +49,7 @@ pub(super) fn associate_restored_registry_effects(
             output,
             &event_identity,
             &correlation.id,
-            "migration_registry_creation",
+            REGISTRY_CORRELATION_KIND,
             correlation.evidence,
         )?;
     }
