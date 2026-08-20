@@ -26,9 +26,12 @@ pub const REGISTRY_ANNOUNCEMENT_EDGE_KIND: &str = "registry_announcement";
 pub const ADMISSION_DISCOVERY_EDGE_KINDS: &[&str] = &["resolver", REGISTRY_ANNOUNCEMENT_EDGE_KIND];
 
 /// The only normalized event kinds a child migration boundary's recorded ENSv1 cleanup can be: the
-/// wrapper token parked in the graveyard, or the node unwrapped into it. Which upstream branch a
-/// cleanup came from is adapter knowledge, so the transport matches this set rather than naming
-/// kinds of its own.
+/// wrapper token parked in the graveyard
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58),
+/// or the node unwrapped into it
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+/// Which upstream branch a cleanup came from is adapter knowledge, so the transport matches this
+/// set rather than naming kinds of its own.
 pub const CHILD_CLEANUP_EVENT_KINDS: &[&str] = &[
     TOKEN_CONTROL_TRANSFERRED_EVENT_KIND,
     SURFACE_UNBOUND_EVENT_KIND,
