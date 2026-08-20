@@ -72,6 +72,7 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                    lower(event.after_state ->> 'owner') AS owner,
                    NULL::text AS registrant,
                    event.normalized_event_id,
+                   event.event_identity,
                    event.source_manifest_id,
                    event.source_family,
                    event.manifest_version,
@@ -160,6 +161,7 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                    NULL::text AS owner,
                    lower(registration.after_state ->> 'registrant') AS registrant,
                    registration.normalized_event_id,
+                   registration.event_identity,
                    registration.source_manifest_id,
                    registration.source_family,
                    GREATEST(

@@ -274,8 +274,16 @@ reaches ENSv2 authority only through a current positive ENSv2 registration.
 
 Both arms stating a relation for the same Mainnet pair is not itself the
 failure condition. Neither ENSv1→ENSv2 migration branch retracts the ENSv1
-registry entry, so a migrated or positively registered child ordinarily retains
-its ENSv1 relation. The slice 3B child assertion — ordered after the slice 2E
+registry entry: the locked branch only moves the wrapper token to the Graveyard
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58),
+which reassigns the token holder and writes nothing to the ENSv1 registry
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L301 @ ens_v1@91c966f),
+and the emancipated branch unwraps the node into the Graveyard
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58),
+which sets a new registry owner rather than clearing the entry
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f).
+A migrated or positively registered child therefore ordinarily retains its
+ENSv1 relation. The slice 3B child assertion — ordered after the slice 2E
 exact-name assertion and keyed on the parent-child pair — fails the
 [projection generation](glossary.md#projection-generation) only when, on the
 Mainnet deployment profile, a child whose authority proof kind is

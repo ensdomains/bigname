@@ -284,6 +284,7 @@ async fn assert_child_authority(
                        (authority.authority_epoch_start_position ->> 'log_index')::bigint, -1
                    ) AS epoch_log_index,
                    predecessor.normalized_event_id AS predecessor_event_id,
+                   predecessor.event_identity AS predecessor_event_identity,
                    predecessor.source_family AS predecessor_source_family,
                    predecessor.block_number AS predecessor_block_number,
                    COALESCE(predecessor.evidence_transaction_index, -1)
@@ -291,6 +292,7 @@ async fn assert_child_authority(
                    COALESCE(predecessor.evidence_log_index, -1) AS predecessor_log_index,
                    predecessor.canonicality_state AS predecessor_canonicality_state,
                    successor.normalized_event_id AS successor_event_id,
+                   successor.event_identity AS successor_event_identity,
                    successor.source_family AS successor_source_family,
                    successor.block_number AS successor_block_number,
                    COALESCE(successor.evidence_transaction_index, -1)
@@ -338,6 +340,10 @@ async fn assert_child_authority(
         )
         SELECT parent_logical_name_id,
                child_logical_name_id,
+               -- Every input is stable across a replay. `normalized_event_id` is a generated
+               -- identity that a redo's delete-and-reinsert changes, so the fingerprint and the
+               -- durable evidence are keyed on `event_identity` instead; the same semantic
+               -- conflict after a replay must dedup against the row already written.
                encode(
                    sha256(
                        convert_to(
@@ -347,10 +353,10 @@ async fn assert_child_authority(
                                proof_block_number::text, proof_block_hash,
                                epoch_block_number::text, epoch_transaction_index::text,
                                epoch_log_index::text,
-                               predecessor_event_id::text, predecessor_block_number::text,
+                               predecessor_event_identity, predecessor_block_number::text,
                                predecessor_transaction_index::text,
                                predecessor_log_index::text,
-                               successor_event_id::text, successor_block_number::text,
+                               successor_event_identity, successor_block_number::text,
                                successor_transaction_index::text,
                                successor_log_index::text
                            ),
@@ -378,6 +384,7 @@ async fn assert_child_authority(
                    'predecessor', jsonb_build_object(
                        'authority_arm', 'ens_v1',
                        'source_family', predecessor_source_family,
+                       'event_identity', predecessor_event_identity,
                        'normalized_event_id', predecessor_event_id,
                        'block_number', predecessor_block_number,
                        'transaction_index', predecessor_transaction_index,
@@ -387,6 +394,7 @@ async fn assert_child_authority(
                    'successor', jsonb_build_object(
                        'authority_arm', 'ens_v2',
                        'source_family', successor_source_family,
+                       'event_identity', successor_event_identity,
                        'normalized_event_id', successor_event_id,
                        'block_number', successor_block_number,
                        'transaction_index', successor_transaction_index,
@@ -403,7 +411,7 @@ async fn assert_child_authority(
         -- One pair can have several candidate rows per arm, so the witness is pinned by the
         -- candidate events themselves rather than by the pair alone.
         ORDER BY parent_logical_name_id, child_logical_name_id,
-                 predecessor_event_id, successor_event_id
+                 predecessor_event_identity, successor_event_identity
         LIMIT 1
         "#,
     )

@@ -320,7 +320,7 @@ struct PredecessorSelector {
     /// The evidence shape the predecessor query matches. A child anchor keeps its own
     /// `anchor_kind` in the selector but resolves through the same ENSv1 NameWrapper evidence,
     /// because every migratable child is held in that wrapper immediately before its boundary
-    /// ([child migration boundary](../../../../../../docs/glossary.md#child-migration-boundary)).
+    /// ([child migration boundary](../../../../../docs/glossary.md#child-migration-boundary)).
     anchor_kind: String,
     identity: String,
     contract_instance_id: Option<Uuid>,

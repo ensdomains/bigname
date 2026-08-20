@@ -2845,6 +2845,19 @@ async fn a_post_boundary_ens_v1_child_relation_blocks_mainnet_publication() -> R
     );
     assert_eq!(evidence["predecessor"]["authority_arm"], json!("ens_v1"));
     assert_eq!(evidence["successor"]["authority_arm"], json!("ens_v2"));
+    // The stable event keys are what stays resolvable once a redo drops the generated ids.
+    for side in ["predecessor", "successor"] {
+        let identity = evidence[side]["event_identity"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{side} evidence keeps its event identity"));
+        let known: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE event_identity = $1)",
+        )
+        .bind(identity)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert!(known, "{side} event identity {identity} resolves");
+    }
     assert!(evidence["predecessor"]["block_number"].is_number());
     assert!(evidence["authority_epoch_start_position"]["block_number"].is_number());
     // The proof's own block identity and canonicality are durable, so the row stays
@@ -3018,6 +3031,94 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
         json!({}),
     )
     .await
+}
+
+/// Replays what a redo does to the events in a block range: deletes them and writes them
+/// back with identical content. `normalized_event_id` is a generated identity, so every
+/// re-inserted row gets a new one while its `event_identity` stays put.
+async fn reinsert_events_with_new_ids(pool: &PgPool, chain: &str, to_block: i64) -> Result<()> {
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'normalized_events'
+           AND is_identity = 'NO' AND is_generated = 'NEVER'
+         ORDER BY ordinal_position",
+    )
+    .fetch_all(pool)
+    .await?;
+    let list = columns.join(", ");
+    sqlx::query(&format!(
+        "CREATE TABLE redo_replay AS SELECT {list} FROM normalized_events
+         WHERE chain_id = $1 AND block_number <= $2"
+    ))
+    .bind(chain)
+    .bind(to_block)
+    .execute(pool)
+    .await?;
+    sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1 AND block_number <= $2")
+        .bind(chain)
+        .bind(to_block)
+        .execute(pool)
+        .await?;
+    sqlx::query(&format!(
+        "INSERT INTO normalized_events ({list}) SELECT {list} FROM redo_replay"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query("DROP TABLE redo_replay").execute(pool).await?;
+    Ok(())
+}
+
+// The audit row is keyed by a fingerprint of the conflict, so the same semantic conflict
+// after a redo must hash to the same value. Generated row ids do not survive a redo; the
+// event identities the fingerprint is built from do.
+#[tokio::test]
+async fn a_replayed_child_conflict_keeps_its_fingerprint_and_records_no_second_row() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_child_replay_fingerprint").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_child_authority_fixture(scratch.pool(), 5, 3).await?;
+
+    run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("a post-boundary ENSv1 child relation must not publish");
+    let first = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(first.len(), 1);
+    let before: Vec<i64> = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events
+         WHERE chain_id = $1 AND block_number <= 5 ORDER BY normalized_event_id",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+
+    reinsert_events_with_new_ids(scratch.pool(), CHAIN, 5).await?;
+    let after: Vec<i64> = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events
+         WHERE chain_id = $1 AND block_number <= 5 ORDER BY normalized_event_id",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(after.len(), before.len());
+    assert!(
+        after.iter().all(|id| !before.contains(id)),
+        "the replay must hand every event a new generated id"
+    );
+
+    run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("the replayed conflict still blocks publication");
+    let second = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(
+        second.len(),
+        1,
+        "the same conflict after a replay records no second audit row"
+    );
+    assert_eq!(
+        second[0].4, first[0].4,
+        "the conflict fingerprint survives the replay"
+    );
+    assert_eq!(second[0].6, first[0].6, "so does its evidence payload");
+    scratch.cleanup().await
 }
 
 // The other ENSv2 child authority proof reaches the same assertion: a positive ENSv2 child
