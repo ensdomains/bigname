@@ -1,0 +1,110 @@
+# ENSv1 Sepolia NameWrapper source-family admission.
+#
+# This is the family the ENSv2 migration family's `ens_v1_name_wrapper`
+# correlation address points at. Admitting it makes the wrapper's own logs
+# ingestible on this deployment profile, which is what lets a migrated child's
+# ENSv1 cleanup — the wrapper token parked in the Graveyard, or the node
+# unwrapped into it — be observed at all. Without this family the correlation
+# address names a contract no admitted source watches.
+#
+# NameWrapper deployment address:
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L2 @ ens_v1@91c966f).
+# Wrapper event and registry-mutating surfaces admitted as adapter input only:
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L54 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L80 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L90 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L102 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L138 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L140 @ ens_v1@91c966f).
+# Wrapper upgrade history remains outside this source-family admission:
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L479 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L500 @ ens_v1@91c966f).
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_wrapper_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "name_wrapper"
+address = "0x0635513f179D50A207757E05759CbD106d7dFcE8"
+proxy_kind = "none"
+# Start block is the Sepolia deployment transaction's block; the pinned record
+# deploys this same address in its only deployment.
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L2 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L1512 @ ens_v1@91c966f).
+start_block = 3790153
+
+# Wrapper event ABI fragment consumed by block-derived preimage observation.
+# NameWrapped: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L275 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NameWrapped"
+fragment = "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
+
+# Wrapper authority events consumed by manifest-derived authority topic lookup.
+# NameUnwrapped is also the emancipated-branch cleanup a migrated child's ENSv1
+# authority ends at: the migration receiver unwraps the node into the Graveyard.
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L238 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+[[abi.events]]
+name = "NameUnwrapped"
+fragment = "event NameUnwrapped(bytes32 indexed node, address owner)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
+
+[[abi.events]]
+name = "FusesSet"
+fragment = "event FusesSet(bytes32 indexed node, uint32 fuses)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["PermissionScopeChanged"]
+
+[[abi.events]]
+name = "ExpiryExtended"
+fragment = "event ExpiryExtended(bytes32 indexed node, uint64 expiry)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["ExpiryChanged"]
+
+# ERC1155 TransferSingle is emitted by the wrapper's ERC1155Fuse base. It is
+# also the locked-branch cleanup: the migration receiver transfers the still-
+# wrapped token to the Graveyard, which is what makes this event the ENSv1
+# authority end for a locked migrated name.
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L258 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L278 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L303 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L368 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+[[abi.events]]
+name = "TransferSingle"
+fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["TokenControlTransferred", "PermissionChanged"]
+
+# ERC1155 TransferBatch is emitted by the wrapper's ERC1155Fuse base and
+# reference indexers fan it out per id:
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L154 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L187 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L331 @ ens_v1@91c966f)
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L222 @ ens_subgraph@723f1b6)
+# (upstream: .refs/ens_subgraph/src/nameWrapper.ts:L231 @ ens_subgraph@723f1b6)
+# (upstream: .refs/ens_subgraph/src/nameWrapper.ts:L236 @ ens_subgraph@723f1b6).
+[[abi.events]]
+name = "TransferBatch"
+fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
+emitter_roles = ["name_wrapper"]
+normalized_events = ["TokenControlTransferred", "PermissionChanged"]

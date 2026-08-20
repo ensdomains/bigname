@@ -729,14 +729,19 @@ transaction rolls back completely. The phase runner then appends one
 to `project_generation_failures` in a separate transaction. The row is
 keyed by chain, target block number/hash, interpreter content hash, failure
 kind, and a deterministic fingerprint of the conflict, and stores both
-binding/resource identities, the activated boundary event
-identity, every relevant block/transaction/log position, and the canonicality
-observed at failure. The fingerprint is part of the key so that a retry of the
+sides' identities (binding/resource for an exact name, parent/child relation
+evidence for a child), the identity and block position of the event that proves
+the surviving ENSv2 authority — an activated migration boundary or a positive
+ENSv2 child registration — every relevant block/transaction/log position, and
+the canonicality observed at failure for the proof, both sides, and the target
+block. The fingerprint is part of the key so that a retry of the
 same semantic failure records nothing, while a different conflict surfacing at
 the same target still appends its own evidence rather than being swallowed. One
 failed [projection generation](glossary.md#projection-generation) writes one
-row, deterministically for the lexicographically-first conflicting name; any
-further conflicting name surfaces on a later attempt. It marks the target
+row, for the first failing invariant in the fixed assertion order — exact-name
+authority before child authority — and within that invariant its own
+deterministic witness ordering selects the recorded conflict. Any further
+conflict surfaces on a later attempt. It marks the target
 projection generation not ready. A later reorg or successful projection
 generation never deletes the audit row: its recorded block hashes
 remain resolvable through lineage as canonical or orphaned, and a later success

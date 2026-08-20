@@ -48,7 +48,26 @@ sol! {
         address implementation
     );
     event ParentUpdated(address indexed parent, string label, address indexed sender);
+    event NameUnwrapped(bytes32 indexed node, address owner);
+    event TransferSingle(
+        address indexed operator,
+        address indexed from,
+        address indexed to,
+        uint256 id,
+        uint256 value
+    );
+    event TransferBatch(
+        address indexed operator,
+        address indexed from,
+        address indexed to,
+        uint256[] ids,
+        uint256[] values
+    );
+    event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
 }
+
+const NAME_WRAPPER: &str = "0x0635513f179d50a207757e05759cbd106d7dfce8";
+const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 
 #[derive(Clone, Copy, Debug)]
 enum RestartLane {
@@ -195,6 +214,55 @@ async fn seed_candidate_address_history(name: &str) -> Result<ScratchDatabase> {
     .execute(scratch.pool())
     .await?;
     Ok(scratch)
+}
+
+/// The Sepolia ENSv1 registry and wrapper admissions make the logs a migrated child's ENSv1
+/// cleanup is carried by ingestible on this deployment profile. Before them the migration manifest
+/// named a NameWrapper correlation address that no admitted source watched, so a child's cleanup
+/// could never be observed and no child boundary could derive from it.
+///
+/// This pins ingestibility of those inputs only. It does not claim an ENSv1 authority arm for .eth
+/// second-level authority-transition boundaries: that still needs the ENSv1 registrar family,
+/// which this profile does not admit.
+#[tokio::test]
+async fn sepolia_profile_watches_the_ens_v1_cleanup_and_registry_surfaces() -> Result<()> {
+    let scratch = ScratchDatabase::create("sepolia_ens_v1_admission_watch").await?;
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(scratch.pool(), &load_repository(manifest_root)?).await?;
+
+    let watch = load_persisted_watch_filter(
+        scratch.pool(),
+        CHAIN,
+        ANNOUNCEMENT_BLOCK,
+        ANNOUNCEMENT_BLOCK,
+    )
+    .await?;
+
+    // Both branches a migrated child's ENSv1 control can end on: the wrapper token parked in the
+    // Graveyard still wrapped, and the node unwrapped into it.
+    for (label, topic) in [
+        ("NameUnwrapped", NameUnwrapped::SIGNATURE_HASH),
+        ("TransferSingle", TransferSingle::SIGNATURE_HASH),
+        ("TransferBatch", TransferBatch::SIGNATURE_HASH),
+    ] {
+        assert!(
+            watch.includes(NAME_WRAPPER, &format!("{topic:#x}"), ANNOUNCEMENT_BLOCK),
+            "ENSv1 cleanup surface {label} must be ingestible on the Sepolia profile"
+        );
+    }
+
+    assert!(
+        watch.includes(
+            ENS_REGISTRY,
+            &format!("{:#x}", NewOwner::SIGNATURE_HASH),
+            ANNOUNCEMENT_BLOCK
+        ),
+        "the ENSv1 registry ownership surface must be ingestible on the Sepolia profile"
+    );
+
+    scratch.cleanup().await
 }
 
 async fn run_lane(lane: RestartLane) -> Result<LaneSnapshot> {
