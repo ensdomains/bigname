@@ -297,18 +297,19 @@ impl Catalog {
         })
     }
 
-    pub(super) fn declared_contract_instance_for_role(
+    pub(super) fn declared_start_block_for_role(
         &self,
         source_family: &str,
         role: &str,
-    ) -> Option<Uuid> {
+    ) -> Option<i64> {
         self.admissions.iter().find_map(|admission| {
             (admission.role.as_deref() == Some(role)
                 && admission
                     .source_manifest_id
                     .and_then(|manifest_id| self.source(manifest_id))
                     .is_some_and(|source| source.source_family == source_family))
-            .then_some(admission.contract_instance_id)
+            .then_some(admission.active_from_block)
+            .flatten()
         })
     }
 

@@ -33,7 +33,33 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    migration_enabled: bool,
 ) -> anyhow::Result<Interpreted> {
+    match selected.event.signature.as_str() {
+        "ControllerAdded(address)"
+        | "ControllerRemoved(address)"
+        | "NameRegistered(uint256,address,uint256)"
+        | "NameRenewed(uint256,uint256)" => {
+            return if migration_enabled {
+                super::super::migration::interpret_base_registrar(selected, raw, state)
+            } else {
+                Ok(Interpreted::new())
+            };
+        }
+        "Transfer(address,address,uint256)"
+            if selected.source.source_family == "ens_v1_registrar_l1"
+                && selected.emitter_role.as_deref() == Some("registrar") =>
+        {
+            let mut ordinary = transfer(selected, raw, state)?;
+            if migration_enabled {
+                let mut correlated =
+                    super::super::migration::interpret_base_registrar(selected, raw, state)?;
+                ordinary.append(&mut correlated);
+            }
+            return Ok(ordinary);
+        }
+        _ => {}
+    }
     match selected.event.name.as_str() {
         "NameRegistered" => name_event(selected, raw, state, true),
         "NameRenewed" => name_event(selected, raw, state, false),
@@ -62,6 +88,35 @@ fn transfer(
     let labelhash = B256::from(event.tokenId.to_be_bytes::<32>());
     let raw_namehash = registrar_namehash(selected, labelhash);
     let previous_active = state.v1_name(&selected.source.namespace, &raw_namehash);
+    let mut wrapper_fallback = false;
+    if state
+        .v1_registrar(&selected.source.namespace, &raw_namehash)
+        .is_none()
+        && state.v1_surface_materialized(&selected.source.namespace, &raw_namehash)
+        && state.matches_v1_unwrap(&selected.source.namespace, &raw_namehash, &from, raw)
+        && let Some(expiry) =
+            state.v1_registrar_expiry_from_wrapper(&selected.source.namespace, &raw_namehash)
+    {
+        let (token_lineage_id, resource_id, authority_key) =
+            new_registrar_identity(selected, raw, &format!("{labelhash:#x}"));
+        state.observe_v1_registrar(
+            &selected.source.namespace,
+            &raw_namehash,
+            format!("{}:{raw_namehash}", selected.source.namespace),
+            true,
+            resource_id,
+            token_lineage_id,
+            selected.source.source_family.clone(),
+            Some(selected.source.manifest_id),
+            Some(format!("{labelhash:#x}")),
+            Some(expiry),
+            Some(from.clone()),
+            authority_key,
+            true,
+            false,
+        );
+        wrapper_fallback = true;
+    }
     let Some((before, linked)) =
         state.transfer_v1_registrar_owner(&selected.source.namespace, &raw_namehash, to.clone())
     else {
@@ -100,6 +155,7 @@ fn transfer(
             expiry: None,
             owner: Some(registry_owner),
             authority_key: Some(format!("registry-only:{}:{raw_namehash}", raw.chain_id)),
+            wrapper_fallback: false,
         };
         state.remember_v1_registry_authority(
             &selected.source.namespace,
@@ -113,17 +169,30 @@ fn transfer(
         );
         active_after = Some(authority);
     }
+    let mut after = json!({
+        "source_event": "Transfer",
+        "to": to,
+        "token_id": u256_word_hex(event.tokenId),
+        "namehash": raw_namehash,
+        "token_lineage_id": linked.token_lineage_id.map(|id| id.to_string()),
+    });
+    // A fallback-created registrar identity must be recoverable from the latest transfer row
+    // alone. Until a label-bearing registrar-controller registration or renewal replaces it,
+    // every transfer repeats the marker and uses that transfer's sender as the restore-time owner.
+    if wrapper_fallback || linked.wrapper_fallback {
+        after["fallback_from_wrapper"] = json!(true);
+        after["fallback_from"] = json!(from);
+        after["surface_known"] = json!(linked.surface_known);
+        after["labelhash"] = json!(linked.labelhash);
+        after["expiry"] = json!(linked.expiry);
+        after["authority_key"] = json!(linked.authority_key);
+        after["authority_source_manifest_id"] = json!(linked.source_manifest_id);
+    }
     let mut output = single_event(
         "TokenControlTransferred",
         Some(linked.logical_name_id.clone()),
         Some(linked.resource_id),
-        json!({
-            "source_event": "Transfer",
-            "to": to,
-            "token_id": u256_word_hex(event.tokenId),
-            "namehash": raw_namehash,
-            "token_lineage_id": linked.token_lineage_id.map(|id| id.to_string()),
-        }),
+        after,
     );
     output.events[0].explicit_before = Some(json!({"from": from}));
     output.resources.push(ResourceDraft {
@@ -294,6 +363,7 @@ fn name_event(
         expiry,
         owner.clone(),
         retained_authority_key.clone(),
+        false,
         make_current,
     );
     let wrapper_renewal = wrapper_renewal::event(

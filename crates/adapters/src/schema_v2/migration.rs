@@ -4,7 +4,9 @@ use anyhow::Context;
 use serde_json::{Value, json};
 
 use super::{
-    BatchOutput, MigrationCandidateEffect, NormalizedEvent, catalog::Catalog,
+    BatchOutput, MigrationCandidateEffect, NormalizedEvent,
+    catalog::{Catalog, Selected},
+    manifest::ManifestSource,
     protocol::MigrationObservation,
 };
 
@@ -17,8 +19,45 @@ pub use support::inject_activated_transition_for_test;
 use support::*;
 
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
+const V1_REGISTRAR_FAMILY: &str = "ens_v1_registrar_l1";
+const V1_REGISTRAR_ROLE: &str = "registrar";
 const CANDIDATE: &str = "candidate";
 const TRANSITION_KIND: &str = "authority_transition";
+
+pub(super) fn correlated_registrar_source(
+    catalog: &Catalog,
+    selected: &Selected,
+    raw: &super::RawLogInput,
+) -> anyhow::Result<Option<ManifestSource>> {
+    if selected.source.source_family != V1_REGISTRAR_FAMILY
+        || selected.emitter_role.as_deref() != Some(V1_REGISTRAR_ROLE)
+    {
+        return Ok(None);
+    }
+    let Some(migration_source) = catalog.source_for_family(MIGRATION_FAMILY) else {
+        return Ok(None);
+    };
+    if migration_source.namespace != selected.source.namespace
+        || migration_source.chain_id != selected.source.chain_id
+    {
+        return Ok(None);
+    }
+    let registrar = catalog
+        .correlation_address(MIGRATION_FAMILY, "ens_v1_base_registrar")
+        .context("migration manifest has no ENSv1 BaseRegistrar correlation address")?;
+    let launch_block = catalog
+        .declared_start_block_for_role(MIGRATION_FAMILY, "graveyard")
+        .context("migration manifest has no launch-bounded Graveyard declaration")?;
+    if !raw.emitting_address.eq_ignore_ascii_case(registrar) || raw.block_number < launch_block {
+        return Ok(None);
+    }
+    Ok(Some(migration_source.clone()))
+}
+
+fn is_v1_registrar_observation(observation: &MigrationObservation) -> bool {
+    observation.source_family == V1_REGISTRAR_FAMILY
+        && observation.emitter_role.as_deref() == Some(V1_REGISTRAR_ROLE)
+}
 
 pub(super) fn correlate(
     catalog: &Catalog,
@@ -38,9 +77,9 @@ pub(super) fn correlate(
     let name_wrapper = catalog
         .correlation_address(MIGRATION_FAMILY, "ens_v1_name_wrapper")
         .context("migration manifest has no ENSv1 NameWrapper correlation address")?;
-    let base_registrar_instance = catalog
-        .declared_contract_instance_for_role(MIGRATION_FAMILY, "ens_v1_base_registrar")
-        .context("migration manifest has no ENSv1 BaseRegistrar contract instance")?;
+    let base_registrar = catalog
+        .correlation_address(MIGRATION_FAMILY, "ens_v1_base_registrar")
+        .context("migration manifest has no ENSv1 BaseRegistrar correlation address")?;
     let mut by_transaction = BTreeMap::<(String, String), Vec<&MigrationObservation>>::new();
     for observation in &observations {
         by_transaction
@@ -66,7 +105,8 @@ pub(super) fn correlate(
             &graveyard,
             &unlocked,
             &locked,
-            base_registrar_instance,
+            catalog,
+            base_registrar,
             name_wrapper,
             &registry_groups,
             output,
@@ -138,7 +178,7 @@ fn correlate_renewals(
             .copied()
             .filter(|observation| {
                 observation.event_name == "NameRenewed"
-                    && observation.emitter_role.as_deref() == Some("ens_v1_base_registrar")
+                    && is_v1_registrar_observation(observation)
                     && observation.decoded.get("token_id").and_then(Value::as_str)
                         == Some(base_token_id)
                     && observation.raw.log_index > v2_position
@@ -187,10 +227,11 @@ fn correlate_controllers(
         .iter()
         .copied()
         .filter(|observation| {
-            matches!(
-                observation.event_name.as_str(),
-                "ControllerAdded" | "ControllerRemoved"
-            )
+            is_v1_registrar_observation(observation)
+                && matches!(
+                    observation.event_name.as_str(),
+                    "ControllerAdded" | "ControllerRemoved"
+                )
         })
         .collect::<Vec<_>>();
     let mut participating = BTreeSet::new();
@@ -215,7 +256,7 @@ fn correlate_controllers(
         };
         let renewed = observations.iter().copied().filter(|observation| {
             observation.event_name == "NameRenewed"
-                && observation.emitter_role.as_deref() == Some("ens_v1_base_registrar")
+                && is_v1_registrar_observation(observation)
                 && observation.raw.log_index > added.raw.log_index
                 && observation.raw.log_index < removed.raw.log_index
         });
@@ -229,16 +270,29 @@ fn correlate_controllers(
             let id = correlation_id("synchronized_renewal", Some(&logical_name_id), &evidence);
             mark_direct_position(output, &added.raw, &id);
             mark_direct_position(output, &base.raw, &id);
+            if let Some(wrapper_expiry) = base.correlated_wrapper_expiry {
+                for event in output.normalized_events.iter_mut().filter(|event| {
+                    event.source_family == MIGRATION_FAMILY && same_position(event, &base.raw)
+                }) {
+                    let wrapper_expiry = event
+                        .after_state
+                        .get("wrapper_expiry")
+                        .and_then(Value::as_u64)
+                        .map_or(wrapper_expiry, |retained| retained.max(wrapper_expiry));
+                    event.after_state["wrapper_expiry"] = Value::from(wrapper_expiry);
+                }
+            }
             mark_direct_position(output, &removed.raw, &id);
             participating.insert((added.event_name.as_str(), added.raw.log_index));
             participating.insert((removed.event_name.as_str(), removed.raw.log_index));
         }
     }
     for observation in observations.iter().copied().filter(|observation| {
-        matches!(
-            observation.event_name.as_str(),
-            "ControllerAdded" | "ControllerRemoved"
-        )
+        is_v1_registrar_observation(observation)
+            && matches!(
+                observation.event_name.as_str(),
+                "ControllerAdded" | "ControllerRemoved"
+            )
     }) {
         if !participating.contains(&(observation.event_name.as_str(), observation.raw.log_index)) {
             let subject = value_str(&observation.decoded, "subject")?;
@@ -265,7 +319,8 @@ fn correlate_authority_transitions(
     graveyard: &str,
     unlocked: &str,
     locked: &str,
-    base_registrar_instance: uuid::Uuid,
+    catalog: &Catalog,
+    base_registrar: &str,
     name_wrapper: &str,
     registry_groups: &[RegistryGroup],
     output: &mut BatchOutput,
@@ -308,6 +363,7 @@ fn correlate_authority_transitions(
             .copied()
             .filter(|observation| {
                 observation.event_name == "Transfer"
+                    && is_v1_registrar_observation(observation)
                     && observation.raw.log_index < registration_log
                     && observation.decoded.get("labelhash").and_then(Value::as_str)
                         == Some(labelhash)
@@ -366,6 +422,17 @@ fn correlate_authority_transitions(
                 registration_log,
             )
         });
+        let independently_admitted_transfer_events = output
+            .normalized_events
+            .iter()
+            .filter(|event| {
+                event.source_family == V1_REGISTRAR_FAMILY
+                    && transfers
+                        .iter()
+                        .any(|observation| same_position(event, &observation.raw))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let successor_registry_instance = registration
             .after_state
             .get("registry_contract_instance_id")
@@ -390,7 +457,10 @@ fn correlate_authority_transitions(
             value_str(&successor_binding_event.after_state, "surface_binding_id")?;
         evidence.extend(correlated_events.iter().map(event_evidence));
         let id = correlation_id(TRANSITION_KIND, Some(&logical_name_id), &evidence);
-        for event in &correlated_events {
+        for event in correlated_events
+            .iter()
+            .chain(&independently_admitted_transfer_events)
+        {
             associate_event(
                 output,
                 &event.event_identity,
@@ -400,13 +470,25 @@ fn correlate_authority_transitions(
             )?;
         }
         let predecessor_resource = match migration_path {
-            "unwrapped" => json!({
-                "anchor_kind":"registrar_backed_registration",
-                "contract_instance_id":base_registrar_instance,
-                "token_id":labelhash,
-                "labelhash":labelhash,
-                "selection":"current_registrar_resource_immediately_before_boundary",
-            }),
+            "unwrapped" => {
+                let base_registrar_instance = catalog
+                    .contract_instance_for_address(
+                        base_registrar,
+                        registration
+                            .block_number
+                            .context("migration registration has no block number")?,
+                    )?
+                    .context(
+                        "ENSv1 BaseRegistrar correlation address has no active contract instance",
+                    )?;
+                json!({
+                    "anchor_kind":"registrar_backed_registration",
+                    "contract_instance_id":base_registrar_instance,
+                    "token_id":labelhash,
+                    "labelhash":labelhash,
+                    "selection":"current_registrar_resource_immediately_before_boundary",
+                })
+            }
             "unlocked_wrapped" | "locked_wrapped" => json!({
                 "anchor_kind":"wrapper_backed_control",
                 "contract_address":name_wrapper,

@@ -1,5 +1,7 @@
 use super::{model::PriorEventInput, protocol::v1::unmasked_word, state::State};
 use {serde_json::Value, uuid::Uuid};
+#[path = "state_restore_v1_transfer.rs"]
+mod v1_transfer;
 pub(super) fn rebuild_v2_indexes(state: &mut State) {
     state.rebuild_v2_token_indexes();
 }
@@ -177,6 +179,19 @@ fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
 }
 
 pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
+    let source_event = event
+        .after_state
+        .get("source_event")
+        .and_then(Value::as_str);
+    if event.source_family == "ens_v2_migration_l1"
+        && source_event == Some("NameRenewed")
+        && let (Some(namehash), Some(expiry)) = (
+            event.after_state.get("namehash").and_then(Value::as_str),
+            event.after_state.get("wrapper_expiry").and_then(parse_u64),
+        )
+    {
+        state.restore_v1_correlated_wrapper_expiry(&event.namespace, namehash, expiry);
+    }
     if !(event.source_family.starts_with("ens_v1_")
         || event.source_family.starts_with("basenames_"))
     {
@@ -188,10 +203,6 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     {
         state.observe_v1_surface(&event.namespace, namehash);
     }
-    let source_event = event
-        .after_state
-        .get("source_event")
-        .and_then(Value::as_str);
     if matches!(source_event, Some("NewOwner" | "Transfer"))
         && let Some(namehash) = event
             .after_state
@@ -227,6 +238,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                     expiry: None,
                     owner: Some(owner.to_owned()),
                     authority_key: Some(format!("registry-only:{}:{namehash}", event.chain_id)),
+                    wrapper_fallback: false,
                 },
             );
         }
@@ -448,6 +460,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                     .get("authority_key")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                false,
                 make_current,
             );
         }
@@ -499,6 +512,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                             .as_ref()
                             .and_then(|state| state.authority_key.clone())
                     }),
+                false,
                 make_current,
             );
         }
@@ -549,39 +563,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
         _ => {}
     }
 
-    if event.event_kind == "TokenControlTransferred"
-        && source_event.is_some_and(|source| source.starts_with("Transfer"))
-        && let (Some(namehash), Some(to)) = (
-            event
-                .after_state
-                .get("namehash")
-                .or_else(|| event.after_state.get("node"))
-                .and_then(Value::as_str),
-            event.after_state.get("to").and_then(Value::as_str),
-        )
-    {
-        if event.source_family == "ens_v1_wrapper_l1" {
-            state.transfer_v1_wrapper_owner(
-                &event.namespace,
-                namehash,
-                &event.source_family,
-                to.to_owned(),
-            );
-        } else if matches!(
-            event.source_family.as_str(),
-            "ens_v1_registrar_l1" | "basenames_base_registrar"
-        ) {
-            state.transfer_v1_registrar_owner(&event.namespace, namehash, to.to_owned());
-            state.converge_v1_registrar_transfer(
-                &event.namespace,
-                namehash,
-                event
-                    .block_timestamp
-                    .map(|timestamp| timestamp.unix_timestamp())
-                    .unwrap_or(i64::MIN),
-            );
-        }
-    }
+    v1_transfer::restore(state, event);
 }
 
 fn parse_i64(value: &Value) -> Option<i64> {

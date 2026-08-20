@@ -165,6 +165,7 @@ pub(super) fn interpret(
                     expiry: None,
                     owner: Some(owner.to_owned()),
                     authority_key: Some(format!("registry-only:{}:{affected_node}", raw.chain_id)),
+                    wrapper_fallback: false,
                 };
                 state.remember_v1_registry_authority(
                     &selected.source.namespace,

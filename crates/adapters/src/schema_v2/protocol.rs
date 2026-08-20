@@ -49,6 +49,9 @@ pub(super) struct Interpreted {
     pub binding_closures: Vec<BindingClosureDraft>,
     pub bindings: Vec<BindingDraft>,
     pub discovery: Vec<DiscoveryDraft>,
+    /// Rows whose raw log belongs to a separately admitted ENSv1 registrar manifest while
+    /// persisted normalized provenance remains `ens_v2_migration_l1`.
+    pub migration_events: Vec<EventDraft>,
     pub migration_observations: Vec<MigrationObservation>,
 }
 
@@ -63,6 +66,7 @@ impl Interpreted {
             binding_closures: Vec::new(),
             bindings: Vec::new(),
             discovery: Vec::new(),
+            migration_events: Vec::new(),
             migration_observations: Vec::new(),
         }
     }
@@ -76,6 +80,7 @@ impl Interpreted {
         self.binding_closures.append(&mut other.binding_closures);
         self.bindings.append(&mut other.bindings);
         self.discovery.append(&mut other.discovery);
+        self.migration_events.append(&mut other.migration_events);
         self.migration_observations
             .append(&mut other.migration_observations);
     }
@@ -89,6 +94,7 @@ pub(super) struct MigrationObservation {
     pub contract_instance_id: Uuid,
     pub raw: RawLogInput,
     pub decoded: Value,
+    pub correlated_wrapper_expiry: Option<u64>,
 }
 
 pub(super) fn v2_boundary_expiration(
@@ -211,10 +217,11 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    registrar_migration_enabled: bool,
 ) -> anyhow::Result<Interpreted> {
     let mut output = match selected.source.source_family.as_str() {
         family if family.starts_with("ens_v1_") || family.starts_with("basenames_") => {
-            v1::interpret(selected, raw, state)
+            v1::interpret(selected, raw, state, registrar_migration_enabled)
         }
         "ens_v2_registry_l1" | "ens_v2_root_l1" | "ens_v2_registrar_l1" => {
             v2_registry::interpret(selected, raw, state)
@@ -370,7 +377,23 @@ pub(super) fn is_match_all(
 
 fn supports_signature(source_family: &str, signature: &str) -> bool {
     match source_family {
-        "ens_v1_registrar_l1" | "basenames_base_registrar" => matches!(
+        "ens_v1_registrar_l1" => matches!(
+            signature,
+            "ControllerAdded(address)"
+                | "ControllerRemoved(address)"
+                | "NameRegistered(uint256,address,uint256)"
+                | "NameRenewed(uint256,uint256)"
+                | "NameRegistered(string,bytes32,address,uint256)"
+                | "NameRegistered(string,bytes32,address,uint256,uint256)"
+                | "NameRegistered(string,bytes32,address,uint256,uint256,uint256)"
+                | "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)"
+                | "NameRenewed(string,bytes32,uint256)"
+                | "NameRenewed(string,bytes32,uint256,uint256)"
+                | "NameRenewed(string,bytes32,uint256,uint256,bytes32)"
+                | "Transfer(address,address,uint256)"
+                | "Upgraded(address)"
+        ),
+        "basenames_base_registrar" => matches!(
             signature,
             "NameRegistered(string,bytes32,address,uint256)"
                 | "NameRegistered(string,bytes32,address,uint256,uint256)"
@@ -386,11 +409,6 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
             signature,
             "ProxyDeployed(address,address,uint256,address)"
                 | "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)"
-                | "ControllerAdded(address)"
-                | "ControllerRemoved(address)"
-                | "NameRegistered(uint256,address,uint256)"
-                | "NameRenewed(uint256,uint256)"
-                | "Transfer(address,address,uint256)"
         ),
         "ens_v1_registry_l1" | "basenames_base_registry" => matches!(
             signature,
