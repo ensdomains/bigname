@@ -264,6 +264,44 @@ async fn healthz_payload(database: &TestDatabase) -> Result<Value> {
     read_json(response).await
 }
 
+#[tokio::test]
+async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> Result<()> {
+    let database = TestDatabase::new(true).await?;
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    let repository = bigname_manifests::load_repository(manifest_root)?;
+    bigname_manifests::sync_schema_v2_repository(&database.lookup_pool, &repository).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/namespaces/ens")
+                .body(Body::empty())
+                .expect("namespace request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"]["capabilities"]["name_profile"],
+        json!({ "completeness": "partial" })
+    );
+    assert_eq!(
+        payload["data"]["capabilities"]["name_history"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "not_supported_for_namespace"
+        })
+    );
+    assert_eq!(
+        payload["data"]["networks"],
+        json!([{ "network": "ethereum-sepolia", "chain_id": 11155111 }])
+    );
+
+    database.cleanup().await
+}
+
 include!("tests/graphql.rs");
 include!("tests/graphql_contract.rs");
 include!("tests/v2_name_record.rs");

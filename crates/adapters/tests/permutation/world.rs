@@ -106,6 +106,42 @@ pub const ENS_V1_MAINNET: World = World {
     ],
 };
 
+pub const ENS_V1_SEPOLIA: World = World {
+    label: "ens_v1_sepolia",
+    namespace: "ens",
+    chain_id: "ethereum-sepolia",
+    deployment_epoch: "ens_v1",
+    address_base: 0x0003_0000,
+    sources: &[
+        SourceSlot {
+            family: "ens_v1_registry_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v1_registrar_l1",
+            version_file: "v1.toml",
+        },
+        SourceSlot {
+            family: "ens_v1_wrapper_l1",
+            version_file: "v1.toml",
+        },
+    ],
+    roles: &[
+        RoleSlot {
+            family: "ens_v1_registry_l1",
+            role: "registry",
+        },
+        RoleSlot {
+            family: "ens_v1_registrar_l1",
+            role: "registrar",
+        },
+        RoleSlot {
+            family: "ens_v1_wrapper_l1",
+            role: "name_wrapper",
+        },
+    ],
+};
+
 pub const ENS_V2_SEPOLIA: World = World {
     label: "ens_v2_sepolia",
     namespace: "ens",
@@ -450,11 +486,7 @@ const UNMODELLED_NAMESPACES: &[&str] = &["basenames"];
 /// deployment needs this list rather than `UNMODELLED_NAMESPACES`: every ENS deployment shares the
 /// `ens` namespace, so naming a namespace to excuse one of them would stop checking the others too.
 ///
-/// `ens/ethereum-sepolia/ens_v1` admits the ENSv1 registry and NameWrapper but not the `.eth`
-/// registrar, whose address the migration family already claims (issue #502). A world built before
-/// that resolves would pin a registrar-less shape that no deployment will run, so the deferral
-/// holds until the registrar family can be admitted.
-const UNMODELLED_DEPLOYMENTS: &[&str] = &["ens/ethereum-sepolia/ens_v1"];
+const UNMODELLED_DEPLOYMENTS: &[&str] = &[];
 
 /// The per-world check only looks inside epochs a world already declares, so a deployment that
 /// arrives as a *new* epoch — ENSv2 reaching mainnet, say — would be pinned by nobody and generate

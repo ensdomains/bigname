@@ -64,10 +64,16 @@ sol! {
         uint256[] values
     );
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    event ControllerAdded(address indexed controller);
+    event ControllerRemoved(address indexed controller);
+    event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
+    event NameRenewed(uint256 indexed id, uint256 expires);
 }
 
 const NAME_WRAPPER: &str = "0x0635513f179d50a207757e05759cbd106d7dfce8";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+const BASE_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
 
 #[derive(Clone, Copy, Debug)]
 enum RestartLane {
@@ -216,16 +222,14 @@ async fn seed_candidate_address_history(name: &str) -> Result<ScratchDatabase> {
     Ok(scratch)
 }
 
-/// The Sepolia ENSv1 registry and wrapper admissions make the logs a migrated child's ENSv1
-/// cleanup is carried by ingestible on this deployment profile. Before them the migration manifest
-/// named a NameWrapper correlation address that no admitted source watched, so a child's cleanup
-/// could never be observed and no child boundary could derive from it.
+/// The checked-in Sepolia manifests make the logs carrying a migrated child's ENSv1 cleanup and
+/// registrar predecessor state downloadable. Before these declarations, the `ens_v2_migration_l1`
+/// manifest named correlation addresses that no ENSv1 contract declaration watched.
 ///
-/// This pins ingestibility of those inputs only. It does not claim an ENSv1 authority arm for .eth
-/// second-level authority-transition boundaries: that still needs the ENSv1 registrar family,
-/// which this profile does not admit.
+/// This pins persisted ingest filtering only; consumer activation remains a separate contract.
 #[tokio::test]
-async fn sepolia_profile_watches_the_ens_v1_cleanup_and_registry_surfaces() -> Result<()> {
+async fn sepolia_manifests_watch_the_ens_v1_cleanup_registry_and_registrar_surfaces() -> Result<()>
+{
     let scratch = ScratchDatabase::create("sepolia_ens_v1_admission_watch").await?;
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -249,7 +253,7 @@ async fn sepolia_profile_watches_the_ens_v1_cleanup_and_registry_surfaces() -> R
     ] {
         assert!(
             watch.includes(NAME_WRAPPER, &format!("{topic:#x}"), ANNOUNCEMENT_BLOCK),
-            "ENSv1 cleanup surface {label} must be ingestible on the Sepolia profile"
+            "ENSv1 cleanup surface {label} must be downloadable from the checked-in Sepolia manifests"
         );
     }
 
@@ -259,8 +263,21 @@ async fn sepolia_profile_watches_the_ens_v1_cleanup_and_registry_surfaces() -> R
             &format!("{:#x}", NewOwner::SIGNATURE_HASH),
             ANNOUNCEMENT_BLOCK
         ),
-        "the ENSv1 registry ownership surface must be ingestible on the Sepolia profile"
+        "the ENSv1 registry ownership surface must be downloadable from the checked-in Sepolia manifests"
     );
+
+    for (label, topic) in [
+        ("Transfer", Transfer::SIGNATURE_HASH),
+        ("ControllerAdded", ControllerAdded::SIGNATURE_HASH),
+        ("ControllerRemoved", ControllerRemoved::SIGNATURE_HASH),
+        ("NameRegistered", NameRegistered::SIGNATURE_HASH),
+        ("NameRenewed", NameRenewed::SIGNATURE_HASH),
+    ] {
+        assert!(
+            watch.includes(BASE_REGISTRAR, &format!("{topic:#x}"), ANNOUNCEMENT_BLOCK),
+            "ENSv1 BaseRegistrar surface {label} must be downloadable from the checked-in Sepolia manifests"
+        );
+    }
 
     scratch.cleanup().await
 }

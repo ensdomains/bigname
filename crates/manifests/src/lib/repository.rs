@@ -191,7 +191,65 @@ fn validate_repository_manifests(manifests: &[LoadedManifest]) -> Result<()> {
         );
     }
 
+    validate_migration_correlations(manifests)?;
     validate_block_derived_preimage_attribution(manifests)?;
+
+    Ok(())
+}
+
+fn validate_migration_correlations(manifests: &[LoadedManifest]) -> Result<()> {
+    for migration in manifests.iter().filter(|loaded| {
+        loaded.manifest.rollout_status.is_active()
+            && loaded.manifest.source_family == "ens_v2_migration_l1"
+    }) {
+        for (key, source_family, role) in [
+            ("ens_v1_name_wrapper", "ens_v1_wrapper_l1", "name_wrapper"),
+            ("ens_v1_base_registrar", "ens_v1_registrar_l1", "registrar"),
+        ] {
+            let correlation_address = migration
+                .manifest
+                .correlation_addresses
+                .get(key)
+                .with_context(|| {
+                    format!(
+                        "active ens_v2_migration_l1 manifest {} is missing required correlation address {key}",
+                        migration.relative_path.display(),
+                    )
+                })?;
+            let Some(correlated_family) = manifests.iter().find(|loaded| {
+                loaded.manifest.rollout_status.is_active()
+                    && loaded.manifest.namespace == migration.manifest.namespace
+                    && loaded.manifest.chain == migration.manifest.chain
+                    && loaded.manifest.source_family == source_family
+            }) else {
+                continue;
+            };
+            let declared_address = correlated_family
+                .manifest
+                .contracts
+                .iter()
+                .find(|contract| contract.role == role)
+                .map(|contract| contract.address.as_str())
+                .with_context(|| {
+                    format!(
+                        "active {source_family} manifest {} paired with ens_v2_migration_l1 {} does not declare contract role {role}",
+                        correlated_family.relative_path.display(),
+                        migration.relative_path.display(),
+                    )
+                })?;
+            let correlation_address = parse_alloy_evm_address(correlation_address)
+                .context("validated migration correlation address did not parse")?;
+            let declared_address = parse_alloy_evm_address(declared_address)
+                .context("validated correlated contract address did not parse")?;
+            if correlation_address != declared_address {
+                bail!(
+                    "active ens_v2_migration_l1 manifest {} declares correlation address {key} {correlation_address}, but active {source_family} manifest {} declares {role} {declared_address}",
+                    migration.relative_path.display(),
+                    correlated_family.relative_path.display(),
+                );
+            }
+        }
+    }
 
     Ok(())
 }

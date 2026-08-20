@@ -418,6 +418,244 @@ fn co_admitted_registrar_transfer_keeps_ordinary_event_and_gains_association() -
 }
 
 #[test]
+fn sepolia_base_registrar_admission_restores_unwrapped_fallback_authority() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let registrar = addresses["base_registrar"].as_str().unwrap();
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let registry = "0x0000000000000000000000000000000000000099";
+    let label = b"restored";
+    let labelhash = keccak256(label);
+    let node = super::common::namehash(&["restored".to_owned(), "eth".to_owned()]);
+    let block = fixture["scenarios"]["U-01"]["migration_block"]
+        .as_i64()
+        .unwrap();
+    let owner = Address::from([0x51; 20]);
+    let successor = Address::from([0x52; 20]);
+    let old_registrar_expiry = u64::try_from(block)? + 10_000;
+    let renewed_registrar_expiry = old_registrar_expiry + 20_000;
+    let wrapper_expiry = old_registrar_expiry + (90 * 24 * 60 * 60);
+    let logs = vec![
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            0,
+            registry,
+        ),
+        raw_at_transaction(
+            super::NameWrapped {
+                node: node.parse()?,
+                name: b"\x08restored\x03eth\0".to_vec().into(),
+                owner,
+                fuses: (1 << 16) | (1 << 17),
+                expiry: wrapper_expiry,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            1,
+            wrapper,
+        ),
+        raw_at_transaction(
+            ControllerAdded {
+                controller: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block + 1,
+            0,
+            0,
+            registrar,
+        ),
+        base_renewed_at(
+            addresses,
+            U256::from_be_bytes(*labelhash),
+            renewed_registrar_expiry,
+            block + 1,
+            1,
+        ),
+        raw_at_transaction(
+            ControllerRemoved {
+                controller: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block + 1,
+            0,
+            2,
+            registrar,
+        ),
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner,
+            }
+            .encode_log_data(),
+            block + 2,
+            0,
+            0,
+            registry,
+        ),
+        raw_at_transaction(
+            super::NameUnwrapped {
+                node: node.parse()?,
+                owner,
+            }
+            .encode_log_data(),
+            block + 2,
+            0,
+            1,
+            wrapper,
+        ),
+        registrar_transfer_at(wrapper.parse()?, owner, labelhash, block + 2, 2, registrar),
+        registrar_transfer_at(owner, successor, labelhash, block + 3, 0, registrar),
+    ];
+
+    let mut before_input = batch(logs.clone(), &fixture, false);
+    admit_v1_registry(&mut before_input, registry);
+    before_input
+        .manifests
+        .retain(|manifest| manifest.source_family != "ens_v1_registrar_l1");
+    before_input
+        .admissions
+        .retain(|admission| admission.source_manifest_id != Some(V1_REGISTRAR_MANIFEST_ID));
+    let before = interpret_test_batch(before_input)?;
+    assert!(!before.normalized_events.iter().any(|event| {
+        event.event_kind == "SurfaceBound" && event.after_state["source_event"] == "Transfer"
+    }));
+
+    let mut standalone_input = batch(logs.clone(), &fixture, false);
+    admit_v1_registry(&mut standalone_input, registry);
+    standalone_input
+        .manifests
+        .retain(|manifest| manifest.source_family != "ens_v2_migration_l1");
+    standalone_input
+        .admissions
+        .retain(|admission| admission.source_manifest_id != Some(MIGRATION_MANIFEST_ID));
+    let standalone = interpret_test_batch(standalone_input)?;
+    assert!(
+        standalone
+            .normalized_events
+            .iter()
+            .all(|event| { event.source_family != "ens_v2_migration_l1" })
+    );
+    let standalone_transfer = standalone
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "TokenControlTransferred"
+                && event.after_state["source_event"] == "Transfer"
+                && event.block_number == Some(block + 2)
+        })
+        .expect("ordinary registrar unwrap transfer without ENSv1→ENSv2 migration correlation");
+    assert_eq!(
+        standalone_transfer.after_state["expiry"],
+        old_registrar_expiry
+    );
+    assert_eq!(
+        standalone_transfer.after_state["fallback_from_wrapper"],
+        true
+    );
+
+    let mut after_input = batch(logs, &fixture, false);
+    admit_v1_registry(&mut after_input, registry);
+    let retained_blocks = after_input
+        .raw_logs
+        .iter()
+        .map(|raw| RawBlockInput {
+            chain_id: raw.chain_id.clone(),
+            block_hash: raw.block_hash.clone(),
+            block_number: raw.block_number,
+            block_timestamp: raw.block_timestamp,
+            canonicality_state: raw.canonicality_state.clone(),
+        })
+        .collect::<Vec<_>>();
+    let after = interpret_test_batch(after_input)?;
+    let fallback = after
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound" && event.after_state["source_event"] == "Transfer"
+        })
+        .expect("admitted BaseRegistrar transfer restores the unwrap fallback");
+    assert_eq!(fallback.source_family, "ens_v1_registrar_l1");
+    let transfer = after
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "TokenControlTransferred"
+        })
+        .expect("admitted BaseRegistrar transfer state");
+    let prior = super::super::seam::fold_prior_events(
+        Vec::new(),
+        &after.normalized_events,
+        &retained_blocks,
+    )?;
+    let expired_block = i64::try_from(renewed_registrar_expiry)? + (90 * 24 * 60 * 60) + 1;
+    let resume = |at, to, prior| {
+        let mut input = batch(
+            vec![registrar_transfer_at(
+                successor, to, labelhash, at, 0, registrar,
+            )],
+            &fixture,
+            false,
+        );
+        admit_v1_registry(&mut input, registry);
+        input.prior_events = prior;
+        interpret_test_batch(input)
+    };
+    assert!(has_v1_registrar_transfer(&resume(
+        block + 4,
+        Address::from([0x53; 20]),
+        prior.clone(),
+    )?));
+    assert!(!has_v1_registrar_transfer(&resume(
+        expired_block,
+        Address::from([0x54; 20]),
+        prior,
+    )?));
+    assert_eq!(transfer.after_state["expiry"], renewed_registrar_expiry);
+    assert!(after.resources.iter().any(|resource| {
+        Some(resource.resource_id) == fallback.resource_id && resource.token_lineage_id.is_some()
+    }));
+    Ok(())
+}
+
+fn registrar_transfer_at(
+    from: Address,
+    to: Address,
+    token: B256,
+    block: i64,
+    log: i64,
+    registrar: &str,
+) -> RawLogInput {
+    raw_at_transaction(
+        super::v1_registrar::Transfer {
+            from,
+            to,
+            tokenId: U256::from_be_bytes(*token),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log,
+        registrar,
+    )
+}
+
+fn has_v1_registrar_transfer(output: &BatchOutput) -> bool {
+    output.normalized_events.iter().any(|event| {
+        event.source_family == "ens_v1_registrar_l1"
+            && event.event_kind == "TokenControlTransferred"
+    })
+}
+
+#[test]
 fn unlocked_wrapped_catalog_shape_is_distinguished_per_name() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["W-01"];
@@ -2153,6 +2391,73 @@ fn compacted_restore_retains_sync_wrapper_expiry_after_later_numeric_renewal() -
 }
 
 #[test]
+fn completed_correlation_groups_retain_monotone_max_expiry_across_replay_modes()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let mut probe = wrapper_fallback_probe(&fixture, "monotone-expiry")?;
+    probe.setup_logs.extend([
+        raw_at_transaction(
+            ControllerAdded {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 1,
+            0,
+            0,
+            &probe.registrar,
+        ),
+        base_renewed_at(
+            &fixture["addresses"],
+            U256::from_be_bytes(*probe.labelhash),
+            1_248,
+            probe.block + 1,
+            1,
+        ),
+        raw_at_transaction(
+            ControllerRemoved {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 1,
+            0,
+            2,
+            &probe.registrar,
+        ),
+        raw_at_transaction(
+            ControllerAdded {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 2,
+            0,
+            0,
+            &probe.registrar,
+        ),
+        base_renewed_at(
+            &fixture["addresses"],
+            U256::from_be_bytes(*probe.labelhash),
+            848,
+            probe.block + 2,
+            1,
+        ),
+        raw_at_transaction(
+            ControllerRemoved {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 2,
+            0,
+            2,
+            &probe.registrar,
+        ),
+    ]);
+
+    let replay = replay_fallback_with_rank_one_restore(&fixture, probe)?;
+    assert_fallback_replay_matches(&replay, 1_248);
+    Ok(())
+}
+
+#[test]
 fn registrar_controller_envelope_cannot_cross_transaction_boundaries() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let mut probe = wrapper_fallback_probe(&fixture, "cross-transaction")?;
@@ -2327,6 +2632,7 @@ struct CompactedFallbackReplay {
     setup_output: BatchOutput,
     compacted_prior: Vec<PriorEventInput>,
     full_tail: Vec<NormalizedEvent>,
+    incremental_output: BatchOutput,
     cold_output: BatchOutput,
 }
 
@@ -2349,7 +2655,7 @@ fn replay_fallback_with_rank_one_restore(
 
     let mut setup_input = batch(probe.setup_logs.clone(), fixture, false);
     admit_v1_registry(&mut setup_input, &probe.registry);
-    let setup_output = interpret_test_batch(setup_input)?;
+    let (setup_output, session) = interpret_test_batch_incremental(setup_input, None)?;
     let mut blocks = probe
         .setup_logs
         .iter()
@@ -2367,10 +2673,15 @@ fn replay_fallback_with_rank_one_restore(
     let compacted_prior =
         seam::fold_prior_events(Vec::new(), &setup_output.normalized_events, &blocks)?;
 
-    let mut cold_input = batch(probe.tail_logs, fixture, false);
+    let tail_logs = probe.tail_logs;
+    let mut cold_input = batch(tail_logs.clone(), fixture, false);
     admit_v1_registry(&mut cold_input, &probe.registry);
     cold_input.prior_events = compacted_prior.clone();
     let cold_output = interpret_test_batch(cold_input)?;
+    let mut incremental_input = batch(tail_logs, fixture, false);
+    admit_v1_registry(&mut incremental_input, &probe.registry);
+    let (incremental_output, _) =
+        interpret_test_batch_incremental(incremental_input, Some(session))?;
     let full_tail = full
         .normalized_events
         .into_iter()
@@ -2380,6 +2691,7 @@ fn replay_fallback_with_rank_one_restore(
         setup_output,
         compacted_prior,
         full_tail,
+        incremental_output,
         cold_output,
     })
 }
@@ -2404,6 +2716,10 @@ fn assert_fallback_replay_matches(replay: &CompactedFallbackReplay, expected_exp
     assert_eq!(
         replay.cold_output.normalized_events, replay.full_tail,
         "rank-1-compacted cold restore must reproduce the full unwrap output"
+    );
+    assert_eq!(
+        replay.incremental_output.normalized_events, replay.full_tail,
+        "incremental replay must reproduce the full unwrap output"
     );
 }
 
@@ -3400,8 +3716,9 @@ fn registry_manifest() -> ManifestInput {
     )
 }
 
-/// The ENSv1 NameWrapper the migration manifest names as a correlation address. A child's
-/// predecessor cleanup is emitted here, so a batch that carries a child migration carries these.
+/// The ENSv1 NameWrapper the ENSv1→ENSv2 migration manifest names as a correlation address. A
+/// child's predecessor cleanup is emitted here, so a batch carrying that child's ENSv1→ENSv2
+/// migration carries it.
 fn wrapper_manifest() -> ManifestInput {
     manifest_with_events(
         V1_WRAPPER_MANIFEST_ID,

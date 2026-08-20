@@ -345,6 +345,194 @@ fn repository_loader_rejects_duplicate_storage_identity_and_active_versions() ->
     Ok(())
 }
 
+fn migration_wrapper_manifest_pair() -> (String, String) {
+    let wrapper = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v1_wrapper_l1\"",
+            1,
+        )
+        .replacen("role = \"registry\"", "role = \"name_wrapper\"", 1)
+        .replacen(
+            "emitter_roles = [\"registry\"]",
+            "emitter_roles = [\"name_wrapper\"]",
+            1,
+        );
+    let migration = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v2_migration_l1\"",
+            1,
+        )
+        .replacen(
+            "address = \"0x0000000000000000000000000000000000000001\"",
+            "address = \"0x0000000000000000000000000000000000000002\"",
+            1,
+        )
+        .replacen(
+            "address = \"0x00000000000000000000000000000000000000AA\"",
+            "address = \"0x00000000000000000000000000000000000000AB\"",
+            1,
+        )
+        .replacen(
+            "[capability_flags]",
+            "[correlation_addresses]\nens_v1_name_wrapper = \"0x00000000000000000000000000000000000000AA\"\nens_v1_base_registrar = \"0x00000000000000000000000000000000000000EE\"\n\n[capability_flags]",
+            1,
+        );
+
+    (wrapper, migration)
+}
+
+#[test]
+fn repository_loader_rejects_mismatched_migration_name_wrapper_correlation() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let (wrapper, migration) = migration_wrapper_manifest_pair();
+    test_dir.write_manifest("ens", "ens_v1_wrapper_l1", "v1", &wrapper)?;
+    test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &migration)?;
+    load_repository(&test_dir.path).context("matching wrapper correlation must load")?;
+
+    let mismatch = migration.replacen(
+        "ens_v1_name_wrapper = \"0x00000000000000000000000000000000000000AA\"",
+        "ens_v1_name_wrapper = \"0x00000000000000000000000000000000000000BB\"",
+        1,
+    );
+    test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &mismatch)?;
+    let error = load_repository(&test_dir.path)
+        .expect_err("mismatched migration-to-wrapper correlation must fail manifest load");
+    let message = error.to_string();
+    assert!(
+        message.contains("ens_v1_name_wrapper")
+            && message.contains("ens_v2_migration_l1")
+            && message.contains("ens_v1_wrapper_l1")
+            && message.contains("0x00000000000000000000000000000000000000bb")
+            && message.contains("0x00000000000000000000000000000000000000aa"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_loader_requires_both_active_migration_correlation_keys() -> Result<()> {
+    for (key, declaration) in [
+        (
+            "ens_v1_name_wrapper",
+            "ens_v1_name_wrapper = \"0x00000000000000000000000000000000000000AA\"\n",
+        ),
+        (
+            "ens_v1_base_registrar",
+            "ens_v1_base_registrar = \"0x00000000000000000000000000000000000000EE\"\n",
+        ),
+    ] {
+        let test_dir = TestDir::new()?;
+        let (_, migration) = migration_wrapper_manifest_pair();
+        let missing_key = migration.replacen(declaration, "", 1);
+        test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &missing_key)?;
+
+        let error = load_repository(&test_dir.path).expect_err(
+            "every active ENSv1→ENSv2 migration family requires both runtime correlation keys",
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(key) && message.contains("ens_v2_migration_l1"),
+            "unexpected error: {error:#}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn repository_loader_compares_wrapper_correlation_as_an_evm_address() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let (wrapper, migration) = migration_wrapper_manifest_pair();
+    let unprefixed = migration.replacen(
+        "ens_v1_name_wrapper = \"0x00000000000000000000000000000000000000AA\"",
+        "ens_v1_name_wrapper = \"00000000000000000000000000000000000000AA\"",
+        1,
+    );
+    test_dir.write_manifest("ens", "ens_v1_wrapper_l1", "v1", &wrapper)?;
+    test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &unprefixed)?;
+
+    load_repository(&test_dir.path)
+        .context("equivalent prefixed and unprefixed EVM addresses must compare equal")?;
+    Ok(())
+}
+
+#[test]
+fn repository_loader_requires_coadmitted_name_wrapper_role() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let (wrapper, migration) = migration_wrapper_manifest_pair();
+    let missing_role = wrapper
+        .replacen("role = \"name_wrapper\"", "role = \"wrapper_contract\"", 1)
+        .replacen(
+            "emitter_roles = [\"name_wrapper\"]",
+            "emitter_roles = [\"wrapper_contract\"]",
+            1,
+        );
+    test_dir.write_manifest("ens", "ens_v1_wrapper_l1", "v1", &missing_role)?;
+    test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &migration)?;
+
+    let error = load_repository(&test_dir.path)
+        .expect_err("an active wrapper family requires its name_wrapper role");
+    let message = error.to_string();
+    assert!(
+        message.contains("ens_v1_wrapper_l1")
+            && message.contains("ens_v2_migration_l1")
+            && message.contains("contract role name_wrapper"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_loader_rejects_mismatched_migration_base_registrar_correlation() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let (_, migration) = migration_wrapper_manifest_pair();
+    let registrar = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v1_registrar_l1\"",
+            1,
+        )
+        .replacen(
+            "address = \"0x0000000000000000000000000000000000000001\"",
+            "address = \"0x0000000000000000000000000000000000000003\"",
+            1,
+        )
+        .replacen(
+            "address = \"0x00000000000000000000000000000000000000AA\"",
+            "address = \"0x00000000000000000000000000000000000000EE\"",
+            1,
+        )
+        .replacen("role = \"registry\"", "role = \"registrar\"", 1)
+        .replacen(
+            "emitter_roles = [\"registry\"]",
+            "emitter_roles = [\"registrar\"]",
+            1,
+        );
+    test_dir.write_manifest("ens", "ens_v1_registrar_l1", "v1", &registrar)?;
+    test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &migration)?;
+    load_repository(&test_dir.path).context("matching registrar correlation must load")?;
+
+    let mismatch = migration.replacen(
+        "ens_v1_base_registrar = \"0x00000000000000000000000000000000000000EE\"",
+        "ens_v1_base_registrar = \"0x00000000000000000000000000000000000000FF\"",
+        1,
+    );
+    test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &mismatch)?;
+    let error = load_repository(&test_dir.path)
+        .expect_err("mismatched migration-to-registrar correlation must fail manifest load");
+    let message = error.to_string();
+    assert!(
+        message.contains("ens_v1_base_registrar")
+            && message.contains("ens_v2_migration_l1")
+            && message.contains("ens_v1_registrar_l1")
+            && message.contains("0x00000000000000000000000000000000000000ff")
+            && message.contains("0x00000000000000000000000000000000000000ee"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
 #[test]
 fn repository_loader_rejects_preimage_attribution_overlap() -> Result<()> {
     let test_dir = TestDir::new()?;
@@ -382,16 +570,29 @@ fn repository_loader_rejects_preimage_attribution_overlap() -> Result<()> {
 #[test]
 fn pre_502_dual_registrar_contract_roles_still_fail_attribution_guard() -> Result<()> {
     let test_dir = TestDir::new()?;
-    let registrar = manifest_contents().replacen(
-        "source_family = \"ens_v2_registry_l1\"",
-        "source_family = \"ens_v1_registrar_l1\"",
-        1,
-    );
-    let migration = manifest_contents().replacen(
-        "source_family = \"ens_v2_registry_l1\"",
-        "source_family = \"ens_v2_migration_l1\"",
-        1,
-    );
+    let registrar = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v1_registrar_l1\"",
+            1,
+        )
+        .replacen("role = \"registry\"", "role = \"registrar\"", 1)
+        .replacen(
+            "emitter_roles = [\"registry\"]",
+            "emitter_roles = [\"registrar\"]",
+            1,
+        );
+    let migration = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v2_migration_l1\"",
+            1,
+        )
+        .replacen(
+            "[capability_flags]",
+            "[correlation_addresses]\nens_v1_name_wrapper = \"0x00000000000000000000000000000000000000BB\"\nens_v1_base_registrar = \"0x00000000000000000000000000000000000000AA\"\n\n[capability_flags]",
+            1,
+        );
     test_dir.write_manifest("ens", "ens_v1_registrar_l1", "v1", &registrar)?;
     test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &migration)?;
 
@@ -451,13 +652,13 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
 }
 
 #[test]
-fn sepolia_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<()> {
+fn sepolia_ensv1_to_ensv2_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
     let migration = repository
         .manifests()
         .iter()
         .find(|loaded| loaded.manifest.source_family == "ens_v2_migration_l1")
-        .expect("Sepolia migration family");
+        .expect("Sepolia ENSv1→ENSv2 migration family");
     let roles = migration
         .manifest
         .contracts
@@ -531,11 +732,12 @@ fn mainnet_registrar_family_pins_the_base_registrar_event_surface() -> Result<()
     Ok(())
 }
 
-/// Sepolia admits the ENSv1 registry and wrapper manifests consumed by `ens_v2_migration_l1`
-/// correlation. BaseRegistrar raw-log attribution belongs only to `ens_v1_registrar_l1`, whose
-/// Sepolia manifest stays in the stacked follow-up.
+/// Sepolia admits the ENSv1 registry, registrar, and wrapper manifests consumed by
+/// `ens_v2_migration_l1` ENSv1→ENSv2 migration correlation. BaseRegistrar raw logs belong only to
+/// `ens_v1_registrar_l1`; the `ens_v2_migration_l1` manifest keeps the address as correlation
+/// metadata.
 #[test]
-fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<()> {
+fn sepolia_manifests_admit_the_ens_v1_registry_registrar_and_wrapper_families() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
     let family = |name: &str| {
         repository
@@ -596,12 +798,29 @@ fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<(
         )
     );
 
-    // The admitted wrapper is the contract the migration family names as its correlation address.
-    // A child's ENSv1 cleanup is only observable because both agree on this address.
-    let migration = family("ens_v2_migration_l1").expect("Sepolia migration family");
+    // The admitted wrapper is the contract `ens_v2_migration_l1` names as its correlation
+    // address. A child's ENSv1 cleanup is only observable because both agree on this address.
+    let migration = family("ens_v2_migration_l1").expect("Sepolia ENSv1→ENSv2 migration manifest");
     assert_eq!(
         normalize_address(&migration.correlation_addresses["ens_v1_name_wrapper"]),
         wrapper_roles["name_wrapper"].0,
+    );
+
+    let registrar = family("ens_v1_registrar_l1").expect("Sepolia ENSv1 registrar family");
+    assert_eq!(
+        registrar.contracts.len(),
+        1,
+        "#515 option (b) admits only BaseRegistrar; Sepolia registrar controllers stay deferred"
+    );
+    assert_eq!(registrar.contracts[0].role, "registrar");
+    assert_eq!(registrar.contracts[0].start_block, Some(3_702_731));
+    assert_eq!(
+        normalize_address(&registrar.contracts[0].address),
+        "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85"
+    );
+    assert_eq!(
+        normalize_address(&migration.correlation_addresses["ens_v1_base_registrar"]),
+        normalize_address(&registrar.contracts[0].address),
     );
 
     // Both cleanup branches a migrated child can take must be ingestible: the wrapper token parked
@@ -615,18 +834,14 @@ fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<(
     for required in ["TransferSingle", "TransferBatch", "NameUnwrapped"] {
         assert!(
             wrapper_events.contains(required),
-            "wrapper family must admit {required}"
+            "wrapper manifest must admit {required}"
         );
     }
 
-    assert!(
-        family("ens_v1_registrar_l1").is_none(),
-        "Sepolia ENSv1 registrar admission belongs to the stacked follow-up"
-    );
     Ok(())
 }
 
-/// The declared surface of the two new Sepolia ENSv1 families, pinned across the fields that
+/// The declared surface of the three Sepolia ENSv1 manifests, pinned across the fields that
 /// decide what gets ingested. The admission test above covers contracts, addresses, chain, and
 /// rollout status; this one covers the event surface, capability flags, deployment epoch, and
 /// roots, so that deleting an event block, widening a fragment type, dropping a normalized event,
@@ -782,6 +997,35 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
                 "name_wrapper".to_owned(),
                 token_control.to_owned(),
             ),
+        ]
+    );
+
+    let registrar = family("ens_v1_registrar_l1");
+    assert_eq!(registrar.deployment_epoch, "ens_v1");
+    assert_eq!(
+        roots(registrar),
+        vec![(
+            "ETHRegistrar".to_owned(),
+            "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85".to_owned(),
+            Some(3_702_731)
+        )]
+    );
+    assert_eq!(
+        ["exact_name_profile", "name_history"].map(|flag| registrar.capability_flags[flag].status),
+        [CapabilitySupportStatus::Shadow; 2]
+    );
+    let registrar_surface = event_surface(registrar)
+        .into_iter()
+        .map(|(name, fragment, roles, events)| format!("{name}|{fragment}|{roles}|{events}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        registrar_surface,
+        [
+            "ControllerAdded|event ControllerAdded(address indexed controller)|registrar|PermissionChanged",
+            "ControllerRemoved|event ControllerRemoved(address indexed controller)|registrar|PermissionChanged",
+            "NameRegistered|event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)|registrar|RegistrationReleased",
+            "NameRenewed|event NameRenewed(uint256 indexed id, uint256 expires)|registrar|RegistrationRenewed,ExpiryChanged",
+            "Transfer|event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)|registrar|TokenControlTransferred,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
         ]
     );
     Ok(())

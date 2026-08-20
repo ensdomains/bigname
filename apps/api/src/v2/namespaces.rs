@@ -188,6 +188,7 @@ mod tests {
                 "ethereum-mainnet",
                 [
                     ("declared_children", CapabilitySupportStatus::Supported),
+                    ("exact_name_profile", CapabilitySupportStatus::Supported),
                     ("verified_resolution", CapabilitySupportStatus::Supported),
                 ],
             ),
@@ -196,7 +197,7 @@ mod tests {
                 "base-mainnet",
                 [
                     ("verified_resolution", CapabilitySupportStatus::Unsupported),
-                    ("name_history", CapabilitySupportStatus::Supported),
+                    ("name_history", CapabilitySupportStatus::Unsupported),
                 ],
             ),
             manifest(
@@ -204,7 +205,7 @@ mod tests {
                 "ethereum-mainnet",
                 [
                     ("exact_name_profile", CapabilitySupportStatus::Shadow),
-                    ("name_history", CapabilitySupportStatus::Supported),
+                    ("name_history", CapabilitySupportStatus::Unsupported),
                 ],
             ),
         ];
@@ -229,15 +230,15 @@ mod tests {
         assert_eq!(
             capabilities["name_history"],
             NamespaceCapability {
-                completeness: Completeness::Full,
-                unsupported_reason: None,
+                completeness: Completeness::Unsupported,
+                unsupported_reason: Some(UNSUPPORTED_REASON.to_owned()),
             }
         );
         assert_eq!(
             capabilities["name_profile"],
             NamespaceCapability {
-                completeness: Completeness::Unsupported,
-                unsupported_reason: Some(UNSUPPORTED_REASON.to_owned()),
+                completeness: Completeness::Partial,
+                unsupported_reason: None,
             }
         );
     }

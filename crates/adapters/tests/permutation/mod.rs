@@ -4,6 +4,7 @@ pub mod events;
 pub mod invariants;
 pub mod names;
 pub mod pool_v1;
+pub mod pool_v1_sepolia;
 pub mod pool_v2;
 pub mod rng;
 pub mod scenario;
