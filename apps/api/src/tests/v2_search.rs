@@ -1188,6 +1188,49 @@ async fn v2_search_response_for_database_with_public_namespaces(
         .context("v2 search request failed")
 }
 
+// Search carries no row-local status or unsupported-reason field, so a name whose exact-name
+// authority is unsupported is omitted whatever the reason rather than served from a registration
+// no selected authority backs. Callers read name detail or batch lookup for the reason.
+#[tokio::test]
+async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
+    for reason in [
+        "conflicting_current_ens_authority",
+        "independent_ens_deployments_overlap",
+        "ensv2_exact_name_profile_shadow",
+        "current_authority_not_projected",
+    ] {
+        let database = TestDatabase::new_migrated().await?;
+        seed_v2_search_fixture(&database).await?;
+
+        // Anti-vacuity: both names are served while the projection still supports them.
+        let before =
+            v2_search_payload_for_database(&database, "/v2/search?q=al&namespace=ens").await?;
+        assert_eq!(
+            v2_search_names(before["data"].as_array().expect("search data must be an array")),
+            vec!["alpha.eth", "alpine.eth"]
+        );
+
+        sqlx::query(
+            "UPDATE bigname_phase.name_current
+             SET support_status = 'unsupported', unsupported_reason = $1
+             WHERE raw_name = 'alpha.eth'",
+        )
+        .bind(reason)
+        .execute(&database.pool)
+        .await?;
+
+        let payload =
+            v2_search_payload_for_database(&database, "/v2/search?q=al&namespace=ens").await?;
+        assert_eq!(
+            v2_search_names(payload["data"].as_array().expect("search data must be an array")),
+            vec!["alpine.eth"],
+            "{reason} was not omitted from search"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
 fn v2_search_names(rows: &[Value]) -> Vec<&str> {
     rows.iter()
         .map(|row| row["name"].as_str().expect("search row must include name"))

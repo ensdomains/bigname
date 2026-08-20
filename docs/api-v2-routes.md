@@ -350,16 +350,25 @@ Field ownership:
   `200` name-profile response,
   `status` is the flat-record result: `ok` for clean indexed reads; `failed`
   and `stale` may appear only when `source=verified` cannot serve the verified
-  sections. `unsupported` currently has the same verified-only scope. Once the
-  exact-name authority slice is activated, an indexed mixed-history read with
-  no provable current authority also returns `200` with `status=unsupported` and the
-  same `conflicting_current_ens_authority` or
-  `independent_ens_deployments_overlap` reason used by batch lookup. A proven
+  sections. `unsupported` is keyed on the projected row's own coverage status,
+  not on a list of reasons: any row whose `coverage.status=unsupported` returns
+  `200` with `status=unsupported` and the minimal identity-only object below.
+  The single exception is `current_authority_not_projected`, which keeps the
+  ratified partial `status=ok` described at the end of this section. Every other
+  unsupported reason downgrades, including
+  `conflicting_current_ens_authority` and
+  `independent_ens_deployments_overlap` for a mixed-history read with no
+  provable current authority, and `ensv2_exact_name_profile_shadow`, which
+  reaches consumers as `exact_name_profile_not_supported`. The rule fails closed
+  at both edges: an unsupported row that names no reason downgrades, and so does
+  an unsupported reason this build does not recognize, so a reason added to the
+  projection later serves `unsupported` by default rather than silently serving
+  `ok` ([#487](https://github.com/ensdomains/bigname/issues/487)). A proven
   migration boundary returns the selected ENSv2 registration and `status=ok`;
   it does not expose the retained ENSv1 registration as current. `failure_reason`
   or `unsupported_reason` carries the product reason when available;
   `not_found` and `invalid_name` are unreachable in-record. The unsupported
-  mixed-history object retains only `name`, `display_name`, `namespace`,
+  object retains only `name`, `display_name`, `namespace`,
   `namehash`, `status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
@@ -442,16 +451,23 @@ Field ownership:
 - Status semantics: a missing name returns `404 not_found`. Missing, unset, or
   unsupported requested record values are reported with the common result
   `status` vocabulary inside the record answer rather than by changing the
-  envelope. Once exact-name authority is activated, a proven migration uses
+  envelope. A proven migration uses
   only the selected ENSv2 resolver; the retained ENSv1 resolver is historical.
-  A mixed-history name with no provable current authority exposes no resolver
-  values and reports each requested or inventory-derived key as
-  `status=unsupported` with `conflicting_current_ens_authority` or
-  `independent_ens_deployments_overlap`. Verified execution does not choose a
-  resolver for that unsupported name. `current_authority_not_projected`
-  likewise short-circuits `source=indexed`, `source=verified`, and
-  `source=auto` before provider execution: the response has no resolver values
-  and reports each requested or inventory-derived key as `status=unsupported`
+  A name whose exact-name projection is unsupported exposes no resolver values.
+  Every unsupported reason except `current_authority_not_projected`
+  short-circuits `source=indexed`, `source=verified`, and `source=auto` before
+  provider execution and reports each requested or inventory-derived key as
+  `status=unsupported` with the name-level reason:
+  `conflicting_current_ens_authority` or
+  `independent_ens_deployments_overlap` for a mixed-history name with no
+  provable current authority, and otherwise the same public reason name detail
+  serves for that row. The reason reaches this route through the shared
+  name-level vocabulary name detail uses, so one projection reason yields one
+  public reason on every route. Verified execution does not choose a resolver
+  for an unsupported name. `current_authority_not_projected` also
+  short-circuits those three sources before provider execution, but keeps its
+  documented behavior: the response has no resolver values and reports each
+  requested or inventory-derived key as `status=unsupported`
   with `inventory_not_available`.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
@@ -577,15 +593,14 @@ Field ownership:
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
 - Response shape: `data` is an array of permission rows
-  `{address, grant_scope, powers, registration_id, name?, wrapper_state?,
-  wrapper_fuses?}`. The two wrapper fields use the same atomic,
+  `{address, grant_scope, powers, registration_id, name?, authority_context,
+  wrapper_state?, wrapper_fuses?}`. The two wrapper fields use the same atomic,
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
   contract as name detail and appear only for a returned current ENSv1 wrapper
   registration. Their presence does not widen wrapper-holder enumeration;
   request-relative completeness metadata below remains authoritative.
-  Once the planned exact-name authority rule is activated, the row object is
-  `{address, grant_scope, powers, registration_id, name?, authority_context,
-  wrapper_state?, wrapper_fuses?}` and `authority_context` is required.
+  `authority_context` is required on every row and records how that row was
+  admitted under the per-name ownership rule.
   `include=lineage`
   adds route-local `lineage` per row:
   `{grant, revocation?, inheritance_path?, transfer_behavior?}`. Product lineage
@@ -609,7 +624,10 @@ Field ownership:
   deferred to the revision-bound storage follow-up.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
-  current state. Unsupported filter combinations return `422 unsupported`.
+  current state. Unsupported filter combinations return `422 unsupported`;
+  pairing `name` with a `registration_id` that is not that name's selected
+  current registration is not one of them. It is a supported query that selects
+  nothing, so it returns `200` with empty `data`.
   The route reads current permission rows and summaries without claiming a
   request-wide immutable projection generation; current-state generation changes
   do not produce `409 stale`. When `name` or `registration_id` binds the read to a
@@ -624,11 +642,11 @@ Field ownership:
   zero-row wrapper registrations are absent from the permission-row fan-out; a
   missing or partial summary for a returned registration changes the reason to
   `permission_support_unknown`. Projected rows are not suppressed by these
-  classifications. Once exact-name authority is activated, a `name` filter
+  classifications. A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
-  retained historical ENSv1 registration for audit. At that activation, every
-  permission row additionally carries the required `authority_context` field.
+  retained historical ENSv1 registration for audit. Every
+  permission row carries the required `authority_context` field.
   `current_for_name` means a `name` filter selected the row's current
   registration for that requested name. A row admitted without a `name` filter,
   including an explicit-`registration_id` or address-filtered resource read, is
@@ -642,10 +660,10 @@ Field ownership:
   current authority, address relations, and role summaries, so a superseded
   ENSv1 registration is never selected while a current registration queried by
   resource can still contribute elsewhere. The collection adds no row-local
-  coverage status or unsupported-reason vocabulary; when exact-name authority
-  is unsupported and no current registration anchor is published, the existing
-  `200` empty result applies and callers use name detail or batch lookup for the
-  explicit reason.
+  coverage status or unsupported-reason vocabulary. A `name` filter whose
+  exact-name projection is unsupported therefore selects no registration and
+  returns `200` with empty `data`; callers use name detail or batch lookup for
+  the explicit reason.
 - Replaces (v1): `GET /v1/resources/{resource_id}/permissions`,
   `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, and
   `GET /v1/resources/lookup`.
@@ -714,7 +732,7 @@ Field ownership:
   grants remain in `role_summary`, but the expansion is non-authoritative;
   therefore an empty wrapper summary is not a proven empty permission set.
   Missing summary metadata takes precedence when a page contains both cases.
-  Once exact-name authority is activated, current address relations and
+  Current address relations and
   `role_summary` are built only from the selected registration. A migrated
   name therefore stops relating its superseded ENSv1 holder or controller to
   the current name row. This collection adds no row-local mixed-authority
@@ -803,10 +821,14 @@ Field ownership:
   retries. Malformed addresses return `400 invalid_input`.
   `source=indexed` does not enter verified-execution rate or concurrency
   admission; omitted `source` and `source=verified` do because they run the
-  fresh lookup. Exact-name authority does not yet govern primary-name forward
-  verification. Slice 2D applies the selected authority to this route; until
-  then, a mixed-history claim retains the pre-authority verified lookup
-  behavior rather than returning an exact-name unsupported reason.
+  fresh lookup. Forward verification requires the claimed name's selected
+  exact-name authority. A claim whose exact-name projection is unsupported
+  returns the in-band unsupported result and dispatches no provider call.
+  Verifying a claim whose selected authority is the ENSv2 arm through ENSv2 is
+  not possible yet: no manifest declares an ENSv2 execution entrypoint, so this
+  route has no ENSv2 forward-resolution path. Such a claim returns the same
+  in-band unsupported result rather than being forward-verified through the
+  superseded ENSv1 universal resolver.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`
@@ -852,15 +874,16 @@ Field ownership:
   historical `finality` values are rejected by the shared latest-state
   collection rule.
 - Response shape: `data` is an array of record-shaped name search results in
-  dictionary vocabulary. Slice 2D applies the selected exact-name authority to
-  search results; until then, a search row retains the pre-authority
-  registration selection rather than being filtered or reshaped by exact-name
-  authority. Once slice 2D is activated, each result is built only from the
-  selected current registration: a migrated name uses its ENSv2 owner,
-  registrant, status, and expiry, and a mixed-history name with no provable
-  current authority is omitted rather than exposing an arbitrary registration.
-  Search adds no row-local mixed-authority status, so callers use name detail
-  or batch lookup when they need an omitted name's explicit coverage reason.
+  dictionary vocabulary. Each result is built only from the selected current
+  registration: a migrated name uses its ENSv2 owner, registrant, status, and
+  expiry. A name whose exact-name projection is unsupported is omitted from
+  search results whatever the reason, including a mixed-history name with no
+  provable current authority. Search carries no row-local status or
+  unsupported-reason field, so it omits such a name rather than serving
+  registration fields no selected authority backs; callers use name detail or
+  batch lookup when they need an omitted name's explicit coverage reason. The
+  omission is applied before paging, so returned counts, page order, and cursor
+  continuation all reflect the same filtered set.
 - Pagination behavior: standard collection pagination. Without an explicit
   namespace, the cursor binds the deployment-derived namespace set and is
   rejected if that set changes.

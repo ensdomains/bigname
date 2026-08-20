@@ -9,6 +9,12 @@ pub(crate) use wrapper_fuses::WrapperFuses;
 mod wrapper_state;
 pub(crate) use wrapper_state::WrapperState;
 
+#[path = "vocab/unsupported_reason.rs"]
+mod unsupported_reason;
+pub(crate) use unsupported_reason::{
+    MISSING_UNSUPPORTED_REASON, PARTIAL_SERVE_UNSUPPORTED_REASON, downgrades_unsupported_name,
+};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Status {
@@ -143,6 +149,16 @@ pub(crate) enum RegistrationStatus {
     Registered,
     Released,
     Unregistered,
+}
+
+/// How a permission row may be read. `CurrentForName` is claimed only when a
+/// `name` filter selected the row's current registration for that name;
+/// everything else is a resource-keyed read that makes no current-name claim.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuthorityContext {
+    CurrentForName,
+    ResourceAudit,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -419,6 +435,12 @@ mod tests {
     use serde::Serialize;
 
     use super::*;
+
+    #[test]
+    fn authority_context_serializes_as_the_documented_wire_values() {
+        assert_wire(AuthorityContext::CurrentForName, "current_for_name");
+        assert_wire(AuthorityContext::ResourceAudit, "resource_audit");
+    }
 
     fn assert_wire<T: Serialize>(value: T, expected: &str) {
         let serialized = serde_json::to_value(value).expect("value must serialize");

@@ -949,6 +949,83 @@ async fn v2_get_primary_name_rejects_malformed_address() -> Result<()> {
     Ok(())
 }
 
+// Forward verification consults the claimed name's selected exact-name authority before it
+// dispatches anything. The RPC endpoint here is dead, so reaching a provider at all would fail the
+// whole request with 500: a successful in-band unsupported answer is the proof no call went out.
+#[tokio::test]
+async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispatch() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    seed_phase_primary_name_snapshot(
+        &database,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some("taytems.eth"),
+        true,
+    )
+    .await?;
+    // The claimed name's exact-name authority is unsupported: no registration is selected for it,
+    // so there is nothing for forward verification to resolve through.
+    seed_schema_v2_unsupported_name(&lookup_pool, "ens", "taytems.eth").await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[format!(
+        "ethereum-mainnet={unavailable_rpc_url}"
+    )])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 authority-gated primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+
+    let verified = payload["data"]["answers"]
+        .as_array()
+        .expect("answers must be an array")
+        .iter()
+        .find(|answer| answer["source"] == json!("verified"))
+        .expect("a verified answer must be present");
+    assert_eq!(verified["status"], json!("unsupported"), "{payload}");
+    assert_eq!(
+        verified["unsupported_reason"],
+        json!("conflicting_current_ens_authority")
+    );
+    // No provider call ran, so there is no verification outcome to report.
+    assert!(payload["data"].get("verification").is_none(), "{payload}");
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
 const V2_PRIMARY_NAME_ADDRESS: &str = "0x0000000000000000000000000000000000000abc";
 const V2_ON_DEMAND_PRIMARY_NAME_ADDRESS: &str = "0x8e8db5ccef88cca9d624701db544989c996e3216";
 const V2_BASENAMES_PRIMARY_COIN_TYPE: &str = "2147492101";
@@ -1062,6 +1139,86 @@ async fn seed_v2_basenames_primary_name_base_snapshot_position(
             }
         }))
         .await
+}
+
+// Projects one name whose exact-name authority the projection does not support, so a route can be
+// asked what it serves for a claim with no selected registration.
+async fn seed_schema_v2_unsupported_name(
+    pool: &PgPool,
+    namespace: &str,
+    name: &str,
+) -> Result<()> {
+    let chain_id = "ethereum-mainnet";
+    let (block_number, block_hash): (i64, String) = sqlx::query_as(
+        "SELECT block_number, block_hash FROM bigname_phase.chain_lineage \
+         WHERE chain_id = $1 \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
+         ORDER BY block_number DESC, block_hash LIMIT 1",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?;
+    let namehash = bigname_lookup::ens_namehash_hex(name)?;
+    let logical_name_id = format!("{namespace}:{namehash}");
+    let labels = name.split('.').collect::<Vec<_>>();
+    sqlx::query(
+        "INSERT INTO bigname_phase.name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+             labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, $4, '\\x00', $5, $6, 'test', 'active', $7, $8, $9, 'canonical')
+         ON CONFLICT (logical_name_id) DO NOTHING",
+    )
+    .bind(&logical_name_id)
+    .bind(namespace)
+    .bind(name)
+    .bind(&labels)
+    .bind(&namehash)
+    .bind(
+        labels
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("0x{:064x}", index + 1))
+            .collect::<Vec<_>>(),
+    )
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.name_current (
+             logical_name_id, namespace, raw_name, namehash, declared_summary,
+             support_status, unsupported_reason, provenance, chain_positions,
+             canonicality_summary, manifest_version
+         ) VALUES (
+             $1, $2, $3, $4, '{}'::jsonb, 'unsupported', 'conflicting_current_ens_authority',
+             jsonb_build_object('chain_id', $5::text), $6, $7, 1
+         )
+         ON CONFLICT (logical_name_id) DO UPDATE SET
+             support_status = EXCLUDED.support_status,
+             unsupported_reason = EXCLUDED.unsupported_reason",
+    )
+    .bind(&logical_name_id)
+    .bind(namespace)
+    .bind(name)
+    .bind(&namehash)
+    .bind(chain_id)
+    .bind(json!({
+        "ethereum": {
+            "chain_id": chain_id,
+            "block_number": block_number,
+            "block_hash": block_hash
+        }
+    }))
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": block_hash
+    }))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn seed_schema_v2_primary_name_claim(

@@ -310,9 +310,25 @@ async fn v2_lookup_withholds_fields_for_unsupported_name_authority() -> Result<(
     )
     .await?;
 
-    for reason in [
-        "conflicting_current_ens_authority",
-        "independent_ens_deployments_overlap",
+    // Keyed on the unsupported status, not on a list of reasons: a projection reason with no
+    // partial-serve contract withholds the same fields, under its public name.
+    for (reason, expected) in [
+        (
+            "conflicting_current_ens_authority",
+            "conflicting_current_ens_authority",
+        ),
+        (
+            "independent_ens_deployments_overlap",
+            "independent_ens_deployments_overlap",
+        ),
+        (
+            "ensv2_exact_name_profile_shadow",
+            "exact_name_profile_not_supported",
+        ),
+        (
+            "a_reason_this_build_has_never_seen",
+            "a_reason_this_build_has_never_seen",
+        ),
     ] {
         sqlx::query(
             "UPDATE name_current
@@ -332,8 +348,8 @@ async fn v2_lookup_withholds_fields_for_unsupported_name_authority() -> Result<(
                 }),
             )
             .await?;
-            assert_eq!(payload["data"][0]["status"], "unsupported");
-            assert_eq!(payload["data"][0]["unsupported_reason"], reason);
+            assert_eq!(payload["data"][0]["status"], "unsupported", "{reason}");
+            assert_eq!(payload["data"][0]["unsupported_reason"], expected);
             assert_eq!(
                 payload["data"][0]["record"],
                 json!({
@@ -342,8 +358,9 @@ async fn v2_lookup_withholds_fields_for_unsupported_name_authority() -> Result<(
                     "namespace":"ens",
                     "namehash":bigname_lookup::ens_namehash_hex("authority-gap.eth")?,
                     "status":"unsupported",
-                    "unsupported_reason":reason
-                })
+                    "unsupported_reason":expected
+                }),
+                "{reason} served fields beyond the identity-only record"
             );
         }
     }

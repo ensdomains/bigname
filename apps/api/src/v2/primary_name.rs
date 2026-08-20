@@ -256,6 +256,13 @@ fn build_verified_answer(lookup_state: &PrimaryNameLookupState) -> V2Result<Veri
         OnDemandPrimaryNameVerificationState::ClaimNotNormalized => {
             Some(primary_name_claim_not_normalized_result())
         }
+        OnDemandPrimaryNameVerificationState::AuthorityUnsupported(reason) => {
+            return Ok(VerifiedAnswer {
+                answer: PrimaryNameAnswer::unsupported(Source::Verified, reason),
+                // No provider call ran, so there is no verification outcome to report.
+                outcome_exists: false,
+            });
+        }
         OnDemandPrimaryNameVerificationState::Verified(verified) => Some(verified.clone()),
         OnDemandPrimaryNameVerificationState::NotAttempted => None,
     };

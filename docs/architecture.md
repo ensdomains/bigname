@@ -867,6 +867,17 @@ verification is unsupported; its indexed response remains Base-scoped.
 
 ## Collection semantics
 
+Product collections share one authority rule,
+[current-authority fanout](glossary.md#current-authority-fanout). A collection
+may derive its membership and current fields from the current registration
+already selected for the name by the
+[ENSv1→ENSv2 current authority](#ensv1ensv2-current-authority) rule, but it may
+not perform an independent cross-era ENSv1-versus-ENSv2 ranking of its own.
+Authority-derived product-history fanout means authority-derived anchors and
+current annotations only: it deletes or suppresses no independently admitted
+historical fact, so exact-name history and explicit registration history retain
+both eras.
+
 ### Exact-name lookup
 
 Resolves a `NameSurface`. Returns normalized identity, current binding, declared summary sections (registration, authority, control, resolver, record inventory, history), provenance, coverage.

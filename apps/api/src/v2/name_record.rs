@@ -18,7 +18,10 @@ use super::{
     Envelope, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams, V2Error,
     V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
-    vocab::{RegistrationStatus, Resolver, Source, Status, WrapperFuses, WrapperState},
+    vocab::{
+        PARTIAL_SERVE_UNSUPPORTED_REASON, RegistrationStatus, Resolver, Source, Status,
+        WrapperFuses, WrapperState,
+    },
 };
 
 #[path = "name_record/inventory.rs"]
@@ -220,7 +223,7 @@ pub(crate) fn build_name_record(
         .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
     let resolver = (!released_tombstone
         && string_field(row.coverage.get("unsupported_reason")).as_deref()
-            != Some("current_authority_not_projected"))
+            != Some(PARTIAL_SERVE_UNSUPPORTED_REASON))
     .then(|| resolver(&row.declared_summary))
     .flatten();
 

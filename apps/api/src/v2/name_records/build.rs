@@ -6,6 +6,9 @@ use tracing::error;
 
 use crate::v2::support::{ResolutionRecordKey, build_lookup_resolution_verified_state};
 
+use super::super::vocab::{
+    MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, shared_product_reason,
+};
 use super::super::{
     PRODUCT_PIPELINE_TERMS, Source, Status, V2Error, V2Result, contains_boundary_vocabulary,
     name_record::{
@@ -54,19 +57,20 @@ fn authority_unsupported_reason(row: &NameCurrentRow) -> V2Result<Option<String>
     if string_field(row.coverage.get("status")).as_deref() != Some("unsupported") {
         return Ok(None);
     }
-    let Some(reason) = string_field(row.coverage.get("unsupported_reason")) else {
-        return Ok(None);
-    };
-    if reason == "current_authority_not_projected" {
+    let reason = string_field(row.coverage.get("unsupported_reason"))
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| MISSING_UNSUPPORTED_REASON.to_owned());
+    if !downgrades_unsupported_name(&reason) {
         return Ok(Some(INDEXED_INVENTORY_UNAVAILABLE_REASON.to_owned()));
     }
-    if !matches!(
-        reason.as_str(),
-        "conflicting_current_ens_authority" | "independent_ens_deployments_overlap"
-    ) {
-        return Ok(None);
-    }
-    Ok(Some(product_record_reason(&reason)?))
+    // A name-level authority reason, so it maps through the shared name
+    // vocabulary rather than the record-family map: one projection reason must
+    // reach every route as the same public reason.
+    Ok(Some(shared_product_reason(
+        &reason,
+        "rejected exact-name reason containing pipeline vocabulary",
+        "failed to map exact-name reason vocabulary",
+    )?))
 }
 
 pub(crate) fn build_indexed_name_records(

@@ -176,6 +176,18 @@ revision-checked old-runtime proof of which watched block intervals had
 complete log-fetch coverage. Its tables remain in schema-migration history, but its
 Rust writers, readers, and checkpoint-promotion path were deleted in Stage B.
 
+**Current-authority fanout** — a product collection deriving its membership and
+current fields from the one exact-name authority already selected for the name,
+instead of ranking that name's cross-era ENSv1 and ENSv2 events again per
+collection.
+
+**Current-for-name authority context** (`current_for_name`) — the marker on a
+permission row admitted because a `name` filter selected that name's current
+registration. It is the counterpart of the
+[resource audit context](#resource-audit-context): `current_for_name` states
+that the row is the requested name's current authority, while `resource_audit`
+makes no current-name claim.
+
 **Declared vs verified** — *declared* state is what protocol-side observation
 says: indexed onchain events, plus the documented hydration of event-silent
 contracts from pinned calls (see Hydration, Event-silent). *Verified* state is

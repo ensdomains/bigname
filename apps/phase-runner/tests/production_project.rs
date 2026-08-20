@@ -7853,6 +7853,153 @@ async fn authority_epoch_incremental_splits_equal_rebuilds() -> Result<()> {
     scratch.cleanup().await
 }
 
+// Seeds the migrated name at its selected ENSv2 epoch, then appends one ENSv1
+// residue event on the superseded resource. `insert_event` leaves the position
+// indexes null, so a same-block residue outranks the block-7 ENSv2 events by
+// insertion order: any collection that ranks the name's events by recency
+// instead of consuming the selected resource picks the residue.
+async fn seed_late_v1_residue(
+    pool: &PgPool,
+    chain: &str,
+    event_kind: &str,
+    after_state: Value,
+) -> Result<String> {
+    let (logical_name_id, _) = seed_authority_lifecycle_fixture(pool, chain, "unwrapped").await?;
+    let v1_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'
+         ORDER BY block_number DESC LIMIT 1",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    insert_event(
+        pool,
+        chain,
+        7,
+        Some(&logical_name_id),
+        Some(&v1_resource.to_string()),
+        event_kind,
+        "ens_v1_registrar_l1",
+        after_state,
+        json!({}),
+    )
+    .await?;
+    Ok(logical_name_id)
+}
+
+async fn address_relation_holders(
+    pool: &PgPool,
+    logical_name_id: &str,
+    relation: &str,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT address FROM address_names_current
+         WHERE logical_name_id = $1 AND relation = $2
+         ORDER BY address",
+    )
+    .bind(logical_name_id)
+    .bind(relation)
+    .fetch_all(pool)
+    .await?)
+}
+
+// The selected ENSv2 registrant is the only registrant relation the migrated
+// name publishes; a later ENSv1 grant on the superseded resource is history.
+#[tokio::test]
+async fn selected_authority_constrains_the_address_registrant_lateral() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_fanout_registrant").await?;
+    let chain = "fanout-registrant";
+    let logical_name_id = seed_late_v1_residue(
+        scratch.pool(),
+        chain,
+        "RegistrationGranted",
+        json!({"status":"registered","registrant":TRANSFER_OWNER}),
+    )
+    .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 7).await?;
+
+    // Anti-vacuity: the name is projected under the ENSv2 arm the residue contradicts.
+    let selected: (Value, Value) = sqlx::query_as(
+        "SELECT declared_summary -> 'registration' -> 'registrant',
+                provenance -> 'authority_selection' -> 'authority_arm'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(selected, (json!(OWNER), json!("ens_v2")));
+
+    assert_eq!(
+        address_relation_holders(scratch.pool(), &logical_name_id, "registrant").await?,
+        vec![OWNER.to_owned()]
+    );
+    scratch.cleanup().await
+}
+
+// Token-holder membership follows the selected resource's token lineage, so a
+// superseded-resource token transfer moves no current address relation.
+#[tokio::test]
+async fn selected_authority_constrains_the_address_token_holder_lateral() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_fanout_token_holder").await?;
+    let chain = "fanout-token-holder";
+    let logical_name_id = seed_late_v1_residue(
+        scratch.pool(),
+        chain,
+        "TokenControlTransferred",
+        json!({"from":OWNER,"to":TRANSFER_OWNER}),
+    )
+    .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 7).await?;
+
+    let arm: Value = sqlx::query_scalar(
+        "SELECT provenance -> 'authority_selection' -> 'authority_arm'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(arm, json!("ens_v2"));
+
+    assert_eq!(
+        address_relation_holders(scratch.pool(), &logical_name_id, "token_holder").await?,
+        vec![OWNER.to_owned()]
+    );
+    scratch.cleanup().await
+}
+
+// The controller fold reads the same selected event set: a superseded-resource
+// authority transfer cannot install itself as the name's effective controller.
+#[tokio::test]
+async fn selected_authority_constrains_the_effective_controller_fold() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_fanout_controller").await?;
+    let chain = "fanout-controller";
+    let logical_name_id = seed_late_v1_residue(
+        scratch.pool(),
+        chain,
+        "AuthorityTransferred",
+        json!({"owner":TRANSFER_OWNER}),
+    )
+    .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 7).await?;
+
+    let owner: Value = sqlx::query_scalar(
+        "SELECT declared_summary -> 'control' -> 'registry_owner'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(owner, json!(OWNER));
+
+    assert_eq!(
+        address_relation_holders(scratch.pool(), &logical_name_id, "effective_controller").await?,
+        vec![OWNER.to_owned()]
+    );
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn positive_v2_child_registration_establishes_authority_without_child_migration() -> Result<()>
 {

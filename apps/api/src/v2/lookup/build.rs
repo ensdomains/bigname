@@ -13,9 +13,10 @@ use crate::v2::{
         self, chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
     },
     shared_product_reason,
+    vocab::{
+        MISSING_UNSUPPORTED_REASON, PARTIAL_SERVE_UNSUPPORTED_REASON, downgrades_unsupported_name,
+    },
 };
-
-const MISSING_UNSUPPORTED_REASON: &str = "unsupported_reason_missing";
 
 pub(super) fn build_forward_detail_record(
     record: &bigname_storage::IdentityNameRecordRow,
@@ -174,7 +175,7 @@ fn build_detail_record(
         .and_then(|addresses| addresses.get(primary_coin_type).cloned());
     let resolver = (!released_tombstone
         && string_field(record.row.coverage.get("unsupported_reason")).as_deref()
-            != Some("current_authority_not_projected"))
+            != Some(PARTIAL_SERVE_UNSUPPORTED_REASON))
     .then(|| name_record::resolver(&record.row.declared_summary))
     .flatten();
 
@@ -224,43 +225,40 @@ fn authority_unsupported_record(
     status: Status,
     unsupported_reason: Option<String>,
 ) -> Option<LookupRecord> {
-    unsupported_reason
-        .as_deref()
-        .is_some_and(|reason| {
-            matches!(
-                reason,
-                "conflicting_current_ens_authority" | "independent_ens_deployments_overlap"
-            )
-        })
-        .then(|| LookupRecord {
-            name: record.row.normalized_name.clone(),
-            display_name: record.row.canonical_display_name.clone(),
-            namespace: record.row.namespace.clone(),
-            namehash: record.row.namehash.clone(),
-            registration_id: None,
-            token_id: None,
-            owner: None,
-            manager: None,
-            registrant: None,
-            registered_at: None,
-            created_at: None,
-            expires_at: None,
-            registration_status: None,
-            resolver: None,
-            addresses: None,
-            text_records: None,
-            content_hash: None,
-            primary_name: None,
-            primary_address: None,
-            chain_id: None,
-            network: None,
-            is_primary: None,
-            relations: Vec::new(),
-            status,
-            unsupported_reason,
-            failure_reason: None,
-            unsupported_fields: Vec::new(),
-        })
+    (status == Status::Unsupported
+        && string_field(record.row.coverage.get("unsupported_reason"))
+            .filter(|reason| !reason.trim().is_empty())
+            .as_deref()
+            .is_none_or(downgrades_unsupported_name))
+    .then(|| LookupRecord {
+        name: record.row.normalized_name.clone(),
+        display_name: record.row.canonical_display_name.clone(),
+        namespace: record.row.namespace.clone(),
+        namehash: record.row.namehash.clone(),
+        registration_id: None,
+        token_id: None,
+        owner: None,
+        manager: None,
+        registrant: None,
+        registered_at: None,
+        created_at: None,
+        expires_at: None,
+        registration_status: None,
+        resolver: None,
+        addresses: None,
+        text_records: None,
+        content_hash: None,
+        primary_name: None,
+        primary_address: None,
+        chain_id: None,
+        network: None,
+        is_primary: None,
+        relations: Vec::new(),
+        status,
+        unsupported_reason,
+        failure_reason: None,
+        unsupported_fields: Vec::new(),
+    })
 }
 
 fn identity_addresses(

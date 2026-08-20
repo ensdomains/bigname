@@ -10,6 +10,12 @@ pub(super) async fn build(
     // Address relations fold registration, token-holder, and controller events for the staged
     // current name/resource. They read no resolver classification or pointer history; a resolver
     // event can therefore affect only its directly scoped name/resource here.
+    //
+    // Every per-name fold reads project_authority_events, the selected authority epoch's event
+    // set, rather than project_events. Ranking the name's whole cross-era history here would
+    // re-decide authority per relation, so a superseded-resource event could outrank the
+    // selected registration; the resource-keyed folds below are already scoped by their join to
+    // the staged current resource.
     sqlx::query(
         r#"
         WITH RECURSIVE target_time AS (
@@ -140,7 +146,7 @@ pub(super) async fn build(
                            THEN event.after_state ->> 'subject'
                    END) AS subject
             FROM project_stage_name_current name
-            JOIN project_events event
+            JOIN project_authority_events event
               ON event.logical_name_id = name.logical_name_id
              AND event.event_kind IN ('AuthorityTransferred', 'PermissionChanged')
             LEFT JOIN scope_modifiers modifier
@@ -239,7 +245,7 @@ pub(super) async fn build(
                            ELSE event.after_state ->> 'registrant'
                        END) AS registrant,
                        event.*
-                FROM project_events event
+                FROM project_authority_events event
                 WHERE event.logical_name_id = name.logical_name_id
                   AND event.event_kind IN (
                       'RegistrationGranted', 'TokenControlTransferred'
@@ -253,7 +259,7 @@ pub(super) async fn build(
             LEFT JOIN LATERAL (
                 SELECT lower(event.after_state ->> 'to') AS token_holder,
                        event.*
-                FROM project_events event
+                FROM project_authority_events event
                 WHERE event.logical_name_id = name.logical_name_id
                   AND event.event_kind = 'TokenControlTransferred'
                 ORDER BY event.block_number DESC NULLS LAST,

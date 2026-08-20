@@ -31,6 +31,9 @@ pub(crate) fn primary_name_verified_result(
             OnDemandPrimaryNameVerificationState::ClaimNotNormalized => {
                 primary_name_claim_not_normalized_result()
             }
+            OnDemandPrimaryNameVerificationState::AuthorityUnsupported(reason) => {
+                json!({ "status": "unsupported", "unsupported_reason": reason })
+            }
             OnDemandPrimaryNameVerificationState::Verified(result) => result.clone(),
             OnDemandPrimaryNameVerificationState::NotAttempted
                 if matches!(
