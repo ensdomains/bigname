@@ -71,10 +71,15 @@ selectors in the same request.
 
 ## Primary-name lookup
 
-The verified primary-name product path supports ENS on coin type `60`. It reads
-the phase `primary_names_current` claim, requires a byte-normalized successful
-claim, resolves the claimed name at the selected Ethereum position, and accepts
-it only when the forward address matches the requested address. A reverse claim
+The verified primary-name product path supports ENS on coin type `60`. It
+performs a fresh reverse lookup at the selected Ethereum position; a projected
+`primary_names_current` claim is not required. When a projected claim exists,
+the route consults it before live execution so unsupported exact-name coverage
+or an unverifiable selected [authority arm](glossary.md#authority-epoch) can
+refuse the forward call. After the reverse leg, the same exact-name gate applies
+to the live claim. An absent readable exact-name row admits the forward call.
+The live reverse claim must already be byte-normalized, and the route accepts it
+only when the forward address matches the requested address. A reverse claim
 alone is not proof of a primary name.[^v1-aur-l217][^v1-aur-l263][^v1-aur-l269]
 
 Invalid or non-normalized claims remain non-primary. A successful claim whose

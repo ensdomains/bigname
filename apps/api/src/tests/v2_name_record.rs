@@ -112,21 +112,45 @@ async fn v2_get_name_exposes_authority_unsupported_shape() -> Result<()> {
     Ok(())
 }
 
+// An unsupported projection row never serves `status=ok`, whatever its reason. The rule is keyed
+// on the unsupported status with one named exception, so a reason this build has never seen fails
+// closed instead of serving a registration the projection declined to support.
 #[tokio::test]
-async fn v2_get_name_preserves_non_authority_unsupported_shape() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
-        row.coverage = json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_asserted",
-            "unsupported_reason": "ensv2_exact_name_profile_shadow"
-        });
-    })
-    .await?;
-    let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("status"), Some(&json!("ok")));
-    assert_eq!(data.get("registration_status"), Some(&json!("active")));
-    assert_eq!(data.get("network"), Some(&json!("ethereum")));
-    assert!(data.get("unsupported_reason").is_none());
+async fn v2_get_name_downgrades_every_unsupported_reason() -> Result<()> {
+    for (reason, expected) in [
+        (
+            "ensv2_exact_name_profile_shadow",
+            "exact_name_profile_not_supported",
+        ),
+        (
+            "a_reason_this_build_has_never_seen",
+            "a_reason_this_build_has_never_seen",
+        ),
+    ] {
+        let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+            row.coverage = json!({
+                "status": "unsupported",
+                "exhaustiveness": "not_asserted",
+                "unsupported_reason": reason
+            });
+        })
+        .await?;
+        let data = payload["data"].as_object().expect("data must be an object");
+        assert_eq!(data.get("status"), Some(&json!("unsupported")), "{reason}");
+        assert_eq!(data.get("unsupported_reason"), Some(&json!(expected)));
+        assert_eq!(
+            data.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                "display_name",
+                "name",
+                "namehash",
+                "namespace",
+                "status",
+                "unsupported_reason",
+            ],
+            "{reason} served fields beyond the identity-only object"
+        );
+    }
     Ok(())
 }
 
@@ -1543,10 +1567,20 @@ async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_
 
 #[tokio::test]
 async fn v2_get_name_records_withholds_unproven_authority_without_verified_lookup() -> Result<()> {
+    // Every unsupported reason short-circuits the records response under its public name; only
+    // `current_authority_not_projected` keeps its own documented inventory reason.
     for (reason, product_reason) in [
         (
             "conflicting_current_ens_authority",
             "conflicting_current_ens_authority",
+        ),
+        (
+            "ensv2_exact_name_profile_shadow",
+            "exact_name_profile_not_supported",
+        ),
+        (
+            "a_reason_this_build_has_never_seen",
+            "a_reason_this_build_has_never_seen",
         ),
         (
             "current_authority_not_projected",
@@ -1585,6 +1619,61 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
             );
         }
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_unknown_pipeline_unsupported_reason_stays_in_band() -> Result<()> {
+    let records = v2_name_records_payload_with_row_and_setup(
+        "/v2/names/Alice.eth/records?keys=addr:60",
+        |row| {
+            row.coverage = json!({
+                "status": "unsupported",
+                "unsupported_reason": "future_projection_gap"
+            });
+        },
+        |_, _, _| {},
+    )
+    .await?;
+
+    assert_eq!(records["data"]["resolver"], Value::Null);
+    assert_eq!(records["data"]["addresses"], json!({}));
+    assert_eq!(records["data"]["text_records"], json!({}));
+    assert_eq!(records["data"]["content_hash"], Value::Null);
+    assert_eq!(
+        records["data"]["records"]["addr:60"],
+        json!({
+            "status": "unsupported",
+            "unsupported_reason": "unsupported_reason_unrecognized"
+        })
+    );
+
+    let verified =
+        v2_name_record_payload_with_row("/v2/names/Alice.eth?source=verified", |row| {
+            row.coverage = json!({
+                "status": "unsupported",
+                "unsupported_reason": "future_projection_gap"
+            });
+        })
+        .await?;
+    let data = verified["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("unsupported")));
+    assert_eq!(
+        data.get("unsupported_reason"),
+        Some(&json!("unsupported_reason_unrecognized"))
+    );
+    assert_eq!(
+        data.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "display_name",
+            "name",
+            "namehash",
+            "namespace",
+            "status",
+            "unsupported_reason",
+        ]
+    );
 
     Ok(())
 }

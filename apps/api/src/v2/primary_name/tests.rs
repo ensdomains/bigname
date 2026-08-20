@@ -2,7 +2,9 @@ use bigname_storage::PrimaryNameCurrentRow;
 use serde_json::json;
 
 use crate::v2::ErrorCode;
-use crate::v2::support::{OnDemandPrimaryNameClaim, OnDemandPrimaryNameInvalidClaim};
+use crate::v2::support::{
+    OnDemandPrimaryNameClaim, OnDemandPrimaryNameInvalidClaim, primary_name_verified_result,
+};
 
 use super::*;
 
@@ -58,6 +60,53 @@ fn builder_returns_indexed_then_verified_answers_for_both_sources() {
             unsupported_reason: None,
             failure_reason: Some("resolved_target_mismatch".to_owned()),
         })
+    );
+}
+
+#[test]
+fn metric_outcome_keeps_completed_live_result_when_projected_tuple_exists() {
+    let mut lookup_state = PrimaryNameLookupState {
+        tuple_state: PrimaryNameTupleState::TuplePresent(PrimaryNameCurrentRow {
+            address: "0x0000000000000000000000000000000000000abc".to_owned(),
+            namespace: "ens".to_owned(),
+            coin_type: "60".to_owned(),
+            claim_status: PrimaryNameClaimStatus::Success,
+            raw_claim_name: Some("alice.eth".to_owned()),
+            claim_provenance: json!({}),
+        }),
+        normalized_claim_name: Some("alice.eth".to_owned()),
+        claim_name_is_normalized: true,
+        on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
+        on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
+    };
+
+    for status in ["success", "mismatch", "execution_failed"] {
+        lookup_state.on_demand_verified =
+            OnDemandPrimaryNameVerificationState::Verified(json!({ "status": status }));
+        assert_eq!(
+            primary_name_verified_result("ens", &lookup_state)["status"],
+            json!(status),
+            "completed live outcome must not be replaced by the projected tuple"
+        );
+    }
+
+    lookup_state.on_demand_verified = OnDemandPrimaryNameVerificationState::NotAttempted;
+    lookup_state.on_demand_claim =
+        OnDemandPrimaryNameClaimState::InvalidName(OnDemandPrimaryNameInvalidClaim {
+            raw_name: "alice..eth".to_owned(),
+            resolver_address: "0x0000000000000000000000000000000000000def".to_owned(),
+        });
+    assert_eq!(
+        primary_name_verified_result("ens", &lookup_state)["status"],
+        json!("invalid_name"),
+        "unnormalizable live claim must not be replaced by the projected tuple"
+    );
+
+    lookup_state.on_demand_claim = OnDemandPrimaryNameClaimState::Unavailable;
+    assert_eq!(
+        primary_name_verified_result("ens", &lookup_state)["status"],
+        json!("execution_failed"),
+        "failed live reverse execution must not be replaced by the projected tuple"
     );
 }
 

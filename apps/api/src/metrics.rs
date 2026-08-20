@@ -1,5 +1,8 @@
 use std::{net::SocketAddr, sync::OnceLock};
 
+#[cfg(test)]
+use std::{cell::RefCell, future::Future};
+
 use axum::{
     extract::{MatchedPath, Request},
     middleware::Next,
@@ -69,6 +72,33 @@ impl ApiMetrics {
 fn api_metrics() -> &'static ApiMetrics {
     static METRICS: OnceLock<ApiMetrics> = OnceLock::new();
     METRICS.get_or_init(|| ApiMetrics::new().expect("API metrics must register"))
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static VERIFIED_EXECUTION_OUTCOMES: RefCell<Vec<&'static str>>;
+}
+
+#[cfg(test)]
+pub(crate) async fn capture_verified_execution_outcomes<F>(
+    future: F,
+) -> (F::Output, Vec<&'static str>)
+where
+    F: Future,
+{
+    VERIFIED_EXECUTION_OUTCOMES
+        .scope(RefCell::new(Vec::new()), async move {
+            let output = future.await;
+            let outcomes = VERIFIED_EXECUTION_OUTCOMES
+                .with(|outcomes| std::mem::take(&mut *outcomes.borrow_mut()));
+            (output, outcomes)
+        })
+        .await
+}
+
+#[cfg(test)]
+fn record_verified_execution_outcome(outcome: &'static str) {
+    let _ = VERIFIED_EXECUTION_OUTCOMES.try_with(|outcomes| outcomes.borrow_mut().push(outcome));
 }
 
 pub(crate) async fn bind(bind_addr: SocketAddr) -> anyhow::Result<MetricsServer> {
@@ -151,10 +181,13 @@ pub(crate) struct VerifiedExecutionTimer {
 
 impl VerifiedExecutionTimer {
     pub(crate) fn finish(mut self, outcome: &'static str) {
+        let outcome = bounded_outcome(outcome);
         api_metrics()
             .verified_execution
-            .with_label_values(&[bounded_outcome(outcome)])
+            .with_label_values(&[outcome])
             .inc();
+        #[cfg(test)]
+        record_verified_execution_outcome(outcome);
         self.completed = true;
     }
 }
@@ -166,6 +199,8 @@ impl Drop for VerifiedExecutionTimer {
                 .verified_execution
                 .with_label_values(&["error"])
                 .inc();
+            #[cfg(test)]
+            record_verified_execution_outcome("error");
         }
     }
 }

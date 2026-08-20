@@ -51,27 +51,51 @@ impl LookupEngine {
         &self,
         normalized_address: &str,
     ) -> Result<EnsPrimaryNameLookup> {
-        self.lookup_ens_primary_name_before_revalidate(normalized_address, || ready(()))
+        self.lookup_ens_primary_name_gated(normalized_address, |_| ready(true))
             .await
     }
 
-    async fn lookup_ens_primary_name_before_revalidate<F, Fut>(
+    /// As `lookup_ens_primary_name`, but `admit_forward` decides -- from the reverse-claimed name
+    /// alone -- whether the forward verification call may be dispatched at all. Refusing yields a
+    /// `ForwardRefused` result with the reverse answer intact and no forward call made.
+    pub async fn lookup_ens_primary_name_gated<G, GFut>(
         &self,
         normalized_address: &str,
+        admit_forward: G,
+    ) -> Result<EnsPrimaryNameLookup>
+    where
+        G: FnOnce(String) -> GFut,
+        GFut: Future<Output = bool>,
+    {
+        self.lookup_ens_primary_name_before_revalidate(normalized_address, admit_forward, || {
+            ready(())
+        })
+        .await
+    }
+
+    async fn lookup_ens_primary_name_before_revalidate<G, GFut, F, Fut>(
+        &self,
+        normalized_address: &str,
+        admit_forward: G,
         before_revalidate: F,
     ) -> Result<EnsPrimaryNameLookup>
     where
+        G: FnOnce(String) -> GFut,
+        GFut: Future<Output = bool>,
         F: FnOnce() -> Fut,
         Fut: Future<Output = ()>,
     {
         let authority = load_ens_primary_name_authority(&self.pool).await?;
-        let result = lookup_ens_primary_name(EnsPrimaryNameRequest {
-            normalized_address,
-            registry_address: &authority.registry_address,
-            universal_resolver_address: &authority.universal_resolver_address,
-            position: &authority.position,
-            chain_rpc_urls: &self.rpc_urls,
-        })
+        let result = lookup_ens_primary_name(
+            EnsPrimaryNameRequest {
+                normalized_address,
+                registry_address: &authority.registry_address,
+                universal_resolver_address: &authority.universal_resolver_address,
+                position: &authority.position,
+                chain_rpc_urls: &self.rpc_urls,
+            },
+            admit_forward,
+        )
         .await?;
         before_revalidate().await;
         revalidate_primary_name_position(&self.pool, &authority).await?;
@@ -171,8 +195,12 @@ impl LookupEngine {
         F: FnOnce() -> Fut,
         Fut: Future<Output = ()>,
     {
-        self.lookup_ens_primary_name_before_revalidate(normalized_address, before_revalidate)
-            .await
+        self.lookup_ens_primary_name_before_revalidate(
+            normalized_address,
+            |_| ready(true),
+            before_revalidate,
+        )
+        .await
     }
 }
 

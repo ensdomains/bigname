@@ -92,7 +92,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `subname_count` | count of direct subnames when requested | `subname_count` (unchanged; now the only count name for child rows) |
 | `record_count` | count of known record keys when requested | `record_count` (unchanged) |
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
-| `authority_context` | planned with the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); `current_for_name` means a `name` filter selected the current registration, while `resource_audit` makes no current-name claim | new in v2 after activation |
+| `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
 | `capabilities` | product-facing summary of supported namespace capabilities | capability flag summaries when exposed to product routes |
 | `type` | product event category label | `event_kind`, compact event `type` aliases |
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
@@ -505,6 +505,15 @@ route:
 Rules:
 
 - `unsupported_reason` is required when `status=unsupported`.
+- A read over a projected row keys `unsupported` on that row's own coverage
+  status, not on a list of known reasons: an unsupported row serves
+  `status=unsupported` even when it names no reason or names a reason the build
+  does not recognize. Exceptions are per-route and named there, such as the
+  name-detail partial serve for `current_authority_not_projected` in
+  [`api-v2-routes.md`](api-v2-routes.md).
+- When an unsupported projected row names a reason that this build does not
+  recognize and that cannot cross the serving boundary as public vocabulary,
+  the public `unsupported_reason` is `unsupported_reason_unrecognized`.
 - `failure_reason` is permitted on `failed`, `stale`, `not_found`, and
   `mismatch`.
 - `mismatch` is the verification state where a claimed answer verifies to a

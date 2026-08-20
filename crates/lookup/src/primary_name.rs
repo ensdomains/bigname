@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use serde_json::{Value, json};
 
 use bigname_domain::normalization::normalize_name;
@@ -23,6 +25,9 @@ pub enum EnsPrimaryNameStatus {
     Mismatch,
     InvalidName,
     ExecutionFailed,
+    /// The caller's gate declined forward verification for the reverse-claimed name, so no
+    /// forward call was dispatched.
+    ForwardRefused,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,9 +53,14 @@ pub(crate) struct EnsPrimaryNameRequest<'a> {
     pub chain_rpc_urls: &'a ChainRpcUrls,
 }
 
-pub(crate) async fn lookup_ens_primary_name(
+pub(crate) async fn lookup_ens_primary_name<F, Fut>(
     request: EnsPrimaryNameRequest<'_>,
-) -> Result<EnsPrimaryNameLookup> {
+    admit_forward: F,
+) -> Result<EnsPrimaryNameLookup>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = bool>,
+{
     if request.position.block_hash.trim().is_empty() {
         return Err(LookupError::configuration(
             "ENS primary-name lookup block hash must not be empty",
@@ -93,6 +103,19 @@ pub(crate) async fn lookup_ens_primary_name(
             ));
         }
     };
+
+    // The reverse answer is settled here and the forward call has not gone out yet. This is the
+    // only point at which a caller can refuse a name without paying for a resolver call it has
+    // already decided not to trust -- and the forward call follows CCIP-read, so a refused
+    // dispatch would reach external gateways.
+    if !admit_forward(normalized_name.clone()).await {
+        return Ok(forward_refused(
+            &raw_name,
+            &normalized_name,
+            &resolver_address,
+            request.position,
+        ));
+    }
 
     let record = RecordSelector::parse("addr:60")?;
     let dns_name = dns_encode_name(&normalized_name).map_err(|error| {
@@ -234,6 +257,24 @@ fn execution_failed(
         forward_address: None,
         ccip_read,
         failure_reason: Some(failure_reason.to_owned()),
+    }
+}
+
+fn forward_refused(
+    raw_name: &str,
+    normalized_name: &str,
+    resolver_address: &str,
+    position: &LookupPosition,
+) -> EnsPrimaryNameLookup {
+    EnsPrimaryNameLookup {
+        position: position.clone(),
+        status: EnsPrimaryNameStatus::ForwardRefused,
+        name: Some(raw_name.to_owned()),
+        normalized_name: Some(normalized_name.to_owned()),
+        reverse_resolver_address: Some(resolver_address.to_owned()),
+        forward_address: None,
+        ccip_read: false,
+        failure_reason: None,
     }
 }
 
