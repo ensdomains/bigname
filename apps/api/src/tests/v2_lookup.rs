@@ -329,6 +329,10 @@ async fn v2_lookup_withholds_fields_for_unsupported_name_authority() -> Result<(
             "a_reason_this_build_has_never_seen",
             "a_reason_this_build_has_never_seen",
         ),
+        (
+            "future_projection_gap",
+            "unsupported_reason_unrecognized",
+        ),
     ] {
         sqlx::query(
             "UPDATE name_current

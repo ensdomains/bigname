@@ -1,6 +1,5 @@
 use super::*;
-use crate::v2::shared_product_reason;
-use crate::v2::vocab::MISSING_UNSUPPORTED_REASON;
+use crate::v2::vocab::{MISSING_UNSUPPORTED_REASON, projected_row_product_reason};
 
 /// The public reason for a claim whose selected authority has no declared entrypoint to verify
 /// through. Distinct from an unsupported exact-name projection, which reports its own reason.
@@ -93,22 +92,11 @@ pub(super) async fn unverifiable_name_authority(
         let reason = crate::v2::name_record::string_field(row.coverage.get("unsupported_reason"))
             .filter(|reason| !reason.trim().is_empty())
             .unwrap_or_else(|| MISSING_UNSUPPORTED_REASON.to_owned());
-        return Ok(ForwardGateDecision::Refuse(
-            shared_product_reason(
-                &reason,
-                "rejected exact-name reason containing pipeline vocabulary",
-                "failed to map exact-name reason vocabulary",
-            )
-            .map_err(|error| {
-                error!(
-                    service = "api",
-                    namespace = %namespace,
-                    error = ?error,
-                    "failed to map exact-name reason vocabulary"
-                );
-                ApiError::internal_error("failed to map exact-name reason vocabulary")
-            })?,
-        ));
+        return Ok(ForwardGateDecision::Refuse(projected_row_product_reason(
+            &reason,
+            "rejected exact-name reason containing pipeline vocabulary",
+            "failed to map exact-name reason vocabulary",
+        )));
     }
 
     // No manifest declares an execution entrypoint for any arm but ENSv1, so this deployment has

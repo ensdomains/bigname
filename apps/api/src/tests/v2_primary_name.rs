@@ -1069,7 +1069,7 @@ async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispa
         &lookup_pool,
         "ens",
         "taytems.eth",
-        Some("conflicting_current_ens_authority"),
+        Some("future_projection_gap"),
         "ens_v1",
     )
     .await?;
@@ -1108,7 +1108,7 @@ async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispa
     assert_eq!(verified["status"], json!("unsupported"), "{payload}");
     assert_eq!(
         verified["unsupported_reason"],
-        json!("conflicting_current_ens_authority")
+        json!("unsupported_reason_unrecognized")
     );
     // No provider call ran, so there is no verification outcome to report.
     assert!(payload["data"].get("verification").is_none(), "{payload}");

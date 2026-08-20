@@ -511,6 +511,9 @@ Rules:
   does not recognize. Exceptions are per-route and named there, such as the
   name-detail partial serve for `current_authority_not_projected` in
   [`api-v2-routes.md`](api-v2-routes.md).
+- When an unsupported projected row names a reason that this build does not
+  recognize and that cannot cross the serving boundary as public vocabulary,
+  the public `unsupported_reason` is `unsupported_reason_unrecognized`.
 - `failure_reason` is permitted on `failed`, `stale`, `not_found`, and
   `mismatch`.
 - `mismatch` is the verification state where a claimed answer verifies to a

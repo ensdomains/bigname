@@ -7,7 +7,7 @@ use crate::v2::support::{
     PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey, parse_resolution_record_key,
 };
 use crate::v2::vocab::{
-    MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, shared_product_reason,
+    MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
 };
 
 use super::super::{
@@ -56,11 +56,11 @@ fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>>
     if !downgrades_unsupported_name(&reason) {
         return Ok(None);
     }
-    let reason = shared_product_reason(
+    let reason = projected_row_product_reason(
         &reason,
         "rejected exact-name reason containing pipeline vocabulary",
         "failed to map exact-name reason vocabulary",
-    )?;
+    );
     Ok(Some(NameRecord {
         registration_id: None,
         token_id: None,

@@ -15,6 +15,7 @@ use crate::v2::{
     shared_product_reason,
     vocab::{
         MISSING_UNSUPPORTED_REASON, PARTIAL_SERVE_UNSUPPORTED_REASON, downgrades_unsupported_name,
+        projected_row_product_reason,
     },
 };
 
@@ -339,7 +340,11 @@ fn identity_record_unsupported_reason(
     let reason = string_field(coverage.get("unsupported_reason"))
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| MISSING_UNSUPPORTED_REASON.to_owned());
-    product_lookup_reason(&reason).map(Some)
+    Ok(Some(projected_row_product_reason(
+        &reason,
+        "rejected lookup reason containing pipeline vocabulary",
+        "failed to map lookup reason vocabulary",
+    )))
 }
 
 fn identity_record_failure_reason(coverage: &Value, status: Status) -> V2Result<Option<String>> {

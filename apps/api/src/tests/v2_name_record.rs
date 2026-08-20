@@ -1624,6 +1624,61 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
 }
 
 #[tokio::test]
+async fn v2_unknown_pipeline_unsupported_reason_stays_in_band() -> Result<()> {
+    let records = v2_name_records_payload_with_row_and_setup(
+        "/v2/names/Alice.eth/records?keys=addr:60",
+        |row| {
+            row.coverage = json!({
+                "status": "unsupported",
+                "unsupported_reason": "future_projection_gap"
+            });
+        },
+        |_, _, _| {},
+    )
+    .await?;
+
+    assert_eq!(records["data"]["resolver"], Value::Null);
+    assert_eq!(records["data"]["addresses"], json!({}));
+    assert_eq!(records["data"]["text_records"], json!({}));
+    assert_eq!(records["data"]["content_hash"], Value::Null);
+    assert_eq!(
+        records["data"]["records"]["addr:60"],
+        json!({
+            "status": "unsupported",
+            "unsupported_reason": "unsupported_reason_unrecognized"
+        })
+    );
+
+    let verified =
+        v2_name_record_payload_with_row("/v2/names/Alice.eth?source=verified", |row| {
+            row.coverage = json!({
+                "status": "unsupported",
+                "unsupported_reason": "future_projection_gap"
+            });
+        })
+        .await?;
+    let data = verified["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("status"), Some(&json!("unsupported")));
+    assert_eq!(
+        data.get("unsupported_reason"),
+        Some(&json!("unsupported_reason_unrecognized"))
+    );
+    assert_eq!(
+        data.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "display_name",
+            "name",
+            "namehash",
+            "namespace",
+            "status",
+            "unsupported_reason",
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_verified_name_reads_reject_oversized_inventory_derived_selector_sets() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {

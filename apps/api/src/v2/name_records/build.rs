@@ -7,7 +7,7 @@ use tracing::error;
 use crate::v2::support::{ResolutionRecordKey, build_lookup_resolution_verified_state};
 
 use super::super::vocab::{
-    MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, shared_product_reason,
+    MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
 };
 use super::super::{
     PRODUCT_PIPELINE_TERMS, Source, Status, V2Error, V2Result, contains_boundary_vocabulary,
@@ -66,11 +66,11 @@ fn authority_unsupported_reason(row: &NameCurrentRow) -> V2Result<Option<String>
     // A name-level authority reason, so it maps through the shared name
     // vocabulary rather than the record-family map: one projection reason must
     // reach every route as the same public reason.
-    Ok(Some(shared_product_reason(
+    Ok(Some(projected_row_product_reason(
         &reason,
         "rejected exact-name reason containing pipeline vocabulary",
         "failed to map exact-name reason vocabulary",
-    )?))
+    )))
 }
 
 pub(crate) fn build_indexed_name_records(

@@ -369,6 +369,15 @@ pub(crate) fn shared_product_reason(
     Ok(reason.to_owned())
 }
 
+pub(crate) fn projected_row_product_reason(
+    reason: &str,
+    pipeline_rejection_log: &'static str,
+    pipeline_rejection_error: &'static str,
+) -> String {
+    shared_product_reason(reason, pipeline_rejection_log, pipeline_rejection_error)
+        .unwrap_or_else(|_| "unsupported_reason_unrecognized".to_owned())
+}
+
 pub(crate) fn matched_boundary_vocabulary_terms<'a>(
     candidate: &str,
     terms: &'a [&'a str],

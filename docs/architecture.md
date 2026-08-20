@@ -909,7 +909,8 @@ name that expired while wrapped it would publish the wrapper contract itself as
 the controller of every such name, because registry-owner writes made during the
 wrapped era are attributed to the wrapper resource. (The wrap itself is not such a
 write: the registry hand-off to the wrapper is attributed to the pre-wrap
-resource. Wrapping is an ENSv1 shape; the Basenames arm has no wrapper.)
+resource. Only the ENSv1 arm has an admitted wrapper source family, so wrapped-era
+attribution arises only there.)
 
 The lower bound compares blocks, not full log positions, and that is deliberate.
 It is not the same window the exact-name authority uses for this divergence: that
