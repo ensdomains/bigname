@@ -190,7 +190,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             event.after_state.get("wrapper_expiry").and_then(parse_u64),
         )
     {
-        state.update_v1_wrapper_expiry(&event.namespace, namehash, expiry);
+        state.restore_v1_correlated_wrapper_expiry(&event.namespace, namehash, expiry);
     }
     if !(event.source_family.starts_with("ens_v1_")
         || event.source_family.starts_with("basenames_"))

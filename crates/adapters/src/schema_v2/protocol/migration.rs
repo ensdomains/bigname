@@ -48,25 +48,30 @@ pub(super) fn interpret(selected: &Selected, raw: &RawLogInput) -> anyhow::Resul
         contract_instance_id: selected.contract_instance_id,
         raw: raw.clone(),
         decoded,
+        correlated_wrapper_expiry: None,
     });
     Ok(output)
 }
 
 /// Decode a BaseRegistrar log attributed by `ens_v1_registrar_l1`. Event drafts retain
-/// ENSv1→ENSv2 migration-family provenance and are materialized only when the migration
-/// manifest's launch-bounded correlation admits the observation.
+/// `ens_v2_migration_l1` provenance and are materialized only when that manifest's launch-bounded
+/// correlation admits the observation.
 pub(super) fn interpret_base_registrar(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Interpreted> {
     let mut output = Interpreted::new();
-    let decoded = match selected.event.signature.as_str() {
-        "ControllerAdded(address)" => controller(selected, raw, state, &mut output, true)?,
-        "ControllerRemoved(address)" => controller(selected, raw, state, &mut output, false)?,
-        "NameRegistered(uint256,address,uint256)" => name_registered(selected, raw, &mut output)?,
+    let (decoded, correlated_wrapper_expiry) = match selected.event.signature.as_str() {
+        "ControllerAdded(address)" => (controller(selected, raw, state, &mut output, true)?, None),
+        "ControllerRemoved(address)" => {
+            (controller(selected, raw, state, &mut output, false)?, None)
+        }
+        "NameRegistered(uint256,address,uint256)" => {
+            (name_registered(selected, raw, &mut output)?, None)
+        }
         "NameRenewed(uint256,uint256)" => base_renewed(selected, raw, state, &mut output)?,
-        "Transfer(address,address,uint256)" => transfer(raw)?,
+        "Transfer(address,address,uint256)" => (transfer(raw)?, None),
         signature => bail!("unsupported ENSv1 BaseRegistrar event {signature}"),
     };
     output.migration_events = std::mem::take(&mut output.events);
@@ -77,6 +82,7 @@ pub(super) fn interpret_base_registrar(
         contract_instance_id: selected.contract_instance_id,
         raw: raw.clone(),
         decoded,
+        correlated_wrapper_expiry,
     });
     Ok(output)
 }
@@ -246,7 +252,7 @@ fn base_renewed(
     raw: &RawLogInput,
     state: &mut State,
     output: &mut Interpreted,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<(Value, Option<u64>)> {
     let event = decode_event_log::<base_registrar::NameRenewed>(
         &raw.topics,
         &raw.data,
@@ -258,7 +264,7 @@ fn base_renewed(
     let logical_name_id = format!("{}:{namehash}", selected.source.namespace);
     let registrar_expiry =
         u64::try_from(event.expires).context("BaseRegistrar NameRenewed expiry exceeds u64")?;
-    let mut decoded = json!({
+    let decoded = json!({
         "token_id":u256_word_hex(event.id),
         "labelhash":format!("{labelhash:#x}"),
         "namehash":namehash,
@@ -279,16 +285,12 @@ fn base_renewed(
             "consumer_visibility":"candidate",
         },
     });
-    if let Some(wrapper_expiry) =
-        state.sync_v1_wrapper_expiry(
-            &selected.source.namespace,
-            &namehash,
-            registrar_expiry,
-            raw,
-        )
-    {
-        decoded["wrapper_expiry"] = Value::from(wrapper_expiry);
-    }
+    let correlated_wrapper_expiry = state.correlated_v1_wrapper_expiry(
+        &selected.source.namespace,
+        &namehash,
+        registrar_expiry,
+        raw,
+    );
     // This scope is a persisted interpreter-state identity. It deliberately names the emitter
     // class rather than the candidate resource UUID so slice 2 reproduces the same scope.
     let scope = format!("migration-renewal:base-registrar:{logical_name_id}");
@@ -302,7 +304,7 @@ fn base_renewed(
             scope.clone(),
         ));
     }
-    Ok(decoded)
+    Ok((decoded, correlated_wrapper_expiry))
 }
 
 fn transfer(raw: &RawLogInput) -> anyhow::Result<Value> {

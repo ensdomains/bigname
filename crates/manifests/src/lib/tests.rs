@@ -486,9 +486,54 @@ fn sepolia_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<(
     Ok(())
 }
 
-/// The checked-in Sepolia deployment profile admits the ENSv1 registry and wrapper families the
-/// ENSv2 migration family bridges from. Registrar raw-log attribution now belongs only to the
-/// ENSv1 registrar family, but that family's Sepolia admission remains in the stacked follow-up.
+#[test]
+fn mainnet_registrar_family_pins_the_base_registrar_event_surface() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let registrar = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_registrar_l1")
+        .map(|loaded| &loaded.manifest)
+        .expect("Mainnet ENSv1 registrar family");
+    let required = [
+        (
+            "ControllerAdded",
+            "event ControllerAdded(address indexed controller)",
+            &["PermissionChanged"][..],
+        ),
+        (
+            "ControllerRemoved",
+            "event ControllerRemoved(address indexed controller)",
+            &["PermissionChanged"][..],
+        ),
+        (
+            "NameRegistered",
+            "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
+            &["RegistrationReleased"][..],
+        ),
+        (
+            "NameRenewed",
+            "event NameRenewed(uint256 indexed id, uint256 expires)",
+            &["RegistrationRenewed", "ExpiryChanged"][..],
+        ),
+    ];
+
+    for (name, fragment, normalized_events) in required {
+        let event = registrar
+            .abi
+            .events
+            .iter()
+            .find(|event| event.name == name && event.fragment == fragment)
+            .unwrap_or_else(|| panic!("missing BaseRegistrar event {fragment}"));
+        assert_eq!(event.emitter_roles, ["registrar"]);
+        assert_eq!(event.normalized_events, normalized_events);
+    }
+    Ok(())
+}
+
+/// Sepolia admits the ENSv1 registry and wrapper manifests consumed by `ens_v2_migration_l1`
+/// correlation. BaseRegistrar raw-log attribution belongs only to `ens_v1_registrar_l1`, whose
+/// Sepolia manifest stays in the stacked follow-up.
 #[test]
 fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;

@@ -279,6 +279,145 @@ fn cross_family_registrar_transfer_emits_one_unwrapped_candidate_boundary() -> a
 }
 
 #[test]
+fn co_admitted_registrar_transfer_keeps_ordinary_event_and_gains_association() -> anyhow::Result<()>
+{
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["U-01"];
+    let addresses = &fixture["addresses"];
+    let label = scenario["label"].as_str().unwrap();
+    let base_token = decimal_u256(&scenario["base_token_id"])?;
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let migration_block = scenario["migration_block"].as_i64().unwrap();
+    let wrapper = address(addresses, "name_wrapper")?;
+    let unlocked = address(addresses, "unlocked_controller")?;
+    let graveyard = address(addresses, "graveyard")?;
+    let mut dns_name = Vec::with_capacity(label.len() + 6);
+    dns_name.push(u8::try_from(label.len())?);
+    dns_name.extend_from_slice(label.as_bytes());
+    dns_name.extend_from_slice(b"\x03eth\0");
+
+    let setup = interpret_test_batch(batch(
+        vec![
+            raw_at_transaction(
+                super::NameWrapped {
+                    node: scenario["namehash"].as_str().unwrap().parse()?,
+                    name: dns_name.into(),
+                    owner: unlocked,
+                    fuses: 0,
+                    expiry: scenario["stored_expiry"].as_u64().unwrap() + (90 * 24 * 60 * 60),
+                }
+                .encode_log_data(),
+                migration_block - 2,
+                0,
+                0,
+                addresses["name_wrapper"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                super::NameUnwrapped {
+                    node: scenario["namehash"].as_str().unwrap().parse()?,
+                    owner: unlocked,
+                }
+                .encode_log_data(),
+                migration_block - 1,
+                0,
+                0,
+                addresses["name_wrapper"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                super::v1_registrar::Transfer {
+                    from: wrapper,
+                    to: unlocked,
+                    tokenId: base_token,
+                }
+                .encode_log_data(),
+                migration_block - 1,
+                0,
+                1,
+                addresses["base_registrar"].as_str().unwrap(),
+            ),
+        ],
+        &fixture,
+        false,
+    ))?;
+    assert!(setup.normalized_events.iter().any(|event| {
+        event.source_family == "ens_v1_registrar_l1"
+            && event.event_kind == "TokenControlTransferred"
+    }));
+
+    let migration_log = scenario["graveyard_transfer_log_index"].as_i64().unwrap();
+    let mut input = batch(
+        vec![
+            raw_at_transaction(
+                super::v1_registrar::Transfer {
+                    from: unlocked,
+                    to: graveyard,
+                    tokenId: base_token,
+                }
+                .encode_log_data(),
+                migration_block,
+                0,
+                migration_log,
+                addresses["base_registrar"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                super::v2_registry::LabelRegistered {
+                    tokenId: v2_token,
+                    labelHash: keccak256(label.as_bytes()),
+                    label: label.to_owned(),
+                    owner: Address::from([0x11; 20]),
+                    expiry: scenario["stored_expiry"].as_u64().unwrap(),
+                    sender: unlocked,
+                }
+                .encode_log_data(),
+                migration_block,
+                0,
+                scenario["v2_registration_log_index"].as_i64().unwrap(),
+                addresses["eth_registry"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                super::v2_registry::TokenResource {
+                    tokenId: v2_token,
+                    resource: v2_token,
+                }
+                .encode_log_data(),
+                migration_block,
+                0,
+                scenario["v2_registration_log_index"].as_i64().unwrap() + 1,
+                addresses["eth_registry"].as_str().unwrap(),
+            ),
+        ],
+        &fixture,
+        true,
+    );
+    input.prior_events = setup
+        .normalized_events
+        .iter()
+        .map(super::prior_event)
+        .collect();
+    let output = interpret_test_batch(input)?;
+
+    let transfer = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "TokenControlTransferred"
+                && event.log_index == Some(migration_log)
+        })
+        .expect("the independently admitted registrar Transfer remains an ordinary event");
+    assert_eq!(transfer.consumer_visibility, "activated");
+    assert!(transfer.migration_correlation_ids.is_empty());
+    assert!(
+        output
+            .migration_event_associations
+            .iter()
+            .any(|association| association.event_identity == transfer.event_identity),
+        "the ordinary registrar Transfer must separately retain its migration relationship"
+    );
+    Ok(())
+}
+
+#[test]
 fn unlocked_wrapped_catalog_shape_is_distinguished_per_name() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["W-01"];
@@ -1402,6 +1541,12 @@ fn cross_family_registrar_controller_uses_a_separate_name_wrapper_envelope() -> 
     }));
     assert!(unrelated_output.resources.is_empty());
     assert!(unrelated_output.token_lineages.is_empty());
+    assert!(
+        unrelated_output
+            .normalized_events
+            .iter()
+            .all(|event| { event.after_state.get("wrapper_expiry").is_none() })
+    );
 
     let mut mismatched_logs = logs;
     mismatched_logs[2] = raw_at_transaction(
@@ -1423,6 +1568,73 @@ fn cross_family_registrar_controller_uses_a_separate_name_wrapper_envelope() -> 
     }));
     assert!(mismatched_output.resources.is_empty());
     assert!(mismatched_output.token_lineages.is_empty());
+    assert!(
+        mismatched_output
+            .normalized_events
+            .iter()
+            .all(|event| { event.after_state.get("wrapper_expiry").is_none() })
+    );
+    Ok(())
+}
+
+#[test]
+fn numeric_base_registrar_events_are_silent_without_the_migration_family() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let registrar = addresses["base_registrar"].as_str().unwrap();
+    let controller = address(addresses, "name_wrapper")?;
+    let block = fixture["scenarios"]["R-05"]["configuration_block"]
+        .as_i64()
+        .unwrap();
+    let token = decimal_u256(&fixture["scenarios"]["R-05"]["base_token_id"])?;
+    let mut input = batch(
+        vec![
+            raw_at_transaction(
+                ControllerAdded { controller }.encode_log_data(),
+                block,
+                0,
+                0,
+                registrar,
+            ),
+            raw_at_transaction(
+                ControllerRemoved { controller }.encode_log_data(),
+                block,
+                0,
+                1,
+                registrar,
+            ),
+            raw_at_transaction(
+                with_topic0(
+                    BaseNameRegistered {
+                        id: token,
+                        owner: Address::from([0x51; 20]),
+                        expires: U256::from(2_000_000_000_u64),
+                    }
+                    .encode_log_data(),
+                    keccak256(b"NameRegistered(uint256,address,uint256)"),
+                ),
+                block,
+                0,
+                2,
+                registrar,
+            ),
+            base_renewed_at(addresses, token, 2_000_000_001, block, 3),
+        ],
+        &fixture,
+        false,
+    );
+    input
+        .manifests
+        .retain(|manifest| manifest.source_family != "ens_v2_migration_l1");
+    input
+        .admissions
+        .retain(|admission| admission.source_manifest_id != Some(MIGRATION_MANIFEST_ID));
+
+    let output = interpret_test_batch(input)?;
+    assert!(output.normalized_events.is_empty());
+    assert!(output.resources.is_empty());
+    assert!(output.token_lineages.is_empty());
+    assert!(output.migration_event_associations.is_empty());
     Ok(())
 }
 
@@ -1518,6 +1730,325 @@ fn unmatched_controller_addition_cannot_change_a_later_transaction_renewal() -> 
     };
     assert_eq!(renewal_state(&full), renewal_state(&split));
     assert!(renewal_state(&full).get("wrapper_expiry").is_none());
+    Ok(())
+}
+
+#[test]
+fn candidate_registrar_renewal_cannot_change_later_ordinary_wrapper_output() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let registrar = addresses["base_registrar"].as_str().unwrap();
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let registry = "0x0000000000000000000000000000000000000099";
+    let label = b"candidate-state";
+    let labelhash = keccak256(label);
+    let node = super::common::namehash(&["candidate-state".to_owned(), "eth".to_owned()]);
+    let block = fixture["scenarios"]["R-05"]["configuration_block"]
+        .as_i64()
+        .unwrap();
+    let initial_wrapper_expiry = 7_776_100;
+    let registrar_expiry = 200;
+    let later_wrapper_expiry = 7_776_300;
+    let setup = vec![
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            0,
+            registry,
+        ),
+        raw_at_transaction(
+            super::NameWrapped {
+                node: node.parse()?,
+                name: b"\x0fcandidate-state\x03eth\0".to_vec().into(),
+                owner: Address::from([0x51; 20]),
+                fuses: (1 << 16) | (1 << 17),
+                expiry: initial_wrapper_expiry,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            1,
+            wrapper,
+        ),
+    ];
+    let correlation = vec![
+        raw_at_transaction(
+            ControllerAdded {
+                controller: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block + 1,
+            0,
+            0,
+            registrar,
+        ),
+        base_renewed_at(
+            addresses,
+            U256::from_be_bytes(*labelhash),
+            registrar_expiry,
+            block + 1,
+            1,
+        ),
+        raw_at_transaction(
+            ControllerRemoved {
+                controller: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block + 1,
+            0,
+            2,
+            registrar,
+        ),
+    ];
+    let later = raw_at_transaction(
+        super::ExpiryExtended {
+            node: node.parse()?,
+            expiry: later_wrapper_expiry,
+        }
+        .encode_log_data(),
+        block + 2,
+        0,
+        0,
+        wrapper,
+    );
+    let run = |logs| -> anyhow::Result<BatchOutput> {
+        let mut input = batch(logs, &fixture, false);
+        admit_v1_registry(&mut input, registry);
+        interpret_test_batch(input)
+    };
+    let wrapper_expiry_event = |output: &BatchOutput| {
+        output
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.source_family == "ens_v1_wrapper_l1"
+                    && event.after_state["source_event"] == "ExpiryExtended"
+            })
+            .cloned()
+            .expect("ordinary NameWrapper ExpiryExtended output")
+    };
+
+    let control = run(setup
+        .iter()
+        .cloned()
+        .chain(std::iter::once(later.clone()))
+        .collect())?;
+    let correlated = run(setup
+        .iter()
+        .cloned()
+        .chain(correlation.iter().cloned())
+        .chain(std::iter::once(later.clone()))
+        .collect())?;
+    assert!(correlated.normalized_events.iter().any(|event| {
+        event.source_family == "ens_v2_migration_l1"
+            && event.after_state["source_event"] == "NameRenewed"
+            && event.after_state["wrapper_expiry"] == 7_776_200
+    }));
+    assert_eq!(
+        wrapper_expiry_event(&correlated),
+        wrapper_expiry_event(&control),
+        "candidate renewal state must not alter a later ordinary event during full replay"
+    );
+
+    let seeded_incomplete = run(setup
+        .iter()
+        .cloned()
+        .chain(correlation.iter().take(2).cloned())
+        .collect())?;
+    let unseeded_incomplete = run(correlation.iter().take(2).cloned().collect())?;
+    let historical_renewal = |output: &BatchOutput| {
+        output
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.source_family == "ens_v2_migration_l1"
+                    && event.event_kind == "RegistrationRenewed"
+            })
+            .cloned()
+            .expect("incomplete controller envelope remains historical renewal evidence")
+    };
+    assert_eq!(
+        historical_renewal(&seeded_incomplete).migration_correlation_ids,
+        historical_renewal(&unseeded_incomplete).migration_correlation_ids,
+        "unproven wrapper state must not change historical-renewal evidence identity"
+    );
+    assert!(
+        historical_renewal(&seeded_incomplete)
+            .after_state
+            .get("wrapper_expiry")
+            .is_none()
+    );
+
+    let staged = run(setup.into_iter().chain(correlation).collect::<Vec<_>>())?;
+    let mut cold_input = batch(vec![later], &fixture, false);
+    admit_v1_registry(&mut cold_input, registry);
+    cold_input.prior_events = staged
+        .normalized_events
+        .iter()
+        .map(super::prior_event)
+        .collect();
+    let cold = interpret_test_batch(cold_input)?;
+    assert_eq!(
+        wrapper_expiry_event(&cold),
+        wrapper_expiry_event(&control),
+        "candidate renewal state must not alter a later ordinary event after cold restore"
+    );
+    Ok(())
+}
+
+#[test]
+fn unwrap_fallback_cannot_materialize_a_stale_wrapper_derived_registrar_expiry()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let registrar = addresses["base_registrar"].as_str().unwrap();
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let registry = "0x0000000000000000000000000000000000000099";
+    let owner = Address::from([0x51; 20]);
+    let label = b"candidate-fallback";
+    let labelhash = keccak256(label);
+    let node = super::common::namehash(&["candidate-fallback".to_owned(), "eth".to_owned()]);
+    let block = fixture["scenarios"]["R-05"]["configuration_block"]
+        .as_i64()
+        .unwrap();
+    let grace = 90 * 24 * 60 * 60;
+    let initial_registrar_expiry = u64::try_from(block)? + 10;
+    let initial_wrapper_expiry = initial_registrar_expiry + grace;
+    let renewed_registrar_expiry = initial_registrar_expiry + 1_000;
+    let unwrap_block = i64::try_from(initial_wrapper_expiry + 1)?;
+    let logs = vec![
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            0,
+            registry,
+        ),
+        raw_at_transaction(
+            super::NameWrapped {
+                node: node.parse()?,
+                name: b"\x12candidate-fallback\x03eth\0".to_vec().into(),
+                owner,
+                fuses: (1 << 16) | (1 << 17),
+                expiry: initial_wrapper_expiry,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            1,
+            wrapper,
+        ),
+        raw_at_transaction(
+            ControllerAdded {
+                controller: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block + 1,
+            0,
+            0,
+            registrar,
+        ),
+        base_renewed_at(
+            addresses,
+            U256::from_be_bytes(*labelhash),
+            renewed_registrar_expiry,
+            block + 1,
+            1,
+        ),
+        raw_at_transaction(
+            ControllerRemoved {
+                controller: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block + 1,
+            0,
+            2,
+            registrar,
+        ),
+        raw_at_transaction(
+            super::NameUnwrapped {
+                node: node.parse()?,
+                owner,
+            }
+            .encode_log_data(),
+            unwrap_block,
+            0,
+            0,
+            wrapper,
+        ),
+        raw_at_transaction(
+            super::v1_registrar::Transfer {
+                from: wrapper.parse()?,
+                to: owner,
+                tokenId: U256::from_be_bytes(*labelhash),
+            }
+            .encode_log_data(),
+            unwrap_block,
+            0,
+            1,
+            registrar,
+        ),
+    ];
+    let mut input = batch(logs.clone(), &fixture, false);
+    admit_v1_registry(&mut input, registry);
+    let output = interpret_test_batch(input)?;
+    let fallback = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "TokenControlTransferred"
+                && event.block_number == Some(unwrap_block)
+        })
+        .expect("ordered unwrap transfer materializes registrar authority");
+    assert_eq!(fallback.after_state["fallback_from_wrapper"], true);
+    assert_eq!(
+        fallback.after_state["expiry"], renewed_registrar_expiry,
+        "fallback must use the proven syncWrapper expiry without mutating ordinary wrapper state"
+    );
+    assert!(output.normalized_events.iter().any(|event| {
+        event.source_family == "ens_v1_registrar_l1"
+            && event.event_kind == "SurfaceBound"
+            && event.block_number == Some(unwrap_block)
+    }));
+
+    let mut setup_input = batch(logs[..5].to_vec(), &fixture, false);
+    admit_v1_registry(&mut setup_input, registry);
+    let (setup_output, session) = interpret_test_batch_incremental(setup_input, None)?;
+    let mut incremental_input = batch(logs[5..].to_vec(), &fixture, false);
+    admit_v1_registry(&mut incremental_input, registry);
+    let (incremental, _) = interpret_test_batch_incremental(incremental_input, Some(session))?;
+    let mut cold_input = batch(logs[5..].to_vec(), &fixture, false);
+    admit_v1_registry(&mut cold_input, registry);
+    cold_input.prior_events = setup_output
+        .normalized_events
+        .iter()
+        .map(super::prior_event)
+        .collect();
+    let cold = interpret_test_batch(cold_input)?;
+    let full_unwrap_events = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.block_number == Some(unwrap_block))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        incremental.normalized_events, full_unwrap_events,
+        "incremental replay must retain the proven syncWrapper expiry separately from wrapper state"
+    );
+    assert_eq!(
+        cold.normalized_events, full_unwrap_events,
+        "cold restore must retain the proven syncWrapper expiry separately from wrapper state"
+    );
     Ok(())
 }
 
@@ -1787,6 +2318,68 @@ fn cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes() -> 
             "RegistrationGranted" | "RegistrarNameRegistered" | "RegistrationRenewed"
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn locked_migration_does_not_require_a_registrar_admission() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["L-01"];
+    let addresses = &fixture["addresses"];
+    let block = scenario["migration_block"].as_i64().unwrap();
+    let token = decimal_u256(&scenario["v2_token_id"])?;
+    let mut input = batch(
+        vec![
+            registry_created_raw(scenario, addresses),
+            factory_raw(scenario, addresses)?,
+            raw_at_transaction(
+                super::v2_registry::LabelRegistered {
+                    tokenId: token,
+                    labelHash: scenario["labelhash"].as_str().unwrap().parse()?,
+                    label: scenario["label"].as_str().unwrap().to_owned(),
+                    owner: Address::from([0x11; 20]),
+                    expiry: scenario["stored_expiry"].as_u64().unwrap(),
+                    sender: address(addresses, "locked_controller")?,
+                }
+                .encode_log_data(),
+                block,
+                0,
+                scenario["v2_registration_log_index"].as_i64().unwrap(),
+                addresses["eth_registry"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                super::v2_registry::TokenResource {
+                    tokenId: token,
+                    resource: token,
+                }
+                .encode_log_data(),
+                block,
+                0,
+                scenario["v2_registration_log_index"].as_i64().unwrap() + 2,
+                addresses["eth_registry"].as_str().unwrap(),
+            ),
+        ],
+        &fixture,
+        false,
+    );
+    input
+        .manifests
+        .retain(|manifest| manifest.source_family != "ens_v1_registrar_l1");
+    input
+        .admissions
+        .retain(|admission| admission.source_manifest_id != Some(V1_REGISTRAR_MANIFEST_ID));
+
+    let output = interpret_test_batch(input)?;
+    let boundary = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "MigrationApplied")
+        .expect("locked migration boundary without registrar admission");
+    assert_eq!(boundary.after_state["migration_path"], "locked_wrapped");
+    assert_eq!(
+        boundary.after_state["predecessor_binding"]["resource"]["anchor_kind"],
+        "wrapper_backed_control"
+    );
     Ok(())
 }
 
@@ -2484,6 +3077,12 @@ fn wrapper_manifest() -> ManifestInput {
                 "event NameUnwrapped(bytes32 indexed node, address owner)",
                 &["name_wrapper"],
                 &["SurfaceUnbound", "AuthorityEpochChanged"],
+            ),
+            (
+                "ExpiryExtended",
+                "event ExpiryExtended(bytes32 indexed node, uint64 expiry)",
+                &["name_wrapper"],
+                &["ExpiryChanged"],
             ),
         ],
     )

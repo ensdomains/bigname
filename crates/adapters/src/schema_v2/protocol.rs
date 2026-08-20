@@ -49,8 +49,8 @@ pub(super) struct Interpreted {
     pub binding_closures: Vec<BindingClosureDraft>,
     pub bindings: Vec<BindingDraft>,
     pub discovery: Vec<DiscoveryDraft>,
-    /// Rows whose raw log is attributed to another source family while persisted normalized
-    /// provenance remains with the ENSv1→ENSv2 migration family.
+    /// Rows whose raw log belongs to a separately admitted ENSv1 registrar manifest while
+    /// persisted normalized provenance remains `ens_v2_migration_l1`.
     pub migration_events: Vec<EventDraft>,
     pub migration_observations: Vec<MigrationObservation>,
 }
@@ -94,6 +94,7 @@ pub(super) struct MigrationObservation {
     pub contract_instance_id: Uuid,
     pub raw: RawLogInput,
     pub decoded: Value,
+    pub correlated_wrapper_expiry: Option<u64>,
 }
 
 pub(super) fn v2_boundary_expiration(

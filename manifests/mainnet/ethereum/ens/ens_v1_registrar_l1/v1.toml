@@ -73,8 +73,8 @@ emitter_roles = ["registrar"]
 normalized_events = ["TokenControlTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
 # BaseRegistrar controller and lifecycle events share registrar-log attribution
-# with Transfer on every deployment profile. Migration correlation may consume
-# them, but no migration family declares this emitter.
+# with Transfer in every deployment. ENSv1→ENSv2 migration correlation may consume
+# them, but `ens_v2_migration_l1` does not declare this emitter.
 # (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8-L20 @ ens_v1@91c966f)
 [[abi.events]]
 name = "ControllerAdded"

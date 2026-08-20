@@ -5001,6 +5001,268 @@ fn born_wrapped_unwrap_revokes_the_name_wrapper_registration_grant() -> anyhow::
 }
 
 #[test]
+fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore()
+-> anyhow::Result<()> {
+    const REGISTRAR: &str = "0x0000000000000000000000000000000000000044";
+    const NAME_WRAPPER: &str = "0x0000000000000000000000000000000000000046";
+    const USER: &str = "0x0000000000000000000000000000000000000047";
+    const NEXT_OWNER: &str = "0x0000000000000000000000000000000000000048";
+    const REGISTRAR_EXPIRY: u64 = 1_000_000;
+    const WRAPPER_EXPIRY: u64 = REGISTRAR_EXPIRY + 90 * 24 * 60 * 60;
+
+    let labelhash = keccak256(b"alice");
+    let node = super::common::namehash(&["alice".to_owned(), "eth".to_owned()]);
+    let manifests = || {
+        vec![
+            manifest(
+                41,
+                "ens_v1_registrar_l1",
+                "Transfer",
+                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                &["registrar"],
+                &["TokenControlTransferred"],
+            ),
+            manifest_with_events(
+                42,
+                "ens",
+                "ens_v1_wrapper_l1",
+                &[
+                    (
+                        "NameWrapped",
+                        "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                        &["name_wrapper"],
+                        &[
+                            "TokenControlTransferred",
+                            "ExpiryChanged",
+                            "PermissionScopeChanged",
+                            "SurfaceBound",
+                            "AuthorityEpochChanged",
+                        ],
+                    ),
+                    (
+                        "NameUnwrapped",
+                        "event NameUnwrapped(bytes32 indexed node, address owner)",
+                        &["name_wrapper"],
+                        &["SurfaceUnbound", "AuthorityEpochChanged"],
+                    ),
+                ],
+            ),
+        ]
+    };
+    let admissions = || {
+        let mut registrar = admission(41, "registrar");
+        registrar.address = REGISTRAR.to_owned();
+        let mut wrapper = admission(42, "name_wrapper");
+        wrapper.address = NAME_WRAPPER.to_owned();
+        vec![registrar, wrapper]
+    };
+    let wrap = raw_at(
+        NameWrapped {
+            node: node.parse()?,
+            name: b"\x05alice\x03eth\0".to_vec().into(),
+            owner: USER.parse()?,
+            fuses: 1,
+            expiry: WRAPPER_EXPIRY,
+        }
+        .encode_log_data(),
+        1,
+        0,
+        NAME_WRAPPER,
+    );
+    let unwrap = raw_at(
+        NameUnwrapped {
+            node: node.parse()?,
+            owner: USER.parse()?,
+        }
+        .encode_log_data(),
+        2,
+        0,
+        NAME_WRAPPER,
+    );
+    let fallback_transfer = raw_at(
+        v1_registrar::Transfer {
+            from: NAME_WRAPPER.parse()?,
+            to: USER.parse()?,
+            tokenId: U256::from_be_bytes(*labelhash),
+        }
+        .encode_log_data(),
+        2,
+        1,
+        REGISTRAR,
+    );
+    let later_transfer = raw_at(
+        v1_registrar::Transfer {
+            from: USER.parse()?,
+            to: NEXT_OWNER.parse()?,
+            tokenId: U256::from_be_bytes(*labelhash),
+        }
+        .encode_log_data(),
+        3,
+        0,
+        REGISTRAR,
+    );
+
+    let wrapped = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests(),
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![wrap.clone()],
+    })?;
+    let fallback = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests(),
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events: wrapped.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![unwrap.clone(), fallback_transfer.clone()],
+    })?;
+    let fallback_event = fallback
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "TokenControlTransferred"
+        })
+        .expect("ordered unwrap transfer creates the missing registrar identity");
+    assert_eq!(fallback_event.after_state["fallback_from_wrapper"], true);
+    assert_eq!(fallback_event.after_state["expiry"], REGISTRAR_EXPIRY);
+    let fallback_resource = fallback_event.resource_id.expect("fallback resource");
+    let fallback_lineage = fallback_event.after_state["token_lineage_id"].clone();
+
+    let cold_prior = wrapped
+        .normalized_events
+        .iter()
+        .chain(&fallback.normalized_events)
+        .map(prior_event)
+        .collect::<Vec<_>>();
+    let cold = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests(),
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events: cold_prior,
+        blocks: Vec::new(),
+        raw_logs: vec![later_transfer.clone()],
+    })?;
+    let cold_later = cold
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "TokenControlTransferred"
+        })
+        .expect("cold restore retains the fallback registrar identity");
+    assert_eq!(cold_later.resource_id, Some(fallback_resource));
+    assert_eq!(cold_later.after_state["token_lineage_id"], fallback_lineage);
+
+    let full = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests(),
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![wrap, unwrap, fallback_transfer, later_transfer],
+    })?;
+    let full_later = full
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "TokenControlTransferred"
+                && event.block_number == Some(3)
+        })
+        .expect("full replay retains the fallback registrar identity");
+    assert_eq!(full_later.resource_id, cold_later.resource_id);
+    assert_eq!(full_later.before_state, cold_later.before_state);
+    assert_eq!(full_later.after_state, cold_later.after_state);
+
+    let transfer_before_unwrap = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests(),
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events: wrapped.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                v1_registrar::Transfer {
+                    from: NAME_WRAPPER.parse()?,
+                    to: USER.parse()?,
+                    tokenId: U256::from_be_bytes(*labelhash),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                REGISTRAR,
+            ),
+            raw_at(
+                NameUnwrapped {
+                    node: node.parse()?,
+                    owner: USER.parse()?,
+                }
+                .encode_log_data(),
+                2,
+                1,
+                NAME_WRAPPER,
+            ),
+        ],
+    })?;
+    assert!(
+        transfer_before_unwrap
+            .normalized_events
+            .iter()
+            .all(|event| {
+                event.source_family != "ens_v1_registrar_l1"
+                    || event.event_kind != "TokenControlTransferred"
+            })
+    );
+
+    let different_transaction = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests(),
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events: wrapped.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at_transaction(
+                NameUnwrapped {
+                    node: node.parse()?,
+                    owner: USER.parse()?,
+                }
+                .encode_log_data(),
+                2,
+                0,
+                0,
+                NAME_WRAPPER,
+            ),
+            raw_at_transaction(
+                v1_registrar::Transfer {
+                    from: NAME_WRAPPER.parse()?,
+                    to: USER.parse()?,
+                    tokenId: U256::from_be_bytes(*labelhash),
+                }
+                .encode_log_data(),
+                2,
+                1,
+                1,
+                REGISTRAR,
+            ),
+        ],
+    })?;
+    assert!(different_transaction.normalized_events.iter().all(|event| {
+        event.source_family != "ens_v1_registrar_l1"
+            || event.event_kind != "TokenControlTransferred"
+    }));
+    Ok(())
+}
+
+#[test]
 fn registration_to_the_controller_discards_the_transient_registry_self_grant() -> anyhow::Result<()>
 {
     const REGISTRY: &str = "0x0000000000000000000000000000000000000043";

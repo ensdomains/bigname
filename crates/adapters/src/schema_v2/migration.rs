@@ -270,6 +270,13 @@ fn correlate_controllers(
             let id = correlation_id("synchronized_renewal", Some(&logical_name_id), &evidence);
             mark_direct_position(output, &added.raw, &id);
             mark_direct_position(output, &base.raw, &id);
+            if let Some(wrapper_expiry) = base.correlated_wrapper_expiry {
+                for event in output.normalized_events.iter_mut().filter(|event| {
+                    event.source_family == MIGRATION_FAMILY && same_position(event, &base.raw)
+                }) {
+                    event.after_state["wrapper_expiry"] = Value::from(wrapper_expiry);
+                }
+            }
             mark_direct_position(output, &removed.raw, &id);
             participating.insert((added.event_name.as_str(), added.raw.log_index));
             participating.insert((removed.event_name.as_str(), removed.raw.log_index));
@@ -346,14 +353,6 @@ fn correlate_authority_transitions(
         let registration_log = registration
             .log_index
             .context("registration has no log index")?;
-        let base_registrar_instance = catalog
-            .contract_instance_for_address(
-                base_registrar,
-                registration
-                    .block_number
-                    .context("migration registration has no block number")?,
-            )?
-            .context("ENSv1 BaseRegistrar correlation address has no active contract instance")?;
         let transfers = observations
             .iter()
             .copied()
@@ -418,6 +417,17 @@ fn correlate_authority_transitions(
                 registration_log,
             )
         });
+        let independently_admitted_transfer_events = output
+            .normalized_events
+            .iter()
+            .filter(|event| {
+                event.source_family == V1_REGISTRAR_FAMILY
+                    && transfers
+                        .iter()
+                        .any(|observation| same_position(event, &observation.raw))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let successor_registry_instance = registration
             .after_state
             .get("registry_contract_instance_id")
@@ -442,7 +452,10 @@ fn correlate_authority_transitions(
             value_str(&successor_binding_event.after_state, "surface_binding_id")?;
         evidence.extend(correlated_events.iter().map(event_evidence));
         let id = correlation_id(TRANSITION_KIND, Some(&logical_name_id), &evidence);
-        for event in &correlated_events {
+        for event in correlated_events
+            .iter()
+            .chain(&independently_admitted_transfer_events)
+        {
             associate_event(
                 output,
                 &event.event_identity,
@@ -452,13 +465,25 @@ fn correlate_authority_transitions(
             )?;
         }
         let predecessor_resource = match migration_path {
-            "unwrapped" => json!({
-                "anchor_kind":"registrar_backed_registration",
-                "contract_instance_id":base_registrar_instance,
-                "token_id":labelhash,
-                "labelhash":labelhash,
-                "selection":"current_registrar_resource_immediately_before_boundary",
-            }),
+            "unwrapped" => {
+                let base_registrar_instance = catalog
+                    .contract_instance_for_address(
+                        base_registrar,
+                        registration
+                            .block_number
+                            .context("migration registration has no block number")?,
+                    )?
+                    .context(
+                        "ENSv1 BaseRegistrar correlation address has no active contract instance",
+                    )?;
+                json!({
+                    "anchor_kind":"registrar_backed_registration",
+                    "contract_instance_id":base_registrar_instance,
+                    "token_id":labelhash,
+                    "labelhash":labelhash,
+                    "selection":"current_registrar_resource_immediately_before_boundary",
+                })
+            }
             "unlocked_wrapped" | "locked_wrapped" => json!({
                 "anchor_kind":"wrapper_backed_control",
                 "contract_address":name_wrapper,

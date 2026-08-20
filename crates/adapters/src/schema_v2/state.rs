@@ -79,6 +79,8 @@ pub(super) struct State {
     v1_pending_unwraps: OrdMap<String, (String, i64)>,
     v1_registrar_controller_transaction: Option<String>,
     v1_registrar_controllers: OrdSet<String>,
+    v1_pending_wrapper_sync_expiries: OrdMap<String, (String, u64)>,
+    v1_correlated_wrapper_expiries: OrdMap<String, u64>,
     v1_registrars: OrdMap<String, V1NameState>,
     v1_expiries: OrdSet<(i64, String)>,
     v1_registry_authorities: OrdMap<String, V1NameState>,

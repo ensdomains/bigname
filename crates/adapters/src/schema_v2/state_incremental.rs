@@ -26,6 +26,8 @@ impl State {
             v1_pending_unwraps: OrdMap::new(),
             v1_registrar_controller_transaction: None,
             v1_registrar_controllers: OrdSet::new(),
+            v1_pending_wrapper_sync_expiries: OrdMap::new(),
+            v1_correlated_wrapper_expiries: OrdMap::new(),
             v1_registrars: OrdMap::new(),
             v1_expiries: OrdSet::new(),
             v1_registry_authorities: OrdMap::new(),

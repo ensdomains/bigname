@@ -260,13 +260,14 @@ wrapper family but still sees no cleanup for children wrapped earlier. Deriving
 child boundaries on this profile requires an ingest floor at or below the
 wrapper's `start_block`, and below each child's own wrap block.
 
-`ens_v1_registrar_l1` is **not** admitted on this profile, and no ENSv1
-registrar-controller contract is admitted either. The reason is the migration
-family's own `ens_v1_base_registrar` contract role, which already declares the
-Sepolia BaseRegistrar address: see the launch-bounded declaration below.
+`ens_v1_registrar_l1` is **not** admitted on this deployment profile, and no
+ENSv1 registrar-controller contract is admitted either. The migration family's
+`correlation_addresses.ens_v1_base_registrar` value names the Sepolia
+BaseRegistrar for cross-family matching only; it is not a contract declaration,
+does not own raw-log attribution, and does not add the address to the watch plan.
 Consequences to hold in mind while that stands:
 
-- `.eth` second-level ENSv1 registrar authority has no source on this profile, so an activated migration boundary has no ENSv1 registrar predecessor binding to close.
+- `.eth` second-level ENSv1 registrar authority has no source on this deployment profile, so an activated migration boundary has no ENSv1 registrar predecessor binding to close.
 - ENSv1 label-bearing registration and renewal observations are absent, so ENSv1-arm Sepolia names carry no registrar lifecycle history.
 - `ens_v1_resolver_l1` is likewise unadmitted here, so an ENSv1-arm Sepolia name can carry a resolver pointer whose resolver logs no watch plan fetches. That is a known coverage asymmetry against the mainnet profile, not a resolver bug.
 
@@ -456,7 +457,8 @@ event around a multi-label
 every participating name; it is not duplicated per name and remains candidate
 until all referenced groups activate. A controller event outside such a batch
 uses the name-independent `controller_configuration` derivation group above.
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) Wrapper-expiry synchronization requires the matching controller addition earlier in the same transaction; an unmatched addition cannot affect a later transaction, whether the blocks are interpreted in one batch or several.
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106-L111 @ ens_v2@ccaeb58) Wrapper-expiry correlation requires the complete controller-addition, renewal, and matching controller-removal envelope in one transaction. An incomplete envelope remains historical evidence, and candidate correlation never advances the independently admitted NameWrapper state; an unmatched addition therefore cannot affect later ordinary output whether the blocks are interpreted in one batch or several.
+The proven wrapper expiry is retained separately and may refine only the registrar expiry when a later ordered `NameUnwrapped` then BaseRegistrar `Transfer` first materializes a missing registrar identity; full replay, incremental replay, and cold restore make the same choice. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows; no transaction-level synthetic renewal is created. A resource-bearing registry observation retains its resource, and the bridge observation uses that already-materialized ENSv2 `resource_id`. When the reserved registry resource cannot be derived, both observations remain resource-less rather than inventing an anchor. A launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it does not materialize an ordinary ENSv1 resource or token lineage before later consumer activation. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
 
 The production migration driver revokes the superseded public ENSv1
@@ -653,7 +655,7 @@ watched after restart.
 The current watch planner uses each active manifest's complete ABI topic set
 for every address declared by that manifest; `emitter_roles` constrains
 interpretation selection, not ingest planning. The active ENSv1→ENSv2 migration family
-therefore widens the watch plan across all nine declared addresses,
+therefore widens the watch plan across all eight declared addresses,
 including marker-only contracts, with each address bounded by its own pinned
 start block. The
 manifest content-hash rotation invalidates interpretation and projection
