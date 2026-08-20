@@ -455,6 +455,265 @@ fn sepolia_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<(
     Ok(())
 }
 
+/// The Sepolia profile admits the ENSv1 registry and wrapper families the ENSv2 migration family
+/// bridges from. The registrar family is deliberately absent: the migration family already owns
+/// that address's attribution through its own `ens_v1_base_registrar` contract role, so admitting
+/// it here fails preimage-attribution validation. That is tracked separately, and this test pins
+/// the gap so it cannot be closed by accident.
+#[test]
+fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let family = |name: &str| {
+        repository
+            .manifests()
+            .iter()
+            .find(|loaded| loaded.manifest.source_family == name)
+            .map(|loaded| &loaded.manifest)
+    };
+
+    let registry = family("ens_v1_registry_l1").expect("Sepolia ENSv1 registry family");
+    assert_eq!(registry.chain, "ethereum-sepolia");
+    assert!(registry.rollout_status.is_active());
+    let registry_roles = registry
+        .contracts
+        .iter()
+        .map(|contract| {
+            (
+                contract.role.as_str(),
+                (normalize_address(&contract.address), contract.start_block),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(registry_roles.len(), 2);
+    assert_eq!(
+        registry_roles["registry"],
+        (
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+            Some(3_702_728)
+        )
+    );
+    assert_eq!(
+        registry_roles["registry_old"],
+        (
+            "0x94f523b8261b815b87effcf4d18e6abef18d6e4b".to_owned(),
+            Some(3_702_721)
+        )
+    );
+
+    let wrapper = family("ens_v1_wrapper_l1").expect("Sepolia ENSv1 wrapper family");
+    assert_eq!(wrapper.chain, "ethereum-sepolia");
+    assert!(wrapper.rollout_status.is_active());
+    let wrapper_roles = wrapper
+        .contracts
+        .iter()
+        .map(|contract| {
+            (
+                contract.role.as_str(),
+                (normalize_address(&contract.address), contract.start_block),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(wrapper_roles.len(), 1);
+    assert_eq!(
+        wrapper_roles["name_wrapper"],
+        (
+            "0x0635513f179d50a207757e05759cbd106d7dfce8".to_owned(),
+            Some(3_790_153)
+        )
+    );
+
+    // The admitted wrapper is the contract the migration family names as its correlation address.
+    // A child's ENSv1 cleanup is only observable because both agree on this address.
+    let migration = family("ens_v2_migration_l1").expect("Sepolia migration family");
+    assert_eq!(
+        normalize_address(&migration.correlation_addresses["ens_v1_name_wrapper"]),
+        wrapper_roles["name_wrapper"].0,
+    );
+
+    // Both cleanup branches a migrated child can take must be ingestible: the wrapper token parked
+    // in the Graveyard, and the node unwrapped into it.
+    let wrapper_events = wrapper
+        .abi
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for required in ["TransferSingle", "TransferBatch", "NameUnwrapped"] {
+        assert!(
+            wrapper_events.contains(required),
+            "wrapper family must admit {required}"
+        );
+    }
+
+    assert!(
+        family("ens_v1_registrar_l1").is_none(),
+        "Sepolia ENSv1 registrar admission collides with the migration family's \
+         ens_v1_base_registrar declaration and is tracked separately"
+    );
+    Ok(())
+}
+
+/// The declared surface of the two new Sepolia ENSv1 families, pinned across the fields that
+/// decide what gets ingested. The admission test above covers contracts, addresses, chain, and
+/// rollout status; this one covers the event surface, capability flags, deployment epoch, and
+/// roots, so that deleting an event block, widening a fragment type, dropping a normalized event,
+/// or downgrading a capability flag fails here rather than silently changing what a live chain
+/// produces.
+#[test]
+fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let family = |name: &str| {
+        let versions = repository
+            .manifests()
+            .iter()
+            .filter(|loaded| loaded.manifest.source_family == name)
+            .collect::<Vec<_>>();
+        // Pinning one version is only meaningful while it is the only one; a later v2 must land
+        // here deliberately rather than leave this test quietly pinning the superseded file.
+        assert_eq!(versions.len(), 1, "Sepolia {name} family versions");
+        &versions[0].manifest
+    };
+    let event_surface = |manifest: &SourceManifest| {
+        let mut events = manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| {
+                (
+                    event.name.clone(),
+                    event.fragment.clone(),
+                    event.emitter_roles.join(","),
+                    event.normalized_events.join(","),
+                )
+            })
+            .collect::<Vec<_>>();
+        events.sort();
+        events
+    };
+    let roots = |manifest: &SourceManifest| {
+        manifest
+            .roots
+            .iter()
+            .map(|root| {
+                (
+                    root.name.clone(),
+                    normalize_address(&root.address),
+                    root.start_block,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let registry = family("ens_v1_registry_l1");
+    assert_eq!(registry.deployment_epoch, "ens_v1");
+    assert_eq!(
+        roots(registry),
+        vec![(
+            "ENSRegistry".to_owned(),
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+            Some(3_702_728)
+        )]
+    );
+    assert_eq!(registry.capability_flags.len(), 1);
+    assert_eq!(
+        registry.capability_flags["declared_children"].status,
+        CapabilitySupportStatus::Supported
+    );
+    assert!(registry.discovery_rules.is_empty());
+    let registry_emitters = "registry,registry_old";
+    assert_eq!(
+        event_surface(registry),
+        vec![
+            (
+                "NewOwner".to_owned(),
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
+                    .to_owned(),
+                registry_emitters.to_owned(),
+                "SubregistryChanged,AuthorityTransferred,PermissionChanged,SurfaceUnbound,\
+                 SurfaceBound,AuthorityEpochChanged,ResolverChanged"
+                    .to_owned(),
+            ),
+            (
+                "NewResolver".to_owned(),
+                "event NewResolver(bytes32 indexed node, address resolver)".to_owned(),
+                registry_emitters.to_owned(),
+                "ResolverChanged,PermissionChanged".to_owned(),
+            ),
+            (
+                "NewTTL".to_owned(),
+                "event NewTTL(bytes32 indexed node, uint64 ttl)".to_owned(),
+                registry_emitters.to_owned(),
+                String::new(),
+            ),
+            (
+                "Transfer".to_owned(),
+                "event Transfer(bytes32 indexed node, address owner)".to_owned(),
+                registry_emitters.to_owned(),
+                "AuthorityTransferred,PermissionChanged,SurfaceUnbound,SurfaceBound,\
+                 AuthorityEpochChanged,ResolverChanged"
+                    .to_owned(),
+            ),
+        ]
+    );
+
+    let wrapper = family("ens_v1_wrapper_l1");
+    assert_eq!(wrapper.deployment_epoch, "ens_v1");
+    assert!(wrapper.roots.is_empty());
+    assert!(wrapper.capability_flags.is_empty());
+    assert!(wrapper.discovery_rules.is_empty());
+    let token_control = "TokenControlTransferred,PermissionChanged";
+    assert_eq!(
+        event_surface(wrapper),
+        vec![
+            (
+                "ExpiryExtended".to_owned(),
+                "event ExpiryExtended(bytes32 indexed node, uint64 expiry)".to_owned(),
+                "name_wrapper".to_owned(),
+                "ExpiryChanged".to_owned(),
+            ),
+            (
+                "FusesSet".to_owned(),
+                "event FusesSet(bytes32 indexed node, uint32 fuses)".to_owned(),
+                "name_wrapper".to_owned(),
+                "PermissionScopeChanged".to_owned(),
+            ),
+            (
+                "NameUnwrapped".to_owned(),
+                "event NameUnwrapped(bytes32 indexed node, address owner)".to_owned(),
+                "name_wrapper".to_owned(),
+                "SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged".to_owned(),
+            ),
+            (
+                "NameWrapped".to_owned(),
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, \
+                 uint64 expiry)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                "TokenControlTransferred,ExpiryChanged,PermissionScopeChanged,SurfaceUnbound,\
+                 SurfaceBound,AuthorityEpochChanged,ResolverChanged,PreimageObserved"
+                    .to_owned(),
+            ),
+            (
+                "TransferBatch".to_owned(),
+                "event TransferBatch(address indexed operator, address indexed from, address \
+                 indexed to, uint256[] ids, uint256[] values)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                token_control.to_owned(),
+            ),
+            (
+                "TransferSingle".to_owned(),
+                "event TransferSingle(address indexed operator, address indexed from, address \
+                 indexed to, uint256 id, uint256 value)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                token_control.to_owned(),
+            ),
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn normalize_address_preserves_legacy_fallbacks() {
     assert_eq!(
