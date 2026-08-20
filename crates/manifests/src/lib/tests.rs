@@ -553,21 +553,25 @@ fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<(
     Ok(())
 }
 
-/// The declared surface of the two new Sepolia ENSv1 families, pinned field by field. The
-/// admission test above proves the families exist at the right addresses; this one proves the
-/// declarations still say what they said, so that deleting an event block, widening a fragment
-/// type, dropping a normalized event, or downgrading a capability flag fails here rather than
-/// silently changing what gets ingested on a live chain.
+/// The declared surface of the two new Sepolia ENSv1 families, pinned across the fields that
+/// decide what gets ingested. The admission test above covers contracts, addresses, chain, and
+/// rollout status; this one covers the event surface, capability flags, deployment epoch, and
+/// roots, so that deleting an event block, widening a fragment type, dropping a normalized event,
+/// or downgrading a capability flag fails here rather than silently changing what a live chain
+/// produces.
 #[test]
 fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
     let family = |name: &str| {
-        repository
+        let versions = repository
             .manifests()
             .iter()
-            .find(|loaded| loaded.manifest.source_family == name)
-            .map(|loaded| &loaded.manifest)
-            .unwrap_or_else(|| panic!("Sepolia {name} family"))
+            .filter(|loaded| loaded.manifest.source_family == name)
+            .collect::<Vec<_>>();
+        // Pinning one version is only meaningful while it is the only one; a later v2 must land
+        // here deliberately rather than leave this test quietly pinning the superseded file.
+        assert_eq!(versions.len(), 1, "Sepolia {name} family versions");
+        &versions[0].manifest
     };
     let event_surface = |manifest: &SourceManifest| {
         let mut events = manifest
