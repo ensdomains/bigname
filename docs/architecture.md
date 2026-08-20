@@ -724,17 +724,14 @@ over identical input must write identical rows no matter where the 500-block
 batch boundaries fall. The guarantee is verified for the divergence classes
 [#336](https://github.com/ensdomains/bigname/issues/336) identified on the
 ENSv1 path — the permutation lane's pinned batch-artifact counts sit at zero —
-with two known open exceptions of distinct kinds.
+with one known open exception.
 [#348](https://github.com/ensdomains/bigname/issues/348) is a batch-boundary
 divergence of exactly the kind this rule condemns, on the ENSv2 resolver
 path: a late resolver `RecordChanged` on a lapsed registration keeps an
 attribution in an uninterrupted walk that a walk split across a batch
 boundary does not reproduce, and production, which always walks in physical
 batches, does not carry the attribution across a boundary.
-[#347](https://github.com/ensdomains/bigname/issues/347) is not a
-boundary-carry artifact: an uninterrupted walk under-derives a wrapper
-authority lapse (`AuthorityEpochChanged` with its `PermissionChanged`) that a
-split walk derives. Three rules keep the written rows batch-independent:
+Four rules keep the written rows batch-independent:
 
 - `before_state` chains over the emitted event stream: a retained event's
   `before_state` is the `after_state` of the previous retained event under the
@@ -771,6 +768,23 @@ split walk derives. Three rules keep the written rows batch-independent:
   bounded redo's orphan healing above: an identity still orphaned after a
   replay re-anchors to the earliest surviving reference outside the redone
   range.
+- ENSv1 time-derived lifecycle changes at the start of a block read ENSv1
+  protocol state rebuilt from the preceding block's normalized events after
+  same-transaction reconciliation. The interpreter applies that rule between
+  blocks even when both blocks share one physical batch; a batch boundary
+  therefore cannot create an extra state-rebuild observation point. For a
+  wrapped `.eth` name, NameWrapper stores registrar expiry plus the 90-day
+  grace period, and after that wrapper expiry its public data clears an
+  emancipated owner and clears the fuse word. The first loaded raw block whose
+  timestamp is later than that expiry anchors the resulting authority and
+  permission changes; the physical batch grid never does. (upstream:
+  .refs/ens_v1/contracts/wrapper/README.md:L77 @ ens_v1@91c966f) (upstream:
+  .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+  (upstream:
+  .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297-L303 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L153 @
+  ens_v1@91c966f) (upstream:
+  .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L852 @ ens_v1@91c966f)
 
 ## Resolution
 

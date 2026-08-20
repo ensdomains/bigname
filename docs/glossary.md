@@ -91,16 +91,14 @@ atomic unit every grid loads. Where the boundaries fall is an execution
 detail, not an input to interpretation — surviving identity rows, discovery
 edges, and normalized events must be identical across grids over identical
 input. That identity is verified for the ENSv1 divergence classes
-[#336](https://github.com/ensdomains/bigname/issues/336) catalogued, with two
-known open exceptions of distinct kinds:
+[#336](https://github.com/ensdomains/bigname/issues/336) catalogued, with one
+known open exception:
 [#348](https://github.com/ensdomains/bigname/issues/348) is a true grid
 divergence, on the ENSv2 resolver path — a late resolver `RecordChanged` on a
 lapsed registration keeps an attribution only in a grid that never splits the
-walk;
-[#347](https://github.com/ensdomains/bigname/issues/347) diverges
-whole-walk versus split-walk output but is not a boundary-carry artifact —
-the uninterrupted walk under-derives a wrapper authority lapse that a split
-walk derives.
+walk. ENSv1 lifecycle state instead advances through each block's reconciled
+normalized events before the next block-boundary observation, including when
+both blocks share one physical batch; see [interpretation replay](storage.md#interpretation-replay).
 
 **Stored-history verification** — the read-only phase that validates a chain's
 stored extent through a finalized block and, when the chain has an independent
@@ -1291,13 +1289,12 @@ including an interrupted redo's persisted intermediate state).
 Batch-independence rules require identical surviving rows in every run shape
 over identical input. That identity is verified for the ENSv1 divergence
 classes [#336](https://github.com/ensdomains/bigname/issues/336) catalogued,
-with two known open exceptions of distinct kinds:
+with one known open exception:
 [#348](https://github.com/ensdomains/bigname/issues/348) is a batch-boundary
 divergence, on the ENSv2 resolver path — an attribution an uninterrupted walk
-keeps and a walk continued across a batch boundary does not reproduce;
-[#347](https://github.com/ensdomains/bigname/issues/347) is not a
-boundary-carry artifact — the uninterrupted walk under-derives a wrapper
-authority lapse that a walk split into two shapes derives.
+keeps and a walk continued across a batch boundary does not reproduce. ENSv1
+time-derived lifecycle observations use reconciled state from the preceding
+block in every run shape; see [interpretation replay](storage.md#interpretation-replay).
 
 **Shadow** — (1) manifest rollout/capability value: facts may be interpreted
 but general public reads are not enabled; (2) *shadow comparison*:
