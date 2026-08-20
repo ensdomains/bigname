@@ -796,7 +796,11 @@ Field ownership:
   Ethereum position used by fresh ENS/60 verification. No metadata field
   implies cache reuse or a persisted execution identity. Provider transport
   failures abort the request with `500 internal_error`; they are not verified
-  answer entries with `status=stale`.
+  answer entries with `status=stale`. The projected-claim reads that decide
+  whether a claimed name may be verified at all fail closed the same way: if
+  those reads error the request returns `500 internal_error` rather than
+  proceeding to live resolution, because a failed read is not evidence that no
+  claim exists.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. A stored
   successful claim whose spelling does not normalize returns an `indexed` entry
@@ -822,13 +826,19 @@ Field ownership:
   `source=indexed` does not enter verified-execution rate or concurrency
   admission; omitted `source` and `source=verified` do because they run the
   fresh lookup. Forward verification requires the claimed name's selected
-  exact-name authority. A claim whose exact-name projection is unsupported
-  returns the in-band unsupported result and dispatches no provider call.
-  Verifying a claim whose selected authority is the ENSv2 arm through ENSv2 is
-  not possible yet: no manifest declares an ENSv2 execution entrypoint, so this
-  route has no ENSv2 forward-resolution path. Such a claim returns the same
-  in-band unsupported result rather than being forward-verified through the
-  superseded ENSv1 universal resolver.
+  exact-name authority, and declines in two distinct cases that share a response
+  shape but not a reason. A claim whose exact-name projection is unsupported
+  returns the in-band unsupported result carrying that projection's own public
+  reason, the same reason name detail serves for the row. A claim the projection
+  supports whose selected authority is the ENSv2 arm returns the in-band
+  unsupported result carrying `exact_name_authority_not_verifiable`: no manifest
+  declares an ENSv2 execution entrypoint, so this route has no ENSv2
+  forward-resolution path and declines rather than resolving the name through
+  the ENSv1 universal resolver its own authority selection has already ruled
+  out. That second case needs a deployment whose profile can support an ENSv2
+  selection at all; where the profile shadows the ENSv2 arm the name is already
+  unsupported and takes the first case instead. Neither case dispatches a provider call. The shared shape is not reason
+  equality, so a consumer reads `unsupported_reason` to tell the two apart.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`

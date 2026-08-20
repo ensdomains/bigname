@@ -24,8 +24,10 @@ pub(crate) fn downgrades_unsupported_name(reason: &str) -> bool {
 mod tests {
     use super::*;
 
-    // The projection's own schema keeps an unsupported row from naming no reason, so the
-    // fail-closed default is only reachable here. It still has to fail closed.
+    // Two things keep a reason-less unsupported row from reaching a route: name_current's build
+    // SQL pairs the status with a reason, and the projection schema CHECKs the pair. The
+    // fail-closed default below is what still holds if either ever breaks, and this is the only
+    // place it can be reached directly.
     #[test]
     fn only_the_ratified_partial_serve_reason_keeps_serving_a_name() {
         assert!(!downgrades_unsupported_name(

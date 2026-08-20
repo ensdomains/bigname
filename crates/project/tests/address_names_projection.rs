@@ -344,3 +344,555 @@ async fn masked_owner_word_clears_the_effective_controller() -> Result<()> {
     database.cleanup().await?;
     Ok(())
 }
+
+const DIVERGENT_NAMEHASH: &str =
+    "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const DIVERGENT_LOGICAL: &str =
+    "ens:0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const REGISTRAR_RESOURCE: &str = "55555555-5555-5555-5555-555555555555";
+const REGISTRY_RESOURCE: &str = "66666666-6666-6666-6666-666666666666";
+const REGISTRAR_BINDING: &str = "77777777-7777-7777-7777-777777777777";
+const REGISTRY_BINDING: &str = "88888888-8888-8888-8888-888888888888";
+const DIVERGENT_OWNER: &str = "0x33333333333333333333333333333333333333Cc";
+
+/// Binds a further same-arm resource to an existing name, closing whichever binding is still
+/// open so the chain stays non-overlapping.
+async fn seed_next_binding(
+    pool: &PgPool,
+    namehash: &str,
+    resource: &str,
+    binding: &str,
+    block_number: i64,
+    active_from: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1::uuid, $2, $3, $4, 'canonical')",
+    )
+    .bind(resource)
+    .bind(CHAIN)
+    .bind(block_hash(block_number))
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = $2::timestamptz
+         WHERE logical_name_id = $1 AND active_to IS NULL",
+    )
+    .bind(format!("ens:{namehash}"))
+    .bind(active_from)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v1',
+             $4::timestamptz, $5, $6, $7, 'canonical'
+         )",
+    )
+    .bind(binding)
+    .bind(format!("ens:{namehash}"))
+    .bind(resource)
+    .bind(active_from)
+    .bind(CHAIN)
+    .bind(block_hash(block_number))
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Binds a second same-arm resource to an existing name, superseding the first.
+async fn seed_successor_binding(
+    pool: &PgPool,
+    namehash: &str,
+    resource: &str,
+    binding: &str,
+    block_number: i64,
+) -> Result<()> {
+    seed_next_binding(
+        pool,
+        namehash,
+        resource,
+        binding,
+        block_number,
+        "2026-07-02T00:00:00Z",
+    )
+    .await
+}
+
+async fn seed_authority_epoch_changed(
+    pool: &PgPool,
+    identity: &str,
+    namehash: &str,
+    resource: &str,
+    block_number: i64,
+    authority_kind: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             transaction_hash, transaction_index, log_index, derivation_kind,
+             canonicality_state, after_state
+         ) VALUES (
+             $1, 'ens', $2, $3::uuid, 'AuthorityEpochChanged',
+             'ens_v1_registry_l1', 1, $4, $5, $6,
+             $7, 0, 7, 'ens_v1_unwrapped_authority',
+             'canonical', $8
+         )",
+    )
+    .bind(identity)
+    .bind(format!("ens:{namehash}"))
+    .bind(resource)
+    .bind(CHAIN)
+    .bind(block_number)
+    .bind(block_hash(block_number))
+    .bind(format!("0x{:064x}", 700 + block_number))
+    .bind(json!({"authority_kind": authority_kind}))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// ENSv1 keeps registry ownership on a different resource from the registrar leasehold, so a
+/// registry-only binding that superseded the registrar resource must still publish the divergent
+/// owner it left behind. This is the preservation direction of the re-scoped controller fold: the
+/// same-arm predecessor survives, which is a different question from whether a superseded
+/// other-arm event can win.
+#[tokio::test]
+async fn registry_only_binding_preserves_the_same_arm_divergent_owner() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        DIVERGENT_NAMEHASH,
+        "divergent-fixture.eth",
+        REGISTRAR_RESOURCE,
+        REGISTRAR_BINDING,
+    )
+    .await?;
+    // Registry ownership was set on the registrar resource and never reclaimed.
+    seed_authority_transferred(
+        &pool,
+        "fixture:divergent-owner",
+        DIVERGENT_NAMEHASH,
+        REGISTRAR_RESOURCE,
+        8,
+        1,
+        json!({
+            "node": DIVERGENT_NAMEHASH,
+            "owner": DIVERGENT_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    seed_successor_binding(
+        &pool,
+        DIVERGENT_NAMEHASH,
+        REGISTRY_RESOURCE,
+        REGISTRY_BINDING,
+        9,
+    )
+    .await?;
+    seed_authority_epoch_changed(
+        &pool,
+        "fixture:divergent-epoch",
+        DIVERGENT_NAMEHASH,
+        REGISTRY_RESOURCE,
+        9,
+        "registry_only",
+    )
+    .await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 10,
+            affected_from_block: 8,
+            affected_to_block: 10,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+
+    // Anti-vacuity: the registry-only resource is the selected one, not the registrar resource.
+    let selected: Option<String> =
+        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
+            .bind(DIVERGENT_LOGICAL)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(selected.as_deref(), Some(REGISTRY_RESOURCE));
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT address, relation FROM address_names_current WHERE logical_name_id = $1",
+    )
+    .bind(DIVERGENT_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![(
+            DIVERGENT_OWNER.to_lowercase(),
+            "effective_controller".to_owned()
+        )],
+        "the same-arm divergent registry owner lost its relation"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+const SUPERSEDED_NAMEHASH: &str =
+    "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const SUPERSEDED_LOGICAL: &str =
+    "ens:0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const SUPERSEDED_REGISTRAR_RESOURCE: &str = "99999999-9999-9999-9999-999999999999";
+const SUPERSEDED_REGISTRY_RESOURCE: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const SUPERSEDED_REGISTRAR_BINDING: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+const SUPERSEDED_REGISTRY_BINDING: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+const CURRENT_OWNER: &str = "0x44444444444444444444444444444444444444Dd";
+
+/// The fold must stay chronological across the union rather than preferring either side of it,
+/// so a reclaim recorded on the selected registry-only resource still outranks the older owner on
+/// the predecessor resource. This pins the ordering, not the readmission itself -- the winning
+/// event is on the selected resource and so is admitted either way.
+#[tokio::test]
+async fn a_later_selected_resource_owner_outranks_the_readmitted_predecessor() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        SUPERSEDED_NAMEHASH,
+        "superseded-fixture.eth",
+        SUPERSEDED_REGISTRAR_RESOURCE,
+        SUPERSEDED_REGISTRAR_BINDING,
+    )
+    .await?;
+    seed_authority_transferred(
+        &pool,
+        "fixture:superseded-old-owner",
+        SUPERSEDED_NAMEHASH,
+        SUPERSEDED_REGISTRAR_RESOURCE,
+        8,
+        1,
+        json!({
+            "node": SUPERSEDED_NAMEHASH,
+            "owner": DIVERGENT_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    seed_successor_binding(
+        &pool,
+        SUPERSEDED_NAMEHASH,
+        SUPERSEDED_REGISTRY_RESOURCE,
+        SUPERSEDED_REGISTRY_BINDING,
+        9,
+    )
+    .await?;
+    seed_authority_epoch_changed(
+        &pool,
+        "fixture:superseded-epoch",
+        SUPERSEDED_NAMEHASH,
+        SUPERSEDED_REGISTRY_RESOURCE,
+        9,
+        "registry_only",
+    )
+    .await?;
+    // A later reclaim on the selected resource itself.
+    seed_authority_transferred(
+        &pool,
+        "fixture:superseded-current-owner",
+        SUPERSEDED_NAMEHASH,
+        SUPERSEDED_REGISTRY_RESOURCE,
+        10,
+        2,
+        json!({
+            "node": SUPERSEDED_NAMEHASH,
+            "owner": CURRENT_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 10,
+            affected_from_block: 8,
+            affected_to_block: 10,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT address, relation FROM address_names_current WHERE logical_name_id = $1",
+    )
+    .bind(SUPERSEDED_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![(
+            CURRENT_OWNER.to_lowercase(),
+            "effective_controller".to_owned()
+        )],
+        "the readmitted predecessor outranked the selected resource's later owner"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+const RESIDUE_NAMEHASH: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const RESIDUE_LOGICAL: &str =
+    "ens:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const RESIDUE_REGISTRAR_RESOURCE: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+const RESIDUE_REGISTRY_RESOURCE: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+const RESIDUE_REGISTRAR_BINDING: &str = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+const RESIDUE_REGISTRY_BINDING: &str = "12121212-1212-1212-1212-121212121212";
+const RESIDUE_OWNER: &str = "0x55555555555555555555555555555555555555Ee";
+
+/// Readmission is bounded to the predecessor era. An ownership event landing on the superseded
+/// resource *after* the selected binding opened is out of scope for the divergence this restores,
+/// so it must not become the controller — the divergent owner recorded before the binding stands.
+#[tokio::test]
+async fn a_post_binding_event_on_the_superseded_resource_is_not_readmitted() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        RESIDUE_NAMEHASH,
+        "residue-fixture.eth",
+        RESIDUE_REGISTRAR_RESOURCE,
+        RESIDUE_REGISTRAR_BINDING,
+    )
+    .await?;
+    seed_authority_transferred(
+        &pool,
+        "fixture:residue-divergent",
+        RESIDUE_NAMEHASH,
+        RESIDUE_REGISTRAR_RESOURCE,
+        8,
+        1,
+        json!({
+            "node": RESIDUE_NAMEHASH,
+            "owner": DIVERGENT_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    seed_successor_binding(
+        &pool,
+        RESIDUE_NAMEHASH,
+        RESIDUE_REGISTRY_RESOURCE,
+        RESIDUE_REGISTRY_BINDING,
+        9,
+    )
+    .await?;
+    seed_authority_epoch_changed(
+        &pool,
+        "fixture:residue-epoch",
+        RESIDUE_NAMEHASH,
+        RESIDUE_REGISTRY_RESOURCE,
+        9,
+        "registry_only",
+    )
+    .await?;
+    // Residue on the resource the binding already superseded.
+    seed_authority_transferred(
+        &pool,
+        "fixture:residue-late",
+        RESIDUE_NAMEHASH,
+        RESIDUE_REGISTRAR_RESOURCE,
+        10,
+        2,
+        json!({
+            "node": RESIDUE_NAMEHASH,
+            "owner": RESIDUE_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 10,
+            affected_from_block: 8,
+            affected_to_block: 10,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT address, relation FROM address_names_current WHERE logical_name_id = $1",
+    )
+    .bind(RESIDUE_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![(
+            DIVERGENT_OWNER.to_lowercase(),
+            "effective_controller".to_owned()
+        )],
+        "a post-binding event on the superseded resource was readmitted"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+const STALE_NAMEHASH: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const STALE_LOGICAL: &str =
+    "ens:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const STALE_REGISTRAR_RESOURCE: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+const STALE_WRAPPER_RESOURCE: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+const STALE_REGISTRY_RESOURCE: &str = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+const STALE_REGISTRAR_BINDING: &str = "10000000-0000-0000-0000-000000000001";
+const STALE_WRAPPER_BINDING: &str = "10000000-0000-0000-0000-000000000002";
+const STALE_REGISTRY_BINDING: &str = "10000000-0000-0000-0000-000000000003";
+const STALE_OWNER: &str = "0x55555555555555555555555555555555555555Ee";
+const PRE_BINDING_OWNER: &str = "0x66666666666666666666666666666666666666Ff";
+const OFF_PATH_OWNER: &str = "0x77777777777777777777777777777777777777Aa";
+
+/// Readmission exists to recover the owner the *immediate* predecessor binding left behind, so it
+/// must stop at that binding's start. A name that moved registrar -> wrapper -> registry-only has
+/// an ownership event from the registrar era that no longer describes anyone's authority; folding
+/// it back in would publish a long-superseded address, and for a name that expired while wrapped
+/// the same widening would publish the wrapper contract itself as the controller.
+#[tokio::test]
+async fn a_stale_event_from_before_the_predecessor_binding_is_not_readmitted() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        STALE_NAMEHASH,
+        "stale-fixture.eth",
+        STALE_REGISTRAR_RESOURCE,
+        STALE_REGISTRAR_BINDING,
+    )
+    .await?;
+    seed_authority_transferred(
+        &pool,
+        "fixture:stale-registrar-owner",
+        STALE_NAMEHASH,
+        STALE_REGISTRAR_RESOURCE,
+        8,
+        1,
+        json!({
+            "node": STALE_NAMEHASH,
+            "owner": STALE_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    seed_next_binding(
+        &pool,
+        STALE_NAMEHASH,
+        STALE_WRAPPER_RESOURCE,
+        STALE_WRAPPER_BINDING,
+        9,
+        "2026-07-02T00:00:00Z",
+    )
+    .await?;
+    // Isolates the lower bound: on the predecessor resource, but from before that binding opened.
+    seed_authority_transferred(
+        &pool,
+        "fixture:stale-wrapper-pre-binding",
+        STALE_NAMEHASH,
+        STALE_WRAPPER_RESOURCE,
+        8,
+        2,
+        json!({
+            "node": STALE_NAMEHASH,
+            "owner": PRE_BINDING_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    // Isolates the resource restriction: inside the position window, but on a resource the
+    // immediate predecessor is not.
+    seed_authority_transferred(
+        &pool,
+        "fixture:stale-registrar-in-window",
+        STALE_NAMEHASH,
+        STALE_REGISTRAR_RESOURCE,
+        9,
+        3,
+        json!({
+            "node": STALE_NAMEHASH,
+            "owner": OFF_PATH_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    seed_next_binding(
+        &pool,
+        STALE_NAMEHASH,
+        STALE_REGISTRY_RESOURCE,
+        STALE_REGISTRY_BINDING,
+        10,
+        "2026-07-03T00:00:00Z",
+    )
+    .await?;
+    seed_authority_epoch_changed(
+        &pool,
+        "fixture:stale-epoch",
+        STALE_NAMEHASH,
+        STALE_REGISTRY_RESOURCE,
+        10,
+        "registry_only",
+    )
+    .await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 10,
+            affected_from_block: 8,
+            affected_to_block: 10,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+
+    // Anti-vacuity: the readmission gate is armed -- the selected resource is the registry-only
+    // one, and the registrar resource is still a same-arm binding candidate of this name.
+    let selected: Option<String> =
+        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
+            .bind(STALE_LOGICAL)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(selected.as_deref(), Some(STALE_REGISTRY_RESOURCE));
+    let candidates: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings
+         WHERE logical_name_id = $1 AND resource_id = $2::uuid AND authority_arm = 'ens_v1'",
+    )
+    .bind(STALE_LOGICAL)
+    .bind(STALE_REGISTRAR_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(candidates, 1);
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT address, relation FROM address_names_current WHERE logical_name_id = $1",
+    )
+    .bind(STALE_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    assert!(
+        rows.is_empty(),
+        "readmission reached past the immediate predecessor binding and published {rows:?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}

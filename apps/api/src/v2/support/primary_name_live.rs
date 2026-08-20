@@ -1,6 +1,5 @@
+use super::primary_name_claim_gate::unverifiable_claim_authority;
 use super::*;
-use crate::v2::shared_product_reason;
-use crate::v2::vocab::MISSING_UNSUPPORTED_REASON;
 
 #[cfg(test)]
 pub(crate) mod indexed_read_test_hooks {
@@ -97,10 +96,16 @@ pub(crate) async fn load_v2_primary_name_route_read(
     // resolver. When the projected claim names a name that resolver cannot speak for, the route
     // answers in band from projected state instead of dispatching a call whose answer would come
     // from a superseded authority.
+    //
+    // The publication is captured before the gate reads anything, so every row the decision rests
+    // on sits inside the fence the comparison below closes. It stays unresolved until the gate
+    // actually refuses: a request that goes on to the live lookup never depended on the
+    // projection being publishable, and must not start failing when it is not.
+    let gate_publication = current_primary_name_publication(&state.pool, namespace).await;
     if let Some(reason) =
         unverifiable_claim_authority(&state.pool, address, namespace, coin_type).await?
     {
-        let publication = current_primary_name_publication(&state.pool, namespace).await?;
+        let publication = gate_publication?;
         let mut lookup_state =
             load_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?;
         lookup_state.on_demand_verified =
@@ -162,68 +167,6 @@ pub(crate) async fn load_v2_primary_name_route_read(
         lookup_state,
         selected_snapshot: Some(selected_snapshot),
     })
-}
-
-/// The public reason for a claim whose selected authority has no declared entrypoint to verify
-/// through. Distinct from an unsupported exact-name projection, which reports its own reason.
-const CLAIM_AUTHORITY_NOT_VERIFIABLE: &str = "exact_name_authority_not_verifiable";
-
-/// The reason forward verification must not run for this address's projected claim, or `None`
-/// when the claim may be verified. A claim the exact-name projection does not support, and a
-/// claim whose selected authority is an arm this deployment declares no execution entrypoint
-/// for, are both answered in band rather than resolved through the superseded ENSv1 authority.
-async fn unverifiable_claim_authority(
-    pool: &PgPool,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
-) -> ApiResult<Option<String>> {
-    let coin_type = canonical_primary_name_coin_type(coin_type)?;
-    let Ok(Some(snapshot)) =
-        bigname_storage::load_primary_name_current_snapshot(pool, address, namespace, &coin_type)
-            .await
-    else {
-        // No projected claim to contradict: the live reverse leg decides on its own.
-        return Ok(None);
-    };
-    let Some(claim_name) = snapshot.normalized_claim_name.as_deref() else {
-        return Ok(None);
-    };
-    let logical_name_id = bigname_storage::logical_name_id_for_name(namespace, claim_name);
-    let Some(row) = bigname_storage::load_name_current(pool, &logical_name_id)
-        .await
-        .map_err(|_| {
-            ApiError::internal_error("failed to load the claimed name's current authority")
-        })?
-    else {
-        return Ok(None);
-    };
-
-    if crate::v2::name_record::string_field(row.coverage.get("status")).as_deref()
-        == Some("unsupported")
-    {
-        let reason = crate::v2::name_record::string_field(row.coverage.get("unsupported_reason"))
-            .filter(|reason| !reason.trim().is_empty())
-            .unwrap_or_else(|| MISSING_UNSUPPORTED_REASON.to_owned());
-        return Ok(Some(
-            shared_product_reason(
-                &reason,
-                "rejected exact-name reason containing pipeline vocabulary",
-                "failed to map exact-name reason vocabulary",
-            )
-            .map_err(|_| ApiError::internal_error("failed to map exact-name reason vocabulary"))?,
-        ));
-    }
-
-    // Verified execution declares only an ENSv1 entrypoint, so a name whose authority has moved
-    // on cannot be forward verified at all: resolving it through ENSv1 would answer from the
-    // registration the selected authority superseded.
-    let verifiable = row
-        .provenance
-        .pointer("/authority_selection/authority_arm")
-        .and_then(serde_json::Value::as_str)
-        .is_none_or(|arm| arm == "ens_v1");
-    Ok((!verifiable).then(|| CLAIM_AUTHORITY_NOT_VERIFIABLE.to_owned()))
 }
 
 #[derive(Eq, PartialEq)]

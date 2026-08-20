@@ -88,6 +88,113 @@ pub(super) async fn build(
                      event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
         ),
+        -- ENSv1 splits a name's registry ownership from its registrar leasehold across two
+        -- resources of one authority arm. The registrar's ERC721 transfer writes no registry
+        -- state; after registration only `reclaim` does
+        -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L174
+        -- @ ens_v1@91c966f). A transfer with no reclaim therefore leaves the previous owner in
+        -- the registry, and the registry-only binding that records this supersedes the registrar
+        -- resource, putting that owner's own events outside the selected event set. Readmit them
+        -- for the control fold only, over exactly the window the exact-name authority uses for
+        -- the same divergence (`name_authority::stage`): the immediate predecessor binding's
+        -- resource, from that binding's start up to the selected binding's position.
+        --
+        -- The window has to stop at the predecessor. Registry-only authority is the normal state
+        -- of every plain subname and of every expired .eth name, so an unbounded reach would
+        -- republish owners from long-superseded eras -- and for a name that expired while
+        -- wrapped, where registry-owner events are attributed to the wrapper resource, it would
+        -- publish the wrapper contract itself as the controller of every such name.
+        registry_only_names AS (
+            SELECT authority.logical_name_id,
+                   authority.selected_authority_arm
+            FROM project_name_authority authority
+            WHERE authority.unsupported_reason IS NULL
+              AND authority.selected_authority_arm IN ('ens_v1', 'basenames')
+              AND EXISTS (
+                  SELECT 1
+                  FROM project_events epoch
+                  WHERE epoch.logical_name_id = authority.logical_name_id
+                    AND epoch.resource_id = authority.selected_resource_id
+                    AND epoch.event_kind = 'AuthorityEpochChanged'
+                    AND epoch.after_state ->> 'authority_kind' = 'registry_only'
+              )
+        ),
+        registry_only_authority_transfers AS (
+            SELECT event.*
+            FROM registry_only_names authority
+            JOIN project_events event
+              ON event.logical_name_id = authority.logical_name_id
+             AND event.event_kind = 'AuthorityTransferred'
+            WHERE EXISTS (
+                  SELECT 1
+                  FROM project_bindings selected_binding
+                  JOIN LATERAL (
+                      SELECT predecessor.*
+                      FROM project_binding_candidates predecessor
+                      WHERE predecessor.logical_name_id = selected_binding.logical_name_id
+                        AND predecessor.authority_arm = authority.selected_authority_arm
+                        AND (
+                            predecessor.block_number,
+                            COALESCE(
+                                (predecessor.provenance ->> 'transaction_index')::bigint, -1
+                            ),
+                            COALESCE((predecessor.provenance ->> 'log_index')::bigint, -1)
+                        ) < (
+                            selected_binding.block_number,
+                            COALESCE(
+                                (selected_binding.provenance ->> 'transaction_index')::bigint, -1
+                            ),
+                            COALESCE((selected_binding.provenance ->> 'log_index')::bigint, -1)
+                        )
+                      ORDER BY predecessor.block_number DESC,
+                               COALESCE(
+                                   (predecessor.provenance ->> 'transaction_index')::bigint, -1
+                               ) DESC,
+                               COALESCE(
+                                   (predecessor.provenance ->> 'log_index')::bigint, -1
+                               ) DESC,
+                               predecessor.surface_binding_id DESC
+                      LIMIT 1
+                  ) predecessor ON TRUE
+                  WHERE selected_binding.logical_name_id = authority.logical_name_id
+                    AND predecessor.resource_id = event.resource_id
+                    -- Block granularity, not the full position tuple: the transaction that
+                    -- registers a name both writes the registry owner and creates the binding,
+                    -- and the registry write comes first within it (`_register` calls
+                    -- `setSubnodeOwner` before emitting `NameRegistered`, whose log the binding
+                    -- records as its provenance -- upstream:
+                    -- .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L152
+                    -- @ ens_v1@91c966f). Comparing log positions would drop exactly the
+                    -- registration-time owner this readmission exists to recover.
+                    AND event.block_number >= predecessor.block_number
+                    AND (
+                        event.block_number,
+                        COALESCE(event.transaction_index, -1),
+                        COALESCE(event.log_index, -1)
+                    ) <= (
+                        selected_binding.block_number,
+                        COALESCE(
+                            (selected_binding.provenance ->> 'transaction_index')::bigint, -1
+                        ),
+                        COALESCE((selected_binding.provenance ->> 'log_index')::bigint, -1)
+                    )
+              )
+              -- Anti-join instead of a DISTINCT ON over the union: `project_authority_events` is
+              -- indexed on (logical_name_id, normalized_event_id) but not on the event id alone,
+              -- so deduplicating afterwards would sort the whole authority-event set on a rebuild.
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM project_authority_events base
+                  WHERE base.logical_name_id = event.logical_name_id
+                    AND base.normalized_event_id = event.normalized_event_id
+              )
+        ),
+        controller_source AS (
+            SELECT * FROM project_authority_events
+            WHERE event_kind IN ('AuthorityTransferred', 'PermissionChanged')
+            UNION ALL
+            SELECT * FROM registry_only_authority_transfers
+        ),
         controller_events AS (
             SELECT name.logical_name_id,
                    name.resource_id,
@@ -146,9 +253,8 @@ pub(super) async fn build(
                            THEN event.after_state ->> 'subject'
                    END) AS subject
             FROM project_stage_name_current name
-            JOIN project_authority_events event
+            JOIN controller_source event
               ON event.logical_name_id = name.logical_name_id
-             AND event.event_kind IN ('AuthorityTransferred', 'PermissionChanged')
             LEFT JOIN scope_modifiers modifier
               ON modifier.resource_id = name.resource_id
         ),

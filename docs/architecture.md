@@ -878,6 +878,33 @@ current annotations only: it deletes or suppresses no independently admitted
 historical fact, so exact-name history and explicit registration history retain
 both eras.
 
+One same-arm exception is deliberate. ENSv1 splits a name's registry ownership
+from its registrar leasehold across two resources of a single authority arm. The
+registrar's ERC721 transfer writes no registry state; after registration only
+`reclaim` does (upstream:
+.refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L174 @
+ens_v1@91c966f). A transfer with no `reclaim` therefore leaves the registry owner
+behind on the resource that the later registry-only binding superseded. Address
+relations publish that divergent owner as the name's effective controller even
+though its resource is not the selected registration, because otherwise the
+divergence would be invisible in every product collection.
+
+The exception uses the same window the exact-name authority already uses for this
+divergence: the immediate predecessor binding's resource, and only events between
+that binding's start and the selected binding's position. The bound is what keeps
+the exception narrow. Registry-only authority is the ordinary state of every plain
+subname and of every expired `.eth` name, so reaching back past the immediate
+predecessor would republish owners from long-superseded eras — and for a name that
+expired while wrapped, where registry-owner events are attributed to the wrapper
+resource, it would publish the wrapper contract itself as the controller of every
+such name.
+
+The exact-name summary does not follow the exception: for this superseded-resource
+case it keeps reporting no registry owner, so `name_current` and
+`address_names_current` disagree here by design. That disagreement is specific to
+this case — an ordinary registry-only name, which never had a superseded
+predecessor, reports its registry owner in both collections.
+
 ### Exact-name lookup
 
 Resolves a `NameSurface`. Returns normalized identity, current binding, declared summary sections (registration, authority, control, resolver, record inventory, history), provenance, coverage.

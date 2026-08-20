@@ -27,6 +27,7 @@ const BASENAMES_COMPAT_SOURCE_CHAIN_ID: &str = bigname_storage::BASE_MAINNET_CHA
 const BASENAMES_COMPAT_TARGET_CHAIN_ID: &str = bigname_storage::ETHEREUM_MAINNET_CHAIN_ID;
 
 mod json;
+mod primary_name_claim_gate;
 mod primary_name_live;
 mod primary_name_lookup;
 mod primary_name_response;
