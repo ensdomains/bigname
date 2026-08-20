@@ -65,7 +65,7 @@ pub(crate) async fn load_primary_name_lookup_state(
     }
 }
 
-fn primary_name_projection_sqlx_unavailable(error: &sqlx::Error) -> bool {
+pub(super) fn primary_name_projection_sqlx_unavailable(error: &sqlx::Error) -> bool {
     matches!(
         error,
         sqlx::Error::Database(error) if error.code().as_deref() == Some("42P01")

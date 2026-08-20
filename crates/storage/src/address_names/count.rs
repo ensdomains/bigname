@@ -43,6 +43,7 @@ pub async fn count_address_names_current_for_app_filter(
                 addresses: None,
             }),
             is_migrated: None,
+            supported_only: false,
         },
     )
     .await

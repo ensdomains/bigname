@@ -305,12 +305,16 @@ fn search_filter(
     params: &SearchQueryParams,
     public_namespaces: &[String],
 ) -> NameCurrentListFilter {
+    // A search result carries no status or unsupported_reason field, so a name whose exact-name
+    // authority is unsupported is omitted here rather than served from an unselected registration;
+    // name detail and batch lookup carry the reason.
     let mut filter = NameCurrentListFilter {
         namespace: params.namespace.clone(),
         namespaces: params
             .namespace
             .is_none()
             .then(|| public_namespaces.to_vec()),
+        supported_only: true,
         ..NameCurrentListFilter::default()
     };
 

@@ -6,7 +6,9 @@ use crate::AppState;
 use crate::v2::support::{
     PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey, parse_resolution_record_key,
 };
-use crate::v2::vocab::shared_product_reason;
+use crate::v2::vocab::{
+    MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
+};
 
 use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
@@ -50,18 +52,15 @@ fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>>
     }
     let reason = string_field(row.coverage.get("unsupported_reason"))
         .filter(|reason| !reason.trim().is_empty())
-        .unwrap_or_else(|| "unsupported_reason_missing".to_owned());
-    if !matches!(
-        reason.as_str(),
-        "conflicting_current_ens_authority" | "independent_ens_deployments_overlap"
-    ) {
+        .unwrap_or_else(|| MISSING_UNSUPPORTED_REASON.to_owned());
+    if !downgrades_unsupported_name(&reason) {
         return Ok(None);
     }
-    let reason = shared_product_reason(
+    let reason = projected_row_product_reason(
         &reason,
         "rejected exact-name reason containing pipeline vocabulary",
         "failed to map exact-name reason vocabulary",
-    )?;
+    );
     Ok(Some(NameRecord {
         registration_id: None,
         token_id: None,

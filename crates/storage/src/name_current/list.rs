@@ -85,6 +85,10 @@ pub struct NameCurrentListFilter {
     /// registry (`declared_summary.registration.authority_kind = 'ens_v2_registry'`). Backs the
     /// subgraph `isMigrated` filter. `Some(false)` / `None` apply no migration predicate.
     pub is_migrated: Option<bool>,
+    /// When true, omit every row the exact-name projection does not support. A collection with no
+    /// row-local status field cannot report why a name is unsupported, so it omits the name rather
+    /// than serving registration fields no selected authority backs.
+    pub supported_only: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -487,6 +491,9 @@ fn push_name_current_filter_predicates<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a NameCurrentListFilter,
 ) {
+    if filter.supported_only {
+        builder.push(" AND nc.support_status = 'supported'");
+    }
     if let Some(namespaces) = filter
         .namespaces
         .as_ref()

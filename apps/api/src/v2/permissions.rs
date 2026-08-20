@@ -13,12 +13,11 @@ use super::name_record::wrapper_metadata;
 use super::permission_support::{
     apply_permissions_collection_support_meta, permission_support_for_resources,
 };
-use super::support::normalize_inferred_route_name;
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
     StrictQueryParams, V2Error, V2Result, decode, encode, permission_powers_value,
     permission_scope_value, validate_latest_collection_selectors,
-    vocab::{WrapperFuses, WrapperState},
+    vocab::{AuthorityContext, WrapperFuses, WrapperState},
 };
 
 #[path = "permissions/lineage.rs"]
@@ -27,6 +26,9 @@ use lineage::permission_lineage;
 #[path = "permissions/current_name.rs"]
 mod current_name;
 use current_name::load_current_name_row;
+
+mod filter;
+use filter::{permissions_filter_inputs, resolve_permissions_filter};
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -63,6 +65,7 @@ pub(crate) struct PermissionRow {
     pub(crate) registration_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
+    pub(crate) authority_context: AuthorityContext,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_state: Option<WrapperState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,27 +83,6 @@ pub(crate) struct PermissionLineage {
     pub(crate) inheritance_path: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) transfer_behavior: Option<Value>,
-}
-
-#[derive(Debug)]
-struct ResolvedPermissionsFilter {
-    subject: Option<String>,
-    resource_id: Option<Uuid>,
-    known_empty: bool,
-    cursor_filters: BTreeMap<String, String>,
-}
-
-#[derive(Debug)]
-struct NormalizedNameFilter {
-    namespace: String,
-    normalized_name: String,
-}
-
-#[derive(Debug)]
-struct PermissionsFilterInputs {
-    namespace: String,
-    name_filter: Option<NormalizedNameFilter>,
-    requested_resource_id: Option<Uuid>,
 }
 
 pub(crate) async fn get_permissions(
@@ -176,6 +158,7 @@ pub(crate) async fn get_permissions(
                 current_name.map(|name| name.normalized_name.as_str()),
                 current_name.map(|name| &name.declared_summary),
                 include_lineage,
+                resolved.authority_context,
             )
         })
         .collect::<V2Result<Vec<_>>>()?;
@@ -215,110 +198,12 @@ fn empty_permissions_response(params: &QueryParams) -> Json<Envelope<Vec<Permiss
     })
 }
 
-fn permissions_filter_inputs(params: &QueryParams) -> V2Result<PermissionsFilterInputs> {
-    let name_filter = normalized_name_filter(params)?;
-    if name_filter.is_none() && params.registration_id.is_none() && params.address.is_none() {
-        return Err(V2Error::invalid_input(
-            "at least one of name, registration_id, or address is required",
-        ));
-    }
-
-    let requested_resource_id = params
-        .registration_id
-        .as_deref()
-        .map(|registration_id| {
-            Uuid::parse_str(registration_id)
-                .map_err(|_| V2Error::invalid_input("registration_id must be a UUID"))
-        })
-        .transpose()?;
-
-    let namespace = name_filter
-        .as_ref()
-        .map(|name_filter| name_filter.namespace.clone())
-        .or_else(|| params.namespace.clone())
-        .unwrap_or_else(|| "ens".to_owned());
-
-    Ok(PermissionsFilterInputs {
-        namespace,
-        name_filter,
-        requested_resource_id,
-    })
-}
-
-async fn resolve_permissions_filter(
-    state: &AppState,
-    params: &QueryParams,
-    include_lineage: bool,
-    inputs: &PermissionsFilterInputs,
-) -> V2Result<ResolvedPermissionsFilter> {
-    let resolved_name_row = match inputs.name_filter.as_ref() {
-        Some(name_filter) => Some(
-            load_current_name_row(state, &name_filter.namespace, &name_filter.normalized_name)
-                .await?,
-        ),
-        None => None,
-    };
-    let name_resource_id = resolved_name_row
-        .as_ref()
-        .and_then(|row| row.as_ref())
-        .and_then(|row| row.resource_id);
-
-    if let (Some(requested), Some(resolved)) = (inputs.requested_resource_id, name_resource_id)
-        && requested != resolved
-    {
-        return Err(V2Error::unsupported("conflicting registration filters"));
-    }
-
-    let namespace = inputs.namespace.clone();
-    let resource_id = inputs.requested_resource_id.or(name_resource_id);
-    let known_empty = inputs.name_filter.is_some() && name_resource_id.is_none();
-    let mut cursor_filters = BTreeMap::new();
-    if params.namespace.is_some() || inputs.name_filter.is_some() {
-        cursor_filters.insert(NAMESPACE_FILTER_KEY.to_owned(), namespace.clone());
-    }
-    if let Some(address) = params.address.as_ref() {
-        cursor_filters.insert(ADDRESS_FILTER_KEY.to_owned(), address.clone());
-    }
-    if let Some(resource_id) = resource_id {
-        cursor_filters.insert(
-            REGISTRATION_ID_FILTER_KEY.to_owned(),
-            resource_id.to_string(),
-        );
-    }
-    if include_lineage {
-        cursor_filters.insert(INCLUDE_FILTER_KEY.to_owned(), "lineage".to_owned());
-    }
-
-    Ok(ResolvedPermissionsFilter {
-        subject: params.address.clone(),
-        resource_id,
-        known_empty,
-        cursor_filters,
-    })
-}
-
-fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNameFilter>> {
-    let Some(name) = params.name.as_deref() else {
-        return Ok(None);
-    };
-    let normalized = normalize_inferred_route_name(name)
-        .map_err(|error| V2Error::invalid_input(error.message))?;
-    let namespace = params
-        .namespace
-        .clone()
-        .unwrap_or_else(|| normalized.namespace.to_owned());
-
-    Ok(Some(NormalizedNameFilter {
-        namespace,
-        normalized_name: normalized.normalized_name.to_owned(),
-    }))
-}
-
 pub(crate) fn build_permission_row(
     row: &PermissionsCurrentRow,
     name: Option<&str>,
     declared_summary: Option<&Value>,
     include_lineage: bool,
+    authority_context: AuthorityContext,
 ) -> V2Result<PermissionRow> {
     let (wrapper_state, wrapper_fuses) = declared_summary
         .map(wrapper_metadata)
@@ -333,6 +218,7 @@ pub(crate) fn build_permission_row(
         },
         registration_id: row.resource_id.to_string(),
         name: name.map(str::to_owned),
+        authority_context,
         wrapper_state,
         wrapper_fuses,
         lineage: include_lineage
@@ -522,8 +408,14 @@ mod tests {
             Value::Null,
         );
         let name = "alice.eth".to_owned();
-        let mapped = build_permission_row(&row, Some(&name), None, true)
-            .expect("known storage chain id must map");
+        let mapped = build_permission_row(
+            &row,
+            Some(&name),
+            None,
+            true,
+            AuthorityContext::CurrentForName,
+        )
+        .expect("known storage chain id must map");
 
         assert_eq!(mapped.address, ADDRESS);
         assert_eq!(mapped.registration_id, REGISTRATION_ID);
@@ -564,8 +456,8 @@ mod tests {
     fn lineage_omits_absent_optional_members() {
         let mut row = sample_permissions_row(json!([]), Value::Null);
         row.revocation_source = None;
-        let mapped =
-            build_permission_row(&row, None, None, true).expect("known storage chain id must map");
+        let mapped = build_permission_row(&row, None, None, true, AuthorityContext::ResourceAudit)
+            .expect("known storage chain id must map");
         let lineage = mapped.lineage.expect("lineage must be present");
 
         assert_eq!(mapped.name, None);

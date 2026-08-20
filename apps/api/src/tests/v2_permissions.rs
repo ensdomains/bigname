@@ -16,25 +16,111 @@ async fn v2_get_permissions_requires_at_least_one_filter() -> Result<()> {
     Ok(())
 }
 
+// A registration the name filter did not select is not a rejected filter combination: it is a
+// registration that no longer holds the name. It stays queryable on its own as an audit read, and
+// pairing it with the name it lost returns an empty collection.
 #[tokio::test]
-async fn v2_get_permissions_rejects_conflicting_name_and_registration() -> Result<()> {
+async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
     let stale_resource_id = v2_permissions_stale_resource_id();
 
-    let response = v2_permissions_response_for_database(
+    let paired = v2_permissions_payload_for_database(
         &database,
         &format!("/v2/permissions?name=perms.eth&registration_id={stale_resource_id}"),
     )
     .await?;
+    assert_eq!(paired["data"], json!([]));
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("unsupported"));
-    assert_eq!(
-        payload["error"]["message"],
-        json!("conflicting registration filters")
+    // Anti-vacuity: the same superseded registration is still readable as a resource audit.
+    let audited = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?registration_id={stale_resource_id}"),
+    )
+    .await?;
+    assert!(
+        !audited["data"]
+            .as_array()
+            .expect("audit read must return an array")
+            .is_empty(),
+        "the superseded registration lost its own audit read"
     );
+    assert!(
+        audited["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["authority_context"] == json!("resource_audit"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+// Every permission row says how it may be read. Only a `name` filter that selected the row's
+// current registration claims `current_for_name`; a resource-keyed read never does, even when the
+// row carries an optional display name.
+#[tokio::test]
+async fn v2_get_permissions_marks_the_authority_context_of_every_row() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let current_resource_id = v2_permissions_current_resource_id();
+
+    for (uri, expected) in [
+        ("/v2/permissions?name=Perms.eth".to_owned(), "current_for_name"),
+        (
+            format!("/v2/permissions?registration_id={current_resource_id}"),
+            "resource_audit",
+        ),
+        (
+            format!("/v2/permissions?address={V2_PERMISSIONS_OTHER_SUBJECT}"),
+            "resource_audit",
+        ),
+    ] {
+        let payload = v2_permissions_payload_for_database(&database, &uri).await?;
+        let rows = payload["data"].as_array().expect("permissions data");
+        assert!(!rows.is_empty(), "{uri} returned no rows to classify");
+        assert!(
+            rows.iter()
+                .all(|row| row["authority_context"] == json!(expected)),
+            "{uri} did not mark every row {expected}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+// A name filter selects only the exact-name authority's current registration. When the projection
+// does not support the name, there is no such registration and the collection is empty rather than
+// falling back to whatever resource the row still carries.
+#[tokio::test]
+async fn v2_get_permissions_empties_a_name_filter_the_projection_does_not_support() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+
+    // Anti-vacuity: the name filter returns rows while the projection supports the name.
+    let supported =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert!(
+        !supported["data"]
+            .as_array()
+            .expect("permissions data")
+            .is_empty()
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET support_status = 'unsupported',
+             unsupported_reason = 'conflicting_current_ens_authority'
+         WHERE lower(raw_name) = 'perms.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let payload =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert_eq!(payload["data"], json!([]));
 
     database.cleanup().await?;
     Ok(())
