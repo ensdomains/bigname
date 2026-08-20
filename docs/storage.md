@@ -113,6 +113,13 @@ writes the replacement binding and a closure that exempts it; it does not
 synthesize registration, release, transfer, expiry, resolver, or subregistry
 normalized events. The affected surfaces are tracked only while interpreting
 the current batch, cleared at its boundary, and never persisted or restored.
+The non-lifecycle `PreimageObserved` row written with a survivor reassertion
+records the replacement binding and closed authority arm for redo. A raw-log
+reassertion uses the existing `raw_log_preimage_observation`
+[derivation kind](glossary.md#derivation-kind); a block-boundary reassertion
+uses `raw_block_preimage_observation`. The latter derivation kind is admitted
+by the fresh schema and by an in-place schema-migration for initialized
+databases.
 
 The append-numbered phase-schema upgrade adds
 `surface_bindings.authority_arm text NOT NULL` with the closed-value check. It

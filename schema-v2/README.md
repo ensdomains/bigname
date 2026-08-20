@@ -99,8 +99,9 @@ The derivation kind is also closed and identifies the writer path, not the
 upstream event. The admitted values are `ens_v1_reverse_claim`,
 `ens_v1_unwrapped_authority`, `ens_v2_migration`, `ens_v2_permissions`, `ens_v2_registrar`,
 `ens_v2_registry_resource_surface`, `ens_v2_resolver`, `manifest_sync`,
-`proxy_upgrade`, and `raw_log_preimage_observation`. Their meanings and write
-owners are defined by the canonical
+`proxy_upgrade`, `raw_log_preimage_observation`, and
+`raw_block_preimage_observation`. Their meanings and write owners are defined
+by the canonical
 [normalized-event contract](../docs/architecture.md#derivation-kinds).
 
 ## Current projections

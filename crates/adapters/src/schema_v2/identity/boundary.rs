@@ -11,6 +11,7 @@ use crate::schema_v2::{
     },
     normalized::boundary_preimage_event,
     protocol::Interpreted,
+    seam::{ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, SURFACE_BINDING_ID_KEY},
     state::State,
 };
 
@@ -156,6 +157,9 @@ pub(in crate::schema_v2) fn materialize_v2_boundary(
             "raw_name":name.labels.join("."),
             "raw_labels":name.labels,
             "namehash":name.namehash,
+            (ARM_WIDE_BINDING_CLOSE_KEY):true,
+            (CLOSED_AUTHORITY_ARM_KEY):"ens_v2",
+            (SURFACE_BINDING_ID_KEY):surface_binding_id.to_string(),
         }),
     ));
     Ok(())

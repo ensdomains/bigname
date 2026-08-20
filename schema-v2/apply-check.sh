@@ -163,7 +163,10 @@ for migration_file in \
     "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql" \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
     "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
-    "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql"
+    "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
+    "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
+    "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
+    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -297,7 +300,13 @@ for migration_file in \
     "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
     "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
-    "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql"
+    "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
+    "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
+    "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
+    "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
+    "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
+    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
+    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -999,7 +1008,10 @@ SQL
     for migration_file in \
         "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
         "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
-        "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql"
+        "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
+        "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
+        "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
+        "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql"
     do
         sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
     done
@@ -4632,6 +4644,7 @@ BEGIN
             'ens_v2_resolver',
             'manifest_sync',
             'proxy_upgrade',
+            'raw_block_preimage_observation',
             'raw_log_preimage_observation'
         ]
     ) AS admitted(derivation_kind);

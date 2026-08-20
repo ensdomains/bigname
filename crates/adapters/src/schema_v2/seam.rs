@@ -12,6 +12,8 @@ pub const MIGRATION_APPLIED_EVENT_KIND: &str = "MigrationApplied";
 pub const SURFACE_UNBOUND_EVENT_KIND: &str = "SurfaceUnbound";
 pub const TOKEN_CONTROL_TRANSFERRED_EVENT_KIND: &str = "TokenControlTransferred";
 pub const SURFACE_BINDING_ID_KEY: &str = "surface_binding_id";
+pub const ARM_WIDE_BINDING_CLOSE_KEY: &str = "arm_wide_binding_close";
+pub const CLOSED_AUTHORITY_ARM_KEY: &str = "closed_authority_arm";
 pub const TOKEN_LINEAGE_ID_KEY: &str = "token_lineage_id";
 pub const INTERPRETER_STATE_KEY: &str = "interpreter_state_key";
 pub const STATE_SCOPE_KEY: &str = "state_scope";
@@ -57,6 +59,12 @@ pub const EVENT_CLOSE_TIME_SQL: &str = "lineage.block_timestamp + make_interval(
 pub const BINDING_CLOSE_CLAMP_SQL: &str = "GREATEST($2, active_from + interval '1 microsecond')";
 pub const REDO_BINDING_CLOSE_CLAMP_SQL: &str =
     "GREATEST(event.closed_at, binding.active_from + interval '1 microsecond')";
+/// Exact persisted evidence that a non-lifecycle observation accompanies an arm-wide binding
+/// close and names the replacement binding exempted from that close.
+pub const REDO_ARM_WIDE_CLOSE_SQL: &str = "event.event_kind = 'PreimageObserved'
+                           AND event.after_state ->> 'arm_wide_binding_close' = 'true'
+                           AND event.after_state ->> 'surface_binding_id' IS NOT NULL
+                           AND event.after_state ->> 'closed_authority_arm' IS NOT NULL";
 /// The authority arm a closing event's own evidence names, which is the arm a redo reopen may
 /// undo a close on. An ordinary open or unbind closes only its own arm, so that arm is the one the
 /// event identifies: the binding it opened, or failing that its resource. A migration boundary is
@@ -67,6 +75,9 @@ pub const REDO_BINDING_CLOSE_CLAMP_SQL: &str =
 pub const REDO_CLOSED_ARM_SQL: &str = "CASE
                        WHEN event.event_kind = 'MigrationApplied'
                            THEN event.after_state #>> '{predecessor_binding,authority_epoch}'
+                       WHEN event.event_kind = 'PreimageObserved'
+                            AND event.after_state ->> 'arm_wide_binding_close' = 'true'
+                           THEN event.after_state ->> 'closed_authority_arm'
                        ELSE (
                            SELECT CASE
                                WHEN count(DISTINCT opened.authority_arm) = 1

@@ -9115,6 +9115,104 @@ fn release_the_loser_reasserts_the_surviving_holders_persisted_binding() -> anyh
 }
 
 #[test]
+fn contested_loser_reregistration_emits_one_marked_name_observation() -> anyhow::Result<()> {
+    const RIVAL: &str = "0x0000000000000000000000000000000000000069";
+    const MANIFEST_ID: i64 = 96;
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let old_token = versioned_token("alpha", 1);
+    let new_token = versioned_token("alpha", 2);
+    let manifest = manifest_with_events(
+        MANIFEST_ID,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["registry"],
+                &["TokenResourceLinked"],
+            ),
+        ],
+    );
+    let mut rival_admission = admission(MANIFEST_ID, "registry");
+    rival_admission.address = RIVAL.to_owned();
+    rival_admission.contract_instance_id = super::common::contract_id(CHAIN, RIVAL);
+    let register = |emitter: &str, token_id, block| {
+        raw_at(
+            v2_registry::LabelRegistered {
+                tokenId: token_id,
+                labelHash: keccak256(b"alpha"),
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 5_000,
+                sender,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            emitter,
+        )
+    };
+    let link = |emitter: &str, resource, block| {
+        raw_at(
+            v2_registry::TokenResource {
+                tokenId: old_token,
+                resource,
+            }
+            .encode_log_data(),
+            block,
+            1,
+            emitter,
+        )
+    };
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(MANIFEST_ID, "registry"), rival_admission],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            register(CONTRACT, old_token, 1),
+            link(CONTRACT, U256::from(0xaa), 1),
+            register(RIVAL, old_token, 2),
+            link(RIVAL, U256::from(0xbb), 2),
+            register(CONTRACT, new_token, 3),
+        ],
+    })?;
+
+    let observations = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(3)
+                && event.event_kind == seam::PREIMAGE_OBSERVATION_EVENT_KIND
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observations.len(),
+        1,
+        "one raw log and name must not produce divergent normalized-event identities: {observations:#?}"
+    );
+    assert_eq!(
+        observations[0]
+            .after_state
+            .get(seam::ARM_WIDE_BINDING_CLOSE_KEY)
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the coalesced observation must retain the redo close marker"
+    );
+    Ok(())
+}
+
+#[test]
 fn topology_departure_reasserts_the_survivor_across_replay_shapes() -> anyhow::Result<()> {
     const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059";
     let departure = raw_at(

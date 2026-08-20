@@ -210,11 +210,11 @@ qualify which one is meant.
 
 **Derivation kind** — the persisted string naming which adapter pipeline
 produced a normalized event (for example `ens_v1_unwrapped_authority`,
-`ens_v2_registry_resource_surface`, `raw_log_preimage_observation`). These are
-stored identifiers: define, never rename. "Unwrapped authority" is a historical
-name kept because it is a stored identifier: that pipeline derives ownership
-and control for ENSv1 and Basenames names alike, whether the name is registry-,
-registrar-, or NameWrapper-held.
+`ens_v2_registry_resource_surface`, `raw_log_preimage_observation`, or
+`raw_block_preimage_observation`). These are stored identifiers: define, never
+rename. "Unwrapped authority" is a historical name kept because it is a stored
+identifier: that pipeline derives ownership and control for ENSv1 and Basenames
+names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 
 **Discovery graph / discovery edge** — the time-versioned indexability and
 relationship graph that extends the manifest-declared contract graph. The

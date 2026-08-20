@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 
 use crate::schema_v2::{
     protocol::{BindingClosureDraft, EventDraft, Interpreted, NameDraft, ShadowNameDraft},
+    seam::{ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, SURFACE_BINDING_ID_KEY},
     state::{State, V2NameTransition, V2TokenState},
 };
 
@@ -93,32 +94,56 @@ pub(super) fn append_v2_name_transitions(
             .as_ref()
             .and(transition.resource_id.as_ref())
             .copied();
-        output.names.push(NameDraft {
+        let surface_binding_id = bound_resource.map(|_| {
+            crate::schema_v2::common::stable_uuid(&format!(
+                "ens-v2-surface-binding-rebound:{}:{}:{}:{}:{}:{}:{}",
+                raw.chain_id,
+                transition
+                    .registry_contract_instance_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| transition.registry.clone()),
+                transition.upstream_resource.as_deref().unwrap_or("-"),
+                current.logical_name_id,
+                raw.block_hash,
+                raw.transaction_index,
+                raw.log_index,
+            ))
+        });
+        let preimage_metadata = identity_reassertion.then(|| {
+            json!({
+                (ARM_WIDE_BINDING_CLOSE_KEY):true,
+                (CLOSED_AUTHORITY_ARM_KEY):"ens_v2",
+                (SURFACE_BINDING_ID_KEY):surface_binding_id.map(|id| id.to_string()),
+            })
+        });
+        let reasserted_name = NameDraft {
             labels: current.labels.clone(),
             namehash: current.namehash.clone(),
             resource_id: transition.resource_id,
             token_lineage_id: transition.token_lineage_id,
-            surface_binding_id: bound_resource.map(|_| {
-                crate::schema_v2::common::stable_uuid(&format!(
-                    "ens-v2-surface-binding-rebound:{}:{}:{}:{}:{}:{}:{}",
-                    raw.chain_id,
-                    transition
-                        .registry_contract_instance_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_else(|| transition.registry.clone()),
-                    transition.upstream_resource.as_deref().unwrap_or("-"),
-                    current.logical_name_id,
-                    raw.block_hash,
-                    raw.transaction_index,
-                    raw.log_index,
-                ))
-            }),
+            surface_binding_id,
             bind: bound_resource.is_some(),
             binding_kind: "declared_registry_path".to_owned(),
             authority_arm: "ens_v2".to_owned(),
             source_kind: format!("{source_event}_registry_suffix"),
-            preimage_metadata: None,
-        });
+            preimage_metadata,
+        };
+        if identity_reassertion
+            && let Some(direct_name) = output
+                .names
+                .iter_mut()
+                .find(|name| name.namehash == reasserted_name.namehash)
+        {
+            direct_name.resource_id = reasserted_name.resource_id;
+            direct_name.token_lineage_id = reasserted_name.token_lineage_id;
+            direct_name.surface_binding_id = reasserted_name.surface_binding_id;
+            direct_name.bind = reasserted_name.bind;
+            direct_name.binding_kind = reasserted_name.binding_kind;
+            direct_name.authority_arm = reasserted_name.authority_arm;
+            direct_name.preimage_metadata = reasserted_name.preimage_metadata;
+        } else {
+            output.names.push(reasserted_name);
+        }
         if !identity_reassertion && let Some(resource_id) = bound_resource {
             output.events.push(EventDraft {
                 event_kind: "SurfaceBound".to_owned(),
