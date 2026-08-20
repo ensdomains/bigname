@@ -1405,3 +1405,162 @@ async fn seed_v2_basenames_primary_name_claim(
         .await?;
     Ok(())
 }
+
+/// The arm gate must not depend on a projected claim existing. An address with no indexed claim
+/// still reaches the live reverse leg, and that leg can name an ENSv2-armed name just as a
+/// projected claim can. The refusal belongs to the name being resolved, not to how we learned it,
+/// so it has to fire before the forward call goes out.
+#[tokio::test]
+async fn v2_get_primary_name_refuses_a_live_ens_v2_arm_claim_without_forward_dispatch() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    // No projected claim for this address: the gate's snapshot read returns None.
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
+
+    // Anti-vacuity: the projection supports the name the live leg will claim, so only the selected
+    // arm can refuse it, and no projected claim exists to drive the pre-lookup gate.
+    let support: String = sqlx::query_scalar(
+        "SELECT support_status FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
+    )
+    .fetch_one(&lookup_pool)
+    .await?;
+    assert_eq!(support, "supported");
+    let projected_claims: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bigname_phase.primary_names_current WHERE lower(address) = $1",
+    )
+    .bind(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS.to_lowercase())
+    .fetch_one(&lookup_pool)
+    .await?;
+    assert_eq!(projected_claims, 0);
+
+    // Exactly the two calls the reverse leg makes. The mock serves one response per queued entry,
+    // so a forward dispatch would find the listener gone and fail the lookup outright.
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 live ens_v2-arm primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+
+    let verified = payload["data"]["answers"]
+        .as_array()
+        .expect("answers must be an array")
+        .iter()
+        .find(|answer| answer["source"] == json!("verified"))
+        .expect("a verified answer must be present");
+    assert_eq!(verified["status"], json!("unsupported"), "{payload}");
+    assert_eq!(
+        verified["unsupported_reason"],
+        json!("exact_name_authority_not_verifiable"),
+        "{payload}"
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        2,
+        "the reverse leg may run, but the forward call must not: {rpc_requests:?}"
+    );
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The indexed path answers in band when the exact-name projection is not deployed. The verified
+/// path reads the same projection to decide whether a claim may be verified, so it degrades the
+/// same way instead of failing the request -- and without resolving a name whose authority it has
+/// no way to check.
+#[tokio::test]
+async fn v2_get_primary_name_degrades_in_band_when_the_claim_projection_is_absent() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    sqlx::query("DROP TABLE bigname_phase.primary_names_current")
+        .execute(&lookup_pool)
+        .await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[format!(
+        "ethereum-mainnet={unavailable_rpc_url}"
+    )])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 absent-projection primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    // The RPC endpoint is closed, so a 200 at all proves no provider call was dispatched.
+    assert_eq!(status, StatusCode::OK, "{payload}");
+
+    let verified = payload["data"]["answers"]
+        .as_array()
+        .expect("answers must be an array")
+        .iter()
+        .find(|answer| answer["source"] == json!("verified"))
+        .expect("a verified answer must be present");
+    assert_eq!(verified["status"], json!("unsupported"), "{payload}");
+    assert_eq!(
+        verified["unsupported_reason"],
+        json!("declared primary-name claim surface is not yet supported"),
+        "{payload}"
+    );
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}

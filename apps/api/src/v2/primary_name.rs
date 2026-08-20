@@ -211,12 +211,17 @@ pub(crate) fn build_primary_name(
     })
 }
 
+/// Reported by both sources when the exact-name projection is not deployed: the verified path
+/// degrades in band exactly as the indexed path does rather than resolving a name whose authority
+/// it has no way to check.
+pub(crate) const PRIMARY_NAME_SURFACE_UNSUPPORTED: &str =
+    "declared primary-name claim surface is not yet supported";
+
 fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAnswer {
     match &lookup_state.tuple_state {
-        PrimaryNameTupleState::ProjectionUnavailable => PrimaryNameAnswer::unsupported(
-            Source::Indexed,
-            "declared primary-name claim surface is not yet supported",
-        ),
+        PrimaryNameTupleState::ProjectionUnavailable => {
+            PrimaryNameAnswer::unsupported(Source::Indexed, PRIMARY_NAME_SURFACE_UNSUPPORTED)
+        }
         PrimaryNameTupleState::TupleMissing => {
             PrimaryNameAnswer::new(Source::Indexed, Status::NotFound)
         }

@@ -1,4 +1,16 @@
-use super::primary_name_claim_gate::unverifiable_claim_authority;
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
+
+/// What the live forward gate decided, carried out of the lookup callback.
+enum LiveGateOutcome {
+    Refused(Option<String>),
+    Failed(ApiError),
+}
+
+use super::primary_name_claim_gate::{
+    ForwardGateDecision, unverifiable_claim_authority, unverifiable_name_authority,
+};
 use super::*;
 
 #[cfg(test)]
@@ -102,9 +114,17 @@ pub(crate) async fn load_v2_primary_name_route_read(
     // actually refuses: a request that goes on to the live lookup never depended on the
     // projection being publishable, and must not start failing when it is not.
     let gate_publication = current_primary_name_publication(&state.pool, namespace).await;
-    if let Some(reason) =
-        unverifiable_claim_authority(&state.pool, address, namespace, coin_type).await?
-    {
+    let refusal =
+        match unverifiable_claim_authority(&state.pool, address, namespace, coin_type).await? {
+            ForwardGateDecision::Refuse(reason) => Some(reason),
+            // Nothing to verify against: answer in band exactly as the indexed path does, rather than
+            // resolving a name whose authority this deployment cannot check.
+            ForwardGateDecision::ProjectionUnavailable => {
+                Some(crate::v2::primary_name::PRIMARY_NAME_SURFACE_UNSUPPORTED.to_owned())
+            }
+            ForwardGateDecision::Admit => None,
+        };
+    if let Some(reason) = refusal {
         let publication = gate_publication?;
         let mut lookup_state =
             load_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?;
@@ -128,9 +148,34 @@ pub(crate) async fn load_v2_primary_name_route_read(
         None
     };
     let timer = crate::metrics::verified_execution_timer();
+    // The live reverse leg reaches the same question the projected-claim gate answers, so it is
+    // gated the same way -- before the forward call, which follows CCIP-read off-chain.
+    let live_outcome: Arc<Mutex<Option<LiveGateOutcome>>> = Arc::new(Mutex::new(None));
+    let gate_pool = state.pool.clone();
+    let gate_namespace = namespace.to_owned();
+    let gate_outcome = Arc::clone(&live_outcome);
     let lookup =
         bigname_lookup::LookupEngine::new(state.pool.clone(), state.lookup_chain_rpc_urls.clone())
-            .lookup_ens_primary_name(address)
+            .lookup_ens_primary_name_gated(address, move |claimed_name| async move {
+                let outcome =
+                    match unverifiable_name_authority(&gate_pool, &gate_namespace, &claimed_name)
+                        .await
+                    {
+                        Ok(ForwardGateDecision::Admit) => return true,
+                        Ok(ForwardGateDecision::Refuse(reason)) => {
+                            LiveGateOutcome::Refused(Some(reason))
+                        }
+                        Ok(ForwardGateDecision::ProjectionUnavailable) => {
+                            LiveGateOutcome::Refused(Some(
+                                crate::v2::primary_name::PRIMARY_NAME_SURFACE_UNSUPPORTED
+                                    .to_owned(),
+                            ))
+                        }
+                        Err(error) => LiveGateOutcome::Failed(error),
+                    };
+                *gate_outcome.lock().await = Some(outcome);
+                false
+            })
             .await
             .map_err(|error| primary_name_lookup_error(address, error))?;
     let selected_snapshot = primary_name_lookup_snapshot(&lookup.position)?;
@@ -159,7 +204,12 @@ pub(crate) async fn load_v2_primary_name_route_read(
             current_primary_name_publication(&state.pool, namespace).await?,
         )?;
     }
-    apply_primary_name_lookup(&mut lookup_state, namespace, lookup)?;
+    let forward_refusal = match live_outcome.lock().await.take() {
+        Some(LiveGateOutcome::Failed(error)) => return Err(error),
+        Some(LiveGateOutcome::Refused(reason)) => reason,
+        None => None,
+    };
+    apply_primary_name_lookup(&mut lookup_state, namespace, lookup, forward_refusal)?;
     let outcome = primary_name_verified_result(namespace, &lookup_state);
     timer.finish(crate::metrics::json_outcome(&outcome));
 
@@ -380,6 +430,7 @@ fn apply_primary_name_lookup(
     lookup_state: &mut PrimaryNameLookupState,
     namespace: &str,
     lookup: bigname_lookup::EnsPrimaryNameLookup,
+    forward_refusal: Option<String>,
 ) -> ApiResult<()> {
     use bigname_lookup::EnsPrimaryNameStatus;
 
@@ -452,6 +503,18 @@ fn apply_primary_name_lookup(
                         raw_name,
                         resolver_address,
                     });
+            }
+        }
+        // The gate refused before the forward call. The reverse claim stands as observed; only
+        // the verification is withheld, and a refusal with no reason means the exact-name
+        // projection was unavailable, which the tuple state already reports in band.
+        EnsPrimaryNameStatus::ForwardRefused => {
+            lookup_state.on_demand_claim = found_claim
+                .map(OnDemandPrimaryNameClaimState::Found)
+                .unwrap_or(OnDemandPrimaryNameClaimState::Unavailable);
+            if let Some(reason) = forward_refusal {
+                lookup_state.on_demand_verified =
+                    OnDemandPrimaryNameVerificationState::AuthorityUnsupported(reason);
             }
         }
         EnsPrimaryNameStatus::ExecutionFailed => {

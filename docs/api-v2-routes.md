@@ -800,7 +800,19 @@ Field ownership:
   whether a claimed name may be verified at all fail closed the same way: if
   those reads error the request returns `500 internal_error` rather than
   proceeding to live resolution, because a failed read is not evidence that no
-  claim exists.
+  claim exists. The one exception is a missing exact-name projection: the
+  verified source then reports the same in-band `unsupported` answer the indexed
+  source reports for it, rather than failing, since neither source can speak for
+  a projection that is not deployed.
+- Verifiable authority: forward verification is refused for a name whose selected
+  authority is an arm this deployment declares no execution entrypoint for. The
+  refusal is an in-band `verified` entry with `status=unsupported` and
+  `unsupported_reason=exact_name_authority_not_verifiable`, and no forward
+  resolver call is dispatched. The refusal follows the name, not the source that
+  named it: it applies both to a projected claim and to a name the live reverse
+  leg returns, and in the live case the check runs after the reverse leg and
+  before the forward call, so a refused name costs no forward dispatch and no
+  CCIP-read follow.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. A stored
   successful claim whose spelling does not normalize returns an `indexed` entry

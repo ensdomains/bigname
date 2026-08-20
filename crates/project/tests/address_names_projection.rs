@@ -365,6 +365,28 @@ async fn seed_next_binding(
     block_number: i64,
     active_from: &str,
 ) -> Result<()> {
+    seed_next_arm_binding(
+        pool,
+        namehash,
+        resource,
+        binding,
+        block_number,
+        active_from,
+        "ens_v1",
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_next_arm_binding(
+    pool: &PgPool,
+    namehash: &str,
+    resource: &str,
+    binding: &str,
+    block_number: i64,
+    active_from: &str,
+    authority_arm: &str,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO resources (
              resource_id, chain_id, block_hash, block_number, canonicality_state
@@ -389,7 +411,7 @@ async fn seed_next_binding(
              surface_binding_id, logical_name_id, resource_id, binding_kind,
              authority_arm, active_from, chain_id, block_hash, block_number, canonicality_state
          ) VALUES (
-             $1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v1',
+             $1::uuid, $2, $3::uuid, 'declared_registry_path', $8,
              $4::timestamptz, $5, $6, $7, 'canonical'
          )",
     )
@@ -400,8 +422,29 @@ async fn seed_next_binding(
     .bind(CHAIN)
     .bind(block_hash(block_number))
     .bind(block_number)
+    .bind(authority_arm)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Records a real intra-block position on a binding. Interpret provenances every binding with the
+/// transaction and log index of the event that created it; fixtures that leave it NULL cannot tell
+/// an inclusive position bound from an exclusive one.
+async fn seed_binding_provenance(
+    pool: &PgPool,
+    binding: &str,
+    transaction_index: i64,
+    log_index: i64,
+) -> Result<()> {
+    sqlx::query("UPDATE surface_bindings SET provenance = $2 WHERE surface_binding_id = $1::uuid")
+        .bind(binding)
+        .bind(json!({
+            "transaction_index": transaction_index,
+            "log_index": log_index
+        }))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -891,6 +934,332 @@ async fn a_stale_event_from_before_the_predecessor_binding_is_not_readmitted() -
     assert!(
         rows.is_empty(),
         "readmission reached past the immediate predecessor binding and published {rows:?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+const BOUNDARY_NAMEHASH: &str =
+    "0x1111111111111111111111111111111111111111111111111111111111111111";
+const BOUNDARY_LOGICAL: &str =
+    "ens:0x1111111111111111111111111111111111111111111111111111111111111111";
+const BOUNDARY_REGISTRAR_RESOURCE: &str = "20000000-0000-0000-0000-000000000001";
+const BOUNDARY_REGISTRY_RESOURCE: &str = "20000000-0000-0000-0000-000000000002";
+const BOUNDARY_REGISTRAR_BINDING: &str = "20000000-0000-0000-0000-000000000011";
+const BOUNDARY_REGISTRY_BINDING: &str = "20000000-0000-0000-0000-000000000012";
+const BOUNDARY_OWNER: &str = "0x88888888888888888888888888888888888888Bb";
+
+/// The transfer that opens the divergence lands in the same transaction as the binding that
+/// records it, at the same log position. That event is the whole point of the readmission, so the
+/// upper bound has to include its own position rather than stop just short of it.
+#[tokio::test]
+async fn an_authority_transfer_at_the_selected_binding_position_is_readmitted() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        BOUNDARY_NAMEHASH,
+        "boundary-fixture.eth",
+        BOUNDARY_REGISTRAR_RESOURCE,
+        BOUNDARY_REGISTRAR_BINDING,
+    )
+    .await?;
+    seed_next_binding(
+        &pool,
+        BOUNDARY_NAMEHASH,
+        BOUNDARY_REGISTRY_RESOURCE,
+        BOUNDARY_REGISTRY_BINDING,
+        9,
+        "2026-07-02T00:00:00Z",
+    )
+    .await?;
+    seed_binding_provenance(&pool, BOUNDARY_REGISTRY_BINDING, 0, 5).await?;
+    // Exactly at the selected binding's position, on the superseded registrar resource.
+    seed_authority_transferred(
+        &pool,
+        "fixture:boundary-owner",
+        BOUNDARY_NAMEHASH,
+        BOUNDARY_REGISTRAR_RESOURCE,
+        9,
+        5,
+        json!({
+            "node": BOUNDARY_NAMEHASH,
+            "owner": BOUNDARY_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    seed_authority_epoch_changed(
+        &pool,
+        "fixture:boundary-epoch",
+        BOUNDARY_NAMEHASH,
+        BOUNDARY_REGISTRY_RESOURCE,
+        9,
+        "registry_only",
+    )
+    .await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 10,
+            affected_from_block: 8,
+            affected_to_block: 10,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+
+    // Anti-vacuity: the bound is a real position comparison, not (block, -1, -1) on both sides.
+    let provenance: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT provenance FROM surface_bindings WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(BOUNDARY_REGISTRY_BINDING)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        provenance,
+        Some(json!({"transaction_index": 0, "log_index": 5}))
+    );
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT address, relation FROM address_names_current WHERE logical_name_id = $1",
+    )
+    .bind(BOUNDARY_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![(
+            BOUNDARY_OWNER.to_lowercase(),
+            "effective_controller".to_owned()
+        )],
+        "the transfer at the selected binding's own position was dropped"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+const CROSS_ARM_NAMEHASH: &str =
+    "0x2222222222222222222222222222222222222222222222222222222222222222";
+const CROSS_ARM_LOGICAL: &str =
+    "ens:0x2222222222222222222222222222222222222222222222222222222222222222";
+const CROSS_ARM_REGISTRAR_RESOURCE: &str = "30000000-0000-0000-0000-000000000001";
+const CROSS_ARM_OTHER_RESOURCE: &str = "30000000-0000-0000-0000-000000000002";
+const CROSS_ARM_REGISTRY_RESOURCE: &str = "30000000-0000-0000-0000-000000000003";
+const CROSS_ARM_REGISTRAR_BINDING: &str = "30000000-0000-0000-0000-000000000011";
+const CROSS_ARM_OTHER_BINDING: &str = "30000000-0000-0000-0000-000000000012";
+const CROSS_ARM_REGISTRY_BINDING: &str = "30000000-0000-0000-0000-000000000013";
+const CROSS_ARM_OWNER: &str = "0x99999999999999999999999999999999999999Cc";
+
+/// "Immediate predecessor" means the immediate predecessor *on the selected arm*. A binding from
+/// another arm sitting between the superseded resource and the selection must not stand in for it,
+/// or the same-arm divergence stops being recoverable the moment a name has any other-arm history.
+#[tokio::test]
+async fn an_other_arm_binding_does_not_stand_in_for_the_same_arm_predecessor() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        CROSS_ARM_NAMEHASH,
+        "cross-arm-fixture.eth",
+        CROSS_ARM_REGISTRAR_RESOURCE,
+        CROSS_ARM_REGISTRAR_BINDING,
+    )
+    .await?;
+    seed_authority_transferred(
+        &pool,
+        "fixture:cross-arm-owner",
+        CROSS_ARM_NAMEHASH,
+        CROSS_ARM_REGISTRAR_RESOURCE,
+        8,
+        1,
+        json!({
+            "node": CROSS_ARM_NAMEHASH,
+            "owner": CROSS_ARM_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    seed_next_arm_binding(
+        &pool,
+        CROSS_ARM_NAMEHASH,
+        CROSS_ARM_OTHER_RESOURCE,
+        CROSS_ARM_OTHER_BINDING,
+        9,
+        "2026-07-02T00:00:00Z",
+        "ens_v2",
+    )
+    .await?;
+    seed_next_binding(
+        &pool,
+        CROSS_ARM_NAMEHASH,
+        CROSS_ARM_REGISTRY_RESOURCE,
+        CROSS_ARM_REGISTRY_BINDING,
+        10,
+        "2026-07-03T00:00:00Z",
+    )
+    .await?;
+    seed_authority_epoch_changed(
+        &pool,
+        "fixture:cross-arm-epoch",
+        CROSS_ARM_NAMEHASH,
+        CROSS_ARM_REGISTRY_RESOURCE,
+        10,
+        "registry_only",
+    )
+    .await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 10,
+            affected_from_block: 8,
+            affected_to_block: 10,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+
+    // Anti-vacuity: the other-arm binding really is the most recent one before the selection.
+    let nearest_arm: String = sqlx::query_scalar(
+        "SELECT authority_arm FROM surface_bindings
+         WHERE logical_name_id = $1 AND block_number < 10
+         ORDER BY block_number DESC LIMIT 1",
+    )
+    .bind(CROSS_ARM_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(nearest_arm, "ens_v2");
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT address, relation FROM address_names_current WHERE logical_name_id = $1",
+    )
+    .bind(CROSS_ARM_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![(
+            CROSS_ARM_OWNER.to_lowercase(),
+            "effective_controller".to_owned()
+        )],
+        "an other-arm binding displaced the same-arm predecessor"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+const BASENAMES_NAMEHASH: &str =
+    "0x3333333333333333333333333333333333333333333333333333333333333333";
+const BASENAMES_LOGICAL: &str =
+    "ens:0x3333333333333333333333333333333333333333333333333333333333333333";
+const BASENAMES_REGISTRAR_RESOURCE: &str = "40000000-0000-0000-0000-000000000001";
+const BASENAMES_REGISTRY_RESOURCE: &str = "40000000-0000-0000-0000-000000000002";
+const BASENAMES_REGISTRAR_BINDING: &str = "40000000-0000-0000-0000-000000000011";
+const BASENAMES_REGISTRY_BINDING: &str = "40000000-0000-0000-0000-000000000012";
+const BASENAMES_OWNER: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaDd";
+
+/// Basenames reaches this exception with a real shape, not just a fabricated one: its registrar
+/// and its registry are both admitted source families, its registrar creates a non-registry
+/// predecessor binding, and its registrar writes the registry owner before emitting the event the
+/// binding is provenanced to, exactly as ENSv1 does
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L423-L425 @ basenames@1809bbc). So the
+/// recovered owner has to be correct for the Basenames arm too, not only for ENSv1.
+#[tokio::test]
+async fn a_basenames_registry_only_binding_preserves_its_divergent_owner() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        BASENAMES_NAMEHASH,
+        "divergent-basename.eth",
+        BASENAMES_REGISTRAR_RESOURCE,
+        BASENAMES_REGISTRAR_BINDING,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET authority_arm = 'basenames'
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(BASENAMES_REGISTRAR_BINDING)
+    .execute(&pool)
+    .await?;
+    seed_authority_transferred(
+        &pool,
+        "fixture:basenames-divergent-owner",
+        BASENAMES_NAMEHASH,
+        BASENAMES_REGISTRAR_RESOURCE,
+        8,
+        1,
+        json!({
+            "node": BASENAMES_NAMEHASH,
+            "owner": BASENAMES_OWNER,
+            "authority_kind": "registry_only"
+        }),
+    )
+    .await?;
+    seed_next_arm_binding(
+        &pool,
+        BASENAMES_NAMEHASH,
+        BASENAMES_REGISTRY_RESOURCE,
+        BASENAMES_REGISTRY_BINDING,
+        9,
+        "2026-07-02T00:00:00Z",
+        "basenames",
+    )
+    .await?;
+    seed_authority_epoch_changed(
+        &pool,
+        "fixture:basenames-divergent-epoch",
+        BASENAMES_NAMEHASH,
+        BASENAMES_REGISTRY_RESOURCE,
+        9,
+        "registry_only",
+    )
+    .await?;
+
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 10,
+            affected_from_block: 8,
+            affected_to_block: 10,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+
+    // Anti-vacuity: this is the Basenames arm end to end, not an ENSv1 selection in disguise.
+    let selected_arm: String = sqlx::query_scalar(
+        "SELECT binding.authority_arm
+         FROM name_current name
+         JOIN surface_bindings binding
+           ON binding.logical_name_id = name.logical_name_id
+          AND binding.resource_id = name.resource_id
+         WHERE name.logical_name_id = $1",
+    )
+    .bind(BASENAMES_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(selected_arm, "basenames");
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT address, relation FROM address_names_current WHERE logical_name_id = $1",
+    )
+    .bind(BASENAMES_LOGICAL)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![(
+            BASENAMES_OWNER.to_lowercase(),
+            "effective_controller".to_owned()
+        )],
+        "the Basenames divergent registry owner lost its relation"
     );
 
     database.cleanup().await?;
