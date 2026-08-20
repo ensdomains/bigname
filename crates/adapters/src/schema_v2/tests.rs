@@ -5007,6 +5007,7 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
     const NAME_WRAPPER: &str = "0x0000000000000000000000000000000000000046";
     const USER: &str = "0x0000000000000000000000000000000000000047";
     const NEXT_OWNER: &str = "0x0000000000000000000000000000000000000048";
+    const FINAL_OWNER: &str = "0x0000000000000000000000000000000000000049";
     const REGISTRAR_EXPIRY: u64 = 1_000_000;
     const WRAPPER_EXPIRY: u64 = REGISTRAR_EXPIRY + 90 * 24 * 60 * 60;
 
@@ -5101,6 +5102,24 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
         0,
         REGISTRAR,
     );
+    let final_transfer = raw_at(
+        v1_registrar::Transfer {
+            from: NEXT_OWNER.parse()?,
+            to: FINAL_OWNER.parse()?,
+            tokenId: U256::from_be_bytes(*labelhash),
+        }
+        .encode_log_data(),
+        4,
+        0,
+        REGISTRAR,
+    );
+    let block = |number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+    };
 
     let wrapped = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
@@ -5133,12 +5152,13 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
     let fallback_resource = fallback_event.resource_id.expect("fallback resource");
     let fallback_lineage = fallback_event.after_state["token_lineage_id"].clone();
 
-    let cold_prior = wrapped
+    let fallback_history = wrapped
         .normalized_events
         .iter()
         .chain(&fallback.normalized_events)
-        .map(prior_event)
+        .cloned()
         .collect::<Vec<_>>();
+    let cold_prior = seam::fold_prior_events(Vec::new(), &fallback_history, &[block(1), block(2)])?;
     let cold = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: manifests(),
@@ -5166,7 +5186,13 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
         admissions: admissions(),
         prior_events: Vec::new(),
         blocks: Vec::new(),
-        raw_logs: vec![wrap, unwrap, fallback_transfer, later_transfer],
+        raw_logs: vec![
+            wrap.clone(),
+            unwrap.clone(),
+            fallback_transfer.clone(),
+            later_transfer.clone(),
+            final_transfer.clone(),
+        ],
     })?;
     let full_later = full
         .normalized_events
@@ -5180,6 +5206,49 @@ fn wrapper_fallback_registrar_identity_matches_live_full_replay_and_cold_restore
     assert_eq!(full_later.resource_id, cold_later.resource_id);
     assert_eq!(full_later.before_state, cold_later.before_state);
     assert_eq!(full_later.after_state, cold_later.after_state);
+
+    let transfer_history = wrapped
+        .normalized_events
+        .iter()
+        .chain(&fallback.normalized_events)
+        .chain(&cold.normalized_events)
+        .cloned()
+        .collect::<Vec<_>>();
+    let transfer_prior = seam::fold_prior_events(
+        Vec::new(),
+        &transfer_history,
+        &[block(1), block(2), block(3)],
+    )?;
+    let retained_transfers = transfer_prior
+        .iter()
+        .filter(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "TokenControlTransferred"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(retained_transfers.len(), 1);
+    assert_eq!(retained_transfers[0].after_state["to"], NEXT_OWNER);
+    assert_eq!(
+        retained_transfers[0].after_state["fallback_from_wrapper"],
+        true
+    );
+    assert_eq!(retained_transfers[0].after_state["fallback_from"], USER);
+    let cold_final = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests(),
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events: transfer_prior,
+        blocks: Vec::new(),
+        raw_logs: vec![final_transfer],
+    })?;
+    let full_final = full
+        .normalized_events
+        .iter()
+        .filter(|event| event.block_number == Some(4))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(cold_final.normalized_events, full_final);
 
     let transfer_before_unwrap = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),

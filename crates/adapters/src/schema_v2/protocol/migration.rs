@@ -291,6 +291,16 @@ fn base_renewed(
         registrar_expiry,
         raw,
     );
+    let mut persisted = decoded.clone();
+    // BaseRegistrar renewals retained as ENSv1→ENSv2 migration evidence share one
+    // [interpreter state key](../../../../../docs/glossary.md#interpreter-state-key) per event
+    // kind and name. Carry the latest completed correlation onto every later numeric renewal so
+    // cold restore's latest readable row is self-contained.
+    if let Some(wrapper_expiry) =
+        state.retained_v1_correlated_wrapper_expiry(&selected.source.namespace, &namehash)
+    {
+        persisted["wrapper_expiry"] = Value::from(wrapper_expiry);
+    }
     // This scope is a persisted interpreter-state identity. It deliberately names the emitter
     // class rather than the candidate resource UUID so slice 2 reproduces the same scope.
     let scope = format!("migration-renewal:base-registrar:{logical_name_id}");
@@ -300,7 +310,7 @@ fn base_renewed(
             event_kind,
             Some(logical_name_id.clone()),
             format!("{event_kind}:{token_id}"),
-            decoded.clone(),
+            persisted.clone(),
             scope.clone(),
         ));
     }

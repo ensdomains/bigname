@@ -176,6 +176,9 @@ fn transfer(
         "namehash": raw_namehash,
         "token_lineage_id": linked.token_lineage_id.map(|id| id.to_string()),
     });
+    // A fallback-created registrar identity must be recoverable from the latest transfer row
+    // alone. Until a label-bearing registrar-controller registration or renewal replaces it,
+    // every transfer repeats the marker and uses that transfer's sender as the restore-time owner.
     if wrapper_fallback || linked.wrapper_fallback {
         after["fallback_from_wrapper"] = json!(true);
         after["fallback_from"] = json!(from);

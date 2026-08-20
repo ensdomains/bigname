@@ -2052,6 +2052,361 @@ fn unwrap_fallback_cannot_materialize_a_stale_wrapper_derived_registrar_expiry()
     Ok(())
 }
 
+#[test]
+fn compacted_restore_retains_sync_wrapper_expiry_after_later_numeric_renewal() -> anyhow::Result<()>
+{
+    let fixture = fixture()?;
+    let mut probe = wrapper_fallback_probe(&fixture, "shadowed-expiry")?;
+    probe.setup_logs.extend([
+        raw_at_transaction(
+            ControllerAdded {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 1,
+            0,
+            0,
+            &probe.registrar,
+        ),
+        base_renewed_at(
+            &fixture["addresses"],
+            U256::from_be_bytes(*probe.labelhash),
+            1_248,
+            probe.block + 1,
+            1,
+        ),
+        raw_at_transaction(
+            ControllerRemoved {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 1,
+            0,
+            2,
+            &probe.registrar,
+        ),
+        base_renewed_at(
+            &fixture["addresses"],
+            U256::from_be_bytes(*probe.labelhash),
+            2_248,
+            probe.block + 2,
+            0,
+        ),
+    ]);
+    let later_numeric_renewal = probe
+        .setup_logs
+        .last()
+        .cloned()
+        .expect("later numeric renewal");
+
+    let replay = replay_fallback_with_rank_one_restore(&fixture, probe)?;
+    let control = interpret_test_batch(batch(vec![later_numeric_renewal], &fixture, false))?;
+    let logical_name_id = replay
+        .full_tail
+        .iter()
+        .find(|event| event.event_kind == "TokenControlTransferred")
+        .and_then(|event| event.logical_name_id.as_deref())
+        .expect("fallback transfer logical name");
+    let full_renewals = replay
+        .setup_output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.source_family == "ens_v2_migration_l1"
+                && event.event_kind == "RegistrationRenewed"
+                && event.logical_name_id.as_deref() == Some(logical_name_id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(full_renewals.len(), 2);
+    let control_renewal = control
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v2_migration_l1"
+                && event.event_kind == "RegistrationRenewed"
+        })
+        .expect("control historical renewal");
+    assert_eq!(
+        full_renewals[1].migration_correlation_ids, control_renewal.migration_correlation_ids,
+        "restore-only expiry must not change operation-local migration evidence identity"
+    );
+    assert_eq!(
+        full_renewals[0].raw_fact_ref[seam::INTERPRETER_STATE_KEY],
+        full_renewals[1].raw_fact_ref[seam::INTERPRETER_STATE_KEY],
+        "the later numeric renewal must shadow the synchronized renewal under production compaction"
+    );
+    assert_eq!(
+        replay
+            .compacted_prior
+            .iter()
+            .filter(|event| {
+                event.source_family == "ens_v2_migration_l1"
+                    && event.event_kind == "RegistrationRenewed"
+                    && event.logical_name_id.as_deref() == Some(logical_name_id)
+            })
+            .count(),
+        1,
+        "rank-1 restore must retain only the latest renewal row for this state key"
+    );
+    assert_fallback_replay_matches(&replay, 1_248);
+    Ok(())
+}
+
+#[test]
+fn registrar_controller_envelope_cannot_cross_transaction_boundaries() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let mut probe = wrapper_fallback_probe(&fixture, "cross-transaction")?;
+    probe.setup_logs.extend([
+        raw_at_transaction(
+            ControllerAdded {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 1,
+            0,
+            0,
+            &probe.registrar,
+        ),
+        base_renewed_at(
+            &fixture["addresses"],
+            U256::from_be_bytes(*probe.labelhash),
+            1_248,
+            probe.block + 2,
+            0,
+        ),
+        raw_at_transaction(
+            ControllerRemoved {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 3,
+            0,
+            0,
+            &probe.registrar,
+        ),
+    ]);
+
+    let replay = replay_fallback_with_rank_one_restore(&fixture, probe)?;
+    assert_fallback_replay_matches(&replay, 248);
+    Ok(())
+}
+
+#[test]
+fn registrar_controller_envelope_requires_matching_controller_removal() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let mut probe = wrapper_fallback_probe(&fixture, "matching-removal")?;
+    probe.setup_logs.extend([
+        raw_at_transaction(
+            ControllerAdded {
+                controller: probe.wrapper.parse()?,
+            }
+            .encode_log_data(),
+            probe.block + 1,
+            0,
+            0,
+            &probe.registrar,
+        ),
+        base_renewed_at(
+            &fixture["addresses"],
+            U256::from_be_bytes(*probe.labelhash),
+            1_248,
+            probe.block + 1,
+            1,
+        ),
+        raw_at_transaction(
+            ControllerRemoved {
+                controller: Address::from([0x99; 20]),
+            }
+            .encode_log_data(),
+            probe.block + 1,
+            0,
+            2,
+            &probe.registrar,
+        ),
+    ]);
+
+    let replay = replay_fallback_with_rank_one_restore(&fixture, probe)?;
+    assert_fallback_replay_matches(&replay, 248);
+    Ok(())
+}
+
+struct WrapperFallbackProbe {
+    registrar: String,
+    wrapper: String,
+    registry: String,
+    labelhash: B256,
+    block: i64,
+    unwrap_block: i64,
+    setup_logs: Vec<RawLogInput>,
+    tail_logs: Vec<RawLogInput>,
+}
+
+fn wrapper_fallback_probe(fixture: &Value, label: &str) -> anyhow::Result<WrapperFallbackProbe> {
+    let addresses = &fixture["addresses"];
+    let registrar = addresses["base_registrar"].as_str().unwrap().to_owned();
+    let wrapper = addresses["name_wrapper"].as_str().unwrap().to_owned();
+    let registry = "0x0000000000000000000000000000000000000099".to_owned();
+    let owner = Address::from([0x51; 20]);
+    let labelhash = keccak256(label.as_bytes());
+    let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+    let block = fixture["scenarios"]["R-05"]["configuration_block"]
+        .as_i64()
+        .unwrap();
+    let initial_registrar_expiry = 248_u64;
+    let initial_wrapper_expiry = initial_registrar_expiry + (90 * 24 * 60 * 60);
+    let unwrap_block = i64::try_from(initial_wrapper_expiry + 1)?;
+    let mut dns_name = Vec::with_capacity(label.len() + 6);
+    dns_name.push(u8::try_from(label.len())?);
+    dns_name.extend_from_slice(label.as_bytes());
+    dns_name.extend_from_slice(b"\x03eth\0");
+    let setup_logs = vec![
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            0,
+            &registry,
+        ),
+        raw_at_transaction(
+            super::NameWrapped {
+                node: node.parse()?,
+                name: dns_name.into(),
+                owner,
+                fuses: (1 << 16) | (1 << 17),
+                expiry: initial_wrapper_expiry,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            1,
+            &wrapper,
+        ),
+    ];
+    let tail_logs = vec![
+        raw_at_transaction(
+            super::NameUnwrapped {
+                node: node.parse()?,
+                owner,
+            }
+            .encode_log_data(),
+            unwrap_block,
+            0,
+            0,
+            &wrapper,
+        ),
+        raw_at_transaction(
+            super::v1_registrar::Transfer {
+                from: wrapper.parse()?,
+                to: owner,
+                tokenId: U256::from_be_bytes(*labelhash),
+            }
+            .encode_log_data(),
+            unwrap_block,
+            0,
+            1,
+            &registrar,
+        ),
+    ];
+    Ok(WrapperFallbackProbe {
+        registrar,
+        wrapper,
+        registry,
+        labelhash,
+        block,
+        unwrap_block,
+        setup_logs,
+        tail_logs,
+    })
+}
+
+struct CompactedFallbackReplay {
+    setup_output: BatchOutput,
+    compacted_prior: Vec<PriorEventInput>,
+    full_tail: Vec<NormalizedEvent>,
+    cold_output: BatchOutput,
+}
+
+fn replay_fallback_with_rank_one_restore(
+    fixture: &Value,
+    probe: WrapperFallbackProbe,
+) -> anyhow::Result<CompactedFallbackReplay> {
+    let mut full_input = batch(
+        probe
+            .setup_logs
+            .iter()
+            .chain(&probe.tail_logs)
+            .cloned()
+            .collect(),
+        fixture,
+        false,
+    );
+    admit_v1_registry(&mut full_input, &probe.registry);
+    let full = interpret_test_batch(full_input)?;
+
+    let mut setup_input = batch(probe.setup_logs.clone(), fixture, false);
+    admit_v1_registry(&mut setup_input, &probe.registry);
+    let setup_output = interpret_test_batch(setup_input)?;
+    let mut blocks = probe
+        .setup_logs
+        .iter()
+        .map(|raw| RawBlockInput {
+            chain_id: raw.chain_id.clone(),
+            block_hash: raw.block_hash.clone(),
+            block_number: raw.block_number,
+            block_timestamp: raw.block_timestamp,
+            canonicality_state: raw.canonicality_state.clone(),
+        })
+        .collect::<Vec<_>>();
+    blocks.dedup_by(|left, right| {
+        left.block_number == right.block_number && left.block_hash == right.block_hash
+    });
+    let compacted_prior =
+        seam::fold_prior_events(Vec::new(), &setup_output.normalized_events, &blocks)?;
+
+    let mut cold_input = batch(probe.tail_logs, fixture, false);
+    admit_v1_registry(&mut cold_input, &probe.registry);
+    cold_input.prior_events = compacted_prior.clone();
+    let cold_output = interpret_test_batch(cold_input)?;
+    let full_tail = full
+        .normalized_events
+        .into_iter()
+        .filter(|event| event.block_number == Some(probe.unwrap_block))
+        .collect();
+    Ok(CompactedFallbackReplay {
+        setup_output,
+        compacted_prior,
+        full_tail,
+        cold_output,
+    })
+}
+
+fn assert_fallback_replay_matches(replay: &CompactedFallbackReplay, expected_expiry: u64) {
+    fn fallback(events: &[NormalizedEvent]) -> &NormalizedEvent {
+        events
+            .iter()
+            .find(|event| {
+                event.source_family == "ens_v1_registrar_l1"
+                    && event.event_kind == "TokenControlTransferred"
+            })
+            .expect("ordered unwrap transfer materializes registrar authority")
+    }
+    let full = fallback(&replay.full_tail);
+    let cold = fallback(&replay.cold_output.normalized_events);
+    assert_eq!(
+        cold.after_state, full.after_state,
+        "rank-1-compacted cold restore must match full replay"
+    );
+    assert_eq!(full.after_state["expiry"], expected_expiry);
+    assert_eq!(
+        replay.cold_output.normalized_events, replay.full_tail,
+        "rank-1-compacted cold restore must reproduce the full unwrap output"
+    );
+}
+
 fn admit_v1_registry(input: &mut BatchInput, address: &str) {
     input.manifests.push(manifest_with_events(
         V1_REGISTRY_MANIFEST_ID,

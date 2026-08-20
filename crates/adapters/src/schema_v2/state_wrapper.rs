@@ -116,6 +116,16 @@ impl State {
         self.v1_correlated_wrapper_expiries.insert(key, expiry);
     }
 
+    pub(in crate::schema_v2) fn retained_v1_correlated_wrapper_expiry(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<u64> {
+        self.v1_correlated_wrapper_expiries
+            .get(&v1_key(namespace, namehash))
+            .copied()
+    }
+
     // ENSv1 stores the wrapped .eth expiry with the registrar grace period added. A completed
     // ENSv1→ENSv2 syncWrapper envelope can update that expiry without an ordinary NameWrapper
     // event, so fallback identity materialization uses the later of those two retained facts.

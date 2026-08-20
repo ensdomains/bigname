@@ -274,6 +274,11 @@ fn correlate_controllers(
                 for event in output.normalized_events.iter_mut().filter(|event| {
                     event.source_family == MIGRATION_FAMILY && same_position(event, &base.raw)
                 }) {
+                    let wrapper_expiry = event
+                        .after_state
+                        .get("wrapper_expiry")
+                        .and_then(Value::as_u64)
+                        .map_or(wrapper_expiry, |retained| retained.max(wrapper_expiry));
                     event.after_state["wrapper_expiry"] = Value::from(wrapper_expiry);
                 }
             }
