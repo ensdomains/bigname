@@ -5,6 +5,9 @@ use anyhow::bail;
 use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
 use serde_json::{Value, json};
 
+mod boundary;
+pub(super) use boundary::materialize_v2_boundary;
+
 use super::{
     catalog::Selected,
     common::{

@@ -99,6 +99,7 @@ pub(super) struct State {
     v2_expiries: OrdSet<(u64, String)>,
     v2_dirty_tokens: OrdSet<String>,
     v2_dirty_registries: OrdSet<String>,
+    v2_terminal_closure_hits: OrdSet<(String, String)>,
     v2_token_by_upstream_resource_index: OrdMap<(String, String), OrdSet<String>>,
     v2_token_by_name_index: OrdMap<(String, String), OrdSet<String>>,
     v2_tokens_by_current_name_index: OrdMap<String, OrdSet<String>>,

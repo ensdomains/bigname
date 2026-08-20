@@ -9105,6 +9105,546 @@ fn a_reservation_never_closes_another_holders_binding_on_the_same_name() -> anyh
 }
 
 #[test]
+fn release_the_winner_reasserts_the_surviving_holders_persisted_binding() -> anyhow::Result<()> {
+    assert_contested_surface_departure_reasserts_survivor(true)
+}
+
+#[test]
+fn release_the_loser_reasserts_the_surviving_holders_persisted_binding() -> anyhow::Result<()> {
+    assert_contested_surface_departure_reasserts_survivor(false)
+}
+
+#[test]
+fn topology_departure_reasserts_the_survivor_across_replay_shapes() -> anyhow::Result<()> {
+    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059";
+    let departure = raw_at(
+        v2_registry::ParentUpdated {
+            parent: Address::ZERO,
+            label: "eth".to_owned(),
+            sender: CONTRACT.parse()?,
+        }
+        .encode_log_data(),
+        6,
+        0,
+        CLAIM_REGISTRY,
+    );
+    let setup_logs = contested_claim_path_logs(100)?;
+    let mut full_logs = setup_logs.clone();
+    full_logs.push(departure.clone());
+    let full = interpret_test_batch(contested_claim_path_input(
+        full_logs,
+        Vec::new(),
+        Vec::new(),
+    )?)?;
+    let survivor_resource = contested_claim_path_survivor(&full, 6);
+
+    let (setup, session) = interpret_test_batch_incremental(
+        contested_claim_path_input(setup_logs, Vec::new(), Vec::new())?,
+        None,
+    )?;
+    let (incremental, _) = interpret_test_batch_incremental(
+        contested_claim_path_input(vec![departure.clone()], Vec::new(), Vec::new())?,
+        Some(session),
+    )?;
+    let prior = seam::fold_prior_events(
+        Vec::new(),
+        &setup.normalized_events,
+        &(1..=5).map(test_block).collect::<Vec<_>>(),
+    )?;
+    let compacted = interpret_test_batch(contested_claim_path_input(
+        vec![departure],
+        prior,
+        Vec::new(),
+    )?)?;
+
+    assert_eq!(incremental, compacted);
+    assert_eq!(
+        departure_identity_effects(&full, 6),
+        departure_identity_effects(&incremental, 6)
+    );
+    assert_eq!(
+        contested_claim_path_survivor(&incremental, 6),
+        survivor_resource
+    );
+    Ok(())
+}
+
+#[test]
+fn contested_expiry_reasserts_the_survivor_across_replay_shapes() -> anyhow::Result<()> {
+    let setup_logs = contested_claim_path_logs(7)?;
+    let full = interpret_test_batch(contested_claim_path_input(
+        setup_logs.clone(),
+        Vec::new(),
+        (1..=7).map(test_block).collect(),
+    )?)?;
+    let survivor_resource = contested_claim_path_survivor(&full, 7);
+
+    let (setup, session) = interpret_test_batch_incremental(
+        contested_claim_path_input(setup_logs, Vec::new(), Vec::new())?,
+        None,
+    )?;
+    let boundary_input = || contested_claim_path_input(Vec::new(), Vec::new(), vec![test_block(7)]);
+    let (incremental, _) = interpret_test_batch_incremental(boundary_input()?, Some(session))?;
+    let prior = seam::fold_prior_events(
+        Vec::new(),
+        &setup.normalized_events,
+        &(1..=5).map(test_block).collect::<Vec<_>>(),
+    )?;
+    let compacted = interpret_test_batch(contested_claim_path_input(
+        Vec::new(),
+        prior,
+        vec![test_block(7)],
+    )?)?;
+
+    assert_eq!(incremental, compacted);
+    assert_eq!(
+        departure_identity_effects(&full, 7),
+        departure_identity_effects(&incremental, 7)
+    );
+    assert_eq!(
+        contested_claim_path_survivor(&incremental, 7),
+        survivor_resource
+    );
+    Ok(())
+}
+
+fn contested_claim_path_survivor(output: &BatchOutput, boundary_block: i64) -> Uuid {
+    let replacement = output
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.block_number == boundary_block)
+        .expect("the closure boundary reasserts a binding");
+    let persisted = simulate_binding_writer(output);
+    let open = persisted
+        .iter()
+        .filter(|binding| {
+            binding.logical_name_id == replacement.logical_name_id
+                && binding.authority_arm == "ens_v2"
+                && binding.active_to.is_none()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(open.len(), 1, "unexpected binding history: {persisted:#?}");
+    assert_eq!(open[0].position.0, boundary_block);
+    assert_eq!(open[0].resource_id, replacement.resource_id);
+    let fabricated_lifecycle = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(boundary_block)
+                && event.resource_id == Some(replacement.resource_id)
+                && matches!(
+                    event.event_kind.as_str(),
+                    "SurfaceUnbound"
+                        | "RegistrationReleased"
+                        | "SurfaceBound"
+                        | "RegistrationGranted"
+                        | "AuthorityTransferred"
+                        | "ExpiryChanged"
+                        | "ResolverChanged"
+                        | "SubregistryChanged"
+                )
+        })
+        .map(|event| event.event_kind.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        fabricated_lifecycle.is_empty(),
+        "reassertion fabricated survivor lifecycle: {fabricated_lifecycle:?}"
+    );
+    assert!(output.normalized_events.iter().any(|event| {
+        event.block_number == Some(boundary_block)
+            && event.logical_name_id.as_deref() == Some(&replacement.logical_name_id)
+            && event.event_kind == seam::PREIMAGE_OBSERVATION_EVENT_KIND
+    }));
+    replacement.resource_id
+}
+
+fn contested_claim_path_input(
+    raw_logs: Vec<RawLogInput>,
+    prior_events: Vec<PriorEventInput>,
+    blocks: Vec<RawBlockInput>,
+) -> anyhow::Result<BatchInput> {
+    const ROOT_MANIFEST: i64 = 94;
+    const REGISTRY_MANIFEST: i64 = 95;
+    const CLAIM_ROOT: &str = "0x0000000000000000000000000000000000000058";
+    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059";
+    let registry_events = [
+        (
+            "LabelRegistered",
+            "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+            &["registry"][..],
+            &["RegistrationGranted"][..],
+        ),
+        (
+            "TokenResource",
+            "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+            &["registry"][..],
+            &["TokenResourceLinked"][..],
+        ),
+        (
+            "ParentUpdated",
+            "event ParentUpdated(address indexed parent, string label, address indexed sender)",
+            &["registry"][..],
+            &["ParentChanged"][..],
+        ),
+    ];
+    let root_events = [
+        registry_events[0],
+        (
+            "SubregistryUpdated",
+            "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+            &["registry"][..],
+            &["SubregistryChanged"][..],
+        ),
+    ];
+    let mut claim_root = admission(ROOT_MANIFEST, "registry");
+    claim_root.address = CLAIM_ROOT.to_owned();
+    claim_root.contract_instance_id = super::common::contract_id(CHAIN, CLAIM_ROOT);
+    let mut claim_registry = admission(REGISTRY_MANIFEST, "registry");
+    claim_registry.address = CLAIM_REGISTRY.to_owned();
+    claim_registry.contract_instance_id = super::common::contract_id(CHAIN, CLAIM_REGISTRY);
+    claim_registry.role = None;
+    claim_registry.discovery_edge_kind = Some("registry_announcement".to_owned());
+    claim_registry.discovery_from_contract_instance_id = Some(claim_root.contract_instance_id);
+    claim_registry.discovery_observation_key = Some("contested-claim-registry".to_owned());
+    Ok(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![
+            manifest_with_events(ROOT_MANIFEST, "ens", "ens_v2_root_l1", &root_events),
+            manifest_with_events(
+                REGISTRY_MANIFEST,
+                "ens",
+                "ens_v2_registry_l1",
+                &registry_events,
+            ),
+        ],
+        discovery_rules: vec![DiscoveryRuleInput {
+            manifest_id: ROOT_MANIFEST,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }],
+        admissions: vec![
+            admission(REGISTRY_MANIFEST, "registry"),
+            claim_root,
+            claim_registry,
+        ],
+        prior_events,
+        blocks,
+        raw_logs,
+    })
+}
+
+fn contested_claim_path_logs(parent_expiry: u64) -> anyhow::Result<Vec<RawLogInput>> {
+    const CLAIM_ROOT: &str = "0x0000000000000000000000000000000000000058";
+    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059";
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let alpha = versioned_token("alpha", 1);
+    let eth = versioned_token("eth", 1);
+    Ok(vec![
+        raw_at(
+            v2_registry::LabelRegistered {
+                tokenId: alpha,
+                labelHash: keccak256(b"alpha"),
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 100,
+                sender,
+            }
+            .encode_log_data(),
+            1,
+            0,
+            CONTRACT,
+        ),
+        raw_at(
+            v2_registry::TokenResource {
+                tokenId: alpha,
+                resource: U256::from(0xaa),
+            }
+            .encode_log_data(),
+            1,
+            1,
+            CONTRACT,
+        ),
+        raw_at(
+            v2_registry::LabelRegistered {
+                tokenId: eth,
+                labelHash: keccak256(b"eth"),
+                label: "eth".to_owned(),
+                owner,
+                expiry: parent_expiry,
+                sender,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            CLAIM_ROOT,
+        ),
+        raw_at(
+            v2_registry::LabelRegistered {
+                tokenId: alpha,
+                labelHash: keccak256(b"alpha"),
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 100,
+                sender,
+            }
+            .encode_log_data(),
+            3,
+            0,
+            CLAIM_REGISTRY,
+        ),
+        raw_at(
+            v2_registry::TokenResource {
+                tokenId: alpha,
+                resource: U256::from(0xbb),
+            }
+            .encode_log_data(),
+            3,
+            1,
+            CLAIM_REGISTRY,
+        ),
+        raw_at(
+            v2_registry::SubregistryUpdated {
+                tokenId: eth,
+                subregistry: CLAIM_REGISTRY.parse()?,
+                sender,
+            }
+            .encode_log_data(),
+            4,
+            0,
+            CLAIM_ROOT,
+        ),
+        raw_at(
+            v2_registry::ParentUpdated {
+                parent: CLAIM_ROOT.parse()?,
+                label: "eth".to_owned(),
+                sender,
+            }
+            .encode_log_data(),
+            5,
+            0,
+            CLAIM_REGISTRY,
+        ),
+    ])
+}
+
+fn assert_contested_surface_departure_reasserts_survivor(
+    release_winner: bool,
+) -> anyhow::Result<()> {
+    const RIVAL: &str = "0x0000000000000000000000000000000000000069";
+    const MANIFEST_ID: i64 = 93;
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let token = versioned_token("alpha", 1);
+    let manifest = manifest_with_events(
+        MANIFEST_ID,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["registry"],
+                &["TokenResourceLinked"],
+            ),
+            (
+                "LabelUnregistered",
+                "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)",
+                &["registry"],
+                &["RegistrationReleased"],
+            ),
+        ],
+    );
+    let mut rival_admission = admission(MANIFEST_ID, "registry");
+    rival_admission.address = RIVAL.to_owned();
+    rival_admission.contract_instance_id = super::common::contract_id(CHAIN, RIVAL);
+    let admissions = || vec![admission(MANIFEST_ID, "registry"), rival_admission.clone()];
+    let register = |emitter: &str, resource, block| {
+        vec![
+            raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: token,
+                    labelHash: keccak256(b"alpha"),
+                    label: "alpha".to_owned(),
+                    owner,
+                    expiry: 5_000,
+                    sender,
+                }
+                .encode_log_data(),
+                block,
+                0,
+                emitter,
+            ),
+            raw_at(
+                v2_registry::TokenResource {
+                    tokenId: token,
+                    resource,
+                }
+                .encode_log_data(),
+                block,
+                1,
+                emitter,
+            ),
+        ]
+    };
+    let mut setup_logs = register(CONTRACT, U256::from(0xaa), 1);
+    setup_logs.extend(register(RIVAL, U256::from(0xbb), 2));
+    let departed = if release_winner { RIVAL } else { CONTRACT };
+    let survivor_link_block = if release_winner { 1 } else { 2 };
+    let release = raw_at(
+        v2_registry::LabelUnregistered {
+            tokenId: token,
+            sender,
+        }
+        .encode_log_data(),
+        3,
+        0,
+        departed,
+    );
+    let input = |raw_logs, prior_events| BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: admissions(),
+        prior_events,
+        blocks: Vec::new(),
+        raw_logs,
+    };
+
+    let mut all_logs = setup_logs.clone();
+    all_logs.push(release.clone());
+    let full = interpret_test_batch(input(all_logs, Vec::new()))?;
+    let survivor_resource = full
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "TokenResourceLinked"
+                && event.block_number == Some(survivor_link_block)
+        })
+        .and_then(|event| event.resource_id)
+        .expect("the surviving token links a resource");
+    let logical_name_id = full
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.resource_id == survivor_resource)
+        .map(|binding| binding.logical_name_id.clone())
+        .expect("the surviving token initially binds the contested surface");
+    let survivor_lifecycle = full
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(3)
+                && event.resource_id == Some(survivor_resource)
+                && matches!(
+                    event.event_kind.as_str(),
+                    "SurfaceUnbound"
+                        | "RegistrationReleased"
+                        | "SurfaceBound"
+                        | "RegistrationGranted"
+                        | "AuthorityTransferred"
+                        | "ExpiryChanged"
+                        | "ResolverChanged"
+                        | "SubregistryChanged"
+                )
+        })
+        .map(|event| event.event_kind.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        survivor_lifecycle.is_empty(),
+        "identity reassertion must not fabricate survivor lifecycle events: {survivor_lifecycle:?}"
+    );
+    let persisted = simulate_binding_writer(&full);
+    let open = persisted
+        .iter()
+        .filter(|row| {
+            row.live()
+                && row.logical_name_id == logical_name_id
+                && row.authority_arm == "ens_v2"
+                && row.active_to.is_none()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        open.len(),
+        1,
+        "the contested surface must retain exactly one open persisted ENSv2 binding: {persisted:#?}"
+    );
+    assert_eq!(open[0].resource_id, survivor_resource);
+    assert_eq!(
+        open[0].position.0, 3,
+        "the departure boundary must reassert the elected survivor"
+    );
+
+    let (setup, session) = interpret_test_batch_incremental(input(setup_logs, Vec::new()), None)?;
+    // The departure is the last and only raw log in this batch; its survivor reassertion cannot
+    // wait for another batch-scoped refresh.
+    let (incremental, _) =
+        interpret_test_batch_incremental(input(vec![release.clone()], Vec::new()), Some(session))?;
+    let prior = seam::fold_prior_events(
+        Vec::new(),
+        &setup.normalized_events,
+        &[test_block(1), test_block(2)],
+    )?;
+    let compacted = interpret_test_batch(input(vec![release], prior))?;
+    assert_eq!(
+        incremental, compacted,
+        "retained-session incremental interpretation must match compacted cold restore"
+    );
+    assert_eq!(
+        departure_identity_effects(&full, 3),
+        departure_identity_effects(&incremental, 3),
+        "full replay must emit the same departure identity transition as incremental interpretation"
+    );
+    Ok(())
+}
+
+fn departure_identity_effects(
+    output: &BatchOutput,
+    block_number: i64,
+) -> (
+    Vec<NormalizedEvent>,
+    Vec<SurfaceBinding>,
+    Vec<BindingClosure>,
+) {
+    (
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| event.block_number == Some(block_number))
+            .cloned()
+            .collect(),
+        output
+            .surface_bindings
+            .iter()
+            .filter(|binding| binding.block_number == block_number)
+            .cloned()
+            .collect(),
+        output
+            .binding_closures
+            .iter()
+            .filter(|closure| closure.block_number == block_number)
+            .cloned()
+            .collect(),
+    )
+}
+
+fn test_block(block_number: i64) -> RawBlockInput {
+    RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{block_number}"),
+        block_number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(block_number),
+        canonicality_state: "canonical".to_owned(),
+    }
+}
+
+#[test]
 fn discovery_reconciliation_keys_are_scoped_per_registry_token() -> anyhow::Result<()> {
     let known_target = "0x0000000000000000000000000000000000000011";
     let known_target_id = Uuid::from_u128(1_313);
@@ -12237,6 +12777,7 @@ fn assert_batch_referential_integrity(
 struct SimulatedBinding {
     surface_binding_id: Uuid,
     logical_name_id: String,
+    resource_id: Uuid,
     chain_id: String,
     authority_arm: String,
     position: (i64, i64, i64),
@@ -12349,6 +12890,7 @@ fn simulate_binding_writer(output: &BatchOutput) -> Vec<SimulatedBinding> {
                 rows.push(SimulatedBinding {
                     surface_binding_id: binding.surface_binding_id,
                     logical_name_id: binding.logical_name_id.clone(),
+                    resource_id: binding.resource_id,
                     chain_id: binding.chain_id.clone(),
                     authority_arm: binding.authority_arm.clone(),
                     position,

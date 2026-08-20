@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::schema_v2::{
     protocol::{BindingClosureDraft, EventDraft, Interpreted, NameDraft, ShadowNameDraft},
-    state::{V2NameTransition, V2TokenState},
+    state::{State, V2NameTransition, V2TokenState},
 };
 
 pub(super) fn append_v2_name_transitions(
@@ -14,13 +14,17 @@ pub(super) fn append_v2_name_transitions(
     skip: Option<(&str, &str)>,
 ) {
     for transition in transitions {
-        if skip.is_some_and(|(registry, token_id)| {
-            registry.eq_ignore_ascii_case(&transition.registry)
-                && token_id.eq_ignore_ascii_case(&transition.token_id)
-        }) {
+        let identity_reassertion = transition.previous == transition.current
+            && transition.previous_shadow == transition.current_shadow;
+        if !identity_reassertion
+            && skip.is_some_and(|(registry, token_id)| {
+                registry.eq_ignore_ascii_case(&transition.registry)
+                    && token_id.eq_ignore_ascii_case(&transition.token_id)
+            })
+        {
             continue;
         }
-        if let Some(previous) = transition.previous.as_ref() {
+        if !identity_reassertion && let Some(previous) = transition.previous.as_ref() {
             if transition.registration.is_some() {
                 output.binding_closures.push(BindingClosureDraft {
                     logical_name_id: previous.logical_name_id.clone(),
@@ -115,7 +119,7 @@ pub(super) fn append_v2_name_transitions(
             source_kind: format!("{source_event}_registry_suffix"),
             preimage_metadata: None,
         });
-        if let Some(resource_id) = bound_resource {
+        if !identity_reassertion && let Some(resource_id) = bound_resource {
             output.events.push(EventDraft {
                 event_kind: "SurfaceBound".to_owned(),
                 logical_name_id: Some(current.logical_name_id.clone()),
@@ -151,6 +155,39 @@ pub(super) fn boundary_expiration(transition: V2NameTransition) -> anyhow::Resul
         append_removed_name(&mut output, &transition, "RegistryPathExpired");
     }
     Ok(output)
+}
+
+pub(in crate::schema_v2) fn boundary_reassertion(
+    transition: &V2NameTransition,
+    block: &crate::schema_v2::RawBlockInput,
+) -> Option<Interpreted> {
+    if transition.previous != transition.current
+        || transition.previous_shadow != transition.current_shadow
+    {
+        return None;
+    }
+    let raw = crate::schema_v2::RawLogInput {
+        chain_id: block.chain_id.clone(),
+        block_hash: block.block_hash.clone(),
+        block_number: block.block_number,
+        block_timestamp: block.block_timestamp,
+        canonicality_state: block.canonicality_state.clone(),
+        transaction_hash: format!("block-boundary:{}", block.block_hash),
+        transaction_index: -1,
+        log_index: -1,
+        emitting_address: transition.registry.clone(),
+        topics: Vec::new(),
+        data: Vec::new(),
+    };
+    let mut output = Interpreted::new();
+    append_v2_name_transitions(
+        &mut output,
+        vec![transition.clone()],
+        &raw,
+        "RegistryPathExpired",
+        None,
+    );
+    Some(output)
 }
 
 fn append_removed_name(
@@ -351,6 +388,7 @@ fn transition_scope(transition: &V2NameTransition, source_event: &str) -> String
 
 pub(super) fn append_terminal_boundaries(
     output: &mut Interpreted,
+    state: &mut State,
     linked: Option<&V2TokenState>,
     token_id: &str,
     source_event: &str,
@@ -367,6 +405,7 @@ pub(super) fn append_terminal_boundaries(
             logical_name_id: logical_name_id.clone(),
             authority_arm: "ens_v2".to_owned(),
         });
+        state.record_v2_terminal_closure_hit(logical_name_id, "ens_v2");
     }
     if linked.registration.is_some() && linked.resource_id.is_some() && logical_name_id.is_some() {
         output.events.push(EventDraft {

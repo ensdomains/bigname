@@ -248,3 +248,56 @@ pub(super) fn preimage_event(
         before_state_explicit: true,
     }
 }
+
+pub(super) fn boundary_preimage_event(
+    source: &ManifestSource,
+    block: &RawBlockInput,
+    logical_name_id: Option<String>,
+    identity_suffix: &str,
+    after_state: serde_json::Value,
+) -> NormalizedEvent {
+    let state_scope = format!("raw-block:preimage:{identity_suffix}");
+    let state_key = interpreter_state_key(
+        &source.namespace,
+        logical_name_id.as_deref(),
+        None,
+        PREIMAGE_OBSERVATION_EVENT_KIND,
+        &source.source_family,
+        &state_scope,
+    );
+    NormalizedEvent {
+        event_identity: format!(
+            "raw_block_preimage_observation:{}:{}:{}:{identity_suffix}",
+            source.manifest_id, block.chain_id, block.block_hash,
+        ),
+        namespace: source.namespace.clone(),
+        logical_name_id,
+        resource_id: None,
+        event_kind: PREIMAGE_OBSERVATION_EVENT_KIND.to_owned(),
+        source_family: source.source_family.clone(),
+        manifest_version: source.manifest_version,
+        source_manifest_id: Some(source.manifest_id),
+        chain_id: block.chain_id.clone(),
+        block_number: Some(block.block_number),
+        block_hash: Some(block.block_hash.clone()),
+        transaction_hash: None,
+        transaction_index: None,
+        log_index: None,
+        raw_fact_ref: json!({
+            "kind":"raw_block",
+            "chain_id":block.chain_id,
+            "block_hash":block.block_hash,
+            "block_number":block.block_number,
+            "block_timestamp":block.block_timestamp.unix_timestamp(),
+            "state_scope":state_scope,
+            "interpreter_state_key":state_key,
+        }),
+        derivation_kind: "raw_block_preimage_observation".to_owned(),
+        canonicality_state: block.canonicality_state.clone(),
+        before_state: json!({}),
+        after_state,
+        migration_correlation_ids: Vec::new(),
+        consumer_visibility: "activated".to_owned(),
+        before_state_explicit: true,
+    }
+}

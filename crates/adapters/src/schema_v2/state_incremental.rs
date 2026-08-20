@@ -46,6 +46,7 @@ impl State {
             v2_expiries: OrdSet::new(),
             v2_dirty_tokens: OrdSet::new(),
             v2_dirty_registries: OrdSet::new(),
+            v2_terminal_closure_hits: OrdSet::new(),
             v2_token_by_upstream_resource_index: OrdMap::new(),
             v2_token_by_name_index: OrdMap::new(),
             v2_tokens_by_current_name_index: OrdMap::new(),
@@ -71,6 +72,17 @@ impl State {
 
     pub(in crate::schema_v2) fn apply_prior_event_delta(&mut self, prior: Vec<PriorEventInput>) {
         self.apply_prior_events(prior, false, false);
+    }
+
+    pub(in crate::schema_v2) fn begin_batch(&mut self) {
+        self.clear_provisional_values();
+        self.v2_terminal_closure_hits.clear();
+    }
+
+    pub(in crate::schema_v2) fn pending_v2_terminal_closure_hit(
+        &self,
+    ) -> Option<&(String, String)> {
+        self.v2_terminal_closure_hits.get_min()
     }
 
     pub(in crate::schema_v2) fn commit_v2_batch_boundary(&mut self, at_unix_timestamp: i64) {

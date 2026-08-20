@@ -103,6 +103,17 @@ ENSv1 row and an independently admitted ordinary ENSv2 row for the exact same
 logical name to remain simultaneously open until an explicit activated
 [migration boundary](glossary.md#migration-boundary) selects the successor.
 
+When an ENSv2 registration release, a move away from a registry path, or a
+block-boundary expiry closes this arm-wide conflict domain but the surface still
+has a registered holder with a linked resource, Interpret reasserts the elected
+holder at the same raw-log or block-boundary position.
+The elected holder is the greatest lowercase `registry-address:token-id` key
+among the retained registered holders with linked resources. The reassertion
+writes the replacement binding and a closure that exempts it; it does not
+synthesize registration, release, transfer, expiry, resolver, or subregistry
+normalized events. The affected surfaces are tracked only while interpreting
+the current batch, cleared at its boundary, and never persisted or restored.
+
 The append-numbered phase-schema upgrade adds
 `surface_bindings.authority_arm text NOT NULL` with the closed-value check. It
 ships before the planned production re-walk from block zero, so it does not

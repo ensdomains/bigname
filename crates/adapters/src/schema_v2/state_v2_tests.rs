@@ -109,12 +109,39 @@ fn v2_changed_away_winner_hands_the_surface_to_the_surviving_holder() {
         Some((name.logical_name_id.clone(), Some(Uuid::from_u128(2))))
     );
     state.set_v2_parent_claim(NEST, None, b"eth");
-    state.refresh_dirty_v2_names(2);
+    let transitions = state.refresh_dirty_v2_names(2);
+    assert!(transitions.iter().any(|transition| {
+        transition.registry == ROOT
+            && transition.previous == transition.current
+            && transition
+                .current
+                .as_ref()
+                .is_some_and(|current| current.logical_name_id == name.logical_name_id)
+    }));
     assert_eq!(
         state.name_link_by_namehash(NAMESPACE, &name.namehash),
         Some((name.logical_name_id, Some(Uuid::from_u128(1))))
     );
     assert_v2_indexes_are_derived(&state);
+}
+
+#[test]
+fn v2_contested_surface_expiry_reasserts_the_surviving_holder() {
+    let mut state = claim_path_contested_state();
+    state.set_v2_expiry(NEST_ROOT, "0x01", 2);
+    state.refresh_dirty_v2_names(1);
+    let survivor = state
+        .v2_token(ROOT, "0x01")
+        .and_then(|token| token.name)
+        .expect("surviving holder names the contested surface");
+
+    let transitions = state.refresh_dirty_v2_names(2);
+
+    assert!(transitions.iter().any(|transition| {
+        transition.registry == ROOT
+            && transition.previous == transition.current
+            && transition.current.as_ref() == Some(&survivor)
+    }));
 }
 fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl Fn(&mut State)) {
     baseline.refresh_dirty_v2_names(1);

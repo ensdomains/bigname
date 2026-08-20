@@ -250,7 +250,7 @@ fn interpret_loaded(
     let mut output = BatchOutput::default();
     let mut migration_observations = Vec::new();
     let mut raw_logs = raw_logs.into_iter().peekable();
-    state.clear_provisional_values();
+    state.begin_batch();
     for block in blocks {
         super::settle_block_boundary(catalog, block, state, &mut output)?;
         while raw_logs.peek().is_some_and(|raw| {
@@ -273,6 +273,11 @@ fn interpret_loaded(
             raw.log_index,
             raw.block_number,
             raw.block_hash
+        );
+    }
+    if let Some((logical_name_id, authority_arm)) = state.pending_v2_terminal_closure_hit() {
+        bail!(
+            "terminal {authority_arm} binding closure for {logical_name_id} was not handled in its adapter batch"
         );
     }
     super::identity::compact_reserved_label_preimages(&mut output)?;
