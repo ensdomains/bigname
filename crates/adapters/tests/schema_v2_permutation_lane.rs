@@ -11,7 +11,7 @@
 //! the coverage floor does require the kind the wrapper derives from a fuse-bearing wrap.
 //!
 //! Knobs:
-//! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (96 sequences per
+//! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (144 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
 //! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
 //!
@@ -50,9 +50,9 @@ use permutation::{
     names::{labelhash, namehash},
     scenario::{self, BurstPhase},
     world::{
-        ENS_V1_MAINNET, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World, assert_pins_are_current,
-        assert_worlds_cover_deployments, checked_in_manifests, declared_event_kinds,
-        declared_event_topics,
+        ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
+        assert_pins_are_current, assert_worlds_cover_deployments, checked_in_manifests,
+        declared_event_kinds, declared_event_topics,
     },
 };
 
@@ -77,7 +77,7 @@ const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// `generated_scenarios_are_reproducible_from_their_seed`.
 const CASE_STRIDE: u64 = 0xd134_2543_de82_ef95;
 const SPLIT_SALT: u64 = 0xa076_1d64_78bd_642f;
-const WORLDS: [&World; 2] = [&ENS_V1_MAINNET, &ENS_V2_SEPOLIA];
+const WORLDS: [&World; 3] = [&ENS_V1_MAINNET, &ENS_V1_SEPOLIA, &ENS_V2_SEPOLIA];
 /// Any timestamp works for coverage; the axes decide which events a pool contains, not the clock.
 const SETTLE_TIMESTAMP: i64 = 1_700_000_000;
 
@@ -779,6 +779,22 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        ENS_V1_SEPOLIA.label,
+        &[
+            "AuthorityEpochChanged",
+            "AuthorityTransferred",
+            "ExpiryChanged",
+            "PermissionChanged",
+            "PermissionScopeChanged",
+            "PreimageObserved",
+            "ResolverChanged",
+            "SubregistryChanged",
+            "SurfaceBound",
+            "SurfaceUnbound",
+            "TokenControlTransferred",
+        ],
+    ),
+    (
         ENS_V2_SEPOLIA.label,
         &[
             "AuthorityTransferred",
@@ -813,7 +829,7 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// `rebased_anchors:resources` fell 60 to 0), so any class that appears here is a batch-boundary
 /// regression.
 ///
-/// Pinned per world, because the two can diverge independently: a single cross-world total would
+/// Pinned per world, because the three can diverge independently: a single cross-world total would
 /// read the same if one world stopped while the other started.
 ///
 /// A class missing from a row means the default corpus does not reach it, not that it cannot
@@ -824,8 +840,11 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// in-memory known-surface carry a boundary-restored split replay does not hold — the v2-path
 /// counterpart of the stale reach the fix constrained on the v1 path, and a live residual, not a
 /// pin — tracked by issue #348.
-const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] =
-    &[(ENS_V1_MAINNET.label, &[]), (ENS_V2_SEPOLIA.label, &[])];
+const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
+    (ENS_V1_MAINNET.label, &[]),
+    (ENS_V1_SEPOLIA.label, &[]),
+    (ENS_V2_SEPOLIA.label, &[]),
+];
 
 /// The first thing to rule out when a pinned count moves: these are counts over the sequences one
 /// seed draws, so they are not evidence about the interpreter until the corpus is held fixed.
@@ -839,8 +858,11 @@ const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded d
 /// coverage floor above stayed green. Per world for the same reason as the artifacts: ENSv1's
 /// `SubregistryChanged` carries an owner rather than a subregistry and detaches nothing, so a
 /// cross-world total would let an ENSv1 detach appearing offset the ENSv2 path going dark.
-const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] =
-    &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 33)];
+const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] = &[
+    (ENS_V1_MAINNET.label, 0),
+    (ENS_V1_SEPOLIA.label, 0),
+    (ENS_V2_SEPOLIA.label, 33),
+];
 
 /// Per-world corpus volume floors — minimum raw-log and normalized-event totals the default
 /// corpus must reach, in the print order of the run line above. The artifact pins are empty since
@@ -849,9 +871,12 @@ const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] =
 /// silently. Floors, not exact pins: a deeper sweep and legitimate generator evolution both grow
 /// these totals, and only the default corpus asserts them (the same gate as the pins). Derived
 /// from the default-corpus run that introduced them — ens_v1_mainnet 1446 raw logs and 4554
-/// normalized events, ens_v2_sepolia 965 and 1987 — with each floor 70% of that run, truncated.
+/// normalized events, ens_v1_sepolia 1067 and 3634, and ens_v2_sepolia 965 and 1946 — with each
+/// new floor at 70% of that run, truncated. The ENSv2 normalized-event floor retains its
+/// pre-existing stricter value, originally 70% of the earlier 1987-event baseline.
 const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
     (ENS_V1_MAINNET.label, 1012, 3187),
+    (ENS_V1_SEPOLIA.label, 746, 2543),
     (ENS_V2_SEPOLIA.label, 675, 1390),
 ];
 
@@ -879,6 +904,7 @@ const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
 /// pins the axis as ENSv1-only until someone deliberately extends it there.
 const EXPECTED_BURST_REACH: &[(&str, usize, [usize; BurstPhase::COUNT], usize)] = &[
     (ENS_V1_MAINNET.label, 8, [14, 14, 14], 5),
+    (ENS_V1_SEPOLIA.label, 0, [0, 0, 0], 0),
     (ENS_V2_SEPOLIA.label, 0, [0, 0, 0], 0),
 ];
 
@@ -900,6 +926,18 @@ const UNREACHED_EVENT_KINDS: &[(&str, &str, &str)] = &[
         ENS_V1_MAINNET.label,
         "RecordVersionChanged",
         "the resolver pool emits no VersionChanged, so no record-version bump is generated",
+    ),
+    (
+        ENS_V1_SEPOLIA.label,
+        "RegistrationReleased",
+        "numeric BaseRegistrar registrations are candidate-only ENSv1→ENSv2 migration input and \
+         the dedicated ENSv1→ENSv2 migration corpus exercises their correlation",
+    ),
+    (
+        ENS_V1_SEPOLIA.label,
+        "RegistrationRenewed",
+        "numeric BaseRegistrar renewals are candidate-only ENSv1→ENSv2 migration input and the \
+         dedicated ENSv1→ENSv2 migration corpus exercises their correlation",
     ),
     (
         ENS_V2_SEPOLIA.label,

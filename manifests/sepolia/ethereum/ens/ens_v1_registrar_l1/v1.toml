@@ -1,0 +1,66 @@
+# Sepolia ENSv1 .eth BaseRegistrar. Registrar-controller addresses remain
+# unadmitted; only the authoritative token contract is watched.
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registrar_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+discovery_rules = []
+
+[capability_flags]
+exact_name_profile = { status = "shadow", notes = "BaseRegistrar lifecycle is indexed without claiming registrar-controller label coverage" }
+name_history = { status = "shadow", notes = "BaseRegistrar history is indexed before product reads depend on it" }
+
+[[roots]]
+name = "ETHRegistrar"
+address = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+# The ENSv1 artifact supports this address but its retained receipt belongs to
+# a superseded deployment. Start block is explicit reference-only metadata.
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L733-L768 @ ens_v1@91c966f)
+# (upstream: .refs/ens_subgraph/networks.json:L47-L49 @ ens_subgraph@723f1b6)
+start_block = 3702731
+
+[[contracts]]
+role = "registrar"
+address = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+proxy_kind = "none"
+# Start block is reference-only metadata; see the root declaration above.
+# (upstream: .refs/ens_subgraph/networks.json:L47-L49 @ ens_subgraph@723f1b6)
+start_block = 3702731
+
+# BaseRegistrar ERC-721 transfer admission follows the deployed ABI.
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L188-L206 @ ens_v1@91c966f)
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
+emitter_roles = ["registrar"]
+normalized_events = ["TokenControlTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
+
+# BaseRegistrar controller and lifecycle event declarations.
+# (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8-L20 @ ens_v1@91c966f)
+[[abi.events]]
+name = "ControllerAdded"
+fragment = "event ControllerAdded(address indexed controller)"
+emitter_roles = ["registrar"]
+normalized_events = ["PermissionChanged"]
+
+[[abi.events]]
+name = "ControllerRemoved"
+fragment = "event ControllerRemoved(address indexed controller)"
+emitter_roles = ["registrar"]
+normalized_events = ["PermissionChanged"]
+
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrationReleased"]
+
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed id, uint256 expires)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrationRenewed", "ExpiryChanged"]

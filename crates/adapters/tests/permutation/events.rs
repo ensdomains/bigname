@@ -239,7 +239,20 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V2Resolver::NameChanged,
         ]
     );
-    v1.into_iter().chain(v2).collect()
+    let v1_sepolia = declared!(
+        "ens_v1_sepolia",
+        [
+            V1Registry::NewOwner,
+            V1Registry::Transfer,
+            V1Registry::NewResolver,
+            V1RegistrarToken::Transfer,
+            V1Wrapper::NameWrapped,
+            V1Wrapper::NameUnwrapped,
+            V1Wrapper::ExpiryExtended,
+            V1Wrapper::TransferSingle,
+        ]
+    );
+    v1.into_iter().chain(v1_sepolia).chain(v2).collect()
 }
 
 pub fn encoded_topics(encoded: &LogData) -> Vec<String> {
