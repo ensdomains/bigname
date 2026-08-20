@@ -165,7 +165,19 @@ pub(super) async fn build(
                     -- `setSubnodeOwner` before emitting `NameRegistered`, whose log the binding
                     -- records as its provenance -- upstream:
                     -- .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L148-L152
-                    -- @ ens_v1@91c966f). Comparing log positions would drop exactly the
+                    -- @ ens_v1@91c966f). Basenames' conditional direct-registrar path likewise
+                    -- writes the registry owner before emitting `NameRegistered` (upstream:
+                    -- .refs/basenames/src/L2/BaseRegistrar.sol:L423-L425 @ basenames@1809bbc).
+                    -- The Basenames controller paths used here call `registerWithRecord`, which
+                    -- writes the registry record before returning, and only then emit
+                    -- `NameRegistered`
+                    -- (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L275 @
+                    -- basenames@1809bbc)
+                    -- (upstream: .refs/basenames/src/L2/RegistrarController.sol:L535-L548 @
+                    -- basenames@1809bbc)
+                    -- (upstream:
+                    -- .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L615-L633 @
+                    -- basenames@1809bbc). Comparing log positions would drop exactly the
                     -- registration-time owner this readmission exists to recover.
                     AND event.block_number >= predecessor.block_number
                     AND (

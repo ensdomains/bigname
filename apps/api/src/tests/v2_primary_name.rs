@@ -1583,6 +1583,113 @@ async fn v2_get_primary_name_refuses_a_live_ens_v2_arm_claim_without_forward_dis
     Ok(())
 }
 
+/// A projected tuple does not constrain the name returned by the live reverse leg. If that leg
+/// names a different name whose selected authority cannot be verified, the refusal remains the
+/// verified outcome and metric; the stored tuple supplies only the independent indexed answer.
+#[tokio::test]
+async fn a_live_authority_refusal_overrides_a_different_projected_tuple_for_response_and_metrics()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    seed_phase_primary_name_snapshot(
+        &database,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        PrimaryNameClaimStatus::Success,
+        Some("alice.eth"),
+        true,
+    )
+    .await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "alice.eth", None, "ens_v1").await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
+
+    let projected_claim: String = sqlx::query_scalar(
+        "SELECT raw_claim_name FROM bigname_phase.primary_names_current \
+         WHERE lower(address) = $1 AND namespace = 'ens' AND coin_type = '60'",
+    )
+    .bind(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS.to_lowercase())
+    .fetch_one(&lookup_pool)
+    .await?;
+    assert_eq!(projected_claim, "alice.eth");
+    let live_name_arm: String = sqlx::query_scalar(
+        "SELECT provenance #>> '{authority_selection,authority_arm}' \
+         FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
+    )
+    .fetch_one(&lookup_pool)
+    .await?;
+    assert_eq!(live_name_arm, "ens_v2");
+
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let (response, metric_outcomes) = crate::metrics::capture_verified_execution_outcomes(
+        app_router(state).oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        ),
+    )
+    .await;
+    let response = response.context("v2 live refusal with projected tuple request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+
+    let verified = payload["data"]["answers"]
+        .as_array()
+        .expect("answers must be an array")
+        .iter()
+        .find(|answer| answer["source"] == json!("verified"))
+        .expect("a verified answer must be present");
+    assert_eq!(
+        (
+            verified["status"].as_str(),
+            verified["unsupported_reason"].as_str(),
+            metric_outcomes.as_slice(),
+        ),
+        (
+            Some("unsupported"),
+            Some("exact_name_authority_not_verifiable"),
+            ["unsupported"].as_slice(),
+        ),
+        "live refusal must serve and count as unsupported: {payload}"
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        2,
+        "the reverse leg may run, but the refused forward call must not: {rpc_requests:?}"
+    );
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// An absent exact-name row means the name is outside indexed coverage, not that the projection
 /// selected an unverifiable authority. Live verification is its only answer path and must run.
 #[tokio::test]
