@@ -342,7 +342,17 @@ fn interpret_raw(
     let Some(selected) = catalog.select(raw)? else {
         return Ok(());
     };
-    let interpreted = match super::protocol::interpret(&selected, raw, state) {
+    let registrar_migration_source = if selected.source.source_family == "ens_v1_registrar_l1" {
+        super::migration::correlated_registrar_source(catalog, &selected, raw)?
+    } else {
+        None
+    };
+    let interpreted = match super::protocol::interpret(
+        &selected,
+        raw,
+        state,
+        registrar_migration_source.is_some(),
+    ) {
         Ok(interpreted) => interpreted,
         Err(error) if selected.match_all && crate::evm_abi::is_malformed_event_log(&error) => {
             return Ok(());
@@ -356,10 +366,22 @@ fn interpret_raw(
             });
         }
     };
-    migration_observations.extend(interpreted.migration_observations.clone());
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
     super::identity::materialize(&selected, raw, &interpreted, state, output)?;
     super::discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;
+    if let Some(migration_source) = registrar_migration_source {
+        migration_observations.extend(interpreted.migration_observations);
+        super::normalized::materialize_for_source(
+            &migration_source,
+            raw,
+            interpreted.migration_events,
+            state,
+            output,
+        );
+    } else {
+        debug_assert!(interpreted.migration_events.is_empty());
+        migration_observations.extend(interpreted.migration_observations);
+    }
     Ok(())
 }
 

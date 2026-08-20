@@ -2545,7 +2545,7 @@ fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow:
         super::catalog::Catalog::new(vec![manifest], Vec::new(), vec![admission(61, "registrar")])?;
     let selected = catalog.select(&raw)?.expect("selected registrar event");
     let mut live_state = super::state::State::new(vec![registry_prior.clone()], Vec::new());
-    let interpreted = super::protocol::interpret(&selected, &raw, &mut live_state)?;
+    let interpreted = super::protocol::interpret(&selected, &raw, &mut live_state, false)?;
     let grant = interpreted
         .events
         .into_iter()

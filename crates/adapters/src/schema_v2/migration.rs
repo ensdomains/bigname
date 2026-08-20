@@ -4,7 +4,9 @@ use anyhow::Context;
 use serde_json::{Value, json};
 
 use super::{
-    BatchOutput, MigrationCandidateEffect, NormalizedEvent, catalog::Catalog,
+    BatchOutput, MigrationCandidateEffect, NormalizedEvent,
+    catalog::{Catalog, Selected},
+    manifest::ManifestSource,
     protocol::MigrationObservation,
 };
 
@@ -17,8 +19,45 @@ pub use support::inject_activated_transition_for_test;
 use support::*;
 
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
+const V1_REGISTRAR_FAMILY: &str = "ens_v1_registrar_l1";
+const V1_REGISTRAR_ROLE: &str = "registrar";
 const CANDIDATE: &str = "candidate";
 const TRANSITION_KIND: &str = "authority_transition";
+
+pub(super) fn correlated_registrar_source(
+    catalog: &Catalog,
+    selected: &Selected,
+    raw: &super::RawLogInput,
+) -> anyhow::Result<Option<ManifestSource>> {
+    if selected.source.source_family != V1_REGISTRAR_FAMILY
+        || selected.emitter_role.as_deref() != Some(V1_REGISTRAR_ROLE)
+    {
+        return Ok(None);
+    }
+    let Some(migration_source) = catalog.source_for_family(MIGRATION_FAMILY) else {
+        return Ok(None);
+    };
+    if migration_source.namespace != selected.source.namespace
+        || migration_source.chain_id != selected.source.chain_id
+    {
+        return Ok(None);
+    }
+    let registrar = catalog
+        .correlation_address(MIGRATION_FAMILY, "ens_v1_base_registrar")
+        .context("migration manifest has no ENSv1 BaseRegistrar correlation address")?;
+    let launch_block = catalog
+        .declared_start_block_for_role(MIGRATION_FAMILY, "graveyard")
+        .context("migration manifest has no launch-bounded Graveyard declaration")?;
+    if !raw.emitting_address.eq_ignore_ascii_case(registrar) || raw.block_number < launch_block {
+        return Ok(None);
+    }
+    Ok(Some(migration_source.clone()))
+}
+
+fn is_v1_registrar_observation(observation: &MigrationObservation) -> bool {
+    observation.source_family == V1_REGISTRAR_FAMILY
+        && observation.emitter_role.as_deref() == Some(V1_REGISTRAR_ROLE)
+}
 
 pub(super) fn correlate(
     catalog: &Catalog,
@@ -38,9 +77,9 @@ pub(super) fn correlate(
     let name_wrapper = catalog
         .correlation_address(MIGRATION_FAMILY, "ens_v1_name_wrapper")
         .context("migration manifest has no ENSv1 NameWrapper correlation address")?;
-    let base_registrar_instance = catalog
-        .declared_contract_instance_for_role(MIGRATION_FAMILY, "ens_v1_base_registrar")
-        .context("migration manifest has no ENSv1 BaseRegistrar contract instance")?;
+    let base_registrar = catalog
+        .correlation_address(MIGRATION_FAMILY, "ens_v1_base_registrar")
+        .context("migration manifest has no ENSv1 BaseRegistrar correlation address")?;
     let mut by_transaction = BTreeMap::<(String, String), Vec<&MigrationObservation>>::new();
     for observation in &observations {
         by_transaction
@@ -66,7 +105,8 @@ pub(super) fn correlate(
             &graveyard,
             &unlocked,
             &locked,
-            base_registrar_instance,
+            catalog,
+            base_registrar,
             name_wrapper,
             &registry_groups,
             output,
@@ -138,7 +178,7 @@ fn correlate_renewals(
             .copied()
             .filter(|observation| {
                 observation.event_name == "NameRenewed"
-                    && observation.emitter_role.as_deref() == Some("ens_v1_base_registrar")
+                    && is_v1_registrar_observation(observation)
                     && observation.decoded.get("token_id").and_then(Value::as_str)
                         == Some(base_token_id)
                     && observation.raw.log_index > v2_position
@@ -187,10 +227,11 @@ fn correlate_controllers(
         .iter()
         .copied()
         .filter(|observation| {
-            matches!(
-                observation.event_name.as_str(),
-                "ControllerAdded" | "ControllerRemoved"
-            )
+            is_v1_registrar_observation(observation)
+                && matches!(
+                    observation.event_name.as_str(),
+                    "ControllerAdded" | "ControllerRemoved"
+                )
         })
         .collect::<Vec<_>>();
     let mut participating = BTreeSet::new();
@@ -215,7 +256,7 @@ fn correlate_controllers(
         };
         let renewed = observations.iter().copied().filter(|observation| {
             observation.event_name == "NameRenewed"
-                && observation.emitter_role.as_deref() == Some("ens_v1_base_registrar")
+                && is_v1_registrar_observation(observation)
                 && observation.raw.log_index > added.raw.log_index
                 && observation.raw.log_index < removed.raw.log_index
         });
@@ -235,10 +276,11 @@ fn correlate_controllers(
         }
     }
     for observation in observations.iter().copied().filter(|observation| {
-        matches!(
-            observation.event_name.as_str(),
-            "ControllerAdded" | "ControllerRemoved"
-        )
+        is_v1_registrar_observation(observation)
+            && matches!(
+                observation.event_name.as_str(),
+                "ControllerAdded" | "ControllerRemoved"
+            )
     }) {
         if !participating.contains(&(observation.event_name.as_str(), observation.raw.log_index)) {
             let subject = value_str(&observation.decoded, "subject")?;
@@ -265,7 +307,8 @@ fn correlate_authority_transitions(
     graveyard: &str,
     unlocked: &str,
     locked: &str,
-    base_registrar_instance: uuid::Uuid,
+    catalog: &Catalog,
+    base_registrar: &str,
     name_wrapper: &str,
     registry_groups: &[RegistryGroup],
     output: &mut BatchOutput,
@@ -303,11 +346,20 @@ fn correlate_authority_transitions(
         let registration_log = registration
             .log_index
             .context("registration has no log index")?;
+        let base_registrar_instance = catalog
+            .contract_instance_for_address(
+                base_registrar,
+                registration
+                    .block_number
+                    .context("migration registration has no block number")?,
+            )?
+            .context("ENSv1 BaseRegistrar correlation address has no active contract instance")?;
         let transfers = observations
             .iter()
             .copied()
             .filter(|observation| {
                 observation.event_name == "Transfer"
+                    && is_v1_registrar_observation(observation)
                     && observation.raw.log_index < registration_log
                     && observation.decoded.get("labelhash").and_then(Value::as_str)
                         == Some(labelhash)

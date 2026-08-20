@@ -13,6 +13,7 @@ const MIGRATION_MANIFEST_ID: i64 = 100;
 const REGISTRY_MANIFEST_ID: i64 = 101;
 const V1_REGISTRY_MANIFEST_ID: i64 = 102;
 const V1_WRAPPER_MANIFEST_ID: i64 = 103;
+const V1_REGISTRAR_MANIFEST_ID: i64 = 104;
 
 sol! {
     event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation);
@@ -51,7 +52,7 @@ fn catalog_fixture_records_reproducible_provenance_and_corrections() -> anyhow::
 }
 
 #[test]
-fn unwrapped_catalog_shape_emits_one_self_sufficient_candidate_boundary() -> anyhow::Result<()> {
+fn cross_family_registrar_transfer_emits_one_unwrapped_candidate_boundary() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["U-01"];
     let unrelated_cleanup = &fixture["scenarios"]["G-02"];
@@ -218,6 +219,11 @@ fn unwrapped_catalog_shape_emits_one_self_sufficient_candidate_boundary() -> any
     assert_eq!(
         boundary.after_state["predecessor_binding"]["resource"]["anchor_kind"],
         "registrar_backed_registration"
+    );
+    assert_eq!(
+        boundary.after_state["predecessor_binding"]["resource"]["contract_instance_id"],
+        Uuid::from_u128(6).to_string(),
+        "moving attribution between manifest families must preserve address-keyed contract identity"
     );
     assert!(
         boundary.after_state["predecessor_binding"]
@@ -537,7 +543,7 @@ fn resolver_and_ttl_clears_are_optional_boundary_evidence() -> anyhow::Result<()
 }
 
 #[test]
-fn synchronized_catalog_renewal_preserves_resource_anchored_multiplicity() -> anyhow::Result<()> {
+fn cross_family_registrar_renewal_preserves_resource_anchored_multiplicity() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["R-01"];
     let addresses = &fixture["addresses"];
@@ -1297,7 +1303,7 @@ fn premigration_reservation_flood_is_ownerless_and_linear() -> anyhow::Result<()
 }
 
 #[test]
-fn catalog_wrapper_sync_uses_a_separate_name_wrapper_controller_envelope() -> anyhow::Result<()> {
+fn cross_family_registrar_controller_uses_a_separate_name_wrapper_envelope() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["R-05"];
     let addresses = &fixture["addresses"];
@@ -1421,6 +1427,154 @@ fn catalog_wrapper_sync_uses_a_separate_name_wrapper_controller_envelope() -> an
 }
 
 #[test]
+fn unmatched_controller_addition_cannot_change_a_later_transaction_renewal() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let registrar = addresses["base_registrar"].as_str().unwrap();
+    let wrapper = addresses["name_wrapper"].as_str().unwrap();
+    let registry = "0x0000000000000000000000000000000000000099";
+    let label = b"transaction-scoped";
+    let labelhash = keccak256(label);
+    let node = super::common::namehash(&["transaction-scoped".to_owned(), "eth".to_owned()]);
+    let block = fixture["scenarios"]["R-05"]["configuration_block"]
+        .as_i64()
+        .unwrap();
+    let registrar_expiry = u64::try_from(block)? + 20_000;
+    let wrapper_expiry = registrar_expiry + (90 * 24 * 60 * 60);
+    let setup_and_unmatched_add = vec![
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            0,
+            registry,
+        ),
+        raw_at_transaction(
+            super::NameWrapped {
+                node: node.parse()?,
+                name: b"\x12transaction-scoped\x03eth\0".to_vec().into(),
+                owner: Address::from([0x51; 20]),
+                fuses: (1 << 16) | (1 << 17),
+                expiry: wrapper_expiry,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            1,
+            wrapper,
+        ),
+        raw_at_transaction(
+            ControllerAdded {
+                controller: wrapper.parse()?,
+            }
+            .encode_log_data(),
+            block + 1,
+            0,
+            0,
+            registrar,
+        ),
+    ];
+    let renewal = base_renewed_at(
+        addresses,
+        U256::from_be_bytes(*labelhash),
+        registrar_expiry,
+        block + 2,
+        0,
+    );
+
+    let mut full_input = batch(
+        setup_and_unmatched_add
+            .iter()
+            .cloned()
+            .chain(std::iter::once(renewal.clone()))
+            .collect(),
+        &fixture,
+        false,
+    );
+    admit_v1_registry(&mut full_input, registry);
+    let (full, _) = interpret_test_batch_incremental(full_input, None)?;
+
+    let mut first_input = batch(setup_and_unmatched_add, &fixture, false);
+    admit_v1_registry(&mut first_input, registry);
+    let (_, session) = interpret_test_batch_incremental(first_input, None)?;
+    let mut second_input = batch(vec![renewal], &fixture, false);
+    admit_v1_registry(&mut second_input, registry);
+    let (split, _) = interpret_test_batch_incremental(second_input, Some(session))?;
+
+    let renewal_state = |output: &BatchOutput| {
+        output
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.source_family == "ens_v2_migration_l1"
+                    && event.event_kind == "RegistrationRenewed"
+            })
+            .map(|event| event.after_state.clone())
+            .expect("migration-family BaseRegistrar renewal")
+    };
+    assert_eq!(renewal_state(&full), renewal_state(&split));
+    assert!(renewal_state(&full).get("wrapper_expiry").is_none());
+    Ok(())
+}
+
+fn admit_v1_registry(input: &mut BatchInput, address: &str) {
+    input.manifests.push(manifest_with_events(
+        V1_REGISTRY_MANIFEST_ID,
+        "ens",
+        "ens_v1_registry_l1",
+        &[(
+            "Transfer",
+            "event Transfer(bytes32 indexed node, address owner)",
+            &["registry"],
+            &["AuthorityTransferred", "PermissionChanged"],
+        )],
+    ));
+    input.admissions.push(admission_at(
+        V1_REGISTRY_MANIFEST_ID,
+        "registry",
+        address,
+        102,
+    ));
+}
+
+#[test]
+fn cross_family_registrar_correlation_keeps_the_graveyard_launch_floor() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["U-01"];
+    let addresses = &fixture["addresses"];
+    let block = scenario["migration_block"].as_i64().unwrap();
+    let mut input = batch(
+        unlocked_name_logs(scenario, addresses, block, 1, false)?,
+        &fixture,
+        true,
+    );
+    input
+        .admissions
+        .iter_mut()
+        .find(|admission| admission.role.as_deref() == Some("graveyard"))
+        .expect("migration Graveyard admission")
+        .active_from_block = Some(block + 1);
+
+    let output = interpret_test_batch(input)?;
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .all(|event| event.event_kind != "MigrationApplied"),
+        "pre-launch BaseRegistrar observations must not derive a migration boundary"
+    );
+    assert!(output.normalized_events.iter().all(|event| {
+        event.source_family != "ens_v2_migration_l1"
+            || event.raw_fact_ref["emitting_address"] != addresses["base_registrar"]
+    }));
+    Ok(())
+}
+
+#[test]
 fn controller_add_remove_share_state_and_restore_through_compaction() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["R-05"];
@@ -1469,7 +1623,7 @@ fn controller_add_remove_share_state_and_restore_through_compaction() -> anyhow:
 }
 
 #[test]
-fn incomplete_catalog_lookalikes_never_prove_a_migration_boundary() -> anyhow::Result<()> {
+fn cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let cleanup = &fixture["scenarios"]["G-02"];
     let renewal = &fixture["scenarios"]["R-01"];
@@ -2050,8 +2204,18 @@ fn unlocked_name_logs(
 
 fn batch(raw_logs: Vec<RawLogInput>, fixture: &Value, include_registry_setup: bool) -> BatchInput {
     let addresses = &fixture["addresses"];
-    let mut manifests = vec![migration_manifest(), wrapper_manifest()];
+    let mut manifests = vec![
+        migration_manifest(),
+        wrapper_manifest(),
+        registrar_manifest(),
+    ];
     let mut admissions = migration_admissions(addresses);
+    admissions.push(admission_at(
+        V1_REGISTRAR_MANIFEST_ID,
+        "registrar",
+        addresses["base_registrar"].as_str().unwrap(),
+        6,
+    ));
     admissions.push(admission_at(
         V1_WRAPPER_MANIFEST_ID,
         "name_wrapper",
@@ -2151,36 +2315,6 @@ fn migration_manifest() -> ManifestInput {
                 &["ens_v1_renewal_bridge"],
                 &["RegistrationRenewed", "PreimageObserved"],
             ),
-            (
-                "ControllerAdded",
-                "event ControllerAdded(address indexed controller)",
-                &["ens_v1_base_registrar"],
-                &["PermissionChanged"],
-            ),
-            (
-                "ControllerRemoved",
-                "event ControllerRemoved(address indexed controller)",
-                &["ens_v1_base_registrar"],
-                &["PermissionChanged"],
-            ),
-            (
-                "NameRegistered",
-                "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
-                &["ens_v1_base_registrar"],
-                &["RegistrationReleased"],
-            ),
-            (
-                "NameRenewed",
-                "event NameRenewed(uint256 indexed id, uint256 expires)",
-                &["ens_v1_base_registrar"],
-                &["RegistrationRenewed", "ExpiryChanged"],
-            ),
-            (
-                "Transfer",
-                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-                &["ens_v1_base_registrar"],
-                &[],
-            ),
         ],
     );
     let mut payload =
@@ -2191,9 +2325,61 @@ fn migration_manifest() -> ManifestInput {
             ["addresses"]["name_wrapper"]
             .as_str()
             .expect("fixture NameWrapper address"),
+        "ens_v1_base_registrar": fixture()
+            .expect("migration fixture")
+            ["addresses"]["base_registrar"]
+            .as_str()
+            .expect("fixture BaseRegistrar address"),
     });
     manifest.payload_json = payload.to_string();
     manifest
+}
+
+fn registrar_manifest() -> ManifestInput {
+    manifest_with_events(
+        V1_REGISTRAR_MANIFEST_ID,
+        "ens",
+        "ens_v1_registrar_l1",
+        &[
+            (
+                "ControllerAdded",
+                "event ControllerAdded(address indexed controller)",
+                &["registrar"],
+                &["PermissionChanged"],
+            ),
+            (
+                "ControllerRemoved",
+                "event ControllerRemoved(address indexed controller)",
+                &["registrar"],
+                &["PermissionChanged"],
+            ),
+            (
+                "NameRegistered",
+                "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
+                &["registrar"],
+                &["RegistrationReleased"],
+            ),
+            (
+                "NameRenewed",
+                "event NameRenewed(uint256 indexed id, uint256 expires)",
+                &["registrar"],
+                &["RegistrationRenewed", "ExpiryChanged"],
+            ),
+            (
+                "Transfer",
+                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                &["registrar"],
+                &[
+                    "TokenControlTransferred",
+                    "PermissionChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                ],
+            ),
+        ],
+    )
 }
 
 fn registry_manifest() -> ManifestInput {
@@ -2314,7 +2500,6 @@ fn migration_admissions(addresses: &Value) -> Vec<AddressAdmissionInput> {
         ("graveyard", "graveyard", 3),
         ("ens_v1_renewal_bridge", "renewal_bridge", 4),
         ("verifiable_factory", "factory", 5),
-        ("ens_v1_base_registrar", "base_registrar", 6),
     ]
     .into_iter()
     .map(|(role, key, instance)| {

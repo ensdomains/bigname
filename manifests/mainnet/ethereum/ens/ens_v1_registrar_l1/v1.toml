@@ -72,6 +72,34 @@ fragment = "event Transfer(address indexed from, address indexed to, uint256 ind
 emitter_roles = ["registrar"]
 normalized_events = ["TokenControlTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
+# BaseRegistrar controller and lifecycle events share registrar-log attribution
+# with Transfer on every deployment profile. Migration correlation may consume
+# them, but no migration family declares this emitter.
+# (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8-L20 @ ens_v1@91c966f)
+[[abi.events]]
+name = "ControllerAdded"
+fragment = "event ControllerAdded(address indexed controller)"
+emitter_roles = ["registrar"]
+normalized_events = ["PermissionChanged"]
+
+[[abi.events]]
+name = "ControllerRemoved"
+fragment = "event ControllerRemoved(address indexed controller)"
+emitter_roles = ["registrar"]
+normalized_events = ["PermissionChanged"]
+
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrationReleased"]
+
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed id, uint256 expires)"
+emitter_roles = ["registrar"]
+normalized_events = ["RegistrationRenewed", "ExpiryChanged"]
+
 # NameRegistered uses the canonical legacy-controller event shape:
 # (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L35 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L38 @ ens_v1@91c966f)

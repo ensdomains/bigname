@@ -156,7 +156,7 @@ pub(super) fn correlate_cleanups(
     const GRAVEYARD_CLEANUP_EXPIRY: u64 = 18_446_744_073_701_775_615;
     for observation in observations.iter().copied().filter(|observation| {
         observation.event_name == "NameRegistered"
-            && observation.emitter_role.as_deref() == Some("ens_v1_base_registrar")
+            && super::is_v1_registrar_observation(observation)
             && observation
                 .decoded
                 .get("owner")
@@ -178,8 +178,7 @@ pub(super) fn correlate_historical_renewals(
     output: &mut BatchOutput,
 ) -> anyhow::Result<()> {
     for observation in observations.iter().copied().filter(|observation| {
-        observation.event_name == "NameRenewed"
-            && observation.emitter_role.as_deref() == Some("ens_v1_base_registrar")
+        observation.event_name == "NameRenewed" && super::is_v1_registrar_observation(observation)
     }) {
         let already_correlated = output.normalized_events.iter().any(|event| {
             event.source_family == MIGRATION_FAMILY

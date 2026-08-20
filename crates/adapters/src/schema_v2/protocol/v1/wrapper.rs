@@ -415,6 +415,12 @@ fn name_unwrapped(
     )?;
     ensure_declared(selected, &["SurfaceUnbound"])?;
     let namehash = hex_string(event.node);
+    state.note_v1_unwrap(
+        &selected.source.namespace,
+        &namehash,
+        &raw.emitting_address,
+        raw,
+    );
     let linked = state.release_v1_name(&selected.source.namespace, &namehash);
     let reactivated = state.reactivate_v1_registrar(
         &selected.source.namespace,

@@ -1,6 +1,98 @@
 use super::{State, V1NameState, V1WrapperData, v1_key};
+use crate::schema_v2::model::RawLogInput;
 
 impl State {
+    pub(in crate::schema_v2) fn note_v1_unwrap(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        wrapper: &str,
+        raw: &RawLogInput,
+    ) {
+        self.v1_pending_unwraps.insert(
+            v1_key(namespace, namehash),
+            (unwrap_transaction(wrapper, raw), raw.log_index),
+        );
+    }
+
+    pub(in crate::schema_v2) fn matches_v1_unwrap(
+        &self,
+        namespace: &str,
+        namehash: &str,
+        from: &str,
+        raw: &RawLogInput,
+    ) -> bool {
+        self.v1_pending_unwraps
+            .get(&v1_key(namespace, namehash))
+            .is_some_and(|(transaction, unwrapped_log)| {
+                transaction == &unwrap_transaction(from, raw) && *unwrapped_log < raw.log_index
+            })
+    }
+
+    pub(in crate::schema_v2) fn set_v1_registrar_controller(
+        &mut self,
+        controller: &str,
+        approved: bool,
+        raw: &RawLogInput,
+    ) {
+        self.begin_v1_registrar_controller_transaction(raw);
+        let controller = controller.to_ascii_lowercase();
+        if approved {
+            self.v1_registrar_controllers.insert(controller);
+        } else {
+            self.v1_registrar_controllers.remove(&controller);
+        }
+    }
+
+    pub(in crate::schema_v2) fn sync_v1_wrapper_expiry(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        registrar_expiry: u64,
+        raw: &RawLogInput,
+    ) -> Option<u64> {
+        self.begin_v1_registrar_controller_transaction(raw);
+        let key = v1_key(namespace, namehash);
+        let registry_owner = self.v1_registry_owners.get(&key)?;
+        if !self.v1_registrar_controllers.contains(registry_owner)
+            || self
+                .v1_names
+                .get(&key)
+                .is_none_or(|name| name.authority_source_family != "ens_v1_wrapper_l1")
+        {
+            return None;
+        }
+        let wrapper_expiry = registrar_expiry.checked_add(super::ENS_GRACE_PERIOD_SECS as u64)?;
+        self.update_v1_wrapper_expiry(namespace, namehash, wrapper_expiry)?;
+        Some(wrapper_expiry)
+    }
+
+    fn begin_v1_registrar_controller_transaction(&mut self, raw: &RawLogInput) {
+        let transaction = format!("{}:{}", raw.block_hash, raw.transaction_hash);
+        if self.v1_registrar_controller_transaction.as_deref() != Some(transaction.as_str()) {
+            self.v1_registrar_controller_transaction = Some(transaction);
+            self.v1_registrar_controllers.clear();
+        }
+    }
+
+    // ENSv1 stores the wrapped .eth expiry with the registrar grace period added,
+    // so the predecessor BaseRegistrar expiry is the retained wrapper expiry minus it.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L270-L277 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297-L303 @ ens_v1@91c966f)
+    pub(in crate::schema_v2) fn v1_registrar_expiry_from_wrapper(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<i64> {
+        let expiry = self
+            .v1_wrapper_data
+            .get(&v1_key(namespace, namehash))?
+            .expiry;
+        i64::try_from(expiry)
+            .ok()?
+            .checked_sub(super::ENS_GRACE_PERIOD_SECS)
+    }
+
     pub(in crate::schema_v2) fn wrap_v1_name(
         &mut self,
         namespace: &str,
@@ -72,4 +164,9 @@ impl State {
         state.expiry = Some(i64::try_from(data.expiry).unwrap_or(i64::MAX));
         Some((previous, state.clone()))
     }
+}
+
+fn unwrap_transaction(address: &str, raw: &RawLogInput) -> String {
+    let address = address.to_ascii_lowercase();
+    format!("{address}:{}:{}", raw.block_hash, raw.transaction_hash)
 }
