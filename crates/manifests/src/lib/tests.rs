@@ -455,6 +455,104 @@ fn sepolia_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<(
     Ok(())
 }
 
+/// The Sepolia profile admits the ENSv1 registry and wrapper families the ENSv2 migration family
+/// bridges from. The registrar family is deliberately absent: the migration family already owns
+/// that address's attribution through its own `ens_v1_base_registrar` contract role, so admitting
+/// it here fails preimage-attribution validation. That is tracked separately, and this test pins
+/// the gap so it cannot be closed by accident.
+#[test]
+fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let family = |name: &str| {
+        repository
+            .manifests()
+            .iter()
+            .find(|loaded| loaded.manifest.source_family == name)
+            .map(|loaded| &loaded.manifest)
+    };
+
+    let registry = family("ens_v1_registry_l1").expect("Sepolia ENSv1 registry family");
+    assert_eq!(registry.chain, "ethereum-sepolia");
+    assert!(registry.rollout_status.is_active());
+    let registry_roles = registry
+        .contracts
+        .iter()
+        .map(|contract| {
+            (
+                contract.role.as_str(),
+                (normalize_address(&contract.address), contract.start_block),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(registry_roles.len(), 2);
+    assert_eq!(
+        registry_roles["registry"],
+        (
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+            Some(3_702_728)
+        )
+    );
+    assert_eq!(
+        registry_roles["registry_old"],
+        (
+            "0x94f523b8261b815b87effcf4d18e6abef18d6e4b".to_owned(),
+            Some(3_702_721)
+        )
+    );
+
+    let wrapper = family("ens_v1_wrapper_l1").expect("Sepolia ENSv1 wrapper family");
+    assert_eq!(wrapper.chain, "ethereum-sepolia");
+    assert!(wrapper.rollout_status.is_active());
+    let wrapper_roles = wrapper
+        .contracts
+        .iter()
+        .map(|contract| {
+            (
+                contract.role.as_str(),
+                (normalize_address(&contract.address), contract.start_block),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(wrapper_roles.len(), 1);
+    assert_eq!(
+        wrapper_roles["name_wrapper"],
+        (
+            "0x0635513f179d50a207757e05759cbd106d7dfce8".to_owned(),
+            Some(3_790_153)
+        )
+    );
+
+    // The admitted wrapper is the contract the migration family names as its correlation address.
+    // A child's ENSv1 cleanup is only observable because both agree on this address.
+    let migration = family("ens_v2_migration_l1").expect("Sepolia migration family");
+    assert_eq!(
+        normalize_address(&migration.correlation_addresses["ens_v1_name_wrapper"]),
+        wrapper_roles["name_wrapper"].0,
+    );
+
+    // Both cleanup branches a migrated child can take must be ingestible: the wrapper token parked
+    // in the Graveyard, and the node unwrapped into it.
+    let wrapper_events = wrapper
+        .abi
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for required in ["TransferSingle", "TransferBatch", "NameUnwrapped"] {
+        assert!(
+            wrapper_events.contains(required),
+            "wrapper family must admit {required}"
+        );
+    }
+
+    assert!(
+        family("ens_v1_registrar_l1").is_none(),
+        "Sepolia ENSv1 registrar admission collides with the migration family's \
+         ens_v1_base_registrar declaration and is tracked separately"
+    );
+    Ok(())
+}
+
 #[test]
 fn normalize_address_preserves_legacy_fallbacks() {
     assert_eq!(

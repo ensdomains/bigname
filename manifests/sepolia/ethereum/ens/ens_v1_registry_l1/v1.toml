@@ -1,0 +1,93 @@
+# ENSv1 registry admission for the Sepolia deployment profile, with
+# migration-aware ENSRegistryOld intake. This is the ENSv1 side of the
+# deployment the ENSv2 migration family bridges from; the two ENS deployments
+# on Sepolia stay independent except where a proven migration boundary joins a
+# single name. Resolver changes are binding state, not discovery.
+# The registry event surface declares NewResolver:
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L93 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L181 @ ens_v1@91c966f).
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+discovery_rules = []
+
+[capability_flags]
+declared_children = { status = "supported", notes = "registry-controlled child surfaces are authoritative inputs" }
+
+[[roots]]
+name = "ENSRegistry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
+# Address and deployment block come from the pinned ENSv1 Sepolia deployment
+# record, whose receipt deploys this same address in its only deployment.
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L2 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L409 @ ens_v1@91c966f).
+start_block = 3702728
+
+[[contracts]]
+role = "registry"
+address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"
+proxy_kind = "none"
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L2 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L409 @ ens_v1@91c966f).
+start_block = 3702728
+
+[[contracts]]
+# The superseded Sepolia registry is admitted as a distinct migration-epoch
+# registry input in this source family, matching the mainnet profile's
+# ENSRegistryOld admission. It predates the current registry by seven blocks.
+# The supersession is evidenced by the deployed current registry itself: it is a
+# fallback registry exposing an `old` delegate, and its constructor argument is
+# this address.
+# (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L2 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L390 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L148 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L415 @ ens_v1@91c966f).
+role = "registry_old"
+address = "0x94f523b8261B815b87EFfCf4d18E6aBeF18d6e4b"
+proxy_kind = "none"
+start_block = 3702721
+
+# ENSv1 owner and resolver-pointer changes update name state only. They do
+# not admit contract instances or create discovery edges.
+
+# Registry event ABI fragments consumed by manifest-derived authority topic
+# lookup. Event declarations are pinned in the ENS registry interface, and both
+# deployed Sepolia registries carry these exact shapes:
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L9 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L15 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L62 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L56 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NewOwner"
+fragment = "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["SubregistryChanged", "AuthorityTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
+
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L119 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L113 @ ens_v1@91c966f).
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(bytes32 indexed node, address owner)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["AuthorityTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
+
+# (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L81 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L75 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NewResolver"
+fragment = "event NewResolver(bytes32 indexed node, address resolver)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = ["ResolverChanged", "PermissionChanged"]
+
+[[abi.events]]
+name = "NewTTL"
+fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = []
