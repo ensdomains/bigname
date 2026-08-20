@@ -18,7 +18,10 @@ use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, RunMode as InterpretRunMode,
 };
 use bigname_manifests::load_repository;
-use bigname_project::{BatchRequest, DUAL_CURRENT_EXACT_NAME_AUTHORITY, Engine, Marker, RunMode};
+use bigname_project::{
+    BatchRequest, DUAL_CURRENT_CHILD_AUTHORITY, DUAL_CURRENT_EXACT_NAME_AUTHORITY, Engine, Marker,
+    RunMode,
+};
 use bigname_storage::{NameCurrentRow, SurfaceBindingKind, resolution_verified_support_boundary};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
@@ -2635,6 +2638,254 @@ async fn parent_preimage_incrementally_publishes_an_existing_child_edge() -> Res
     scratch.cleanup().await
 }
 
+/// Seeds one parent-child pair stated on both authority arms, with the ENSv1
+/// relation restated at `v1_block` and the child's activated ENSv2 migration
+/// boundary at `boundary_block`.
+async fn seed_child_authority_fixture(
+    pool: &PgPool,
+    v1_block: i64,
+    boundary_block: i64,
+) -> Result<()> {
+    let subregistry_instance = Uuid::parse_str("00000000-0000-0000-0000-0000000000e3")?;
+    let subregistry_address = "0x00000000000000000000000000000000000000e3";
+    for block in 4..=6 {
+        insert_lineage_block(pool, CHAIN, block).await?;
+    }
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1, $2, 'contract')",
+    )
+    .bind(subregistry_instance)
+    .bind(CHAIN)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number
+         ) VALUES ($1, $2, $3, 0)",
+    )
+    .bind(subregistry_instance)
+    .bind(CHAIN)
+    .bind(subregistry_address)
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        Some("ens:0xeth"),
+        None,
+        "SubregistryChanged",
+        "ens_v2_registry_l1",
+        json!({"subregistry":subregistry_address}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        Some("ens:0xalice"),
+        None,
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({
+            "registry_contract_instance_id":subregistry_instance,
+            "label":"alice",
+            "registrant":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    // The ENSv1 relation is restated later than the ENSv2 one, so a recency
+    // tie-break would publish ENSv1.
+    insert_event(
+        pool,
+        CHAIN,
+        v1_block,
+        Some("ens:0xalice"),
+        None,
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xeth",
+            "child_node":"0xalice",
+            "labelhash":"0xalice-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_migration_boundary(pool, "ens:0xalice", boundary_block).await
+}
+
+async fn insert_migration_boundary(pool: &PgPool, child: &str, block: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, raw_fact_ref, derivation_kind,
+             canonicality_state, before_state, after_state, migration_correlation_ids,
+             consumer_visibility
+         ) VALUES (
+             $1, 'ens', $2, 'MigrationApplied', 'ens_v2_migration_l1', 1, $3, $4, $5,
+             $6, 0, 0, '{}'::jsonb, 'ens_v2_migration', 'canonical',
+             jsonb_build_object('authority_epoch', 'ens_v1'),
+             jsonb_build_object(
+                 'migration_path', 'locked_child',
+                 'successor_binding', jsonb_build_object('authority_epoch', 'ens_v2')
+             ),
+             ARRAY['child-authority-fixture']::text[], 'activated'
+         )",
+    )
+    .bind(format!("{CHAIN}:MigrationApplied:{child}"))
+    .bind(child)
+    .bind(CHAIN)
+    .bind(block)
+    .bind(block_hash(CHAIN, block))
+    .bind(format!("{CHAIN}-child-boundary-tx"))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn child_relation(pool: &PgPool) -> Result<Option<(Option<String>, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "SELECT owner, registrant FROM children_current
+         WHERE parent_logical_name_id = 'ens:0xeth'
+           AND child_logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_optional(pool)
+    .await?)
+}
+
+// The child's own authority selects the published relation. The ENSv1 relation is
+// newer here, so a surviving recency tie-break would publish it.
+#[tokio::test]
+async fn a_proven_child_publishes_its_ens_v2_relation_over_a_newer_ens_v1_one() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_child_authority").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_child_authority_fixture(scratch.pool(), 2, 3).await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let published = child_relation(scratch.pool())
+        .await?
+        .expect("the proven child publishes exactly one relation");
+    assert_eq!(
+        published,
+        (None, Some(OWNER.to_owned())),
+        "the ENSv2 relation is published and the retained ENSv1 one is residue"
+    );
+    scratch.cleanup().await
+}
+
+// Release removes the child rather than restoring the ENSv1 relation the migration
+// left behind.
+#[tokio::test]
+async fn a_released_v2_child_publishes_no_relation_and_never_falls_back() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_child_released").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_child_authority_fixture(scratch.pool(), 2, 3).await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        4,
+        Some("ens:0xalice"),
+        None,
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({
+            "registry_contract_instance_id":"00000000-0000-0000-0000-0000000000e3"
+        }),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    assert_eq!(
+        child_relation(scratch.pool()).await?,
+        None,
+        "a released ENSv2 child publishes nothing"
+    );
+    scratch.cleanup().await
+}
+
+// An ENSv1 relation asserted after the child's ENSv2 authority began cannot be
+// reconciled as residue, and selection must not silently drop it.
+#[tokio::test]
+async fn a_post_boundary_ens_v1_child_relation_blocks_mainnet_publication() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_child_dual_current").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_child_authority_fixture(scratch.pool(), 5, 3).await?;
+
+    let failure = run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("a post-boundary ENSv1 child relation must not publish");
+    assert!(
+        failure
+            .to_string()
+            .contains("after the child's ENSv2 authority began"),
+        "unexpected failure: {failure}"
+    );
+    let published: i64 = sqlx::query_scalar("SELECT count(*) FROM children_current")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(published, 0, "an aborted generation publishes no rows");
+
+    let rows = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(rows.len(), 1);
+    let (_, _, _, failure_kind, fingerprint, name, evidence) = rows[0].clone();
+    assert_eq!(failure_kind, DUAL_CURRENT_CHILD_AUTHORITY);
+    assert_eq!(fingerprint.len(), 64);
+    assert_eq!(name, "ens:0xalice");
+    assert_eq!(evidence["parent_logical_name_id"], json!("ens:0xeth"));
+    assert_eq!(
+        evidence["authority_proof_kind"],
+        json!("migration_authority_transition")
+    );
+    assert_eq!(evidence["predecessor"]["authority_arm"], json!("ens_v1"));
+    assert_eq!(evidence["successor"]["authority_arm"], json!("ens_v2"));
+    assert!(evidence["predecessor"]["block_number"].is_number());
+    assert!(evidence["authority_epoch_start_position"]["block_number"].is_number());
+
+    run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("the retried generation still fails");
+    assert_eq!(
+        generation_failure_rows(scratch.pool(), CHAIN).await?,
+        rows,
+        "a retried generation records no second row for the same conflict"
+    );
+    scratch.cleanup().await
+}
+
+// Sepolia runs the same selection but never blocks publication on the pair.
+#[tokio::test]
+async fn a_sepolia_child_overlap_selects_without_blocking_publication() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_child_sepolia").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_child_authority_fixture(scratch.pool(), 5, 3).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), CHAIN).await?;
+
+    run_project_phase(scratch.pool(), CHAIN, 5).await?;
+    assert_eq!(
+        child_relation(scratch.pool()).await?,
+        Some((None, Some(OWNER.to_owned()))),
+        "sepolia still selects the proven ENSv2 relation"
+    );
+    assert!(
+        generation_failure_rows(scratch.pool(), CHAIN)
+            .await?
+            .is_empty(),
+        "sepolia records no publication-blocking failure"
+    );
+    scratch.cleanup().await
+}
+
+// `alice` carries ENSv1 history and takes an ENSv2 registration with no migration
+// proof, so per-child authority omits it as an unsupported mixed corpus rather than
+// ranking the two arms. The renewal of that invisible child must still leave the
+// clean sibling `bob` published.
 #[tokio::test]
 async fn incremental_v2_child_renewal_retains_sibling_edges() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_v2_sibling_scope").await?;
@@ -2736,7 +2987,7 @@ async fn incremental_v2_child_renewal_retains_sibling_edges() -> Result<()> {
     )
     .fetch_all(scratch.pool())
     .await?;
-    assert_eq!(before, vec!["ens:0xalice", "ens:0xbob"]);
+    assert_eq!(before, vec!["ens:0xbob"]);
 
     insert_event(
         scratch.pool(),

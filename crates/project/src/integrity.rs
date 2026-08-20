@@ -3,6 +3,7 @@ use sqlx::{Postgres, Row, Transaction};
 use crate::{Marker, ProjectError, Result};
 
 pub const DUAL_CURRENT_EXACT_NAME_AUTHORITY: &str = "dual_current_exact_name_authority";
+pub const DUAL_CURRENT_CHILD_AUTHORITY: &str = "dual_current_child_authority";
 
 /// Structured evidence for a projection-blocking invariant failure.
 ///
@@ -18,13 +19,24 @@ pub struct GenerationFailureEvidence {
     pub payload: serde_json::Value,
 }
 
+/// Assert every projection-blocking invariant, in a fixed order so one failed
+/// generation always records the same first conflict.
+pub(crate) async fn assert_publishable(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target: &Marker,
+) -> Result<()> {
+    assert_exact_name_authority(transaction, chain_id, target).await?;
+    assert_child_authority(transaction, chain_id, target).await
+}
+
 /// Fail the generation when a Mainnet name still holds current bindings on both
 /// authority arms after its proven activated ENSv1->ENSv2 migration boundary.
 ///
 /// Bindings are evaluated at end-of-target-block, which is the transaction- and
 /// block-level reconciliation tolerance: transients inside one migration
 /// transaction or block are invisible here by construction.
-pub(crate) async fn assert_publishable(
+async fn assert_exact_name_authority(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
@@ -117,7 +129,7 @@ pub(crate) async fn assert_publishable(
               -- ENSv2 child registration
               -- supersedes the retained ENSv1 child binding without closing it,
               -- so an open predecessor there is expected rather than anomalous;
-              -- the child invariant belongs to slice 3B.
+              -- the parent-child relation invariant below covers that case.
               AND authority.authority_proof_kind = 'migration_authority_transition'
               AND authority.authority_proof_event_identity IS NOT NULL
               AND boundary.block_number <= $2
@@ -213,6 +225,182 @@ pub(crate) async fn assert_publishable(
         ),
         GenerationFailureEvidence {
             failure_kind: DUAL_CURRENT_EXACT_NAME_AUTHORITY.into(),
+            failure_fingerprint,
+            logical_name_id,
+            target_block_number: target.number,
+            target_block_hash: target.hash.clone(),
+            payload,
+        },
+    ))
+}
+
+/// Fail the generation when a Mainnet parent-child pair still states both an ENSv1
+/// and an ENSv2 relation after the child's own proven ENSv2 authority began.
+///
+/// Raw coexistence is not the anomaly: a migrated or positively registered ENSv2
+/// child normally keeps its ENSv1 relation as residue, because neither migration
+/// branch retracts the ENSv1 registry entry. What cannot be reconciled is an ENSv1
+/// relation asserted *after* that authority epoch started — the selection would
+/// silently drop it, and dropping a live contradiction is what this refuses.
+async fn assert_child_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target: &Marker,
+) -> Result<()> {
+    let conflict = sqlx::query(
+        r#"
+        WITH conflict AS (
+            SELECT authority.logical_name_id AS child_logical_name_id,
+                   successor.parent_logical_name_id,
+                   authority.authority_proof_kind,
+                   authority.authority_proof_event_identity,
+                   COALESCE(
+                       (authority.authority_epoch_start_position ->> 'block_number')::bigint, -1
+                   ) AS epoch_block_number,
+                   COALESCE(
+                       (authority.authority_epoch_start_position ->> 'transaction_index')::bigint,
+                       -1
+                   ) AS epoch_transaction_index,
+                   COALESCE(
+                       (authority.authority_epoch_start_position ->> 'log_index')::bigint, -1
+                   ) AS epoch_log_index,
+                   predecessor.normalized_event_id AS predecessor_event_id,
+                   predecessor.source_family AS predecessor_source_family,
+                   predecessor.block_number AS predecessor_block_number,
+                   COALESCE(predecessor.evidence_transaction_index, -1)
+                       AS predecessor_transaction_index,
+                   COALESCE(predecessor.evidence_log_index, -1) AS predecessor_log_index,
+                   predecessor.canonicality_state AS predecessor_canonicality_state,
+                   successor.normalized_event_id AS successor_event_id,
+                   successor.source_family AS successor_source_family,
+                   successor.block_number AS successor_block_number,
+                   COALESCE(successor.evidence_transaction_index, -1)
+                       AS successor_transaction_index,
+                   COALESCE(successor.evidence_log_index, -1) AS successor_log_index,
+                   successor.canonicality_state AS successor_canonicality_state
+            FROM project_name_authority authority
+            JOIN project_child_candidates successor
+              ON successor.child_logical_name_id = authority.logical_name_id
+             AND successor.authority_arm = 'ens_v2'
+            JOIN project_child_candidates predecessor
+              ON predecessor.child_logical_name_id = successor.child_logical_name_id
+             AND predecessor.parent_logical_name_id = successor.parent_logical_name_id
+             AND predecessor.authority_arm = 'ens_v1'
+            WHERE authority.deployment_profile = 'mainnet'
+              AND authority.selected_authority_arm = 'ens_v2'
+              -- Both ENSv2 child authority proofs: the activated migration boundary
+              -- and the positive ENSv2 child registration.
+              AND authority.authority_proof_kind IN (
+                  'migration_authority_transition', 'positive_v2_child_registration'
+              )
+              AND authority.authority_proof_event_identity IS NOT NULL
+              AND (
+                  predecessor.block_number,
+                  COALESCE(predecessor.evidence_transaction_index, -1),
+                  COALESCE(predecessor.evidence_log_index, -1)
+              ) > (
+                  COALESCE(
+                      (authority.authority_epoch_start_position ->> 'block_number')::bigint, -1
+                  ),
+                  COALESCE(
+                      (authority.authority_epoch_start_position ->> 'transaction_index')::bigint,
+                      -1
+                  ),
+                  COALESCE(
+                      (authority.authority_epoch_start_position ->> 'log_index')::bigint, -1
+                  )
+              )
+        )
+        SELECT parent_logical_name_id,
+               child_logical_name_id,
+               encode(
+                   sha256(
+                       convert_to(
+                           concat_ws(
+                               '|', parent_logical_name_id, child_logical_name_id,
+                               authority_proof_kind, authority_proof_event_identity,
+                               epoch_block_number::text, epoch_transaction_index::text,
+                               epoch_log_index::text,
+                               predecessor_event_id::text, predecessor_block_number::text,
+                               predecessor_transaction_index::text,
+                               predecessor_log_index::text,
+                               successor_event_id::text, successor_block_number::text,
+                               successor_transaction_index::text,
+                               successor_log_index::text
+                           ),
+                           'UTF8'
+                       )
+                   ),
+                   'hex'
+               ) AS failure_fingerprint,
+               jsonb_build_object(
+                   'parent_logical_name_id', parent_logical_name_id,
+                   'authority_proof_kind', authority_proof_kind,
+                   'authority_proof_event_identity', authority_proof_event_identity,
+                   'authority_epoch_start_position', jsonb_build_object(
+                       'block_number', epoch_block_number,
+                       'transaction_index', epoch_transaction_index,
+                       'log_index', epoch_log_index
+                   ),
+                   'predecessor', jsonb_build_object(
+                       'authority_arm', 'ens_v1',
+                       'source_family', predecessor_source_family,
+                       'normalized_event_id', predecessor_event_id,
+                       'block_number', predecessor_block_number,
+                       'transaction_index', predecessor_transaction_index,
+                       'log_index', predecessor_log_index,
+                       'canonicality_state', predecessor_canonicality_state
+                   ),
+                   'successor', jsonb_build_object(
+                       'authority_arm', 'ens_v2',
+                       'source_family', successor_source_family,
+                       'normalized_event_id', successor_event_id,
+                       'block_number', successor_block_number,
+                       'transaction_index', successor_transaction_index,
+                       'log_index', successor_log_index,
+                       'canonicality_state', successor_canonicality_state
+                   ),
+                   'target', jsonb_build_object(
+                       'block_number', $1::bigint,
+                       'block_hash', $2::text
+                   )
+               ) AS payload
+        FROM conflict
+        ORDER BY parent_logical_name_id, child_logical_name_id
+        LIMIT 1
+        "#,
+    )
+    .bind(target.number)
+    .bind(&target.hash)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to assert child authority integrity", error))?;
+
+    let Some(row) = conflict else {
+        return Ok(());
+    };
+    let parent: String = row
+        .try_get("parent_logical_name_id")
+        .map_err(|error| ProjectError::database("failed to read child failure parent", error))?;
+    let logical_name_id: String = row
+        .try_get("child_logical_name_id")
+        .map_err(|error| ProjectError::database("failed to read child failure name", error))?;
+    let failure_fingerprint: String = row.try_get("failure_fingerprint").map_err(|error| {
+        ProjectError::database("failed to read child failure fingerprint", error)
+    })?;
+    let payload: serde_json::Value = row
+        .try_get("payload")
+        .map_err(|error| ProjectError::database("failed to read child failure evidence", error))?;
+
+    Err(ProjectError::generation_failure(
+        format!(
+            "chain {chain_id} parent {parent} and child {logical_name_id} state current \
+             relations on both authority arms after the child's ENSv2 authority began; \
+             projection generation for block {} is not publishable",
+            target.number
+        ),
+        GenerationFailureEvidence {
+            failure_kind: DUAL_CURRENT_CHILD_AUTHORITY.into(),
             failure_fingerprint,
             logical_name_id,
             target_block_number: target.number,

@@ -2,13 +2,27 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
+/// Builds the parent-child relations each authority arm currently states, then publishes the one
+/// the child's own authority selects.
+///
+/// Publication is per child, not per subtree: an unmigrated ENSv1 child stays ENSv1 below a
+/// migrated parent, and a child that reaches ENSv2 — through an activated migration boundary or a
+/// positive ENSv2 registration — publishes its ENSv2 relation while the retained ENSv1 relation
+/// becomes residue. A released ENSv2 child publishes nothing and never falls back to ENSv1, and a
+/// pair whose arms cannot be told apart is omitted as unsupported rather than ranked.
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    candidates(transaction, target).await?;
+    publish(transaction, chain_id, target).await
+}
+
+async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker) -> Result<()> {
     sqlx::query(
         r#"
+        CREATE TEMP TABLE project_child_candidates ON COMMIT DROP AS
         WITH ranked_v1 AS (
             SELECT event.*,
                    row_number() OVER (
@@ -62,10 +76,14 @@ pub(super) async fn build(
                    event.source_family,
                    event.manifest_version,
                    event.block_number,
+                   event.transaction_index AS evidence_transaction_index,
+                   event.log_index AS evidence_log_index,
                    event.block_hash,
                    event.raw_fact_ref,
                    event.canonicality_state::text AS canonicality_state,
-                   1 AS source_priority
+                   CASE WHEN event.source_family = 'basenames_base_registry'
+                       THEN 'basenames' ELSE 'ens_v1'
+                   END AS authority_arm
             FROM ranked_v1 event
             JOIN project_surfaces parent
               ON lower(parent.namehash) = lower(event.after_state ->> 'node')
@@ -152,6 +170,8 @@ pub(super) async fn build(
                        registration.block_number,
                        subregistry.block_number
                    ) AS block_number,
+                   registration.transaction_index AS evidence_transaction_index,
+                   registration.log_index AS evidence_log_index,
                    CASE
                        WHEN registration.block_number >= subregistry.block_number
                            THEN registration.block_hash
@@ -162,7 +182,7 @@ pub(super) async fn build(
                        'registration', registration.raw_fact_ref
                    ) AS raw_fact_ref,
                    registration.canonicality_state::text AS canonicality_state,
-                   2 AS source_priority
+                   'ens_v2' AS authority_arm
             FROM current_v2_subregistries subregistry
             JOIN project_surfaces parent
               ON parent.logical_name_id = subregistry.logical_name_id
@@ -171,9 +191,9 @@ pub(super) async fn build(
               ON address.chain_id = subregistry.chain_id
              AND lower(address.address) = subregistry.subregistry_address
              AND (address.active_from_block_number IS NULL
-                  OR address.active_from_block_number <= $2)
+                  OR address.active_from_block_number <= $1)
              AND (address.active_to_block_number IS NULL
-                  OR address.active_to_block_number > $2)
+                  OR address.active_to_block_number > $1)
              AND address.deactivated_at IS NULL
             JOIN ranked_v2_registrations registration
               ON registration.current_rank = 1
@@ -190,21 +210,63 @@ pub(super) async fn build(
             LEFT JOIN label_preimages preimage
               ON lower(preimage.labelhash) = lower(child.labelhashes[1])
             WHERE parent.raw_name <> ''
-        ),
-        ranked_rows AS (
-            SELECT row.*,
+        )
+        SELECT * FROM v1_rows
+        UNION ALL
+        SELECT * FROM v2_rows
+        "#,
+    )
+    .bind(target.number)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to stage child candidates", error))?;
+
+    sqlx::query(
+        "CREATE INDEX ON project_child_candidates (
+             parent_logical_name_id, child_logical_name_id
+         )",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to index child candidates", error))?;
+    Ok(())
+}
+
+async fn publish(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target: &Marker,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        WITH selected AS (
+            SELECT candidate.*,
                    row_number() OVER (
-                       PARTITION BY row.parent_logical_name_id,
-                                    row.child_logical_name_id
-                       ORDER BY row.block_number DESC NULLS LAST,
-                                row.normalized_event_id DESC,
-                                row.source_priority DESC
+                       PARTITION BY candidate.parent_logical_name_id,
+                                    candidate.child_logical_name_id
+                       -- Recency picks the current relation inside one selected arm; it never
+                       -- picks the arm.
+                       ORDER BY candidate.block_number DESC NULLS LAST,
+                                candidate.normalized_event_id DESC
                    ) AS pair_rank
-            FROM (
-                SELECT * FROM v1_rows
-                UNION ALL
-                SELECT * FROM v2_rows
-            ) row
+            FROM project_child_candidates candidate
+            LEFT JOIN project_name_authority authority
+              ON authority.logical_name_id = candidate.child_logical_name_id
+            WHERE authority.selected_authority_arm = candidate.authority_arm
+               -- A child whose own authority is undetermined keeps an unambiguous single-arm
+               -- relation, which is what an ordinary unmigrated subname has; a pair whose arms
+               -- disagree is omitted rather than ranked.
+               OR (
+                   authority.selected_authority_arm IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM project_child_candidates other
+                       WHERE other.parent_logical_name_id =
+                             candidate.parent_logical_name_id
+                         AND other.child_logical_name_id =
+                             candidate.child_logical_name_id
+                         AND other.authority_arm <> candidate.authority_arm
+                   )
+               )
         )
         INSERT INTO project_stage_children_current (
             parent_logical_name_id, child_logical_name_id, surface_class,
@@ -253,7 +315,7 @@ pub(super) async fn build(
                    'target_block_hash', $3
                ),
                child.manifest_version
-        FROM ranked_rows child
+        FROM selected child
         WHERE child.pair_rank = 1
         ORDER BY child.parent_logical_name_id, child.child_logical_name_id
         "#,

@@ -13,4 +13,6 @@ mod stage;
 pub use engine::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
 pub use error::{ErrorKind, ProjectError, Result};
 pub use hydration::{HydrationOutcome, Hydrator};
-pub use integrity::{DUAL_CURRENT_EXACT_NAME_AUTHORITY, GenerationFailureEvidence};
+pub use integrity::{
+    DUAL_CURRENT_CHILD_AUTHORITY, DUAL_CURRENT_EXACT_NAME_AUTHORITY, GenerationFailureEvidence,
+};
