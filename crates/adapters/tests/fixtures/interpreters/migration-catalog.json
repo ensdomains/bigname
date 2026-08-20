@@ -66,7 +66,11 @@
       "v2_token_id": "67288639490607741471329381527299044583237042385903607214732634535388505964544",
       "stored_expiry": 1822787360,
       "migration_block": 237,
+      "name_unwrapped_log_index": 4,
       "graveyard_transfer_log_index": 5,
+      "predecessor_cleanup_log_index": 5,
+      "predecessor_anchor_kind": "registrar_backed_registration",
+      "predecessor_selection": "current_registrar_resource_immediately_before_predecessor_cleanup",
       "v2_registration_log_index": 6,
       "migration_path": "unlocked_wrapped"
     },

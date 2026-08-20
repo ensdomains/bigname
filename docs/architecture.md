@@ -196,9 +196,18 @@ When the later consumer-activation slice re-derives that group with
 `consumer_visibility=activated`, it activates the diagnostic associations
 without rewriting their independently admitted events, changes the name's
 [`authority_epoch`](glossary.md#authority-epoch) from `ens_v1` to `ens_v2`,
-and retains or opens the concrete ENSv2 binding. Child and unwrapped
-second-level predecessors close at the exact ENSv1 cleanup recorded by the
-boundary; wrapped second-level predecessors close at the boundary position.
+and retains or opens the concrete ENSv2 binding. Child, registrar-token
+`unwrapped`, and `unlocked_wrapped` second-level predecessors close at the exact
+ENSv1 cleanup recorded by the boundary; `locked_wrapped` second-level
+predecessors close at the boundary position. The unlocked wrapped controller
+unwraps before injecting the ENSv2 registration.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+If the deployment profile had not materialized the registrar identity before
+that unwrap, the exact following BaseRegistrar transfer confirms the fallback
+identity while its binding is effective from the preceding `NameUnwrapped`, so
+the same cleanup-relative selector remains strict in time.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 Interpret first validates the
 one-to-one correspondence between that activated `MigrationApplied` event and
 its [migration authority transition](glossary.md#migration-authority-transition).
@@ -212,11 +221,18 @@ transition correlation or predecessor validation. The selected binding keeps the
 Only then do later ENSv1 facts for the same migrated name become history that
 cannot reopen current authority. An ENSv2 release or unregister leaves
 [`released v2 authority`](glossary.md#released-v2-authority) and does not fall
-back to the [ENSv1 husk](glossary.md#ensv1-husk). The unlocked controller transfers the
-ENSv1 registry position and registrar token to the Graveyard before claiming
-the reserved ENSv2 registration; the locked path instead parks the wrapper
-token in the Graveyard and registers the name in ENSv2 while NameWrapper can
-remain the ENSv1 registry owner. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58)
+back to the [ENSv1 husk](glossary.md#ensv1-husk). The unlocked controller's
+registrar-token path transfers the ENSv1 registry position and registrar token
+to the Graveyard before claiming the reserved ENSv2 registration. Its
+unlocked-wrapped path first unwraps into the Graveyard, which also transfers the
+registrar token there, and then injects the ENSv2 registration. The locked path
+instead parks the wrapper token in the Graveyard and registers the name in
+ENSv2 while NameWrapper can remain the ENSv1 registry owner.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58)
 
 Slices 1, 2A, 2B, and 2C remain separately reviewed and merged implementation units but
 deploy together at one planned [re-derivation

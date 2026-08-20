@@ -43,10 +43,11 @@ pub const CHILD_CLEANUP_EVENT_KINDS: &[&str] = &[
 /// undo. Ordinarily that is the event's own log position. A cleanup-relative migration boundary
 /// instead closes its ENSv1 predecessor at the cleanup it records, earlier in its own transaction,
 /// so keying a reopen on the boundary's own log would find nothing to undo. This covers direct
-/// children and the unwrapped second-level path; for the `locked_child` shape, whose cleanup closes
-/// nothing by itself, the transition write is the only close there is.
+/// children and both unlocked second-level paths; for the `locked_child` shape, whose cleanup
+/// closes nothing by itself, the transition write is the only close there is.
 /// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
 /// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
 pub const EVENT_CLOSE_TIME_SQL: &str = "lineage.block_timestamp + make_interval(\
     secs => COALESCE(\
         CASE WHEN event.after_state #>> '{predecessor_binding,selection}' \

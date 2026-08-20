@@ -197,6 +197,7 @@ pub(super) struct BindingDraft {
     pub binding_kind: String,
     pub authority_arm: String,
     pub surface_binding_id: Option<Uuid>,
+    pub active_from: Option<time::OffsetDateTime>,
 }
 
 #[derive(Clone, Debug)]

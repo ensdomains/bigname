@@ -4,7 +4,10 @@ use bigname_adapters::{
     StateCacheCapacity, prepare_schema_v2_batch_incremental,
     schema_v2::{
         inject_activated_transition_for_test,
-        seam::{ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, SURFACE_BINDING_ID_KEY},
+        seam::{
+            ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, LOG_INDEX_KEY,
+            SURFACE_BINDING_ID_KEY, TRANSACTION_INDEX_KEY,
+        },
     },
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
@@ -45,6 +48,9 @@ sol! {
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
 }
+
+#[path = "tests/unlocked_wrapped.rs"]
+mod unlocked_wrapped;
 
 /// Exercises the checked-in Sepolia manifests through the production adapter and transition
 /// writer. Its BaseRegistrar address is pinned upstream here:

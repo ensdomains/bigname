@@ -114,8 +114,8 @@ pub(super) async fn write(
                 transition.boundary_event_identity
             ))
         })?;
-        // A child or unwrapped second-level predecessor resolves and closes at its recorded ENSv1
-        // cleanup. A wrapped second-level predecessor resolves and closes at the boundary itself.
+        // A child or unlocked second-level predecessor resolves and closes at its recorded ENSv1
+        // cleanup. A locked-wrapped second-level predecessor resolves and closes at the boundary.
         let (predecessor_at, predecessor_time) = match &selector.cleanup {
             Some(cleanup) => (
                 (
@@ -134,7 +134,10 @@ pub(super) async fn write(
                 boundary_time,
             ),
         };
-
+        // A fallback registrar binding is effective from NameUnwrapped, but its confirming
+        // evidence is the cleanup transfer. Only registrar evidence may equal the cleanup.
+        let allow_cleanup_evidence =
+            selector.cleanup.is_some() && selector.anchor_kind == REGISTRAR_ANCHOR_KIND;
         let predecessors: Vec<Uuid> = sqlx::query_scalar(&format!(
             "SELECT surface_binding_id
              FROM surface_bindings
@@ -143,14 +146,16 @@ pub(super) async fn write(
                AND authority_arm = $3
                AND canonicality_state IN ('canonical', 'safe', 'finalized')
                AND (
-                   block_number < $4
-                   OR (
-                       block_number = $4
-                       AND (
-                           COALESCE((provenance ->> '{}')::bigint, -1),
-                           COALESCE((provenance ->> '{}')::bigint, -1)
-                       ) < ($5, $6)
-                   )
+                   (
+                       block_number,
+                       COALESCE((provenance ->> '{}')::bigint, -1),
+                       COALESCE((provenance ->> '{}')::bigint, -1)
+                   ) < ($4, $5, $6)
+                   OR ($12 AND (
+                       block_number,
+                       COALESCE((provenance ->> '{}')::bigint, -1),
+                       COALESCE((provenance ->> '{}')::bigint, -1)
+                   ) = ($4, $5, $6))
                )
                AND active_from < $7
                AND (active_to IS NULL OR active_to >= $7)
@@ -163,14 +168,20 @@ pub(super) async fn write(
                      AND evidence.consumer_visibility = 'activated'
                      AND evidence.canonicality_state IN ('canonical', 'safe', 'finalized')
                      AND (
-                         evidence.block_number < $4
-                         OR (
-                             evidence.block_number = $4
+                         (
+                             evidence.block_number,
+                             COALESCE(evidence.transaction_index, -1),
+                             COALESCE(evidence.log_index, -1)
+                         ) < ($4, $5, $6)
+                         OR ($12
                              AND (
-                                 COALESCE(evidence.transaction_index, -1),
-                                 COALESCE(evidence.log_index, -1)
-                             ) < ($5, $6)
-                         )
+                                 surface_bindings.block_number,
+                                 COALESCE((surface_bindings.provenance ->> '{}')::bigint, -1),
+                                 COALESCE((surface_bindings.provenance ->> '{}')::bigint, -1)
+                             ) = ($4, $5, $6)
+                             AND (evidence.block_number,
+                                  COALESCE(evidence.transaction_index, -1),
+                                  COALESCE(evidence.log_index, -1)) = ($4, $5, $6))
                      )
                      AND EXISTS (
                          SELECT 1
@@ -216,6 +227,10 @@ pub(super) async fn write(
              FOR UPDATE",
             seam::TRANSACTION_INDEX_KEY,
             seam::LOG_INDEX_KEY,
+            seam::TRANSACTION_INDEX_KEY,
+            seam::LOG_INDEX_KEY,
+            seam::TRANSACTION_INDEX_KEY,
+            seam::LOG_INDEX_KEY,
         ))
         .bind(&transition.chain_id)
         .bind(&transition.logical_name_id)
@@ -228,6 +243,7 @@ pub(super) async fn write(
         .bind(&selector.identity)
         .bind(selector.contract_instance_id)
         .bind(&selector.contract_address)
+        .bind(allow_cleanup_evidence)
         .fetch_all(&mut **transaction)
         .await
         .map_err(|error| {
@@ -258,12 +274,13 @@ pub(super) async fn write(
 
 /// Resolves the recorded ENSv1 cleanup to the instant its authority ended.
 ///
-/// A child boundary names its wrapper cleanup. An unwrapped `.eth` second-level boundary names the
+/// A child boundary names its wrapper cleanup. Both unlocked `.eth` second-level paths name the
 /// BaseRegistrar transfer that precedes the ENSv2 registration. The recorded event must exist
 /// exactly as described — same identity, name, position, source event, and admitted emitter — on
 /// readable canonical lineage. "Some earlier cleanup" is not equivalent evidence.
 /// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
 /// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
 async fn resolve_cleanup_time(
     transaction: &mut Transaction<'_, Postgres>,
     transition: &MigrationAuthorityTransition,
@@ -357,7 +374,7 @@ struct PredecessorSelector {
     identity: String,
     contract_instance_id: Option<Uuid>,
     contract_address: Option<String>,
-    /// Present for a child boundary or an unwrapped second-level boundary, whose predecessor is
+    /// Present for a child boundary or either unlocked second-level boundary, whose predecessor is
     /// resolved against its ENSv1 cleanup rather than the later ENSv2 registration.
     cleanup: Option<PredecessorCleanup>,
 }
@@ -391,9 +408,9 @@ fn validate(transition: &MigrationAuthorityTransition) -> Result<PredecessorSele
     let anchor_kind = resource
         .and_then(|value| value.get("anchor_kind"))
         .and_then(serde_json::Value::as_str);
-    // Each selection admits only its stated anchor family. Child and unwrapped registrar
-    // boundaries resolve at their recorded cleanup; wrapped second-level boundaries resolve at
-    // the migration boundary itself.
+    // Each selection admits only its stated anchor family. Child and unlocked registrar
+    // boundaries resolve at their recorded cleanup; locked-wrapped second-level boundaries
+    // resolve at the migration boundary itself.
     let cleanup_relative = match (selection, anchor_kind) {
         (Some("active_immediately_before_boundary"), Some(WRAPPER_EVIDENCE_ANCHOR_KIND)) => false,
         (Some("active_immediately_before_predecessor_cleanup"), Some(CHILD_ANCHOR_KIND)) => true,
@@ -544,9 +561,11 @@ fn predecessor_cleanup(transition: &MigrationAuthorityTransition) -> Result<Pred
         return Err(invalid_selector(transition));
     };
     // Every cleanup-relative path retires the ENSv1 side before registering the successor. The
-    // unwrapped second-level controller transfers the registrar token first
+    // direct-unwrapped controller transfers the registrar token first
     // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58,
     // upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58),
+    // and its unlocked-wrapped loop unwraps before injecting
+    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58),
     // while the child receiver performs its cleanup first
     // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58,
     // upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58,

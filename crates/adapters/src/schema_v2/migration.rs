@@ -469,17 +469,19 @@ fn correlate_authority_transitions(
                 evidence.clone(),
             )?;
         }
-        let registrar_cleanup = (migration_path == "unwrapped")
-            .then(|| {
+        let registrar_cleanup_sender = match migration_path {
+            "unwrapped" => Some(unlocked),
+            "unlocked_wrapped" => Some(name_wrapper),
+            _ => None,
+        };
+        let registrar_cleanup = registrar_cleanup_sender
+            .and_then(|cleanup_sender| {
                 transfers.iter().copied().find(|observation| {
-                    observation
-                        .decoded
-                        .get("from")
-                        .and_then(Value::as_str)
-                        .is_some_and(|from| from.eq_ignore_ascii_case(unlocked))
+                    observation.decoded["from"]
+                        .as_str()
+                        .is_some_and(|from| from.eq_ignore_ascii_case(cleanup_sender))
                 })
             })
-            .flatten()
             .map(|observation| {
                 let event_identity = independently_admitted_transfer_events
                     .iter()
@@ -498,7 +500,7 @@ fn correlate_authority_transitions(
                 })
             });
         let predecessor_resource = match migration_path {
-            "unwrapped" => {
+            "unwrapped" | "unlocked_wrapped" => {
                 let base_registrar_instance = catalog
                     .contract_instance_for_address(
                         base_registrar,
@@ -506,9 +508,7 @@ fn correlate_authority_transitions(
                             .block_number
                             .context("migration registration has no block number")?,
                     )?
-                    .context(
-                        "ENSv1 BaseRegistrar correlation address has no active contract instance",
-                    )?;
+                    .context("ENSv1 BaseRegistrar has no active contract instance")?;
                 json!({
                     "anchor_kind":"registrar_backed_registration",
                     "contract_instance_id":base_registrar_instance,
@@ -517,7 +517,7 @@ fn correlate_authority_transitions(
                     "selection":"current_registrar_resource_immediately_before_predecessor_cleanup",
                 })
             }
-            "unlocked_wrapped" | "locked_wrapped" => json!({
+            "locked_wrapped" => json!({
                 "anchor_kind":"wrapper_backed_control",
                 "contract_address":name_wrapper,
                 "wrapper_token_id":logical_name_id.split_once(':').map(|(_, hash)| hash),
