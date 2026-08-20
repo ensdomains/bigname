@@ -9,9 +9,9 @@ mod redo;
 use bigname_adapters::schema_v2::BatchOutput;
 use bigname_adapters::schema_v2::seam::{
     EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, MIGRATION_APPLIED_EVENT_KIND,
-    PREIMAGE_OBSERVATION_EVENT_KIND, REDO_BINDING_CLOSE_CLAMP_SQL, SURFACE_BINDING_ID_KEY,
-    SURFACE_BOUND_EVENT_KIND, SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
-    TRANSACTION_INDEX_KEY,
+    PREIMAGE_OBSERVATION_EVENT_KIND, REDO_BINDING_CLOSE_CLAMP_SQL, REDO_CLOSED_ARM_SQL,
+    SURFACE_BINDING_ID_KEY, SURFACE_BOUND_EVENT_KIND, SURFACE_UNBOUND_EVENT_KIND,
+    TOKEN_LINEAGE_ID_KEY, TRANSACTION_INDEX_KEY,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -358,7 +358,8 @@ async fn reopen_bindings_closed_in_range(
                    COALESCE(
                        event.after_state ->> '{SURFACE_BINDING_ID_KEY}',
                        event.after_state #>> '{{successor_binding,binding_id}}'
-                   ) AS opened_binding_id
+                   ) AS opened_binding_id,
+                   {REDO_CLOSED_ARM_SQL} AS closed_arm
             FROM normalized_events event
             JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
@@ -383,6 +384,7 @@ async fn reopen_bindings_closed_in_range(
             FROM surface_bindings binding
             JOIN closing_events event
               ON event.logical_name_id = binding.logical_name_id
+             AND event.closed_arm = binding.authority_arm
              AND binding.active_to = {REDO_BINDING_CLOSE_CLAMP_SQL}
              AND (
                     (
