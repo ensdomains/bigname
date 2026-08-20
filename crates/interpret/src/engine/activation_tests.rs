@@ -4,10 +4,7 @@ use bigname_adapters::{
     StateCacheCapacity, prepare_schema_v2_batch_incremental,
     schema_v2::{
         inject_activated_transition_for_test,
-        seam::{
-            ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, PREIMAGE_OBSERVATION_EVENT_KIND,
-            SURFACE_BINDING_ID_KEY,
-        },
+        seam::{ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, SURFACE_BINDING_ID_KEY},
     },
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
@@ -127,16 +124,15 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     );
     assert!(
         output.normalized_events.iter().all(|event| {
-            event.event_kind != PREIMAGE_OBSERVATION_EVENT_KIND
-                || ![
-                    ARM_WIDE_BINDING_CLOSE_KEY,
-                    CLOSED_AUTHORITY_ARM_KEY,
-                    SURFACE_BINDING_ID_KEY,
-                ]
-                .into_iter()
-                .all(|key| event.after_state.get(key).is_some())
+            ![
+                ARM_WIDE_BINDING_CLOSE_KEY,
+                CLOSED_AUTHORITY_ARM_KEY,
+                SURFACE_BINDING_ID_KEY,
+            ]
+            .into_iter()
+            .all(|key| event.after_state.get(key).is_some())
         }),
-        "migration activation must not emit an arm-wide reassertion marker"
+        "migration activation must not emit the complete arm-wide reassertion marker tuple"
     );
 
     // The production phase-runner stamps these diagnostic rows from its connection. This unit

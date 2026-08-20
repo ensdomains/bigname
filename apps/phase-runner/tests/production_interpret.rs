@@ -4477,6 +4477,212 @@ async fn assert_loser_departure_reorg_reopens_the_survivor(boundary_expiry: bool
 }
 
 #[tokio::test]
+async fn redo_arm_wide_reopen_requires_the_planted_preimage_marker() -> Result<()> {
+    for plant_marker in [false, true] {
+        let fixture = if plant_marker {
+            "production_interpret_planted_arm_wide_marker"
+        } else {
+            "production_interpret_migration_boundary_control"
+        };
+        let chain = if plant_marker {
+            "interpret-planted-arm-wide-marker"
+        } else {
+            "interpret-migration-boundary-control"
+        };
+        let scratch = ScratchDatabase::create(fixture).await?;
+        let (arm_wide_predecessor, migration_predecessor) =
+            seed_planted_marker_redo_fixture(scratch.pool(), chain, plant_marker).await?;
+
+        run_engine(scratch.pool(), chain, 2, 2, InterpretRunMode::Redo).await?;
+
+        let arm_wide_reopened: bool = sqlx::query_scalar(
+            "SELECT active_to IS NULL FROM surface_bindings WHERE surface_binding_id = $1",
+        )
+        .bind(arm_wide_predecessor)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(
+            arm_wide_reopened, plant_marker,
+            "the activated MigrationApplied boundary must not perform the arm-wide reopen; only \
+             the planted PreimageObserved marker may do so"
+        );
+
+        let migration_reopened: bool = sqlx::query_scalar(
+            "SELECT active_to IS NULL FROM surface_bindings WHERE surface_binding_id = $1",
+        )
+        .bind(migration_predecessor)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert!(
+            migration_reopened,
+            "the activated boundary still reopens its own recorded ENSv1 predecessor"
+        );
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+async fn seed_planted_marker_redo_fixture(
+    pool: &PgPool,
+    chain: &str,
+    plant_marker: bool,
+) -> Result<(Uuid, Uuid)> {
+    let logical_name_id = "ens:0xplanted-marker";
+    let arm_wide_predecessor = Uuid::parse_str("00000000-0000-0000-0000-000000000101")?;
+    let migration_predecessor = Uuid::parse_str("00000000-0000-0000-0000-000000000102")?;
+    let replacement = Uuid::parse_str("00000000-0000-0000-0000-000000000103")?;
+    let arm_wide_resource = Uuid::parse_str("00000000-0000-0000-0000-000000000201")?;
+    let migration_resource = Uuid::parse_str("00000000-0000-0000-0000-000000000202")?;
+    let replacement_resource = Uuid::parse_str("00000000-0000-0000-0000-000000000203")?;
+
+    insert_manifest(
+        pool,
+        chain,
+        "ens_v2_registry_l1",
+        "tests/planted-marker-redo.toml",
+        json!({
+            "manifest_version":1,
+            "namespace":"ens",
+            "source_family":"ens_v2_registry_l1",
+            "chain":chain,
+            "deployment_epoch":"fixture",
+            "rollout_status":"active",
+            "normalizer_version":NORMALIZER,
+            "capability_flags":{},
+            "roots":[],
+            "contracts":[],
+            "discovery_rules":[],
+            "abi":{"events":[],"calls":[]}
+        }),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES
+             ($1, $2, NULL, 1, to_timestamp(1), 'canonical'),
+             ($1, $3, $2, 2, to_timestamp(2), 'canonical')",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 1))
+    .bind(block_hash(chain, 2))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1, 'ens', 'planted-marker.eth', ARRAY['planted-marker','eth'],
+             decode('00', 'hex'), '0xplanted-marker', ARRAY['0xplanted-marker','0xeth'],
+             $2, 'active', $3, $4, 1, 'canonical'
+         )",
+    )
+    .bind(logical_name_id)
+    .bind(NORMALIZER)
+    .bind(chain)
+    .bind(block_hash(chain, 1))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) SELECT resource_id, $1, $2, 1, 'canonical'
+           FROM unnest($3::uuid[]) AS resource_id",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 1))
+    .bind([arm_wide_resource, migration_resource, replacement_resource])
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, active_to, chain_id, block_hash,
+             block_number, provenance, canonicality_state
+         ) VALUES
+             ($1, $4, $5, 'declared_registry_path', 'ens_v2', to_timestamp(1),
+              to_timestamp(2), $6, $7, 1, '{}'::jsonb, 'canonical'),
+             ($2, $4, $8, 'declared_registry_path', 'ens_v1', to_timestamp(1),
+              to_timestamp(2) + interval '1 microsecond', $6, $7, 1,
+              '{}'::jsonb, 'canonical'),
+             ($3, $4, $9, 'declared_registry_path', 'ens_v2', to_timestamp(2),
+              NULL, $6, $10, 2,
+              '{\"transaction_index\":0,\"log_index\":0}'::jsonb, 'canonical')",
+    )
+    .bind(arm_wide_predecessor)
+    .bind(migration_predecessor)
+    .bind(replacement)
+    .bind(logical_name_id)
+    .bind(arm_wide_resource)
+    .bind(chain)
+    .bind(block_hash(chain, 1))
+    .bind(migration_resource)
+    .bind(replacement_resource)
+    .bind(block_hash(chain, 2))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, raw_fact_ref, derivation_kind,
+             canonicality_state, before_state, after_state, consumer_visibility
+         ) VALUES (
+             $1, 'ens', $2, 'MigrationApplied', 'ens_v2_migration_l1', 1,
+             $3, 2, $4, $5, 0, 1, '{}'::jsonb, 'ens_v2_migration',
+             'canonical', '{}'::jsonb,
+             jsonb_build_object(
+                 'predecessor_binding', jsonb_build_object('authority_epoch', 'ens_v1'),
+                 'successor_binding', jsonb_build_object(
+                     'authority_epoch', 'ens_v2', 'binding_id', $6::text
+                 )
+             ),
+             'activated'
+         )",
+    )
+    .bind(format!("{chain}:activated-migration-boundary"))
+    .bind(logical_name_id)
+    .bind(chain)
+    .bind(block_hash(chain, 2))
+    .bind(format!("{chain}:migration-transaction"))
+    .bind(replacement)
+    .execute(pool)
+    .await?;
+    if plant_marker {
+        sqlx::query(
+            "INSERT INTO normalized_events (
+                 event_identity, namespace, logical_name_id, event_kind, source_family,
+                 manifest_version, chain_id, block_number, block_hash, transaction_hash,
+                 transaction_index, log_index, raw_fact_ref, derivation_kind,
+                 canonicality_state, before_state, after_state, consumer_visibility
+             ) VALUES (
+                 $1, 'ens', $2, 'PreimageObserved', 'ens_v2_registry_l1', 1,
+                 $3, 2, $4, $5, 0, 0, '{}'::jsonb, 'raw_log_preimage_observation',
+                 'canonical', '{}'::jsonb,
+                 jsonb_build_object(
+                     'arm_wide_binding_close', true,
+                     'closed_authority_arm', 'ens_v2',
+                     'surface_binding_id', $6::text
+                 ),
+                 'activated'
+             )",
+        )
+        .bind(format!("{chain}:planted-arm-wide-marker"))
+        .bind(logical_name_id)
+        .bind(chain)
+        .bind(block_hash(chain, 2))
+        .bind(format!("{chain}:marker-transaction"))
+        .bind(replacement)
+        .execute(pool)
+        .await?;
+    }
+    Ok((arm_wide_predecessor, migration_predecessor))
+}
+
+#[tokio::test]
 async fn binding_open_redo_preserves_a_terminal_close_after_the_range() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_binding_terminal").await?;
     let chain = "interpret-binding-terminal";

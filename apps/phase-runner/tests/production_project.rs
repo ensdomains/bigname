@@ -3279,6 +3279,11 @@ async fn same_position_multi_candidate_child_conflict_is_replay_stable_within_ea
     scratch.cleanup().await
 }
 
+// There is no corresponding same-arm publish fixture with two registry contract instances at one
+// address. `contract_instance_addresses_active_idx` admits at most one non-deactivated instance
+// for a chain/address, and `ranked_v2_registrations` keeps one current row per child and admitted
+// instance, so that proposed second candidate cannot reach `publish` after candidate construction.
+
 // The other ENSv2 child authority proof reaches the same assertion: a positive ENSv2 child
 // registration is an authority epoch too, so an ENSv1 relation asserted after it is the same
 // unreconcilable contradiction as one asserted after a migration boundary.
