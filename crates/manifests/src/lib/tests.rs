@@ -380,6 +380,34 @@ fn repository_loader_rejects_preimage_attribution_overlap() -> Result<()> {
 }
 
 #[test]
+fn pre_502_dual_registrar_contract_roles_still_fail_attribution_guard() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let registrar = manifest_contents().replacen(
+        "source_family = \"ens_v2_registry_l1\"",
+        "source_family = \"ens_v1_registrar_l1\"",
+        1,
+    );
+    let migration = manifest_contents().replacen(
+        "source_family = \"ens_v2_registry_l1\"",
+        "source_family = \"ens_v2_migration_l1\"",
+        1,
+    );
+    test_dir.write_manifest("ens", "ens_v1_registrar_l1", "v1", &registrar)?;
+    test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &migration)?;
+
+    let error = load_repository(&test_dir.path)
+        .expect_err("dual registrar/migration contract-role attribution must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("could assign one block-derived preimage log to two sources")
+            && message.contains("ens_v1_registrar_l1")
+            && message.contains("ens_v2_migration_l1"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn rejects_unsupported_discovery_admission() -> Result<()> {
     let contents = manifest_contents().replacen(
         "admission = \"reachable_from_root\"",
@@ -436,7 +464,7 @@ fn sepolia_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<(
         .iter()
         .map(|contract| (contract.role.as_str(), contract.start_block))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(roles.len(), 9);
+    assert_eq!(roles.len(), 8);
     assert_eq!(roles["unlocked_migration_controller"], Some(11_163_401));
     assert_eq!(roles["locked_migration_controller"], Some(11_163_413));
     assert_eq!(roles["graveyard"], Some(11_163_400));
@@ -445,21 +473,67 @@ fn sepolia_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<(
     assert_eq!(roles["batch_registrar"], Some(11_163_411));
     assert_eq!(roles["migration_helper"], Some(11_163_415));
     assert_eq!(roles["wrapper_registry_implementation"], Some(11_163_410));
-    assert_eq!(roles["ens_v1_base_registrar"], Some(11_163_400));
     assert_eq!(
         migration.manifest.correlation_addresses["ens_v1_name_wrapper"],
         "0x0635513f179d50a207757e05759cbd106d7dfce8"
+    );
+    assert_eq!(
+        migration.manifest.correlation_addresses["ens_v1_base_registrar"],
+        "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85"
     );
     assert!(migration.manifest.capability_flags.is_empty());
     assert!(migration.manifest.discovery_rules.is_empty());
     Ok(())
 }
 
-/// The Sepolia profile admits the ENSv1 registry and wrapper families the ENSv2 migration family
-/// bridges from. The registrar family is deliberately absent: the migration family already owns
-/// that address's attribution through its own `ens_v1_base_registrar` contract role, so admitting
-/// it here fails preimage-attribution validation. That is tracked separately, and this test pins
-/// the gap so it cannot be closed by accident.
+#[test]
+fn mainnet_registrar_family_pins_the_base_registrar_event_surface() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let registrar = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_registrar_l1")
+        .map(|loaded| &loaded.manifest)
+        .expect("Mainnet ENSv1 registrar family");
+    let required = [
+        (
+            "ControllerAdded",
+            "event ControllerAdded(address indexed controller)",
+            &["PermissionChanged"][..],
+        ),
+        (
+            "ControllerRemoved",
+            "event ControllerRemoved(address indexed controller)",
+            &["PermissionChanged"][..],
+        ),
+        (
+            "NameRegistered",
+            "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
+            &["RegistrationReleased"][..],
+        ),
+        (
+            "NameRenewed",
+            "event NameRenewed(uint256 indexed id, uint256 expires)",
+            &["RegistrationRenewed", "ExpiryChanged"][..],
+        ),
+    ];
+
+    for (name, fragment, normalized_events) in required {
+        let event = registrar
+            .abi
+            .events
+            .iter()
+            .find(|event| event.name == name && event.fragment == fragment)
+            .unwrap_or_else(|| panic!("missing BaseRegistrar event {fragment}"));
+        assert_eq!(event.emitter_roles, ["registrar"]);
+        assert_eq!(event.normalized_events, normalized_events);
+    }
+    Ok(())
+}
+
+/// Sepolia admits the ENSv1 registry and wrapper manifests consumed by `ens_v2_migration_l1`
+/// correlation. BaseRegistrar raw-log attribution belongs only to `ens_v1_registrar_l1`, whose
+/// Sepolia manifest stays in the stacked follow-up.
 #[test]
 fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
@@ -547,8 +621,7 @@ fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<(
 
     assert!(
         family("ens_v1_registrar_l1").is_none(),
-        "Sepolia ENSv1 registrar admission collides with the migration family's \
-         ens_v1_base_registrar declaration and is tracked separately"
+        "Sepolia ENSv1 registrar admission belongs to the stacked follow-up"
     );
     Ok(())
 }

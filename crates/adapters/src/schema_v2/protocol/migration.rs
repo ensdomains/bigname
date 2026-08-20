@@ -9,6 +9,7 @@ use crate::{
         catalog::Selected,
         common::{event_string_value, namehash, stable_uuid},
         model::RawLogInput,
+        state::State,
     },
 };
 
@@ -38,13 +39,6 @@ pub(super) fn interpret(selected: &Selected, raw: &RawLogInput) -> anyhow::Resul
         "NameRenewed" if selected.emitter_role.as_deref() == Some("ens_v1_renewal_bridge") => {
             bridge_renewed(selected, raw, &mut output)?
         }
-        "ControllerAdded" => controller(selected, raw, &mut output, true)?,
-        "ControllerRemoved" => controller(selected, raw, &mut output, false)?,
-        "NameRegistered" => name_registered(selected, raw, &mut output)?,
-        "NameRenewed" if selected.emitter_role.as_deref() == Some("ens_v1_base_registrar") => {
-            base_renewed(selected, raw, &mut output)?
-        }
-        "Transfer" => transfer(raw)?,
         event => bail!("unsupported ENSv2 migration event {event}"),
     };
     output.migration_observations.push(MigrationObservation {
@@ -54,6 +48,41 @@ pub(super) fn interpret(selected: &Selected, raw: &RawLogInput) -> anyhow::Resul
         contract_instance_id: selected.contract_instance_id,
         raw: raw.clone(),
         decoded,
+        correlated_wrapper_expiry: None,
+    });
+    Ok(output)
+}
+
+/// Decode a BaseRegistrar log attributed by `ens_v1_registrar_l1`. Event drafts retain
+/// `ens_v2_migration_l1` provenance and are materialized only when that manifest's launch-bounded
+/// correlation admits the observation.
+pub(super) fn interpret_base_registrar(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+) -> anyhow::Result<Interpreted> {
+    let mut output = Interpreted::new();
+    let (decoded, correlated_wrapper_expiry) = match selected.event.signature.as_str() {
+        "ControllerAdded(address)" => (controller(selected, raw, state, &mut output, true)?, None),
+        "ControllerRemoved(address)" => {
+            (controller(selected, raw, state, &mut output, false)?, None)
+        }
+        "NameRegistered(uint256,address,uint256)" => {
+            (name_registered(selected, raw, &mut output)?, None)
+        }
+        "NameRenewed(uint256,uint256)" => base_renewed(selected, raw, state, &mut output)?,
+        "Transfer(address,address,uint256)" => (transfer(raw)?, None),
+        signature => bail!("unsupported ENSv1 BaseRegistrar event {signature}"),
+    };
+    output.migration_events = std::mem::take(&mut output.events);
+    output.migration_observations.push(MigrationObservation {
+        source_family: selected.source.source_family.clone(),
+        event_name: selected.event.name.clone(),
+        emitter_role: selected.emitter_role.clone(),
+        contract_instance_id: selected.contract_instance_id,
+        raw: raw.clone(),
+        decoded,
+        correlated_wrapper_expiry,
     });
     Ok(output)
 }
@@ -137,6 +166,7 @@ fn bridge_renewed(
 fn controller(
     selected: &Selected,
     raw: &RawLogInput,
+    state: &mut State,
     output: &mut Interpreted,
     approved: bool,
 ) -> anyhow::Result<Value> {
@@ -165,6 +195,7 @@ fn controller(
     } else {
         "ControllerRemoved"
     };
+    state.set_v1_registrar_controller(&account, approved, raw);
     let decoded = json!({
         "subject":account,
         "scope":{"kind":"registrar_controller"},
@@ -219,8 +250,9 @@ fn name_registered(
 fn base_renewed(
     selected: &Selected,
     raw: &RawLogInput,
+    state: &mut State,
     output: &mut Interpreted,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<(Value, Option<u64>)> {
     let event = decode_event_log::<base_registrar::NameRenewed>(
         &raw.topics,
         &raw.data,
@@ -230,11 +262,13 @@ fn base_renewed(
     let labelhash = B256::from(event.id.to_be_bytes::<32>());
     let namehash = eth_namehash(labelhash);
     let logical_name_id = format!("{}:{namehash}", selected.source.namespace);
+    let registrar_expiry =
+        u64::try_from(event.expires).context("BaseRegistrar NameRenewed expiry exceeds u64")?;
     let decoded = json!({
         "token_id":u256_word_hex(event.id),
         "labelhash":format!("{labelhash:#x}"),
         "namehash":namehash,
-        "expiry":u64::try_from(event.expires).context("BaseRegistrar NameRenewed expiry exceeds u64")?,
+        "expiry":registrar_expiry,
         "source_event":"NameRenewed",
         "resource_anchor":{
             "candidate_resource_id":stable_uuid(&format!(
@@ -251,6 +285,22 @@ fn base_renewed(
             "consumer_visibility":"candidate",
         },
     });
+    let correlated_wrapper_expiry = state.correlated_v1_wrapper_expiry(
+        &selected.source.namespace,
+        &namehash,
+        registrar_expiry,
+        raw,
+    );
+    let mut persisted = decoded.clone();
+    // BaseRegistrar renewals retained as ENSv1→ENSv2 migration evidence share one
+    // [interpreter state key](../../../../../docs/glossary.md#interpreter-state-key) per event
+    // kind and name. Carry the latest completed correlation onto every later numeric renewal so
+    // cold restore's latest readable row is self-contained.
+    if let Some(wrapper_expiry) =
+        state.retained_v1_correlated_wrapper_expiry(&selected.source.namespace, &namehash)
+    {
+        persisted["wrapper_expiry"] = Value::from(wrapper_expiry);
+    }
     // This scope is a persisted interpreter-state identity. It deliberately names the emitter
     // class rather than the candidate resource UUID so slice 2 reproduces the same scope.
     let scope = format!("migration-renewal:base-registrar:{logical_name_id}");
@@ -260,11 +310,11 @@ fn base_renewed(
             event_kind,
             Some(logical_name_id.clone()),
             format!("{event_kind}:{token_id}"),
-            decoded.clone(),
+            persisted.clone(),
             scope.clone(),
         ));
     }
-    Ok(decoded)
+    Ok((decoded, correlated_wrapper_expiry))
 }
 
 fn transfer(raw: &RawLogInput) -> anyhow::Result<Value> {

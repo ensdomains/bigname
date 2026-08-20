@@ -32,6 +32,7 @@ pub(super) struct V1NameState {
     pub expiry: Option<i64>,
     pub owner: Option<String>,
     pub authority_key: Option<String>,
+    pub wrapper_fallback: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +76,11 @@ pub(super) struct State {
     pub(super) provisional_values: OrdMap<String, Value>,
     v1_names: OrdMap<String, V1NameState>,
     v1_wrapper_data: OrdMap<String, V1WrapperData>,
+    v1_pending_unwraps: OrdMap<String, (String, i64)>,
+    v1_registrar_controller_transaction: Option<String>,
+    v1_registrar_controllers: OrdSet<String>,
+    v1_pending_wrapper_sync_expiries: OrdMap<String, (String, u64)>,
+    v1_correlated_wrapper_expiries: OrdMap<String, u64>,
     v1_registrars: OrdMap<String, V1NameState>,
     v1_expiries: OrdSet<(i64, String)>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
@@ -148,6 +154,7 @@ impl State {
                 expiry,
                 owner,
                 authority_key,
+                wrapper_fallback: false,
             },
         );
     }
@@ -167,6 +174,7 @@ impl State {
         expiry: Option<i64>,
         owner: Option<String>,
         authority_key: Option<String>,
+        wrapper_fallback: bool,
         make_current: bool,
     ) {
         if surface_known {
@@ -187,6 +195,7 @@ impl State {
             expiry,
             owner,
             authority_key,
+            wrapper_fallback,
         };
         let key = v1_key(namespace, namehash);
         let previous_expiry = self
@@ -232,6 +241,7 @@ impl State {
             expiry: None,
             owner,
             authority_key,
+            wrapper_fallback: false,
         };
         self.v1_registry_authorities.insert(key, authority.clone());
         self.activate_v1_authority(namespace, namehash, Some(authority));

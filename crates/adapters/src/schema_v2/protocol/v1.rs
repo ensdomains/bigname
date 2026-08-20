@@ -23,10 +23,11 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    registrar_migration_enabled: bool,
 ) -> anyhow::Result<Interpreted> {
     match selected.source.source_family.as_str() {
         "ens_v1_registrar_l1" | "basenames_base_registrar" => {
-            registrar::interpret(selected, raw, state)
+            registrar::interpret(selected, raw, state, registrar_migration_enabled)
         }
         "ens_v1_registry_l1" | "basenames_base_registry" => {
             registry::interpret(selected, raw, state)

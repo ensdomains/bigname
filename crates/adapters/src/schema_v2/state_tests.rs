@@ -120,6 +120,7 @@ fn observe_registrar(state: &mut State, namehash: &str, expiry: Option<i64>) {
         expiry,
         Some("0x0000000000000000000000000000000000000001".to_owned()),
         Some(format!("registrar:{namehash}")),
+        false,
         true,
     );
 }

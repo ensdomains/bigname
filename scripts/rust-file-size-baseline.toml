@@ -11,11 +11,6 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
-path = "crates/adapters/src/schema_v2/state_restore.rs"
-loc = 603
-justification = "Per-family v1 restore arms stay in one file so replay equivalence against the live arms is reviewed in one place; the masked-write snapshot-sync invariant comment pushed the file past the gate, and it stays well under the review threshold."
-
-[[files]]
 path = "crates/project/src/builders/name_authority.rs"
 loc = 683
 justification = "The exact-name authority selector keeps proof, released tombstone, and released-regime arm rules in one auditable query; the released-regime clause belongs next to the tombstone rules whose positions it shares, and the file stays under the review threshold."

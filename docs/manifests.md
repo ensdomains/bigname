@@ -48,7 +48,7 @@ Each manifest contains:
 
 For one `(namespace, source_family, chain)` tuple in a selected deployment-profile root, at most one manifest version may declare `rollout_status = "active"`. Zero active versions remains valid for a family whose versions are only `draft`, `shadow`, or `deprecated`. Each `(namespace, source_family, chain, deployment_epoch, manifest_version)` tuple may come from only one file; the loader rejects duplicate tuples across repository layouts regardless of rollout status. Within one manifest version, every `[[contracts]].role` must be unique. The loader rejects these violations before repository sync.
 
-The loader also rejects two active manifest versions on the same chain when both declare the same address as roots or both declare it as contracts, their open-ended `start_block` ranges overlap, and either family feeds manifest-declared event data into `PreimageObserved` rows produced directly from block logs. Those families are `ens_v1_registrar_l1`, `basenames_base_registrar`, `ens_v1_wrapper_l1`, `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, and `ens_v2_resolver_l1`. This check does not compare a root declaration with a contract declaration. Two roots or two contracts may still share an address when neither family is in that list; this is why the shared `l1_resolver` declaration in `basenames_l1_compat` and `basenames_execution` is accepted.
+The loader also rejects two active manifest versions on the same chain when both declare the same address as roots or both declare it as contracts, their open-ended `start_block` ranges overlap, and either family feeds manifest-declared event data into `PreimageObserved` rows produced directly from block logs. Those families are `ens_v1_registrar_l1`, `basenames_base_registrar`, `ens_v1_wrapper_l1`, `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, `ens_v2_resolver_l1`, and `ens_v2_migration_l1`. This check does not compare a root declaration with a contract declaration or inspect `correlation_addresses`. Two roots or two contracts may still share an address when neither family is in that list; this is why the shared `l1_resolver` declaration in `basenames_l1_compat` and `basenames_execution` is accepted.
 
 Each `[[roots]]` and `[[contracts]]` entry may declare an optional `start_block`.
 `start_block` is the inclusive first historical block for that target. Omitted
@@ -260,13 +260,14 @@ wrapper family but still sees no cleanup for children wrapped earlier. Deriving
 child boundaries on this profile requires an ingest floor at or below the
 wrapper's `start_block`, and below each child's own wrap block.
 
-`ens_v1_registrar_l1` is **not** admitted on this profile, and no ENSv1
-registrar-controller contract is admitted either. The reason is the migration
-family's own `ens_v1_base_registrar` contract role, which already declares the
-Sepolia BaseRegistrar address: see the launch-bounded declaration below.
+`ens_v1_registrar_l1` is **not** admitted on this deployment profile, and no
+ENSv1 registrar-controller contract is admitted either. The migration family's
+`correlation_addresses.ens_v1_base_registrar` value names the Sepolia
+BaseRegistrar for cross-family matching only; it is not a contract declaration,
+does not own raw-log attribution, and does not add the address to the watch plan.
 Consequences to hold in mind while that stands:
 
-- `.eth` second-level ENSv1 registrar authority has no source on this profile, so an activated migration boundary has no ENSv1 registrar predecessor binding to close.
+- `.eth` second-level ENSv1 registrar authority has no source on this deployment profile, so an activated migration boundary has no ENSv1 registrar predecessor binding to close.
 - ENSv1 label-bearing registration and renewal observations are absent, so ENSv1-arm Sepolia names carry no registrar lifecycle history.
 - `ens_v1_resolver_l1` is likewise unadmitted here, so an ENSv1-arm Sepolia name can carry a resolver pointer whose resolver logs no watch plan fetches. That is a known coverage asymmetry against the mainnet profile, not a resolver bug.
 
@@ -338,9 +339,10 @@ The following fixed contracts become direct declarations under
 | DAO batch-reservation registrar (`BatchRegistrar`) | `0xfe2aab6df1cbff84534ce65d9e4a755ba02d6795` / `11163411` | Sender marker for pre-migration reservations and reservation-expiry extensions. The authoritative `LabelReserved` / `ExpiryUpdated` logs still come from the existing `ETHRegistry` declaration. (upstream: .refs/ens_v2/contracts/deployments/sepolia/BatchRegistrar.json:L2 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/BatchRegistrar.json:L279 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L43 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L69 @ ens_v2@ccaeb58) |
 
 The existing Sepolia ENSv1 BaseRegistrar at
-`0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85` is also declared as a
-correlation input, beginning at the Graveyard deployment block `11163400`,
-not at the registrar's original deployment. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/deployments/sepolia/Graveyard.json:L438 @ ens_v2@ccaeb58) Correlation is per name, never per transaction alone. Interpretation hashes the decoded bridge label bytes exactly as emitted; it does not normalize or rewrite them. That labelhash, interpreted as `uint256`, must equal the BaseRegistrar token ID. Interpretation then derives the `.eth` namehash from `ETH_NODE` and that labelhash and requires it to equal the v2 logical name/namehash. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L8 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L108 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L113 @ ens_v2@ccaeb58) A direct child under an already-migrated parent uses the same check without `ETH_NODE`: interpretation derives the child namehash from the parent [migration registry](glossary.md#migration-registry-wrapperregistry)'s own migration evidence — the CREATE2 salt of the factory log that created that registry, which is the parent's namehash — together with the registered labelhash, and requires the result to equal the ENSv2 logical name/namehash the registry topology resolves for that label. A mismatch means the evidence chain is incomplete and no boundary is derived. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58) The participating logs must have a valid path-specific order and come from the declared emitters and controller path; decoded expiry or duration values must agree for that path without reconstructing an expiry. A transaction-hash-only join is forbidden because one transaction can contain several labels through `syncWrapper` or a multi-item wrapper transfer. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L132 @ ens_v2@ccaeb58) Each name produces an independent correlation group, and unrelated co-located logs remain outside every group.
+`0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85` is named by `correlation_addresses.ens_v1_base_registrar`; it is not a migration-family contract declaration or watch-plan input.
+The checked-in Sepolia deployment profile does not yet admit `ens_v1_registrar_l1`. When an ENSv1 registrar family supplies matching BaseRegistrar observations, the ENSv1→ENSv2 migration correlator accepts them only from the Graveyard deployment block `11163400` onward. This preserves the former launch-bounded scope: registrar rows that exist only because of migration correlation remain `consumer_visibility=candidate`, retain `ens_v2_migration_l1` normalized-row provenance, and do not become ordinary consumer-visible registrar history merely because `ens_v1_registrar_l1` attributes the raw log.
+The address-keyed contract instance remains the same identity across the two uses. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/deployments/sepolia/Graveyard.json:L438 @ ens_v2@ccaeb58)
+Correlation is per name, never per transaction alone. Interpretation hashes the decoded bridge label bytes exactly as emitted; it does not normalize or rewrite them. That labelhash, interpreted as `uint256`, must equal the BaseRegistrar token ID. Interpretation then derives the `.eth` namehash from `ETH_NODE` and that labelhash and requires it to equal the v2 logical name/namehash. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L8 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L108 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L113 @ ens_v2@ccaeb58) A direct child under an already-migrated parent uses the same check without `ETH_NODE`: interpretation derives the child namehash from the parent [migration registry](glossary.md#migration-registry-wrapperregistry)'s own migration evidence — the CREATE2 salt of the factory log that created that registry, which is the parent's namehash — together with the registered labelhash, and requires the result to equal the ENSv2 logical name/namehash the registry topology resolves for that label. A mismatch means the evidence chain is incomplete and no boundary is derived. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58) The participating logs must have a valid path-specific order and come from the declared emitters and controller path; decoded expiry or duration values must agree for that path without reconstructing an expiry. A transaction-hash-only join is forbidden because one transaction can contain several labels through `syncWrapper` or a multi-item wrapper transfer. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L132 @ ens_v2@ccaeb58) Each name produces an independent correlation group, and unrelated co-located logs remain outside every group.
 
 Each group carries `correlation_kind`. A synchronized bridge renewal uses
 `synchronized_renewal` and never emits `MigrationApplied`; a later renewal or
@@ -445,29 +447,9 @@ does not materialize an ENSv1 resource, token lineage, authority transition, or
 surface binding. This
 retains post-boundary ENSv1 residue without allowing it to overwrite ENSv2
 authority. Controller additions and removals remain name-independent permission
-history. The selected Sepolia deployment profile admits no ENSv1 *registrar*
-source family, so every controller event admitted through this launch-bounded
-declaration is candidate in slice 1. That absence is a consequence of this
-manifest rather than an accident of the deployment: the `ens_v1_base_registrar`
-contract role above already declares the Sepolia BaseRegistrar address. Some
-source families recover label preimages from whole-block scans rather than from
-a single declared emitter. When either side of an address collision is such a
-family, two active contract declarations of the same address on the same chain
-would leave one log assignable to either source, and the loader rejects that
-pair outright. The migration family and `ens_v1_registrar_l1` are both such
-families, so an `ens_v1_registrar_l1` family cannot be admitted on this profile
-while that role stands. Resolving which family should own that address is
-[issue #502](https://github.com/ensdomains/bigname/issues/502).
-
-The profile does admit the ENSv1 registry and NameWrapper families
-(`ens_v1_registry_l1`, `ens_v1_wrapper_l1`). The migration manifest's
-`correlation_addresses.ens_v1_name_wrapper` value carries the ETHRenewerV1
-constructor's NameWrapper address as non-emitting correlation metadata: within
-the migration family it is not a declared contract, discovery edge, or
-watch-plan input. The contract it names is separately declared and watched by
-`ens_v1_wrapper_l1`, which is what makes a migrated child's ENSv1 cleanup
-observable at all. The migration family reads that evidence; it does not emit
-it.
+history. The checked-in Sepolia deployment profile produces no BaseRegistrar rows because it admits no `ens_v1_registrar_l1` source. Whenever an ENSv1 registrar family is co-admitted, every BaseRegistrar row materialized through the migration family's launch-bounded correlation remains candidate in slice 1 even though the ENSv1 family solely owns those raw logs. The migration family declares no contract at that address, so the attribution guard and runtime adapter selection remain unambiguous.
+Without an `ens_v2_migration_l1` manifest, these four mappings extend raw-log ownership but produce no ordinary registrar rows.
+The checked-in deployment profile admits the ENSv1 registry and NameWrapper families (`ens_v1_registry_l1` and `ens_v1_wrapper_l1`). The migration manifest's `correlation_addresses.ens_v1_name_wrapper` and `correlation_addresses.ens_v1_base_registrar` values are non-emitting correlation metadata: within the migration family they are not contract declarations, discovery edges, or watch-plan inputs. NameWrapper is separately declared and watched by `ens_v1_wrapper_l1`; the BaseRegistrar address remains correlation metadata until its ENSv1 family is admitted. The migration family reads cross-family evidence when present; it does not own or duplicate raw-log attribution.
 (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L894 @ ens_v2@ccaeb58)
 A controller
 event around a multi-label
@@ -475,6 +457,8 @@ event around a multi-label
 every participating name; it is not duplicated per name and remains candidate
 until all referenced groups activate. A controller event outside such a batch
 uses the name-independent `controller_configuration` derivation group above.
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106-L111 @ ens_v2@ccaeb58) Wrapper-expiry correlation requires the complete controller-addition, renewal, and matching controller-removal envelope in one transaction. An incomplete envelope remains historical evidence, and candidate correlation never advances the independently admitted NameWrapper state; an unmatched addition therefore cannot affect later ordinary output whether the blocks are interpreted in one batch or several.
+The proven wrapper expiry is retained separately and may refine only the registrar expiry when a later ordered `NameUnwrapped` then BaseRegistrar `Transfer` first materializes a missing registrar identity; full replay, incremental replay, and cold restore make the same choice. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows; no transaction-level synthetic renewal is created. A resource-bearing registry observation retains its resource, and the bridge observation uses that already-materialized ENSv2 `resource_id`. When the reserved registry resource cannot be derived, both observations remain resource-less rather than inventing an anchor. A launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it does not materialize an ordinary ENSv1 resource or token lineage before later consumer activation. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
 
 The production migration driver revokes the superseded public ENSv1
@@ -671,7 +655,7 @@ watched after restart.
 The current watch planner uses each active manifest's complete ABI topic set
 for every address declared by that manifest; `emitter_roles` constrains
 interpretation selection, not ingest planning. The active ENSv1→ENSv2 migration family
-therefore widens the watch plan across all nine declared addresses,
+therefore widens the watch plan across all eight declared addresses,
 including marker-only contracts, with each address bounded by its own pinned
 start block. The
 manifest content-hash rotation invalidates interpretation and projection

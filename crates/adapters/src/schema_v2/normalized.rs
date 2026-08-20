@@ -18,19 +18,29 @@ pub(super) fn materialize(
     state: &mut State,
     output: &mut BatchOutput,
 ) {
+    materialize_for_source(&selected.source, raw, events, state, output);
+}
+
+pub(super) fn materialize_for_source(
+    source: &ManifestSource,
+    raw: &RawLogInput,
+    events: Vec<EventDraft>,
+    state: &mut State,
+    output: &mut BatchOutput,
+) {
     for (ordinal, draft) in events.into_iter().enumerate() {
         let before_state_explicit = draft.explicit_before.is_some();
         let before_state = state.transition(
-            &selected.source.namespace,
+            &source.namespace,
             draft.logical_name_id.as_deref(),
             draft.resource_id,
             &draft.event_kind,
-            &selected.source.source_family,
+            &source.source_family,
             &draft.state_scope,
             draft.explicit_before,
             draft.after_state.clone(),
         );
-        let derivation = derivation_kind(&selected.source.source_family, &draft.event_kind);
+        let derivation = derivation_kind(&source.source_family, &draft.event_kind);
         let mut source_ref = raw_fact_ref(raw);
         source_ref
             .as_object_mut()
@@ -45,31 +55,31 @@ pub(super) fn materialize(
             .insert(
                 "interpreter_state_key".to_owned(),
                 serde_json::Value::String(interpreter_state_key(
-                    &selected.source.namespace,
+                    &source.namespace,
                     draft.logical_name_id.as_deref(),
                     draft.resource_id,
                     &draft.event_kind,
-                    &selected.source.source_family,
+                    &source.source_family,
                     &draft.state_scope,
                 )),
             );
         output.normalized_events.push(NormalizedEvent {
             event_identity: format!(
                 "{derivation}:{}:{}:{}:{}:{}:{}:{ordinal}",
-                selected.source.manifest_id,
+                source.manifest_id,
                 raw.chain_id,
                 raw.block_hash,
                 raw.transaction_hash,
                 raw.log_index,
                 draft.identity_suffix,
             ),
-            namespace: selected.source.namespace.clone(),
+            namespace: source.namespace.clone(),
             logical_name_id: draft.logical_name_id,
             resource_id: draft.resource_id,
             event_kind: draft.event_kind,
-            source_family: selected.source.source_family.clone(),
-            manifest_version: selected.source.manifest_version,
-            source_manifest_id: Some(selected.source.manifest_id),
+            source_family: source.source_family.clone(),
+            manifest_version: source.manifest_version,
+            source_manifest_id: Some(source.manifest_id),
             chain_id: raw.chain_id.clone(),
             block_number: Some(raw.block_number),
             block_hash: Some(raw.block_hash.clone()),
