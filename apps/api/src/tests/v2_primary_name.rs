@@ -1038,6 +1038,91 @@ async fn v2_get_primary_name_refuses_a_supported_ens_v2_arm_claim_without_provid
 }
 
 #[tokio::test]
+async fn a_supported_name_current_row_without_authority_arm_is_refused_without_forward_dispatch()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v1").await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET provenance = provenance #- '{authority_selection,authority_arm}'
+         WHERE lower(raw_name) = 'taytems.eth'",
+    )
+    .execute(&lookup_pool)
+    .await?;
+
+    let (support, authority_arm): (String, Option<String>) = sqlx::query_as(
+        "SELECT support_status, provenance #>> '{authority_selection,authority_arm}'
+         FROM bigname_phase.name_current
+         WHERE lower(raw_name) = 'taytems.eth'",
+    )
+    .fetch_one(&lookup_pool)
+    .await?;
+    assert_eq!(support, "supported");
+    assert_eq!(authority_arm, None);
+
+    // Queue only the two reverse-leg responses. A fail-open forward dispatch has no queued
+    // response and makes the request fail instead of producing the required in-band refusal.
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 missing-arm primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "verified",
+            "status": "unsupported",
+            "unsupported_reason": "exact_name_authority_not_verifiable"
+        }]),
+        "{payload}"
+    );
+    assert!(payload["data"].get("verification").is_none(), "{payload}");
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        2,
+        "only the reverse leg may dispatch when authority provenance is missing: {rpc_requests:?}"
+    );
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispatch() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
@@ -1491,6 +1576,86 @@ async fn v2_get_primary_name_refuses_a_live_ens_v2_arm_claim_without_forward_dis
         rpc_requests.len(),
         2,
         "the reverse leg may run, but the forward call must not: {rpc_requests:?}"
+    );
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// An absent exact-name row means the name is outside indexed coverage, not that the projection
+/// selected an unverifiable authority. Live verification is its only answer path and must run.
+#[tokio::test]
+async fn an_unindexed_name_is_admitted_to_live_verification() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+
+    let exact_name_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
+    )
+    .fetch_one(&lookup_pool)
+    .await?;
+    assert_eq!(exact_name_rows, 0, "the contract requires no exact-name row");
+
+    // The first two calls are the reverse leg; the third response lets the admitted forward
+    // dispatch verify the address returned by the claim.
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 unindexed-name primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "verified",
+            "status": "ok",
+            "name": "taytems.eth"
+        }]),
+        "{payload}"
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        3,
+        "an unindexed name must dispatch the reverse leg and forward verification"
+    );
+    assert!(
+        rpc_requests
+            .iter()
+            .all(|request| request["method"] == json!("eth_call"))
     );
 
     lookup_pool.close().await;

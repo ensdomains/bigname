@@ -44,7 +44,7 @@ pub(crate) enum OnDemandPrimaryNameVerificationState {
     NotAttempted,
     ClaimNotNormalized,
     /// The claimed name's selected exact-name authority is not one this deployment can resolve
-    /// through, so the route answered from projected state and dispatched no provider call.
+    /// through, so the route dispatched no forward resolver call.
     AuthorityUnsupported(String),
     Verified(JsonValue),
 }

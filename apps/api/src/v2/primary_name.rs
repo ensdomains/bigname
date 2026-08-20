@@ -264,7 +264,7 @@ fn build_verified_answer(lookup_state: &PrimaryNameLookupState) -> V2Result<Veri
         OnDemandPrimaryNameVerificationState::AuthorityUnsupported(reason) => {
             return Ok(VerifiedAnswer {
                 answer: PrimaryNameAnswer::unsupported(Source::Verified, reason),
-                // No provider call ran, so there is no verification outcome to report.
+                // No forward resolver call ran, so there is no verification outcome to report.
                 outcome_exists: false,
             });
         }

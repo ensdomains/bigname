@@ -103,12 +103,19 @@ pub(super) async fn unverifiable_name_authority(
     // no forward-resolution path for a name whose selected authority is a later arm. We decline
     // rather than resolve such a name through the ENSv1 entrypoint, whose answer our own authority
     // selection has already ruled out as the current one.
-    let verifiable = row
+    let Some(authority_arm) = row
         .provenance
         .pointer("/authority_selection/authority_arm")
         .and_then(serde_json::Value::as_str)
-        .is_none_or(|arm| arm == "ens_v1");
-    Ok(if verifiable {
+    else {
+        // Unlike an absent row, a present supported row must carry the projected authority choice.
+        // Missing selection provenance is a projection anomaly, so forward verification fails
+        // closed instead of silently using the ENSv1 entrypoint.
+        return Ok(ForwardGateDecision::Refuse(
+            CLAIM_AUTHORITY_NOT_VERIFIABLE.to_owned(),
+        ));
+    };
+    Ok(if authority_arm == "ens_v1" {
         ForwardGateDecision::Admit
     } else {
         ForwardGateDecision::Refuse(CLAIM_AUTHORITY_NOT_VERIFIABLE.to_owned())

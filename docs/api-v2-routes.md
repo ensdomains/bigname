@@ -813,7 +813,75 @@ Field ownership:
   named it: it applies both to a projected claim and to a name the live reverse
   leg returns, and in the live case the check runs after the reverse leg and
   before the forward call, so a refused name costs no forward dispatch and no
-  CCIP-read follow.
+  CCIP-read follow. A present supported `name_current` row without its selected
+  [authority arm](glossary.md#authority-epoch) is a projection anomaly and
+  receives the same refusal. A name for which the current projection read finds
+  no exact-name row in `name_current` is instead admitted to live forward
+  verification. The projection cannot state which authority applies to a name
+  outside indexed coverage, and live verification is the only answer path for
+  it. A subname known only through offchain or wildcard live resolution has no
+  exact-name row because a live provider answer does not materialize one;
+  separately observed wildcard names can have projected surfaces.
+
+  A missing readable row cannot generally hide a later authority arm from the
+  execution this route performs. Live ENS/60 primary-name verification currently
+  executes only against Mainnet, whose [deployment
+  profile](glossary.md#deployment-profile) admits no ENSv2 registry, so
+  there is no later arm to hide. Sepolia currently has no route execution
+  entrypoint; the Sepolia evidence below explains its projected authority and
+  the expected ENSv1-path behavior, not an active Sepolia verified route. An
+  unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
+  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@ccaeb58)`,
+  an unlocked wrapped ENSv1→ENSv2 migration does the same
+  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2@ccaeb58)`,
+  and the locked path clears it when the name permits that change
+  `(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L135-L144 @ ens_v2@ccaeb58)`.
+  The deployment script installs the ENSv2-backed wildcard resolver at the
+  ENSv1 `eth` node
+  `(upstream: .refs/ens_v2/contracts/deploy/00_ENSV2Resolver.ts:L60-L81 @ ens_v2@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L14 @ ens_v2@ccaeb58)`.
+  The ENSv1 Universal Resolver walks up to an ancestor resolver
+  `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
+  and accepts that resolver through ENSIP-10
+  `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L87 @ ens_v1@91c966f)`,
+  so the ENSv1 path for a migrated name serves live ENSv2 state. Upstream tests
+  prove that path directly; the end-to-end suite defines the shared ENSv1 and
+  ENSv2 resolution check and invokes it before and after ENSv1→ENSv2 migration
+  of unwrapped, unlocked wrapped, and locked names
+  `(upstream: .refs/ens_v2/contracts/test/integration/ENSV2Resolver.test.ts:L94-L124 @ ens_v2@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L133-L147 @ ens_v2@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L451-L455 @ ens_v2@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L543-L550 @ ens_v2@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L603-L610 @ ens_v2@ccaeb58)`.
+  The `eth`-node redirect is scripted intent plus a deployed Sepolia resolver in
+  the pinned checkout
+  `(upstream: .refs/ens_v2/contracts/deployments/sepolia/ENSV2Resolver.json:L2 @ ens_v2@ccaeb58)`;
+  the [`ens_v2` pin](../.refs/MANIFEST.toml) is scoped to current Sepolia
+  deployment evidence and does not establish a Mainnet redirect.
+
+  There is one known narrow exception. A locked name migrated with
+  `CANNOT_SET_RESOLVER` burned keeps its ENSv1 resolver entry because the
+  ENSv1→ENSv2 migration cannot clear it. When that entry names a listed
+  PublicResolver, the ENSv1 side continues to serve its retained records while
+  ENSv2 selects the replacement resolver
+  `(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L137-L175 @ ens_v2@ccaeb58)`.
+  The ENSv1 PublicResolver derives ordinary write authority from the registry or
+  wrapped token owner and their approvals, while separately authorizing its
+  trusted ETH controller and reverse registrar
+  `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114-L128 @ ens_v1@91c966f)`,
+  requires that authority for record writes
+  `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1@91c966f)`,
+  and keeps existing records readable without that write check
+  `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L84 @ ens_v1@91c966f)`.
+  Moving the wrapped token to the graveyard therefore freezes ordinary writes
+  by the former name owner, but it does not revoke those separately trusted
+  callers.
+  This locked-name `CANNOT_SET_RESOLVER` case is not reachable through the
+  current Mainnet-only execution path. If a deployment with the Sepolia redirect
+  gains a verified route entrypoint, a name outside indexed coverage would be
+  admitted and could verify those retained records. Inside coverage, the name's
+  `ens_v2`-selected row would cause the refusal above, so the exposure would close
+  as indexing coverage completes.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. A stored
   successful claim whose spelling does not normalize returns an `indexed` entry
@@ -839,19 +907,22 @@ Field ownership:
   `source=indexed` does not enter verified-execution rate or concurrency
   admission; omitted `source` and `source=verified` do because they run the
   fresh lookup. Forward verification requires the claimed name's selected
-  exact-name authority, and declines in two distinct cases that share a response
-  shape but not a reason. A claim whose exact-name projection is unsupported
-  returns the in-band unsupported result carrying that projection's own public
-  reason, the same reason name detail serves for the row. A claim the projection
-  supports whose selected authority is the ENSv2 arm returns the in-band
-  unsupported result carrying `exact_name_authority_not_verifiable`: no manifest
-  declares an ENSv2 execution entrypoint, so this route has no ENSv2
-  forward-resolution path and declines rather than resolving the name through
-  the ENSv1 universal resolver its own authority selection has already ruled
-  out. That second case needs a deployment whose profile can support an ENSv2
-  selection at all; where the profile shadows the ENSv2 arm the name is already
-  unsupported and takes the first case instead. Neither case dispatches a provider call. The shared shape is not reason
-  equality, so a consumer reads `unsupported_reason` to tell the two apart.
+  exact-name authority and declines in three cases. A claim whose exact-name
+  projection is unsupported returns the in-band unsupported result carrying
+  that projection's own public reason, the same reason name detail serves for
+  the row. A present supported row with no selected authority arm is a projection
+  anomaly and returns `exact_name_authority_not_verifiable`. A claim the
+  projection supports whose selected authority is the ENSv2 arm returns that
+  same reason: no manifest declares an ENSv2 execution entrypoint, so this route
+  has no ENSv2 forward-resolution path and declines rather than resolving the
+  name through the ENSv1 universal resolver its own authority selection has
+  already ruled out. The ENSv2 case needs a deployment profile that can support
+  an ENSv2 selection at all; where the deployment profile shadows the ENSv2 arm,
+  the name is already unsupported and takes the first case instead. None of the
+  three cases dispatches a forward resolver call. A live reverse claim has
+  already used its two reverse-leg provider calls before the name-level refusal
+  is known. A consumer reads `unsupported_reason` to distinguish a projected
+  coverage refusal from the shared authority-not-verifiable refusal.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`

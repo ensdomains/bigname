@@ -360,8 +360,11 @@ makes the prior attempt eligible at the replacement hash without changing its
 round-robin position.
 
 Verified ENS/60 primary-name status is computed per request by schema-v2 lookup.
-It requires the declared claim and a matching forward address; tuple presence
-alone does not prove primary status.
+It does not require a projected declared claim: the route performs a fresh
+reverse lookup, requires that live claim to be byte-normalized, and accepts it
+only when the forward address matches. A projected claim, when present, remains
+an indexed candidate and an input to the pre-forward authority gate; tuple
+presence alone does not prove primary status.
 
 ## Reorg and redo
 
