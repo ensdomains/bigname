@@ -6,6 +6,7 @@ use crate::{InterpretError, Result};
 const CHILD_ANCHOR_KIND: &str = "wrapper_backed_child_control";
 /// Both wrapper anchors resolve against the same ENSv1 NameWrapper evidence shape.
 const WRAPPER_EVIDENCE_ANCHOR_KIND: &str = "wrapper_backed_control";
+const REGISTRAR_ANCHOR_KIND: &str = "registrar_backed_registration";
 
 pub(super) fn validate_boundaries(output: &BatchOutput) -> Result<()> {
     for transition in &output.migration_authority_transitions {
@@ -113,9 +114,8 @@ pub(super) async fn write(
                 transition.boundary_event_identity
             ))
         })?;
-        // A child's ENSv1 authority ends at its own cleanup, earlier in the boundary's
-        // transaction, so its predecessor is resolved and closed there. A second-level boundary
-        // resolves and closes at the boundary itself.
+        // A child or unwrapped second-level predecessor resolves and closes at its recorded ENSv1
+        // cleanup. A wrapped second-level predecessor resolves and closes at the boundary itself.
         let (predecessor_at, predecessor_time) = match &selector.cleanup {
             Some(cleanup) => (
                 (
@@ -256,19 +256,22 @@ pub(super) async fn write(
     Ok(())
 }
 
-/// Resolves the recorded ENSv1 cleanup to the instant the child's ENSv1 authority ended.
+/// Resolves the recorded ENSv1 cleanup to the instant its authority ended.
 ///
-/// The recorded event must exist exactly as the boundary describes it — same identity, name,
-/// position, source event, and emitting wrapper — on readable canonical lineage. "Some earlier
-/// wrapper event" is not equivalent evidence.
+/// A child boundary names its wrapper cleanup. An unwrapped `.eth` second-level boundary names the
+/// BaseRegistrar transfer that precedes the ENSv2 registration. The recorded event must exist
+/// exactly as described — same identity, name, position, source event, and admitted emitter — on
+/// readable canonical lineage. "Some earlier cleanup" is not equivalent evidence.
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
 async fn resolve_cleanup_time(
     transaction: &mut Transaction<'_, Postgres>,
     transition: &MigrationAuthorityTransition,
     selector: &PredecessorSelector,
     cleanup: &PredecessorCleanup,
 ) -> Result<time::OffsetDateTime> {
-    // The cleanup must also be one of the two kinds a child cleanup can be, so a same-position
-    // event of some unrelated kind cannot stand in for one.
+    // The cleanup kind must match its anchor, so an unrelated same-position event cannot stand in
+    // for the recorded transfer.
     let resolved: Option<time::OffsetDateTime> = sqlx::query_scalar(
         "SELECT lineage.block_timestamp + $6 * interval '1 microsecond'
          FROM normalized_events event
@@ -283,8 +286,34 @@ async fn resolve_cleanup_time(
            AND COALESCE(event.transaction_index, -1) = $5
            AND COALESCE(event.log_index, -1) = $6
            AND event.after_state ->> 'source_event' = $7
-           AND event.event_kind = ANY($9)
-           AND lower(event.raw_fact_ref ->> 'emitting_address') = lower($8)
+           AND (
+               (
+                   $9 = 'registrar_backed_registration'
+                   AND event.event_kind = $10
+                   AND EXISTS (
+                       SELECT 1
+                       FROM contract_instance_addresses address
+                       WHERE address.chain_id = event.chain_id
+                         AND address.contract_instance_id = $11
+                         AND lower(address.address) = lower(
+                             event.raw_fact_ref ->> 'emitting_address'
+                         )
+                         AND (
+                             address.active_from_block_number IS NULL
+                             OR address.active_from_block_number <= event.block_number
+                         )
+                         AND (
+                             address.active_to_block_number IS NULL
+                             OR address.active_to_block_number >= event.block_number
+                         )
+                   )
+               )
+               OR (
+                   $9 = 'wrapper_backed_control'
+                   AND event.event_kind = ANY($12)
+                   AND lower(event.raw_fact_ref ->> 'emitting_address') = lower($8)
+               )
+           )
            AND event.consumer_visibility = 'activated'
            AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
@@ -297,6 +326,9 @@ async fn resolve_cleanup_time(
     .bind(cleanup.log_index)
     .bind(&cleanup.source_event)
     .bind(&selector.contract_address)
+    .bind(&selector.anchor_kind)
+    .bind(seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND)
+    .bind(selector.contract_instance_id)
     .bind(
         seam::CHILD_CLEANUP_EVENT_KINDS
             .iter()
@@ -310,7 +342,7 @@ async fn resolve_cleanup_time(
     })?;
     resolved.ok_or_else(|| {
         InterpretError::data_integrity(format!(
-            "activated child migration boundary {} has no exact ENSv1 predecessor cleanup",
+            "activated migration boundary {} has no exact ENSv1 predecessor cleanup",
             transition.boundary_event_identity
         ))
     })
@@ -325,12 +357,12 @@ struct PredecessorSelector {
     identity: String,
     contract_instance_id: Option<Uuid>,
     contract_address: Option<String>,
-    /// Present only for a child boundary, whose predecessor is resolved against the child's own
-    /// ENSv1 cleanup rather than the ENSv2 registration.
+    /// Present for a child boundary or an unwrapped second-level boundary, whose predecessor is
+    /// resolved against its ENSv1 cleanup rather than the later ENSv2 registration.
     cleanup: Option<PredecessorCleanup>,
 }
 
-/// The ENSv1 cleanup a child boundary records, which is the position its ENSv1 authority ended at.
+/// The exact ENSv1 cleanup a boundary records, which is the position its authority ended at.
 struct PredecessorCleanup {
     event_identity: String,
     source_event: String,
@@ -359,16 +391,15 @@ fn validate(transition: &MigrationAuthorityTransition) -> Result<PredecessorSele
     let anchor_kind = resource
         .and_then(|value| value.get("anchor_kind"))
         .and_then(serde_json::Value::as_str);
-    // Each selection admits exactly one anchor family, so a child selector can never be resolved
-    // through the second-level boundary rule and a second-level selector can never be resolved
-    // against a cleanup.
+    // Each selection admits only its stated anchor family. Child and unwrapped registrar
+    // boundaries resolve at their recorded cleanup; wrapped second-level boundaries resolve at
+    // the migration boundary itself.
     let cleanup_relative = match (selection, anchor_kind) {
-        (Some("active_immediately_before_boundary"), Some(anchor))
-            if anchor != CHILD_ANCHOR_KIND =>
-        {
-            false
-        }
+        (Some("active_immediately_before_boundary"), Some(WRAPPER_EVIDENCE_ANCHOR_KIND)) => false,
         (Some("active_immediately_before_predecessor_cleanup"), Some(CHILD_ANCHOR_KIND)) => true,
+        (Some("active_immediately_before_predecessor_cleanup"), Some(REGISTRAR_ANCHOR_KIND)) => {
+            true
+        }
         _ => {
             return Err(InterpretError::data_integrity(format!(
                 "activated migration boundary {} has an invalid authority selector or position",
@@ -389,11 +420,11 @@ fn validate(transition: &MigrationAuthorityTransition) -> Result<PredecessorSele
             transition.boundary_event_identity
         )));
     }
-    if cleanup_relative {
+    if cleanup_relative && anchor_kind == Some(CHILD_ANCHOR_KIND) {
         return child_selector(transition, resource, resource_selection);
     }
     match anchor_kind {
-        Some("registrar_backed_registration") => {
+        Some(REGISTRAR_ANCHOR_KIND) => {
             let token_id = resource
                 .and_then(|value| value.get("token_id"))
                 .and_then(serde_json::Value::as_str);
@@ -404,7 +435,12 @@ fn validate(transition: &MigrationAuthorityTransition) -> Result<PredecessorSele
                 .and_then(|value| value.get("contract_instance_id"))
                 .and_then(serde_json::Value::as_str)
                 .and_then(|value| value.parse().ok());
-            if resource_selection != Some("current_registrar_resource_immediately_before_boundary")
+            let expected_selection = if cleanup_relative {
+                "current_registrar_resource_immediately_before_predecessor_cleanup"
+            } else {
+                "current_registrar_resource_immediately_before_boundary"
+            };
+            if resource_selection != Some(expected_selection)
                 || token_id.is_none()
                 || token_id != labelhash
                 || contract_instance_id.is_none()
@@ -416,7 +452,9 @@ fn validate(transition: &MigrationAuthorityTransition) -> Result<PredecessorSele
                 identity: token_id.unwrap().to_owned(),
                 contract_instance_id,
                 contract_address: None,
-                cleanup: None,
+                cleanup: cleanup_relative
+                    .then(|| predecessor_cleanup(transition))
+                    .transpose()?,
             })
         }
         Some("wrapper_backed_control") => {
@@ -475,6 +513,17 @@ fn child_selector(
     {
         return Err(invalid_selector(transition));
     }
+    let cleanup = predecessor_cleanup(transition)?;
+    Ok(PredecessorSelector {
+        anchor_kind: WRAPPER_EVIDENCE_ANCHOR_KIND.to_owned(),
+        identity: namehash.unwrap().to_owned(),
+        contract_instance_id: None,
+        contract_address: contract_address.map(str::to_owned),
+        cleanup: Some(cleanup),
+    })
+}
+
+fn predecessor_cleanup(transition: &MigrationAuthorityTransition) -> Result<PredecessorCleanup> {
     let recorded = transition
         .predecessor_selector
         .get("predecessor_cleanup")
@@ -494,13 +543,16 @@ fn child_selector(
     ) else {
         return Err(invalid_selector(transition));
     };
-    // For each migrated name the receiver retires the ENSv1 side and only then registers the
-    // successor
+    // Every cleanup-relative path retires the ENSv1 side before registering the successor. The
+    // unwrapped second-level controller transfers the registrar token first
+    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58,
+    // upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58),
+    // while the child receiver performs its cleanup first
     // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58,
     // upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58,
     // upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58,
     // upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58),
-    // and the receiver hook runs the whole migration synchronously
+    // and its receiver hook runs the whole migration synchronously
     // (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L119 @ ens_v2@ccaeb58),
     // so this boundary's cleanup is in the same transaction and strictly earlier in it. A batch may
     // interleave other names, hence the match is per boundary, never per transaction.
@@ -512,18 +564,12 @@ fn child_selector(
     {
         return Err(invalid_selector(transition));
     }
-    Ok(PredecessorSelector {
-        anchor_kind: WRAPPER_EVIDENCE_ANCHOR_KIND.to_owned(),
-        identity: namehash.unwrap().to_owned(),
-        contract_instance_id: None,
-        contract_address: contract_address.map(str::to_owned),
-        cleanup: Some(PredecessorCleanup {
-            event_identity: event_identity.to_owned(),
-            source_event: source_event.to_owned(),
-            block_number,
-            transaction_index,
-            log_index,
-        }),
+    Ok(PredecessorCleanup {
+        event_identity: event_identity.to_owned(),
+        source_event: source_event.to_owned(),
+        block_number,
+        transaction_index,
+        log_index,
     })
 }
 

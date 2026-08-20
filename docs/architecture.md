@@ -196,8 +196,10 @@ When the later consumer-activation slice re-derives that group with
 `consumer_visibility=activated`, it activates the diagnostic associations
 without rewriting their independently admitted events, changes the name's
 [`authority_epoch`](glossary.md#authority-epoch) from `ens_v1` to `ens_v2`,
-closes the selected ENSv1 binding at the recorded boundary position, and
-retains or opens the concrete ENSv2 binding. Interpret first validates the
+and retains or opens the concrete ENSv2 binding. Child and unwrapped
+second-level predecessors close at the exact ENSv1 cleanup recorded by the
+boundary; wrapped second-level predecessors close at the boundary position.
+Interpret first validates the
 one-to-one correspondence between that activated `MigrationApplied` event and
 its [migration authority transition](glossary.md#migration-authority-transition).
 Project therefore consumes the activated
@@ -267,9 +269,12 @@ child publishes no row and does not fall back to ENSv1. A pair whose two arms
 disagree with no authority proof to separate them is omitted as unsupported,
 consistent with the refusal-over-ranking rule below; it is neither ranked nor a
 generation failure. Recency now orders only the current relation within the one
-selected arm; the cross-era block, event-id, and source-priority tie-break is
-gone. Until an ENSv1→ENSv2 migration boundary is activated, the
-activated-boundary branch of this rule has no production input and a child
+selected arm by block, transaction, and log position. If multiple admitted
+events occupy the same exact position, their stable `event_identity` is the
+final tie-break; generated database IDs never participate. The cross-era block,
+event-id, and source-priority tie-break is gone. Until an ENSv1→ENSv2 migration
+boundary is activated, the activated-boundary branch of this rule has no
+production input and a child
 reaches ENSv2 authority only through a current positive ENSv2 registration.
 
 Both arms stating a relation for the same Mainnet pair is not itself the
@@ -636,7 +641,7 @@ ENSv2 mappings:
   the declared unlocked or locked ENSv1→ENSv2 migration controller claims an
   existing reservation through `register(..., expiry = 0)`.
   (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L152 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L164 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L89 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L110 @ ens_v2@ccaeb58) For a child, the already-discovered migration registry receives the
-  wrapper transfer and registers that child in itself. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58) Consumer slice 3A derives a candidate `MigrationApplied` boundary and its correlation-dependent effects for this child shape, requiring the child's own ENSv1 predecessor cleanup in the same transaction — its wrapper token parked in the Graveyard, or its node unwrapped into the Graveyard — so a self-claim without an ENSv1 predecessor derives nothing. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58) Activating that boundary into a `SurfaceBinding` transition remains deferred to the children publication slice and tracked on issue #318. Reverted transactions produce no boundary.
+  wrapper transfer and registers that child in itself. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58) Consumer slice 3A derives a candidate `MigrationApplied` boundary and its correlation-dependent effects for this child shape, requiring the child's own ENSv1 predecessor cleanup in the same transaction — its wrapper token parked in the Graveyard, or its node unwrapped into the Graveyard — so a self-claim without an ENSv1 predecessor derives nothing. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58) Consumer slice 3B part 2 admits that child anchor through the explicit activated test seam. Production still derives candidate groups only; activating a complete group remains a separate follow-on tracked on issue #318. Reverted transactions produce no boundary.
 - `MigrationApplied` is self-sufficient. Its payload identifies
   `logical_name_id` and namehash; `correlation_kind=authority_transition`;
   `migration_path` as `unwrapped`, `unlocked_wrapped`, or `locked_wrapped` for a
@@ -657,7 +662,10 @@ ENSv2 mappings:
   interpreter content hash reproduces the same event identity and payload. A
   candidate event performs no `SurfaceBinding` transition. Slice 2A defines and
   tests the explicit activated transition operation, but production activation
-  remains deferred.
+  remains deferred. An activated boundary remains `MigrationApplied`; it never
+  reuses a `PreimageObserved` row carrying the `arm_wide_binding_close`,
+  `closed_authority_arm`, and `surface_binding_id` marker tuple reserved for an
+  ENSv2 same-arm survivor reassertion.
 - [Synchronized renewal](glossary.md#synchronized-renewal) interpretation preserves separate bridge, ENSv1
   registrar, and ENSv2 registry normalized rows. A resource-bearing registry
   observation retains its derived resource and the bridge uses that resource;

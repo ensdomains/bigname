@@ -210,7 +210,13 @@ fn cross_family_registrar_transfer_emits_one_unwrapped_candidate_boundary() -> a
     );
     assert_eq!(
         boundary.after_state["predecessor_binding"]["selection"],
-        "active_immediately_before_boundary"
+        "active_immediately_before_predecessor_cleanup"
+    );
+    let cleanup = &boundary.after_state["predecessor_binding"]["predecessor_cleanup"];
+    assert_eq!(cleanup["source_event"], "Transfer");
+    assert_eq!(
+        cleanup["log_index"],
+        scenario["graveyard_transfer_log_index"]
     );
     assert_eq!(
         boundary.after_state["predecessor_binding"]["resource"]["token_id"],
@@ -389,6 +395,17 @@ fn co_admitted_registrar_transfer_keeps_ordinary_event_and_gains_association() -
         &fixture,
         true,
     );
+    let without_predecessor = interpret_test_batch(input.clone())?;
+    let fallback_cleanup_identity = without_predecessor
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "MigrationApplied")
+        .and_then(|boundary| {
+            boundary.after_state["predecessor_binding"]["predecessor_cleanup"]["event_identity"]
+                .as_str()
+        })
+        .expect("candidate without ordinary predecessor evidence still records cleanup identity")
+        .to_owned();
     input.prior_events = setup
         .normalized_events
         .iter()
@@ -407,6 +424,20 @@ fn co_admitted_registrar_transfer_keeps_ordinary_event_and_gains_association() -
         .expect("the independently admitted registrar Transfer remains an ordinary event");
     assert_eq!(transfer.consumer_visibility, "activated");
     assert!(transfer.migration_correlation_ids.is_empty());
+    let boundary_cleanup_identity = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "MigrationApplied")
+        .and_then(|boundary| {
+            boundary.after_state["predecessor_binding"]["predecessor_cleanup"]["event_identity"]
+                .as_str()
+        })
+        .expect("co-admitted predecessor boundary records its cleanup identity");
+    assert_eq!(boundary_cleanup_identity, transfer.event_identity);
+    assert_eq!(
+        fallback_cleanup_identity, transfer.event_identity,
+        "candidate cleanup identity must not depend on whether ordinary predecessor evidence materialized"
+    );
     assert!(
         output
             .migration_event_associations
@@ -3348,7 +3379,11 @@ fn assert_activated_transition(output: &mut BatchOutput, path: &str) -> anyhow::
     assert_eq!(transition.successor_arm, "ens_v2");
     assert_eq!(
         transition.predecessor_selector["selection"],
-        "active_immediately_before_boundary"
+        if path == "unwrapped" {
+            "active_immediately_before_predecessor_cleanup"
+        } else {
+            "active_immediately_before_boundary"
+        }
     );
     let successor = output
         .surface_bindings

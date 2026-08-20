@@ -935,67 +935,61 @@ fn transaction_hash(number: i64) -> String {
     format!("0x{:064x}", number + 10_000)
 }
 
-/// Tripwire on the divergence between the ENSv1→ENSv2 migration contract and the checked-in
-/// Sepolia manifest set, which is the only deployment that admits the migration family.
-///
-/// An activated migration authority transition closes the ENSv1 predecessor binding it names, and
-/// Interpret refuses one it cannot resolve to exactly one such binding. Sepolia admits no ENSv1
-/// source family at all, so no `ens_v1` authority arm is ever written there and no boundary
-/// derived from this manifest set has a predecessor to close. `docs/manifests.md` records the same
-/// fact from the manifest side: the selected Sepolia deployment profile has no pre-existing ENSv1
-/// registrar source, and `correlation_addresses.ens_v1_name_wrapper` is correlation metadata
-/// rather than a declared contract, discovery edge, or watch-plan input, so the ENSv1 cleanup a
-/// child boundary requires is never even ingested.
-///
-/// Measured on the slice-3B promotion, running one migration corpus through the adapter twice —
-/// once with the test harness's manifest set, once with every `ens_v1_*` manifest stripped, which
-/// is what this deployment loads:
-///
-/// ```text
-/// test-harness set   arms={"ens_v1","ens_v2"}  boundaries=2  transitions=1 per boundary
-/// sepolia set        arms={"ens_v2"}           boundaries=1  transitions=1, predecessor absent
-/// ```
-///
-/// This test pins the manifest-set half of that, because it is the half a manifest change moves.
-/// It fires when an ENSv1 family is admitted here — at which point the promotion route has to be
-/// re-adjudicated rather than silently starting to resolve predecessors.
+/// The [migration authority transition](../../../docs/glossary.md#migration-authority-transition)
+/// writer requires exactly one matching ENSv1 registrar predecessor for each activated
+/// controller-mediated `.eth` second-level
+/// [migration boundary](../../../docs/glossary.md#migration-boundary). The checked-in Sepolia
+/// [deployment profile](../../../docs/glossary.md#deployment-profile) now makes that requirement
+/// satisfiable: one active
+/// `ens_v1_registrar_l1` declaration owns the BaseRegistrar address that the ENSv1→ENSv2
+/// migration family names for correlation, while registrar-controller contracts remain
+/// unadmitted. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
 #[tokio::test]
-async fn the_sepolia_manifest_set_admits_no_ens_v1_authority_arm() -> Result<()> {
+async fn sepolia_manifest_set_admits_exactly_one_ens_v1_registrar_predecessor_source() -> Result<()>
+{
     let scratch = ScratchDatabase::create("migration_sepolia_manifest_arms").await?;
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("manifests/sepolia");
     sync_schema_v2_repository(scratch.pool(), &load_repository(manifest_root)?).await?;
 
-    let families: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT source_family FROM manifest_versions
-         WHERE chain_id = $1 ORDER BY source_family",
+    let registrar_sources: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT declaration.contract_instance_id::text,
+                lower(declaration.declared_address), declaration.role
+         FROM manifest_versions manifest
+         JOIN manifest_contract_instances declaration
+           ON declaration.manifest_id = manifest.manifest_id
+          AND declaration.chain_id = manifest.chain_id
+         WHERE manifest.chain_id = $1
+           AND manifest.source_family = 'ens_v1_registrar_l1'
+           AND manifest.rollout_status = 'active'
+           AND declaration.declaration_kind = 'contract'
+         ORDER BY declaration.role, declaration.declared_address",
     )
     .bind(CHAIN)
     .fetch_all(scratch.pool())
     .await?;
-    assert!(
-        families
-            .iter()
-            .any(|family| family == "ens_v2_migration_l1"),
-        "this deployment is the one that admits the migration family: {families:?}"
+    assert_eq!(
+        registrar_sources.len(),
+        1,
+        "an activated `.eth` second-level boundary must have one registrar source"
     );
-    assert!(
-        !families.iter().any(|family| family.starts_with("ens_v1_")),
-        "an ENSv1 family is now admitted on {CHAIN}, so activated migration boundaries can \
-         resolve predecessors here and the slice-3B promotion route must be re-adjudicated: \
-         {families:?}"
-    );
+    let (_, registrar_address, role) = &registrar_sources[0];
+    assert_eq!(registrar_address, BASE_REGISTRAR);
+    assert_eq!(role, "registrar");
 
-    let arms: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT authority_arm FROM surface_bindings WHERE chain_id = $1",
+    let migration_registrar: String = sqlx::query_scalar(
+        "SELECT lower(manifest_payload #>> '{correlation_addresses,ens_v1_base_registrar}')
+         FROM manifest_versions
+         WHERE chain_id = $1 AND source_family = 'ens_v2_migration_l1'
+           AND rollout_status = 'active'",
     )
     .bind(CHAIN)
-    .fetch_all(scratch.pool())
+    .fetch_one(scratch.pool())
     .await?;
-    assert!(
-        !arms.iter().any(|arm| arm == "ens_v1"),
-        "no ENSv1 authority arm can exist without an ENSv1 source family: {arms:?}"
+    assert_eq!(
+        migration_registrar, *registrar_address,
+        "the transition selector and admitted predecessor source must name the same registrar"
     );
     scratch.cleanup().await
 }

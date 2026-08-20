@@ -472,9 +472,9 @@ fn unmigrated_child_proves_no_boundary() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The activation contract across the child catalog. Every complete shape derives an activated
-/// boundary that schedules exactly one binding write; every refused shape derives neither, and its
-/// batch stays free of authority-transition effects entirely.
+/// The activation contract across the child catalog. Every complete child shape derives an
+/// activated boundary that schedules exactly one binding write; every refused child shape derives
+/// neither. A refused child can still share a batch with its migrated parent's transition.
 #[test]
 fn the_activation_matrix_covers_the_child_catalog() -> anyhow::Result<()> {
     let fixture = fixture()?;
@@ -487,11 +487,28 @@ fn the_activation_matrix_covers_the_child_catalog() -> anyhow::Result<()> {
         ("C-05", &["parent"], 0),
         ("C-06", &["parent", "child"], 0),
     ] {
-        let output = interpret_test_batch(batch(
+        let mut output = interpret_test_batch(batch(
             scenario_logs(&fixture["scenarios"][scenario], addresses, levels)?,
             &fixture,
             true,
         ))?;
+        let candidate_cleanups = child_boundaries(&output)
+            .into_iter()
+            .map(|boundary| {
+                (
+                    boundary.event_identity.clone(),
+                    boundary.after_state["predecessor_binding"]["predecessor_cleanup"].clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert!(
+            boundaries(&output)
+                .iter()
+                .all(|boundary| boundary.consumer_visibility == "candidate"),
+            "{scenario} must begin as candidate interpretation"
+        );
+
+        super::super::super::migration::inject_activated_transition_for_test(&mut output)?;
         let children = child_boundaries(&output);
         assert_eq!(
             children.len(),
@@ -502,19 +519,29 @@ fn the_activation_matrix_covers_the_child_catalog() -> anyhow::Result<()> {
             children
                 .iter()
                 .all(|boundary| boundary.consumer_visibility == "activated"),
-            "{scenario} derives candidate children after activation"
+            "{scenario} derives activated children after activation"
         );
         for boundary in &children {
+            let transitions = output
+                .migration_authority_transitions
+                .iter()
+                .filter(|transition| transition.boundary_event_identity == boundary.event_identity)
+                .collect::<Vec<_>>();
             assert_eq!(
-                output
-                    .migration_authority_transitions
-                    .iter()
-                    .filter(
-                        |transition| transition.boundary_event_identity == boundary.event_identity
-                    )
-                    .count(),
+                transitions.len(),
                 1,
                 "{scenario} schedules one binding write per activated child boundary"
+            );
+            let cleanup = candidate_cleanups
+                .get(&boundary.event_identity)
+                .expect("complete child boundary had a candidate cleanup");
+            assert_eq!(
+                boundary.after_state["predecessor_binding"]["predecessor_cleanup"], *cleanup,
+                "{scenario} activation must preserve the recorded cleanup object verbatim"
+            );
+            assert_eq!(
+                transitions[0].predecessor_selector["predecessor_cleanup"], *cleanup,
+                "{scenario} transition must consume the recorded cleanup object verbatim"
             );
         }
         // Parent boundaries included: activated boundaries and scheduled writes are one to one.
@@ -529,6 +556,40 @@ fn the_activation_matrix_covers_the_child_catalog() -> anyhow::Result<()> {
                 .all(|boundary| boundary.consumer_visibility == "activated"),
             "{scenario} left a boundary candidate"
         );
+        for boundary in boundaries(&output) {
+            assert_eq!(
+                output
+                    .normalized_events
+                    .iter()
+                    .filter(|event| event.event_identity == boundary.event_identity)
+                    .count(),
+                1,
+                "{scenario} kept candidate and activated copies of one boundary"
+            );
+            assert_eq!(
+                output
+                    .migration_authority_transitions
+                    .iter()
+                    .filter(|transition| {
+                        transition.boundary_event_identity == boundary.event_identity
+                    })
+                    .count(),
+                1,
+                "{scenario} boundary has no one-to-one transition"
+            );
+        }
+        for transition in &output.migration_authority_transitions {
+            assert_eq!(
+                boundaries(&output)
+                    .into_iter()
+                    .filter(|boundary| {
+                        boundary.event_identity == transition.boundary_event_identity
+                    })
+                    .count(),
+                1,
+                "{scenario} transition has no one-to-one boundary"
+            );
+        }
     }
     Ok(())
 }

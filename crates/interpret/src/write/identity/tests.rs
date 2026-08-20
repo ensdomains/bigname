@@ -219,7 +219,32 @@ fn ordinary_open(id: u128, resource: u128, arm: &str, block: i64) -> BatchOutput
     }
 }
 
+const REGISTRAR_CLEANUP_LOG_INDEX: i64 = 0;
+const REGISTRAR_BOUNDARY_LOG_INDEX: i64 = 1;
+
 fn registrar_selector() -> serde_json::Value {
+    json!({
+        "authority_epoch":"ens_v1",
+        "logical_name_id":NAME,
+        "selection":"active_immediately_before_predecessor_cleanup",
+        "predecessor_cleanup":{
+            "event_identity":"registrar-cleanup",
+            "source_event":"Transfer",
+            "block_number":2,
+            (TRANSACTION_INDEX_KEY):0,
+            (LOG_INDEX_KEY):REGISTRAR_CLEANUP_LOG_INDEX
+        },
+        "resource":{
+            "anchor_kind":"registrar_backed_registration",
+            "contract_instance_id":Uuid::from_u128(101).to_string(),
+            "token_id":"0xexpected",
+            "labelhash":"0xexpected",
+            "selection":"current_registrar_resource_immediately_before_predecessor_cleanup"
+        }
+    })
+}
+
+fn legacy_registrar_selector() -> serde_json::Value {
     json!({
         "authority_epoch":"ens_v1",
         "logical_name_id":NAME,
@@ -232,6 +257,21 @@ fn registrar_selector() -> serde_json::Value {
             "selection":"current_registrar_resource_immediately_before_boundary"
         }
     })
+}
+
+fn registrar_cleanup_event() -> NormalizedEvent {
+    let mut event = predecessor_evidence(
+        "registrar-cleanup",
+        1,
+        "0x0000000000000000000000000000000000000101",
+        json!({"source_event":"Transfer","token_id":"0xexpected"}),
+    );
+    event.source_family = "ens_v1_registrar_l1".to_owned();
+    event.block_number = Some(2);
+    event.block_hash = Some("0x02".to_owned());
+    event.transaction_hash = Some("0xtx".to_owned());
+    event.log_index = Some(REGISTRAR_CLEANUP_LOG_INDEX);
+    event
 }
 
 fn wrapper_selector(contract_address: &str) -> serde_json::Value {
@@ -250,7 +290,10 @@ fn wrapper_selector(contract_address: &str) -> serde_json::Value {
 }
 
 fn activate(output: &mut BatchOutput) -> TestResult {
-    activate_with_selector(output, registrar_selector())
+    activate_with_selector(output, registrar_selector())?;
+    output.normalized_events.push(registrar_cleanup_event());
+    boundary_at_log_index(output, REGISTRAR_BOUNDARY_LOG_INDEX);
+    Ok(())
 }
 
 fn activate_with_selector(
@@ -531,6 +574,96 @@ async fn activated_boundary_closes_exactly_one_ens_v1_predecessor() -> TestResul
 }
 
 #[tokio::test]
+async fn registrar_boundary_relative_selector_is_rejected() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_contract(pool).await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    output.normalized_events.push(predecessor_evidence(
+        "same-batch-registrar-evidence",
+        1,
+        "0x0000000000000000000000000000000000000101",
+        json!({"token_id":"0xexpected"}),
+    ));
+    activate_with_selector(&mut output, legacy_registrar_selector())?;
+
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(error.contains("invalid authority selector"), "{error}");
+    assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn registrar_boundary_refuses_inexact_cleanup_evidence() -> TestResult {
+    for case in [
+        "event identity",
+        "source event",
+        "position",
+        "event kind",
+        "emitter",
+        "contract instance",
+    ] {
+        let database = database().await?;
+        let pool = database.pool();
+        insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+        insert_registrar_contract(pool).await?;
+        let mut output = ordinary_open(12, 2, "ens_v2", 2);
+        output.normalized_events.push(predecessor_evidence(
+            "same-batch-registrar-evidence",
+            1,
+            "0x0000000000000000000000000000000000000101",
+            json!({"token_id":"0xexpected"}),
+        ));
+        activate(&mut output)?;
+
+        if case == "contract instance" {
+            let wrong_instance = Uuid::from_u128(202).to_string();
+            output.migration_authority_transitions[0].predecessor_selector["resource"]["contract_instance_id"] =
+                json!(wrong_instance.clone());
+            output
+                .normalized_events
+                .iter_mut()
+                .find(|event| event.event_kind == MIGRATION_APPLIED_EVENT_KIND)
+                .expect("activated migration boundary")
+                .after_state["predecessor_binding"]["resource"]["contract_instance_id"] =
+                json!(wrong_instance);
+        } else {
+            let cleanup = output
+                .normalized_events
+                .iter_mut()
+                .find(|event| event.event_identity == "registrar-cleanup")
+                .expect("registrar cleanup event");
+            match case {
+                "event identity" => cleanup.event_identity = "other-cleanup".to_owned(),
+                "source event" => cleanup.after_state["source_event"] = json!("NameUnwrapped"),
+                "position" => cleanup.log_index = Some(REGISTRAR_BOUNDARY_LOG_INDEX),
+                "event kind" => cleanup.event_kind = SURFACE_UNBOUND_EVENT_KIND.to_owned(),
+                "emitter" => {
+                    cleanup.raw_fact_ref["emitting_address"] =
+                        json!("0x0000000000000000000000000000000000000bad");
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let error = apply(pool, &output).await.unwrap_err().to_string();
+        assert!(
+            error.contains("no exact ENSv1 predecessor cleanup"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            active_to(pool, 11).await?,
+            None,
+            "{case} must not close the ENSv1 predecessor"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn activated_boundary_rejects_zero_and_multiple_predecessors() -> TestResult {
     let database = database().await?;
     let pool = database.pool();
@@ -734,14 +867,29 @@ async fn transition_orders_predecessor_evidence_by_full_same_block_position() ->
         output.surface_bindings[0].provenance[TRANSACTION_INDEX_KEY] = json!(1);
         activate(&mut output)?;
         output.migration_authority_transitions[0].transaction_index = 1;
-        output.migration_authority_transitions[0].log_index = 1;
+        output.migration_authority_transitions[0].log_index = 2;
+        output.migration_authority_transitions[0].predecessor_selector["predecessor_cleanup"]
+            [TRANSACTION_INDEX_KEY] = json!(1);
+        output.migration_authority_transitions[0].predecessor_selector["predecessor_cleanup"]
+            [LOG_INDEX_KEY] = json!(1);
+        let cleanup = output
+            .normalized_events
+            .iter_mut()
+            .find(|event| event.event_identity == "registrar-cleanup")
+            .expect("registrar cleanup event");
+        cleanup.transaction_index = Some(1);
+        cleanup.log_index = Some(1);
         let boundary = output
             .normalized_events
             .iter_mut()
             .find(|event| event.event_kind == MIGRATION_APPLIED_EVENT_KIND)
             .expect("activated migration boundary");
         boundary.transaction_index = Some(1);
-        boundary.log_index = Some(1);
+        boundary.log_index = Some(2);
+        boundary.after_state["predecessor_binding"]["predecessor_cleanup"][TRANSACTION_INDEX_KEY] =
+            json!(1);
+        boundary.after_state["predecessor_binding"]["predecessor_cleanup"][LOG_INDEX_KEY] =
+            json!(1);
 
         let result = apply(pool, &output).await;
         if eligible {
