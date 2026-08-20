@@ -250,9 +250,12 @@ fn interpret_loaded(
     let mut output = BatchOutput::default();
     let mut migration_observations = Vec::new();
     let mut raw_logs = raw_logs.into_iter().peekable();
-    state.begin_batch();
+    let mut committed_state = state.clone();
+    committed_state.begin_batch();
     for block in blocks {
-        super::settle_block_boundary(catalog, block, state, &mut output)?;
+        let mut block_output = BatchOutput::default();
+        let mut block_state = committed_state.clone();
+        super::settle_block_boundary(catalog, block, &mut block_state, &mut block_output)?;
         while raw_logs.peek().is_some_and(|raw| {
             raw.block_number == block.block_number && raw.block_hash == block.block_hash
         }) {
@@ -260,11 +263,31 @@ fn interpret_loaded(
             interpret_raw(
                 catalog,
                 &raw,
-                state,
-                &mut output,
+                &mut block_state,
+                &mut block_output,
                 &mut migration_observations,
             )?;
         }
+        super::protocol::reconcile_batch(&mut block_output);
+        if block_output
+            .normalized_events
+            .iter()
+            .any(|event| event.source_family.starts_with("ens_v1_"))
+        {
+            let delta = super::seam::fold_prior_events(
+                Vec::new(),
+                &block_output.normalized_events,
+                std::slice::from_ref(block),
+            )?;
+            let mut replayed_state = committed_state.clone();
+            replayed_state.apply_prior_event_delta(delta);
+            // Same-transaction reconciliation can remove or retarget ENSv1 transitions after live
+            // state observed them. Rebuild only ENSv1's durable protocol state from the survivors;
+            // other protocol state keeps the uninterrupted-walk behavior outside this fix's scope.
+            block_state.replace_ens_v1_protocol_state_from_replay(replayed_state);
+        }
+        committed_state = block_state;
+        append_output(&mut output, block_output);
     }
     if let Some(raw) = raw_logs.next() {
         bail!(
@@ -275,15 +298,58 @@ fn interpret_loaded(
             raw.block_hash
         );
     }
-    if let Some((logical_name_id, authority_arm)) = state.pending_v2_terminal_closure_hit() {
+    if let Some((logical_name_id, authority_arm)) =
+        committed_state.pending_v2_terminal_closure_hit()
+    {
         bail!(
             "terminal {authority_arm} binding closure for {logical_name_id} was not handled in its adapter batch"
         );
     }
     super::identity::compact_reserved_label_preimages(&mut output)?;
-    super::protocol::reconcile_batch(&mut output);
     super::migration::correlate(catalog, migration_observations, &mut output)?;
     Ok(output)
+}
+
+fn append_output(into: &mut BatchOutput, from: BatchOutput) {
+    let BatchOutput {
+        normalized_events,
+        label_preimages,
+        name_surfaces,
+        token_lineages,
+        resources,
+        surface_bindings,
+        binding_closures,
+        contract_instances,
+        contract_addresses,
+        discovery_edges,
+        discovery_edge_closures,
+        migration_event_associations,
+        migration_discovery_associations,
+        migration_candidate_identity_effects,
+        migration_candidate_discovery_effects,
+        migration_authority_transitions,
+    } = from;
+    into.normalized_events.extend(normalized_events);
+    into.label_preimages.extend(label_preimages);
+    into.name_surfaces.extend(name_surfaces);
+    into.token_lineages.extend(token_lineages);
+    into.resources.extend(resources);
+    into.surface_bindings.extend(surface_bindings);
+    into.binding_closures.extend(binding_closures);
+    into.contract_instances.extend(contract_instances);
+    into.contract_addresses.extend(contract_addresses);
+    into.discovery_edges.extend(discovery_edges);
+    into.discovery_edge_closures.extend(discovery_edge_closures);
+    into.migration_event_associations
+        .extend(migration_event_associations);
+    into.migration_discovery_associations
+        .extend(migration_discovery_associations);
+    into.migration_candidate_identity_effects
+        .extend(migration_candidate_identity_effects);
+    into.migration_candidate_discovery_effects
+        .extend(migration_candidate_discovery_effects);
+    into.migration_authority_transitions
+        .extend(migration_authority_transitions);
 }
 
 fn required_prior_tails(
