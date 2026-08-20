@@ -32,5 +32,13 @@ BEGIN
                 'dual_current_child_authority'
             ))
     $ddl$;
+
+    -- The evidence comment described only the exact-name payload. An upgraded database
+    -- must read the same description the baseline now installs, because bootstrap parity
+    -- compares column comments across the two install paths.
+    EXECUTE $ddl$
+        COMMENT ON COLUMN bigname_phase.project_generation_failures.evidence IS
+            'This payload carries both conflicting sides of the failed invariant — binding and resource identities for an exact name, parent and child relation evidence for a child — the identity of the event proving the selected ENSv2 authority, which is an activated migration boundary or a positive ENSv2 child registration, each block, transaction, and log position, and the canonicality observed at failure.'
+    $ddl$;
 END
 $migration$;

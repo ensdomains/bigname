@@ -45,6 +45,6 @@ COMMENT ON COLUMN project_generation_failures.failure_fingerprint IS
 COMMENT ON COLUMN project_generation_failures.logical_name_id IS
     'This value identifies the logical name whose conflicting authority blocked publication.';
 COMMENT ON COLUMN project_generation_failures.evidence IS
-    'This payload carries the conflicting binding and resource identities, the activated boundary event identity, each block, transaction, and log position, and the canonicality observed at failure.';
+    'This payload carries both conflicting sides of the failed invariant — binding and resource identities for an exact name, parent and child relation evidence for a child — the identity of the event proving the selected ENSv2 authority, which is an activated migration boundary or a positive ENSv2 child registration, each block, transaction, and log position, and the canonicality observed at failure.';
 COMMENT ON COLUMN project_generation_failures.detected_at IS
     'This time records when the phase runner appended the row, after the projection generation transaction rolled back.';
