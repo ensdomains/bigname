@@ -472,6 +472,67 @@ fn unmigrated_child_proves_no_boundary() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The activation contract across the child catalog. Every complete shape derives an activated
+/// boundary that schedules exactly one binding write; every refused shape derives neither, and its
+/// batch stays free of authority-transition effects entirely.
+#[test]
+fn the_activation_matrix_covers_the_child_catalog() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    for (scenario, levels, activated_children) in [
+        ("C-01", &["parent", "child"][..], 1),
+        ("C-02", &["parent", "child"], 1),
+        ("C-03", &["parent", "child"], 1),
+        ("C-04", &["parent", "child", "grandchild"], 2),
+        ("C-05", &["parent"], 0),
+        ("C-06", &["parent", "child"], 0),
+    ] {
+        let output = interpret_test_batch(batch(
+            scenario_logs(&fixture["scenarios"][scenario], addresses, levels)?,
+            &fixture,
+            true,
+        ))?;
+        let children = child_boundaries(&output);
+        assert_eq!(
+            children.len(),
+            activated_children,
+            "{scenario} child boundaries"
+        );
+        assert!(
+            children
+                .iter()
+                .all(|boundary| boundary.consumer_visibility == "activated"),
+            "{scenario} derives candidate children after activation"
+        );
+        for boundary in &children {
+            assert_eq!(
+                output
+                    .migration_authority_transitions
+                    .iter()
+                    .filter(
+                        |transition| transition.boundary_event_identity == boundary.event_identity
+                    )
+                    .count(),
+                1,
+                "{scenario} schedules one binding write per activated child boundary"
+            );
+        }
+        // Parent boundaries included: activated boundaries and scheduled writes are one to one.
+        assert_eq!(
+            boundaries(&output).len(),
+            output.migration_authority_transitions.len(),
+            "{scenario} activated boundaries and binding writes are not one to one"
+        );
+        assert!(
+            boundaries(&output)
+                .iter()
+                .all(|boundary| boundary.consumer_visibility == "activated"),
+            "{scenario} left a boundary candidate"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn a_registry_that_is_not_migration_created_correlates_no_child() -> anyhow::Result<()> {
     let fixture = fixture()?;
