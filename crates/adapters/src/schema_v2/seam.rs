@@ -30,6 +30,34 @@ pub const EVENT_CLOSE_TIME_SQL: &str = "lineage.block_timestamp + make_interval(
 pub const BINDING_CLOSE_CLAMP_SQL: &str = "GREATEST($2, active_from + interval '1 microsecond')";
 pub const REDO_BINDING_CLOSE_CLAMP_SQL: &str =
     "GREATEST(event.closed_at, binding.active_from + interval '1 microsecond')";
+/// The authority arm a closing event's own evidence names, which is the arm a redo reopen may
+/// undo a close on. An ordinary open or unbind closes only its own arm, so that arm is the one the
+/// event identifies: the binding it opened, or failing that its resource. A migration boundary is
+/// deliberately cross-arm and records the predecessor arm it closes. Without exact evidence the
+/// event reopens nothing rather than guessing an arm from position or source family.
+pub const REDO_CLOSED_ARM_SQL: &str = "COALESCE(
+                       event.after_state #>> '{predecessor_binding,authority_epoch}',
+                       (
+                           SELECT CASE
+                               WHEN count(DISTINCT opened.authority_arm) = 1
+                                   THEN min(opened.authority_arm)
+                           END
+                           FROM surface_bindings opened
+                           WHERE opened.chain_id = event.chain_id
+                             AND opened.logical_name_id = event.logical_name_id
+                             AND CASE
+                                 WHEN COALESCE(
+                                     event.after_state ->> 'surface_binding_id',
+                                     event.after_state #>> '{successor_binding,binding_id}'
+                                 ) IS NOT NULL
+                                     THEN opened.surface_binding_id::text = COALESCE(
+                                         event.after_state ->> 'surface_binding_id',
+                                         event.after_state #>> '{successor_binding,binding_id}'
+                                     )
+                                 ELSE opened.resource_id = event.resource_id
+                             END
+                       )
+                   )";
 pub const REDO_RESOLVER_EVIDENCE_SELECT_SQL: &str = r#"
     SELECT event.chain_id, event.event_identity, event.block_number, event.event_kind,
            event.source_family, event.resource_id,

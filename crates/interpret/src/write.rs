@@ -9,9 +9,9 @@ mod redo;
 use bigname_adapters::schema_v2::BatchOutput;
 use bigname_adapters::schema_v2::seam::{
     EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, MIGRATION_APPLIED_EVENT_KIND,
-    PREIMAGE_OBSERVATION_EVENT_KIND, REDO_BINDING_CLOSE_CLAMP_SQL, SURFACE_BINDING_ID_KEY,
-    SURFACE_BOUND_EVENT_KIND, SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
-    TRANSACTION_INDEX_KEY,
+    PREIMAGE_OBSERVATION_EVENT_KIND, REDO_BINDING_CLOSE_CLAMP_SQL, REDO_CLOSED_ARM_SQL,
+    SURFACE_BINDING_ID_KEY, SURFACE_BOUND_EVENT_KIND, SURFACE_UNBOUND_EVENT_KIND,
+    TOKEN_LINEAGE_ID_KEY, TRANSACTION_INDEX_KEY,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -359,35 +359,7 @@ async fn reopen_bindings_closed_in_range(
                        event.after_state ->> '{SURFACE_BINDING_ID_KEY}',
                        event.after_state #>> '{{successor_binding,binding_id}}'
                    ) AS opened_binding_id,
-                   -- The arm the event's own evidence closes. An ordinary open or unbind closes
-                   -- only its own arm, so that arm is the one the event names: the binding it
-                   -- opened, or failing that its resource. A migration boundary is deliberately
-                   -- cross-arm and records the predecessor arm it closes. Without exact evidence
-                   -- the event reopens nothing rather than guessing an arm from position or
-                   -- source family.
-                   COALESCE(
-                       event.after_state #>> '{{predecessor_binding,authority_epoch}}',
-                       (
-                           SELECT CASE
-                               WHEN count(DISTINCT opened.authority_arm) = 1
-                                   THEN min(opened.authority_arm)
-                           END
-                           FROM surface_bindings opened
-                           WHERE opened.chain_id = event.chain_id
-                             AND opened.logical_name_id = event.logical_name_id
-                             AND CASE
-                                 WHEN COALESCE(
-                                     event.after_state ->> '{SURFACE_BINDING_ID_KEY}',
-                                     event.after_state #>> '{{successor_binding,binding_id}}'
-                                 ) IS NOT NULL
-                                     THEN opened.surface_binding_id::text = COALESCE(
-                                         event.after_state ->> '{SURFACE_BINDING_ID_KEY}',
-                                         event.after_state #>> '{{successor_binding,binding_id}}'
-                                     )
-                                 ELSE opened.resource_id = event.resource_id
-                             END
-                       )
-                   ) AS closed_arm
+                   {REDO_CLOSED_ARM_SQL} AS closed_arm
             FROM normalized_events event
             JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
