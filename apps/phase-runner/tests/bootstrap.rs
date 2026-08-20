@@ -534,6 +534,8 @@ async fn generation_failure_audit_matches_between_baseline_and_schema_migration(
         "the resume cursor survives the schema migration"
     );
 
+    assert_failure_kind_vocabulary(migrated.pool()).await?;
+
     let installed = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_generation_failure_baseline")
             .pool_max_connections(2)
@@ -549,6 +551,7 @@ async fn generation_failure_audit_matches_between_baseline_and_schema_migration(
         !installed_structure.is_empty(),
         "the baseline installs the failure-audit table"
     );
+    assert_failure_kind_vocabulary(installed.pool()).await?;
     assert_eq!(
         migrated_structure, installed_structure,
         "the schema migration and the baseline define one identical table"
@@ -556,6 +559,52 @@ async fn generation_failure_audit_matches_between_baseline_and_schema_migration(
 
     installed.cleanup().await?;
     migrated.cleanup().await
+}
+
+/// Both installation paths admit the exact-name kind slice 2E records and the
+/// child kind slice 3B adds, and refuse anything else.
+async fn assert_failure_kind_vocabulary(pool: &sqlx::PgPool) -> Result<()> {
+    for kind in [
+        "dual_current_exact_name_authority",
+        "dual_current_child_authority",
+    ] {
+        insert_failure_kind(pool, kind).await?;
+    }
+    let rejected = insert_failure_kind(pool, "dual_current_unknown_authority").await;
+    assert!(
+        rejected.is_err(),
+        "the failure-kind vocabulary is closed to {}",
+        "dual_current_unknown_authority"
+    );
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bigname_phase.project_generation_failures
+         WHERE chain_id = 'failure-kind-vocabulary'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(recorded, 2, "each admitted kind records one row");
+    sqlx::query(
+        "DELETE FROM bigname_phase.project_generation_failures
+         WHERE chain_id = 'failure-kind-vocabulary'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn insert_failure_kind(pool: &sqlx::PgPool, kind: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_generation_failures (
+             chain_id, target_block_number, target_block_hash,
+             interpreter_content_hash, failure_kind, failure_fingerprint,
+             logical_name_id, evidence
+         ) VALUES ('failure-kind-vocabulary', 1, '0x01', 'hash', $1,
+                   repeat('a', 64), 'ens:0x01', '{}'::jsonb)",
+    )
+    .bind(kind)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn load_table_structure(pool: &sqlx::PgPool) -> Result<Vec<String>> {
