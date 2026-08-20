@@ -286,6 +286,13 @@ impl Engine {
                         window_to,
                     )
                     .await?;
+                redo::require_resumed_window_parent(
+                    &request.chain_id,
+                    &source.key,
+                    request.resume_current.as_ref(),
+                    window_from,
+                    loaded.first_parent_hash.as_deref(),
+                )?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
                 let at_boundary = window_to == source_target_number;
                 let marker = if at_boundary {
@@ -379,6 +386,10 @@ impl Engine {
         };
         let primary = primary_source(&request.sources)?;
         let (current, target) = if let Some(summary) = guarded_summary {
+            summary
+        } else if let Some(summary) =
+            redo::running_summary_from_loaded_source(&progress, &primary.key, to)
+        {
             summary
         } else {
             let provider = self.provider(&request.chain_id, primary).await?;
@@ -485,6 +496,10 @@ impl Engine {
                 number: last.number,
                 hash: last.hash.clone(),
             },
+            first_parent_hash: facts
+                .blocks
+                .first()
+                .and_then(|block| block.parent_hash.clone()),
             estimated_write_bytes,
         })
     }
@@ -563,6 +578,7 @@ struct NormalSourceState<'a> {
 
 pub(super) struct LoadedWindow {
     pub(super) marker: Marker,
+    pub(super) first_parent_hash: Option<String>,
     pub(super) estimated_write_bytes: u64,
 }
 

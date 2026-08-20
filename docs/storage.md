@@ -147,7 +147,7 @@ mandatory full Interpret and Project redos.
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
-| `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
+| `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen only a required Ingest redo recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker) while holding every phase writer lock | Phase progress, repair work, and runtime liveness. Manifest synchronization preserves the phase runner's lifecycle backup fields, clears resumable evidence when it changes the required range or compiled watch inputs, and never executes the redo. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions | Active live/indexed resolver disagreements; diagnostic only. |
 
@@ -525,9 +525,20 @@ lineage, the equal-height evidence requirement still applies: the phase summary
 cannot adopt the fresh resolution without a matching per-source marker returned
 by a load during that redo.
 Together with the per-chain manifest/watch-plan fingerprint, this closes the
-last-boundary case when active inputs change between attempts. Binding
-watch-plan evidence to facts at interior range heights remains tracked by
-issue #376.
+last-boundary case when active inputs change between attempts. At manifest
+synchronization, a semantic comparison of previous and desired watched event,
+emitter scope, and start block now covers interior retained heights: any
+widening that intersects stored Ingest coverage stamps a required Ingest redo
+through the latest published ingested head. That redo reloads the whole
+affected range under one current manifest/watch-plan fingerprint. Every redo
+checkpoint uses the boundary returned by the load itself. Loaded headers must
+form one parent-linked window, and each resumed window must descend from the
+durable prior-batch checkpoint; a fork switch restarts the redo from its range
+beginning instead of combining coverage from sibling forks. Completion of a
+manifest-required redo also requires its loaded range-end hash to equal the
+readable hash at that height. Ordinary repair redos retain their existing
+ability to reconcile a source cursor to another retained fork before normal
+head publication.
 
 ## Interpretation replay
 
@@ -584,12 +595,14 @@ association while the redo cursor is cleared. Interpret walks the audited range
 again from its beginning under the new hash; later interruptions under that
 hash resume normally.
 
-The system cannot verify the fetch or the no-widening review; the attestation is
-the operator's responsibility. The guard cannot distinguish widening from
-another manifest-authority change, so every such change is fenced regardless of
-finite-cursor or Live-lineage coverage until issue #376 binds watch-plan
-evidence to loaded facts. An interpreter content hash rotation with neither a
-current manifest-authority marker nor an active audited redo remains flagless.
+Manifest synchronization distinguishes manifest-authored watch-plan widening
+from narrowing and unrelated authority changes. A widening over retained
+coverage stamps the required Ingest redo; successful completion supplies the
+current-watch-plan fetch before Interpret can run. The attestation remains the
+operator's durable acknowledgement of every manifest-authority change,
+including changes that stamp no Ingest work. An interpreter content hash
+rotation with neither a current manifest-authority marker nor an active audited
+redo remains flagless.
 A missing lineage height, an ambiguous readable height, or an uncovered part of
 a source's finite target remains a fatal presence failure.
 

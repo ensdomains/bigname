@@ -11,6 +11,8 @@ use crate::{LoadedManifest, ManifestLoadStatus, ManifestRepository};
 mod persistence;
 #[path = "schema_v2_sync_state.rs"]
 mod sync_state;
+#[path = "schema_v2_watch.rs"]
+mod watch;
 
 use persistence::{
     deactivate_retired_manifest_addresses, insert_declaration, normalize_address,
@@ -198,8 +200,8 @@ fn manifest_state(manifest_id: i64, loaded: &LoadedManifest) -> Result<StoredMan
         },
         rollout_status: manifest.rollout_status.as_db_value().to_owned(),
         normalizer_version: manifest.normalizer_version.clone(),
-        manifest_payload: serde_json::to_value(manifest)
-            .with_context(|| format!("failed to serialize {}", loaded.path.display()))?,
+        manifest_payload: watch::manifest_payload(manifest)
+            .with_context(|| format!("failed to compile {}", loaded.path.display()))?,
     })
 }
 
@@ -310,8 +312,8 @@ async fn upsert_manifest(
             loaded.path.display()
         )
     })?;
-    let payload = serde_json::to_value(manifest)
-        .with_context(|| format!("failed to serialize {}", loaded.path.display()))?;
+    let payload = watch::manifest_payload(manifest)
+        .with_context(|| format!("failed to compile {}", loaded.path.display()))?;
     sqlx::query_scalar(
         "
         INSERT INTO manifest_versions (

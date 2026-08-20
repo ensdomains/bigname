@@ -178,6 +178,8 @@ fn require_compatible_active_phase(
     phase: PhaseName,
     mode: &RunMode,
 ) -> RunnerResult<()> {
+    let required_ingest_repair = phase == PhaseName::Ingest
+        && is_required_downstream_redo(row_for(rows, PhaseName::Ingest)?);
     for row in rows {
         let other: PhaseName = row.phase_name.parse()?;
         if other == phase {
@@ -187,6 +189,7 @@ fn require_compatible_active_phase(
         if matches!(status, PhaseStatus::Running | PhaseStatus::Paused)
             && !verify_live_work_pair(phase, other)
             && !is_pending_required_downstream_redo(row)
+            && !required_ingest_can_precede_interrupted_derived(required_ingest_repair, other, row)
             && !recompute_can_queue_behind_project_redo(phase, other, mode, row)
         {
             return Err(RunnerError::new(
@@ -198,6 +201,19 @@ fn require_compatible_active_phase(
         }
     }
     Ok(())
+}
+
+fn required_ingest_can_precede_interrupted_derived(
+    required_ingest_repair: bool,
+    other: PhaseName,
+    row: &PhaseStateRow,
+) -> bool {
+    // Manifest sync may widen Ingest while preserving an interrupted
+    // downstream redo. The prerequisite repair must run first; the advisory
+    // locks proved neither retained redo still has a writer.
+    required_ingest_repair
+        && row.redo_in_progress
+        && matches!(other, PhaseName::Interpret | PhaseName::Project)
 }
 
 fn recompute_can_queue_behind_project_redo(
@@ -259,6 +275,14 @@ fn is_pending_required_downstream_redo(row: &PhaseStateRow) -> bool {
             .last_error
             .as_deref()
             .is_some_and(|reason| reason.starts_with(crate::redo_stamp::REQUIRED_REDO_PREFIX))
+}
+
+fn is_required_downstream_redo(row: &PhaseStateRow) -> bool {
+    row.redo_in_progress
+        && row
+            .last_error
+            .as_deref()
+            .is_some_and(crate::redo_stamp::owns_required_redo)
 }
 
 fn require_content_hash(

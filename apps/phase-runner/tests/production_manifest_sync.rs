@@ -1,14 +1,380 @@
 #[allow(dead_code)]
 mod support;
 
-use anyhow::Result;
+use std::{fs, time::Duration};
+
+use alloy_primitives::keccak256;
+use anyhow::{Context, Result};
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
-use phase_runner::{INTERPRETER_CONTENT_HASH, state::PhaseStore};
+use phase_runner::{
+    INTERPRETER_CONTENT_HASH,
+    capacity::CapacityGuard,
+    config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    heads::BlockMarker,
+    phase::{BlockRange, PhaseName, PhaseSet},
+    rewind::rewind_to_ancestor,
+    runner::{PhaseRunner, RedoPhase},
+    state::PhaseStore,
+};
 use sqlx::types::Uuid;
+use tokio_util::sync::CancellationToken;
 
 use support::ScratchDatabase;
 
 type AddressEpoch = (i64, Uuid, Option<i64>, Option<i64>, bool);
+
+struct WatchManifestFixture {
+    root: std::path::PathBuf,
+    chain_id: String,
+    source_family: String,
+}
+
+impl WatchManifestFixture {
+    fn new(chain_id: &str) -> Result<Self> {
+        Self::with_source_family(chain_id, "test_events")
+    }
+
+    fn with_source_family(chain_id: &str, source_family: &str) -> Result<Self> {
+        let root =
+            std::env::temp_dir().join(format!("bigname-manifest-widening-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("test").join(source_family))?;
+        Ok(Self {
+            root,
+            chain_id: chain_id.to_owned(),
+            source_family: source_family.to_owned(),
+        })
+    }
+
+    fn write(&self, include_new_event: bool, include_new_contract: bool) -> Result<()> {
+        let new_event = include_new_event.then_some(
+            r#"
+[[abi.events]]
+name = "Widened"
+fragment = "event Widened(bytes32 indexed value)"
+emitter_roles = ["source_a"]
+normalized_events = []
+status = "supported"
+"#,
+        );
+        let new_contract = include_new_contract.then_some(
+            r#"
+[[contracts]]
+role = "source_b"
+address = "0x0000000000000000000000000000000000000006"
+proxy_kind = "none"
+start_block = 0
+"#,
+        );
+        let manifest = format!(
+            r#"manifest_version = 1
+namespace = "test"
+source_family = "{}"
+chain = "{}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "source_a"
+address = "0x0000000000000000000000000000000000000004"
+proxy_kind = "none"
+start_block = 0
+{}
+
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
+emitter_roles = ["source_a"]
+normalized_events = []
+status = "supported"
+{}
+"#,
+            self.source_family,
+            self.chain_id,
+            new_contract.unwrap_or_default(),
+            new_event.unwrap_or_default(),
+        );
+        fs::write(
+            self.root
+                .join("test")
+                .join(&self.source_family)
+                .join("v1.toml"),
+            manifest,
+        )?;
+        Ok(())
+    }
+
+    fn add_discovery_rule(&self, edge_kind: &str) -> Result<()> {
+        let path = self
+            .root
+            .join("test")
+            .join(&self.source_family)
+            .join("v1.toml");
+        let manifest = fs::read_to_string(&path)?.replace(
+            "discovery_rules = []",
+            &format!(
+                r#"[[discovery_rules]]
+edge_kind = "{edge_kind}"
+from_role = "source_a"
+admission = "reachable_from_root""#
+            ),
+        );
+        fs::write(path, manifest)?;
+        Ok(())
+    }
+}
+
+impl Drop for WatchManifestFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn loopback_runner(scratch: &ScratchDatabase, instance_id: &str) -> Result<PhaseRunner> {
+    Ok(PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        CapacityGuard::system(CapacityConfig::default()),
+        instance_id,
+        TimingConfig {
+            initial_backoff: Duration::from_millis(1),
+            maximum_backoff: Duration::from_millis(4),
+            live_poll_interval: Duration::from_millis(1),
+        },
+    )?)
+}
+
+#[tokio::test]
+async fn widening_an_ingested_manifest_event_blocks_initial_derivation_until_reingest() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_manifest_sync_ingest_widening_gap").await?;
+    let chain_id = "manifest-widening-gap";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    let chain = seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.write(true, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let raw_new_event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM raw_logs
+         WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(raw_new_event_count, 0);
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
+    );
+
+    let runner = loopback_runner(&scratch, "manifest-widening-gap-runner")?;
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.run_chain(&chain, CancellationToken::new()),
+    )
+    .await
+    .context("manifest widening allowed derivation over raw facts without the new event")?
+    .expect_err("manifest widening must block derivation until the explicit Ingest redo");
+    assert!(error.to_string().contains("redo --chain"));
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn widening_after_rewind_targets_the_readable_head_and_can_complete() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_widening_after_rewind").await?;
+    let chain_id = "manifest-widening-after-rewind";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let chain = seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let block_0 = format!("{chain_id}-manifest-sync-head-0");
+    rewind_to_ancestor(&scratch.runner(), chain_id, BlockMarker::new(0, block_0)?).await?;
+    fixture.write(true, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 0)),
+        "rewound orphaned cursor suffixes are not currently published coverage"
+    );
+
+    loopback_runner(&scratch, "manifest-widening-rewind-redo")?
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_watch_comparison_trips_only_for_covered_widenings() -> Result<()> {
+    for (name, before, after, already_ingested, expected_redo) in [
+        (
+            "new-contract",
+            (false, false),
+            (false, true),
+            true,
+            Some((0, 1)),
+        ),
+        ("narrowing", (true, true), (false, false), true, None),
+        ("same-set", (false, false), (false, false), true, None),
+        ("fresh-chain", (false, false), (true, false), false, None),
+    ] {
+        let scratch =
+            ScratchDatabase::create(&format!("production_manifest_watch_comparison_{}", name))
+                .await?;
+        let chain_id = format!("manifest-watch-{name}");
+        let fixture = WatchManifestFixture::new(&chain_id)?;
+        fixture.write(before.0, before.1)?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+        if already_ingested {
+            seed_completed_ingest_range(&scratch, &chain_id).await?;
+        }
+
+        fixture.write(after.0, after.1)?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+        assert_eq!(
+            required_ingest_redo(scratch.pool(), &chain_id).await?,
+            expected_redo,
+            "unexpected Ingest obligation for {name}"
+        );
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn adding_a_declared_address_to_a_discovery_family_requires_reingest() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_discovery_family_address").await?;
+    let chain_id = "manifest-discovery-family-address";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v1_resolver_l1")?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.write(false, true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1)),
+        "a family-scoped discovery watch does not cover a newly declared direct address"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn adding_a_discovery_rule_over_ingested_history_is_rejected() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_discovery_rule_widening").await?;
+    let chain_id = "manifest-discovery-rule-widening";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.add_discovery_rule("resolver")?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("historical indexability admission needs prior discovery derivation");
+    assert!(error.to_string().contains("discovery rule"));
+    for edge_kind in ["subregistry", "registry_announcement"] {
+        fixture.write(false, false)?;
+        fixture.add_discovery_rule(edge_kind)?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    }
+    scratch.cleanup().await?;
+
+    let fresh = ScratchDatabase::create("production_manifest_fresh_discovery_rule").await?;
+    let fresh_chain = "manifest-fresh-discovery-rule";
+    let fresh_fixture = WatchManifestFixture::new(fresh_chain)?;
+    fresh_fixture.write(false, false)?;
+    fresh_fixture.add_discovery_rule("resolver")?;
+    sync_schema_v2_repository(fresh.pool(), &load_repository(&fresh_fixture.root)?).await?;
+    seed_completed_ingest_range(&fresh, fresh_chain).await?;
+    fresh_fixture.write(false, false)?;
+    sync_schema_v2_repository(fresh.pool(), &load_repository(&fresh_fixture.root)?).await?;
+
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn compiled_emitter_policy_widening_with_unchanged_manifest_requires_reingest() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_manifest_compiled_policy_widening").await?;
+    let chain_id = "manifest-compiled-policy-widening";
+    let family = "ens_v1_resolver_l1";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, family)?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let topic0 = format!("{:#x}", keccak256(b"Transfer(address,address,uint256)"));
+    let narrower_compiled_watch = serde_json::json!([{
+        "emitter": {
+            "kind": "address",
+            "family": family,
+            "address": "0x0000000000000000000000000000000000000004"
+        },
+        "topic0": topic0,
+        "start": 0
+    }]);
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = jsonb_set(
+             manifest_payload, '{_bigname_compiled_watch}', $2::jsonb
+         )
+         WHERE chain_id = $1 AND rollout_status = 'active'",
+    )
+    .bind(chain_id)
+    .bind(narrower_compiled_watch)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+             redo_previous_phase_status = 'completed',
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 0, redo_to_block_number = 1,
+             redo_current_block_number = 1, redo_current_block_hash = 'old-policy-checkpoint',
+             redo_manifest_authority_fingerprint = repeat('a', 64),
+             last_error = 'interrupted old-policy redo',
+             started_at = now(), finished_at = NULL
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1)),
+        "persisted compiled emitter scope must survive a binary policy change"
+    );
+    let discarded_checkpoint: (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT redo_current_block_number, redo_manifest_authority_fingerprint
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(discarded_checkpoint, (None, None));
+
+    scratch.cleanup().await
+}
 
 #[tokio::test]
 async fn schema_v2_manifest_sync_is_idempotent_and_retires_absent_history() -> Result<()> {
@@ -417,6 +783,64 @@ async fn schema_v2_manifest_readmission_appends_an_address_epoch() -> Result<()>
     assert_eq!(rows[1].3, None);
     assert!(rows[1].4);
     scratch.cleanup().await
+}
+
+async fn seed_completed_ingest_range(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+) -> Result<ChainConfig> {
+    let source = SourceConfig::new(
+        chain_id,
+        "rpc",
+        "rpc",
+        SeedBasis::NewSignatureRange,
+        0,
+        "http://127.0.0.1:1",
+    )?;
+    let chain = ChainConfig::new(chain_id, vec![source.clone()], false)?;
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store.ensure_ingest_sources(chain_id, &[source]).await?;
+    seed_chain_head(scratch.pool(), chain_id, 0).await?;
+    advance_chain_head(scratch.pool(), chain_id, 1).await?;
+    let block_hash = format!("{chain_id}-manifest-sync-head-1");
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 2, target_block_number = 1,
+             last_processed_block_number = 1,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'rpc'",
+    )
+    .bind(chain_id)
+    .bind(&block_hash)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', current_block_number = 1,
+             current_block_hash = $2, target_block_number = 1,
+             target_block_hash = $2, live_handoff_block_number = 1,
+             live_handoff_block_hash = $2, started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .execute(scratch.pool())
+    .await?;
+    Ok(chain)
+}
+
+async fn required_ingest_redo(pool: &sqlx::PgPool, chain_id: &str) -> Result<Option<(i64, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'
+           AND redo_in_progress
+           AND last_error LIKE 'required downstream redo: %'",
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 async fn seed_chain_head(pool: &sqlx::PgPool, chain_id: &str, number: i64) -> Result<()> {

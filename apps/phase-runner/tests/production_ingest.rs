@@ -728,6 +728,151 @@ async fn resumed_ingest_redo_reloads_a_divergent_boundary_under_the_current_watc
 }
 
 #[tokio::test]
+async fn explicit_ingest_redo_clears_a_manifest_widening_obligation_and_unblocks_derivation()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_manifest_widening_required").await?;
+    let chain_id = "rpc-ingest-manifest-widening-required";
+    let manifests = IngestWatchManifestFixture::new(chain_id)?;
+    manifests.write(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let (endpoint, rpc_state, server) = spawn_watch_plan_boundary_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "manifest-widening-required-runner")?;
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1,
+    )
+    .await?;
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1, SIBLING_CONTRACT).await?,
+        0,
+        "the narrow watch plan must not retain the future address-family fact"
+    );
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'idle', verification_level = NULL,
+             current_block_number = NULL, current_block_hash = NULL,
+             target_block_number = NULL, target_block_hash = NULL,
+             input_content_hash = NULL, live_handoff_block_number = NULL,
+             live_handoff_block_hash = NULL, last_error = NULL,
+             started_at = NULL, finished_at = NULL
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project', 'verify', 'live')",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    manifests.write(true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let required: (i64, i64) = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'
+           AND redo_in_progress",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(required, (0, 1));
+    let blocked = runner
+        .run_chain(&configured_chain, CancellationToken::new())
+        .await
+        .expect_err("normal derivation must not auto-run a costly required Ingest redo");
+    for expected in [chain_id, "--phase ingest", "--from-block 0", "--to-block 1"] {
+        assert!(
+            blocked.to_string().contains(expected),
+            "missing {expected:?} in {blocked}"
+        );
+    }
+
+    rpc_state.hash_epoch.store(2, Ordering::SeqCst);
+    let sibling_error = runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a required redo on a sibling fork must not cover the readable fork");
+    assert_eq!(sibling_error.kind(), ErrorKind::DataIntegrity);
+    assert!(sibling_error.to_string().contains("readable"));
+    rpc_state.hash_epoch.store(0, Ordering::SeqCst);
+
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .context("the exact explicit Ingest redo must clear the widening obligation")?;
+    assert!(rpc_state.boundary_log_calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1, SIBLING_CONTRACT).await?,
+        1,
+        "the explicit redo must fetch the newly watched fact"
+    );
+    let still_required: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!still_required);
+
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task_chain = configured_chain.clone();
+    let task_runner = runner.clone();
+    let mut task =
+        tokio::spawn(async move { task_runner.run_chain(&task_chain, task_cancellation).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status: String = sqlx::query_scalar(
+                "SELECT phase_status FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'interpret'",
+            )
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+            if status == "completed" {
+                cancellation.cancel();
+                return Ok::<_, anyhow::Error>(());
+            }
+            if task.is_finished() {
+                let result = (&mut task).await.context("post-redo runner panicked")?;
+                result.context("derivation stayed blocked after the required Ingest redo")?;
+                anyhow::bail!("post-redo runner exited before Interpret completed");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("derivation did not resume after the required Ingest redo")??;
+    task.await??;
+
+    server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn pre_upgrade_range_end_redo_checkpoint_requires_loaded_boundary_evidence() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_ingest_redo_pre_upgrade_boundary").await?;
     let chain_id = "rpc-ingest-redo-pre-upgrade-boundary";
@@ -1038,46 +1183,43 @@ async fn ingest_redo_checkpoint_does_not_cross_a_manifest_authority_change() -> 
         w0_fingerprint, w1_fingerprint,
         "adding a watched root must change the per-chain manifest/watch-plan fingerprint"
     );
+    assert_eq!(
+        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?,
+        (true, None, None, Some(BLOCK_1.to_owned())),
+        "manifest sync must discard the W0 checkpoint before an operator can resume it"
+    );
+    let required: (i64, i64, String) = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number, last_error
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!((required.0, required.1), (0, 1));
+    assert!(required.2.starts_with("required downstream redo:"));
+
     rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
-    let changed_authority_result = runner
+    let narrow_retry = runner
         .redo(
             &configured_chain,
             RedoPhase::Phase(PhaseName::Ingest),
             BlockRange::new(1, 1)?,
             CancellationToken::new(),
         )
-        .await;
-    let boundary_calls = rpc_state.boundary_log_calls.load(Ordering::SeqCst);
-    let widened_fact = raw_log_count(scratch.pool(), chain_id, BLOCK_1, SIBLING_CONTRACT).await?;
-    let authority_error = changed_authority_result.expect_err(&format!(
-        "W0 evidence crossed the W1 manifest/watch-plan change: boundary_get_logs={boundary_calls}, \
-         widened_raw_logs={widened_fact}, state={:?}",
-        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?
-    ));
-    assert_eq!(authority_error.kind(), ErrorKind::DataIntegrity);
-    assert!(
-        authority_error
-            .to_string()
-            .contains("redo authority changed")
-    );
-    assert!(
-        authority_error
-            .to_string()
-            .contains("rerun the Ingest redo")
-    );
-    assert_eq!(boundary_calls, 0);
-    assert_eq!(widened_fact, 0);
-    assert_eq!(
-        load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?,
-        (true, None, None, Some(BLOCK_1.to_owned()))
-    );
+        .await
+        .expect_err("the old 1..=1 attempt must not undercut the widened required range");
+    for expected in ["--phase ingest", "--from-block 0", "--to-block 1"] {
+        assert!(narrow_retry.to_string().contains(expected));
+    }
+    assert_eq!(rpc_state.boundary_log_calls.load(Ordering::SeqCst), 0);
 
     rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
     runner
         .redo(
             &configured_chain,
             RedoPhase::Phase(PhaseName::Ingest),
-            BlockRange::new(1, 1)?,
+            BlockRange::new(0, 1)?,
             CancellationToken::new(),
         )
         .await?;

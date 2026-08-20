@@ -582,11 +582,28 @@ async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Res
     let (first_b_fingerprint, first_b_generation) = manifest_authority_parts(&first_b_marker)?;
     let first_b_fingerprint = first_b_fingerprint.to_owned();
     let first_b_generation = first_b_generation.to_owned();
-
     let redo_runner = loopback_runner(&scratch, "production-live-manifest-authority-redo")?;
 
-    // Before the manifest-authority fence, this redo passed the presence guard: the finite cursor
-    // proved only block 0 and readable lineage incorrectly certified the A-loaded suffix 1..=3.
+    let required_ingest: (i64, i64) = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest' AND redo_in_progress",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(required_ingest, (0, 3));
+    redo_runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    // After the required Ingest obligation is discharged, Interpret still needs the separate
+    // authority-transition attestation before adopting the new manifest.
     let error = redo_runner
         .redo(
             &live_chain(chain, &fixture.endpoint)?,
@@ -607,11 +624,11 @@ async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Res
             "raw-data presence check failed for interpret redo on chain \
 manifest-authority-live-suffix: the manifest authority changed since blocks 0..=3 were loaded; \
 invalidation token {first_b_generation}; \
-complete the documented mandatory historical fetch for any widened range (docs/manifests.md § \
-mandatory historical fetch after watch-plan widening), or confirm that the change widened \
-nothing; then re-run with --attest-watch-set-coverage {first_b_generation} (or \
+complete any required Ingest redo stamped for this authority transition (docs/manifests.md § \
+mandatory historical fetch after watch-plan widening), then re-run with \
+--attest-watch-set-coverage {first_b_generation} (or \
 --attest-watch-set-coverage manifest-authority-live-suffix={first_b_generation} in a multi-chain \
-redo); see issue #376"
+redo)"
         )
     );
 
@@ -674,6 +691,14 @@ redo); see issue #376"
     let second_b_generation = second_b_generation.to_owned();
     assert_eq!(second_b_fingerprint, first_b_fingerprint);
     assert_ne!(second_b_generation, first_b_generation);
+    redo_runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await?;
     let stale_aba_runner = loopback_runner(&scratch, "production-live-stale-aba-token")?
         .with_watch_set_coverage_attestation(chain, &first_b_generation);
     let aba_error = stale_aba_runner
@@ -807,11 +832,11 @@ async fn manifest_authority_change_without_a_live_suffix_requires_attestation() 
         format!(
             "raw-data presence check failed for interpret redo on chain \
 manifest-authority-finite-coverage: the manifest authority changed since blocks 0..=0 were \
-loaded; invalidation token {generation}; complete the documented mandatory historical fetch for any widened range \
-(docs/manifests.md § mandatory historical fetch after watch-plan widening), or confirm that the \
-change widened nothing; then re-run with --attest-watch-set-coverage {generation} (or \
+loaded; invalidation token {generation}; complete any required Ingest redo stamped for this \
+authority transition (docs/manifests.md § mandatory historical fetch after watch-plan widening), \
+then re-run with --attest-watch-set-coverage {generation} (or \
 --attest-watch-set-coverage manifest-authority-finite-coverage={generation} in a multi-chain \
-redo); see issue #376"
+redo)"
         )
     );
 
@@ -1620,11 +1645,11 @@ async fn manifest_authority_fence_applies_when_all_sources_start_after_redo() ->
         format!(
             "raw-data presence check failed for interpret redo on chain \
 manifest-authority-skipped-sources: the manifest authority changed since blocks 0..=0 were \
-loaded; invalidation token {generation}; complete the documented mandatory historical fetch for any widened range \
-(docs/manifests.md § mandatory historical fetch after watch-plan widening), or confirm that the \
-change widened nothing; then re-run with --attest-watch-set-coverage {generation} (or \
+loaded; invalidation token {generation}; complete any required Ingest redo stamped for this \
+authority transition (docs/manifests.md § mandatory historical fetch after watch-plan widening), \
+then re-run with --attest-watch-set-coverage {generation} (or \
 --attest-watch-set-coverage manifest-authority-skipped-sources={generation} in a multi-chain \
-redo); see issue #376"
+redo)"
         )
     );
 

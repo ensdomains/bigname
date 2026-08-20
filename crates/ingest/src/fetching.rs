@@ -21,6 +21,16 @@ pub async fn fetch_selected_facts(
     let blocks = provider.headers(resolved).await.map_err(|error| {
         super::provider::provider_error("failed to fetch resolved block headers", error)
     })?;
+    for pair in blocks.windows(2) {
+        if pair[1].number != pair[0].number + 1
+            || pair[1].parent_hash.as_deref() != Some(pair[0].hash.as_str())
+        {
+            return Err(IngestError::data_integrity(format!(
+                "loaded block window changes lineage between blocks {} and {}",
+                pair[0].number, pair[1].number
+            )));
+        }
+    }
     if selected_logs.is_empty() {
         return Ok(FetchedBatch {
             blocks,

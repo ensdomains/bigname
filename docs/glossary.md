@@ -1093,10 +1093,13 @@ manifest set. The database mints a new invalidation token for every transition,
 including a later return to the same desired set. The marker poisons ordinary
 hash adoption until the required full redo begins. It proves that authority
 changed; it does not prove that facts required by a widened watch plan were
-fetched. When Interpret would discharge the marker, the operator must complete
-the manifest widening procedure or confirm that nothing widened, then attest
-with the current token. Finite cursors and readable lineage both prove only the
-watch plan active when facts were loaded.
+fetched. When manifest synchronization detects that the desired watch plan
+widens over retained Ingest coverage, it also stamps a required Ingest redo for
+the affected range. That marker blocks ordinary derivation until the operator
+runs the exact redo under the new manifest authority. When Interpret would
+discharge its marker, the operator must complete any stamped Ingest redo, then
+attest with the current token. Finite cursors and readable lineage both prove
+only the watch plan active when facts were loaded.
 
 **Non-name form** — a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its
@@ -1358,12 +1361,15 @@ live/indexed comparison.
 proving all layers connect. In this repo it names the first e2e scenario
 (`register_eth_name`); prefer "the first end-to-end scenario" in prose.
 
-**Watch plan / watched tuple** — the materialized set of
-(source family, address, active block range) targets derived from manifest
-declarations plus indexability-producing discovery edges. Topology-only edges,
-including ENSv2 subregistry edges, do not add targets. A *watched tuple* is one
-such entry; its *watched window* is the active block range. Addresses are
-derived watch targets, never the durable identity.
+**Watch plan / watched tuple** — the materialized set of (source family,
+emitter scope, event signature, active block range) targets derived from
+manifest declarations plus indexability-producing discovery edges. An emitter
+scope may be one declared address, every discovered address in a source family,
+or every emitter for the small set of globally watched announcements and
+resolver events. Topology-only edges, including ENSv2 subregistry edges, do not
+add targets. A *watched tuple* is one such entry; its *watched window* is the
+active block range. Addresses are derived watch targets, never the durable
+identity.
 
 **Wrapped NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
 a name whose wrapper token has a nonzero owner and whose registry owner is the

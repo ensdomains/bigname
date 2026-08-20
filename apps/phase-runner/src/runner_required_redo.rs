@@ -61,6 +61,15 @@ impl PhaseRunner {
             .required_redo_range(&chain.chain_id, phase)
             .await?
         {
+            if phase == PhaseName::Ingest {
+                return Err(RunnerError::data_integrity(format!(
+                    "manifest watch plan widened over already-ingested blocks for chain {}; \
+                     automatic re-ingest is disabled because historical fetch cost is an operator \
+                     decision; rerun `phase-runner redo --chain {} --phase ingest --from-block {} \
+                     --to-block {}` with the configured sources before derivation",
+                    chain.chain_id, chain.chain_id, range.from, range.to
+                )));
+            }
             if phase == PhaseName::Interpret {
                 self.recover_stopped_live(chain).await?;
             }

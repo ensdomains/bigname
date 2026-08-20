@@ -395,13 +395,18 @@ token remains invalid everywhere else. If the interpreter content hash changes
 while the redo is interrupted, the same token preserves the audit association,
 but the new binary clears the redo cursor written under the prior interpreter
 content hash and walks the exact audited range again from its beginning.
-The system cannot verify the fetch or the no-widening review. This conservative
-step applies to every manifest-authority change, including ranges fully covered
-by finite ingest cursors, until issue #376 binds watch-plan evidence to the
-loaded facts. Cursors and readable lineage prove only the facts selected by the
-watch plan active when each block was loaded. Interpreter content hash rotations
-remain flagless only when neither a current manifest-authority marker nor an
-active audited redo exists. Verify redo uses the same scanner as normal
+Manifest synchronization compares the previous and desired compiled watch
+plans. A widening over retained Ingest coverage stamps a required Ingest redo
+from the earliest newly watched block through the latest published head. The
+ordinary runner reports the exact command and refuses to run that potentially
+expensive fetch automatically; successful explicit completion clears the
+obligation. Narrowing, a same-set sync, and a chain with no retained Ingest
+coverage stamp nothing. The attestation remains required for every
+manifest-authority change, including one with no Ingest stamp. Cursors and
+readable lineage prove only the facts selected by the watch plan active when
+each block was loaded. Interpreter content hash rotations remain flagless only
+when neither a current manifest-authority marker nor an active audited redo
+exists. Verify redo uses the same scanner as normal
 verification, rechecks the requested finalized range, and persists the level
 reported by the phase. A partial redo retains the level for the full recorded
 extent; a full-extent redo can report the level fixed by the reference source.

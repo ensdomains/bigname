@@ -20,7 +20,7 @@ struct ScriptedRedoWindowLoader {
     loaded: Arc<Mutex<Vec<(String, Marker)>>>,
 }
 
-type ScriptedWindow = (String, i64, i64, Marker);
+type ScriptedWindow = (String, i64, i64, Marker, Option<String>);
 
 impl ScriptedRedoWindowLoader {
     fn new(windows: impl IntoIterator<Item = ScriptedWindow>) -> Self {
@@ -42,7 +42,7 @@ impl crate::engine::redo::RedoWindowLoader for ScriptedRedoWindowLoader {
         to: i64,
     ) -> crate::engine::redo::RedoLoadFuture<'a> {
         Box::pin(async move {
-            let (expected_source, expected_from, expected_to, marker) = self
+            let (expected_source, expected_from, expected_to, marker, first_parent_hash) = self
                 .windows
                 .lock()
                 .expect("scripted redo windows lock")
@@ -58,6 +58,7 @@ impl crate::engine::redo::RedoWindowLoader for ScriptedRedoWindowLoader {
                 .push((source.key.clone(), marker.clone()));
             Ok(crate::engine::LoadedWindow {
                 marker,
+                first_parent_hash,
                 estimated_write_bytes: 0,
             })
         })
@@ -490,9 +491,22 @@ async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summa
             seam - 255,
             seam,
             loaded_fork.clone(),
+            None,
         ),
-        ("base-rpc".to_owned(), seam, seam, summary_fork.clone()),
-        ("base-rpc".to_owned(), seam + 1, seam + 1, range_end.clone()),
+        (
+            "base-rpc".to_owned(),
+            seam,
+            seam,
+            summary_fork.clone(),
+            None,
+        ),
+        (
+            "base-rpc".to_owned(),
+            seam + 1,
+            seam + 1,
+            range_end.clone(),
+            Some(summary_fork.hash.clone()),
+        ),
     ]);
     let sources = vec![
         SourceDescriptor {
@@ -581,9 +595,16 @@ async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summa
             seam - 255,
             seam,
             loaded_fork.clone(),
+            None,
         ),
-        ("base-rpc".to_owned(), seam, seam, loaded_fork.clone()),
-        ("base-rpc".to_owned(), seam + 1, seam + 1, range_end.clone()),
+        ("base-rpc".to_owned(), seam, seam, loaded_fork.clone(), None),
+        (
+            "base-rpc".to_owned(),
+            seam + 1,
+            seam + 1,
+            range_end.clone(),
+            Some(loaded_fork.hash.clone()),
+        ),
     ]);
     let consistent_sources = vec![
         SourceDescriptor {
@@ -639,6 +660,77 @@ async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summa
             .contains(&("base-coinbase".to_owned(), loaded_fork)),
         "the consistent rerun must retain the fork returned by the source load"
     );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resumed_redo_rejects_a_loaded_window_from_a_sibling_fork() -> AnyResult<()> {
+    let chain_id = "ingest-redo-window-continuity";
+    let database = intake_database("ingest_redo_window_continuity", chain_id).await?;
+    let a_255 = marker_hash(255);
+    let c_256 = marker_hash(1_256);
+    let endpoint = scripted_marker_endpoint(BTreeMap::from([
+        (255, vec![a_255.clone()]),
+        (256, vec![c_256.clone(), c_256.clone(), c_256.clone()]),
+    ]))
+    .await?;
+    let source = SourceDescriptor {
+        key: "rpc".to_owned(),
+        kind: "rpc".to_owned(),
+        start_block: 0,
+        endpoint,
+    };
+    let loader = ScriptedRedoWindowLoader::new([
+        (
+            "rpc".to_owned(),
+            0,
+            255,
+            Marker {
+                number: 255,
+                hash: a_255.clone(),
+            },
+            None,
+        ),
+        (
+            "rpc".to_owned(),
+            256,
+            256,
+            Marker {
+                number: 256,
+                hash: c_256,
+            },
+            Some(marker_hash(1_255)),
+        ),
+    ]);
+    let engine = Engine::new(database.pool().clone());
+    let first = engine
+        .run_redo_batch_with_loader(
+            &loader,
+            BatchRequest {
+                chain_id: chain_id.to_owned(),
+                sources: vec![source.clone()],
+                cursors: Vec::new(),
+                redo_range: Some((0, 256)),
+                resume_current: None,
+            },
+        )
+        .await?;
+    assert_eq!(first.current.hash, a_255);
+
+    let error = engine
+        .run_redo_batch_with_loader(
+            &loader,
+            BatchRequest {
+                chain_id: chain_id.to_owned(),
+                sources: vec![source],
+                cursors: Vec::new(),
+                redo_range: Some((0, 256)),
+                resume_current: Some(first.current),
+            },
+        )
+        .await
+        .expect_err("a resumed redo must stay on the fork loaded by its prior batch");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
     database.cleanup().await
 }
 

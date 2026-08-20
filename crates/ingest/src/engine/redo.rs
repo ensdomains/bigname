@@ -38,6 +38,48 @@ impl RedoWindowLoader for ProductionRedoWindowLoader {
     }
 }
 
+pub(super) fn require_resumed_window_parent(
+    chain_id: &str,
+    source_key: &str,
+    resume: Option<&Marker>,
+    window_from: i64,
+    first_parent_hash: Option<&str>,
+) -> Result<()> {
+    let Some(resume) = resume.filter(|marker| marker.number.checked_add(1) == Some(window_from))
+    else {
+        return Ok(());
+    };
+    if first_parent_hash == Some(resume.hash.as_str()) {
+        return Ok(());
+    }
+    Err(IngestError::data_integrity(format!(
+        "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {chain_id} source {source_key} at block \
+         {window_from}: loaded window parent {}, durable prior-batch hash {}; rerun the Ingest \
+         redo so it starts fresh and reloads the full range on one fork under the current watch plan",
+        first_parent_hash.unwrap_or("missing"),
+        resume.hash
+    )))
+}
+
+pub(super) fn running_summary_from_loaded_source(
+    progress: &[SourceProgress],
+    primary_key: &str,
+    block_number: i64,
+) -> Option<(Marker, Marker)> {
+    let primary = progress.iter().find(|source| source.key == primary_key)?;
+    let loaded = primary
+        .current
+        .as_ref()
+        .filter(|marker| marker.number == block_number)
+        .or_else(|| {
+            progress
+                .iter()
+                .filter_map(|source| source.current.as_ref())
+                .find(|marker| marker.number == block_number)
+        })?;
+    Some((loaded.clone(), primary.target.clone()))
+}
+
 pub(super) fn must_reload_completed_source_boundary(
     completing: bool,
     range_from: i64,
@@ -180,6 +222,28 @@ mod tests {
             number,
             hash: format!("hash-{number}"),
         }
+    }
+
+    #[test]
+    fn running_summary_uses_a_source_that_loaded_the_height_before_primary_start() {
+        let progress = [
+            SourceProgress {
+                key: "bulk".to_owned(),
+                current: Some(marker(100)),
+                target: marker(200),
+                loaded_boundary: None,
+            },
+            SourceProgress {
+                key: "rpc".to_owned(),
+                current: None,
+                target: marker(300),
+                loaded_boundary: None,
+            },
+        ];
+        assert_eq!(
+            running_summary_from_loaded_source(&progress, "rpc", 100),
+            Some((marker(100), marker(300)))
+        );
     }
 
     #[test]

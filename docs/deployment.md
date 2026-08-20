@@ -323,11 +323,14 @@ locked begin keeps the audit association but discards progress written under
 the prior hash, so Interpret restarts the range from its beginning under the
 new hash. Later interruptions under the new hash resume normally. The locked
 begin rejects a stale token, including one from an earlier transition to the
-same authority. The system cannot verify that the fetch or no-widening review
-happened; the attestation is the operator's responsibility. Do not edit cursors.
-The same conservative gate applies to
-non-widening changes and to ranges fully covered by finite cursors until issue
-#376 binds watch-plan evidence to loaded facts. An interpreter content hash
+same authority. Manifest synchronization detects manifest-authored watch-plan
+widening over retained Ingest coverage and stamps the exact required Ingest
+range. Normal phase execution stops and prints the explicit `ingest` redo
+command; it never performs the potentially expensive historical fetch
+automatically. Complete that command before the attested Interpret redo.
+Narrowing, a same-set sync, and a newly admitted chain with no Ingest coverage
+do not stamp Ingest. The attestation remains the operator's responsibility for
+the whole authority transition. Do not edit cursors. An interpreter content hash
 rotation with neither a current manifest-authority marker nor an active audited
 redo remains flagless. When a full-history Interpret redo for an interpreter
 content hash rotation starts at the finite ingest bounds after Live has

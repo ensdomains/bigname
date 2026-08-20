@@ -824,11 +824,38 @@ lineage selection plus an explicit derived-range redo.
 A manifest change widens the [watch
 plan](glossary.md#watch-plan--watched-tuple) when it adds an address, event
 signature, or active block range whose facts were not selected when older
-blocks were loaded. Manifest synchronization records a
-[manifest-authority marker](glossary.md#manifest-authority-marker) on Interpret
-and Project, but it does not fetch the newly watched history. Before rebuilding
-derived state, run an ingest redo over every affected historical range with the
-new manifest profile and the chain's configured sources. For example:
+blocks were loaded. Manifest synchronization compares the previous and desired
+compiled watch plans. Each stored manifest payload carries the compiled
+emitter/event/start entries produced when it was admitted, so a later binary
+change to emitter-scope policy is compared with the policy that actually
+preceded it rather than recompiling both sides with the new binary. This
+internal snapshot is not an authorable TOML field. An all-emitter event covers
+the same event for every family and address. A family-wide event covers emitters
+admitted through that family's discovery edges, but it does not cover a newly
+declared direct address; declared addresses remain explicit watch targets.
+Adding a less general target already covered by an all-emitter event does not
+count as widening.
+
+Adding or broadening an indexability-producing `resolver` discovery rule over
+an already-ingested range is a different ordering problem: the new discovered
+addresses do not exist until Interpret materializes their edges, so an Ingest
+redo cannot yet fetch their address-scoped history. Manifest synchronization
+rejects that transition instead of mis-certifying a one-pass redo. The operator
+cannot perform that ordering with the current in-place phase workflow, because
+Interpret reads discovery rules only after admission. The transition is
+therefore unsupported over retained history and requires a fresh rebuild or a
+future dedicated discovery backfill mechanism. A new chain with no ingested
+range, discovery-rule narrowing, and rules for topology-only `subregistry` or
+intake-discovered `registry_announcement` edges remain admissible.
+
+If a newly watched tuple intersects an already-ingested range, synchronization
+records the ordinary [manifest-authority
+marker](glossary.md#manifest-authority-marker) on Interpret and Project and
+stamps a required Ingest redo from the first newly watched block through the
+latest published ingested head. It does not contact a provider or perform that
+potentially expensive fetch. The phase runner fails closed before derivation
+and prints the exact operator command. Run that command with the updated
+manifests active and the chain's configured sources. Its shape is:
 
 ```sh
 phase-runner redo \
@@ -844,7 +871,20 @@ does not advance the finite `ingest_cursors` used by the initial spine. Finite
 cursors prove that a source reached its target, and readable lineage proves
 which blocks were loaded, but both cover only the facts selected by the watch
 plan active at load time. Neither proves that a later widening's facts were
-fetched.
+fetched. Successful completion of the stamped redo clears the Ingest
+obligation; only then may ordinary derivation resume. The redo includes a
+Live-loaded suffix through the latest published head even though Live does not
+advance finite source cursors. A required redo clears only when its loaded
+range-end hash is the readable hash at that height, so loading a coherent
+sibling fork cannot certify facts for the fork Interpret will read. This
+additional check does not change ordinary operator repair redos, which may
+reconcile a cursor to another retained fork before normal head publication.
+
+Removing watched tuples, repeating the same manifest set, adding a chain with
+no Ingest coverage, or adding a watched window that starts after the retained
+head does not stamp Ingest. A later widening extends an existing required or
+interrupted Ingest redo rather than replacing it. Do not edit cursors to clear
+the obligation.
 
 The fence error prints the invalidation token from the current marker. After
 the fetch, re-run the required full Interpret redo with
@@ -872,14 +912,13 @@ interrupted, re-run that exact range with the same token. The new binary retains
 the audit association but clears progress written under the prior hash and
 walks the range again from its beginning.
 
-The system cannot verify that the historical fetch or the no-widening review
-happened. Supplying the current token records the operator's responsibility for
-that check until issue #376 binds the watch-plan fingerprint to coverage
-evidence. Every
-authority-marked Interpret redo requires the flag, whether its range is covered
-by finite cursors, readable lineage, or both. An interpreter content hash
-rotation with neither a current manifest-authority marker nor an active audited
-redo remains flagless.
+Manifest synchronization now distinguishes manifest-authored watch-plan
+widening from narrowing and unrelated authority changes and enforces the
+historical fetch with the required Ingest redo. The attestation remains the
+operator's durable acknowledgement of the whole authority transition and is
+still required for every authority-marked Interpret redo, whether or not that
+transition stamped Ingest. An interpreter content hash rotation with neither a
+current manifest-authority marker nor an active audited redo remains flagless.
 
 ## Manifest change propagation
 

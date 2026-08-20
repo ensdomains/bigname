@@ -18,6 +18,7 @@ pub(crate) struct RedoSession {
     range: BlockRange,
     attempt_generation: i64,
     recompute_flags: bool,
+    required_ingest: bool,
     stage_project_refresh_on_completion: bool,
     pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
 }
@@ -61,6 +62,16 @@ pub(crate) async fn begin(
             .last_error
             .as_deref()
             .is_some_and(crate::redo_recompute::owns_project_refresh);
+    let pending_required_redo = previous
+        .last_error
+        .as_deref()
+        .is_some_and(|message| message.starts_with(crate::redo_stamp::REQUIRED_REDO_PREFIX));
+    let required_ingest = phase == PhaseName::Ingest
+        && previous.redo_in_progress
+        && previous
+            .last_error
+            .as_deref()
+            .is_some_and(crate::redo_stamp::owns_required_redo);
     crate::redo_completion::restore_previous_lifecycle(&mut previous)?;
     let status = previous.status()?;
     let current_interpreter_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH;
@@ -84,7 +95,7 @@ pub(crate) async fn begin(
     let range = mode.range().ok_or_else(|| {
         RunnerError::data_integrity("explicit redo transition is missing its block range")
     })?;
-    require_recorded_extent(
+    crate::redo_extent::require_recorded_extent(
         &mut transaction,
         chain_id,
         phase,
@@ -122,7 +133,11 @@ pub(crate) async fn begin(
         ));
     }
     let redo_mode = redo_mode(mode)?;
-    let same_active_redo = matches_active_redo(&previous, redo_mode, execution_range);
+    // The work stamped by manifest synchronization is not yet a resumable
+    // operator attempt. Its first explicit execution binds the checkpoint to
+    // the exact event/emitter set being loaded; a later crash retry resumes it.
+    let same_active_redo =
+        matches_active_redo(&previous, redo_mode, execution_range) && !pending_required_redo;
     let attestation_audit = crate::redo_manifest_audit::record_or_resume(
         &mut transaction,
         chain_id,
@@ -239,6 +254,7 @@ pub(crate) async fn begin(
         range: execution_range,
         attempt_generation,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
+        required_ingest,
         stage_project_refresh_on_completion,
         manifest_authority_audit: attestation_audit,
     })
@@ -252,48 +268,6 @@ fn redo_mode(mode: &RunMode) -> RunnerResult<&'static str> {
             "normal mode cannot begin an explicit redo",
         )),
     }
-}
-
-async fn require_recorded_extent(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    chain_id: &str,
-    phase: PhaseName,
-    previous: &PhaseStateRow,
-    range: BlockRange,
-    full_hash_adoption_validated: bool,
-) -> RunnerResult<()> {
-    let to = previous.current_block_number.ok_or_else(|| {
-        RunnerError::data_integrity(format!(
-            "cannot redo chain {chain_id} phase {phase}: the phase has no recorded processed extent"
-        ))
-    })?;
-    let from: Option<i64> = sqlx::query_scalar(
-        "
-        SELECT min(start_block_number)
-        FROM ingest_cursors
-        WHERE chain_id = $1
-        ",
-    )
-    .bind(chain_id)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!("failed to load recorded redo extent for chain {chain_id} phase {phase}"),
-            error,
-        )
-    })?;
-    if (!full_hash_adoption_validated && range.to > to)
-        || from.is_some_and(|from| range.from < from)
-    {
-        let from = from.unwrap_or(0);
-        return Err(RunnerError::data_integrity(format!(
-            "redo range {}..={} is outside the recorded extent {from}..={to} for chain \
-             {chain_id} phase {phase}",
-            range.from, range.to
-        )));
-    }
-    Ok(())
 }
 
 fn require_interrupted_redo_coverage(
@@ -414,9 +388,22 @@ pub(crate) async fn finish(
         interrupted_before_redo,
         range,
         recompute_flags,
+        required_ingest,
         stage_project_refresh_on_completion,
         ..
     } = session;
+    if required_ingest
+        && let Err(error) = crate::redo_required_boundary::require_readable(
+            lock_connection,
+            chain_id,
+            range,
+            progress,
+        )
+        .await
+    {
+        crate::redo_failure::record(lock_connection, chain_id, phase, &error).await?;
+        return Err(error);
+    }
     let content_hash = if phase.writes_derived_data() {
         Some(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     } else {
