@@ -95,9 +95,10 @@ pub(super) async fn build(
         -- @ ens_v1@91c966f). A transfer with no reclaim therefore leaves the previous owner in
         -- the registry, and the registry-only binding that records this supersedes the registrar
         -- resource, putting that owner's own events outside the selected event set. Readmit them
-        -- for the control fold only, over exactly the window the exact-name authority uses for
-        -- the same divergence (`name_authority::stage`): the immediate predecessor binding's
-        -- resource, from that binding's start up to the selected binding's position.
+        -- for the control fold only: events on the immediate predecessor binding's resource, from
+        -- that binding's block up to the selected binding's position. The exact-name authority
+        -- handles the same divergence log-precisely (`name_authority::stage`); this window is
+        -- deliberately block-granular at its lower bound, for the reason on the bound below.
         --
         -- The window has to stop at the predecessor. Registry-only authority is the normal state
         -- of every plain subname and of every expired .eth name, so an unbounded reach would

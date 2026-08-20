@@ -501,9 +501,12 @@ async fn seed_authority_epoch_changed(
     Ok(())
 }
 
-/// ENSv1 keeps registry ownership on a different resource from the registrar leasehold, so a
-/// registry-only binding that superseded the registrar resource must still publish the divergent
-/// owner it left behind. This is the preservation direction of the re-scoped controller fold: the
+/// ENSv1 keeps registry ownership on a different resource from the registrar leasehold: the
+/// registrar's ERC721 transfer writes no registry state, and after registration only `reclaim`
+/// writes the registry owner
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L174
+/// @ ens_v1@91c966f). So a registry-only binding that superseded the registrar resource must
+/// still publish the divergent owner it left behind. This is the preservation direction of the re-scoped controller fold: the
 /// same-arm predecessor survives, which is a different question from whether a superseded
 /// other-arm event can win.
 #[tokio::test]
