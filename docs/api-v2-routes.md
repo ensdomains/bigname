@@ -500,14 +500,14 @@ Field ownership:
   carries no snapshot validity claim. True as-of child enumeration is deferred
   to the revision-bound storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
-  Missing parent names return `404 not_found`. Once the direct-subname authority
-  slice is activated, each child appears at most once from its selected current
-  binding. An unmigrated protected child can remain ENSv1-backed; a migrated or
-  otherwise currently registered ENSv2 child is ENSv2-backed. Both an ENSv1 and
-  ENSv2 binding remaining current for a Mainnet pair blocks Project publication
-  for that generation, so this route
-  never chooses one by recency, emits two rows for one logical child, or adds a
-  row-local unsupported shape.
+  Missing parent names return `404 not_found`. Each child appears at most once,
+  from the relation its own selected authority names. An unmigrated protected
+  child can remain ENSv1-backed; a migrated or otherwise currently registered
+  ENSv2 child is ENSv2-backed. A child whose arms disagree with no authority
+  proof is omitted entirely, and an ENSv1 relation asserted after a proven
+  ENSv2 child authority began blocks Project publication for that generation,
+  so this route never chooses one by recency, emits two rows for one logical
+  child, or adds a row-local unsupported shape.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
 
 ### `GET /v2/names/{name}/history`

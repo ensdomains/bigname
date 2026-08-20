@@ -267,6 +267,8 @@ async fn resolve_cleanup_time(
     selector: &PredecessorSelector,
     cleanup: &PredecessorCleanup,
 ) -> Result<time::OffsetDateTime> {
+    // The cleanup must also be one of the two kinds a child cleanup can be, so a same-position
+    // event of some unrelated kind cannot stand in for one.
     let resolved: Option<time::OffsetDateTime> = sqlx::query_scalar(
         "SELECT lineage.block_timestamp + $6 * interval '1 microsecond'
          FROM normalized_events event
@@ -281,6 +283,7 @@ async fn resolve_cleanup_time(
            AND COALESCE(event.transaction_index, -1) = $5
            AND COALESCE(event.log_index, -1) = $6
            AND event.after_state ->> 'source_event' = $7
+           AND event.event_kind = ANY($9)
            AND lower(event.raw_fact_ref ->> 'emitting_address') = lower($8)
            AND event.consumer_visibility = 'activated'
            AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -294,6 +297,12 @@ async fn resolve_cleanup_time(
     .bind(cleanup.log_index)
     .bind(&cleanup.source_event)
     .bind(&selector.contract_address)
+    .bind(
+        seam::CHILD_CLEANUP_EVENT_KINDS
+            .iter()
+            .map(|kind| (*kind).to_owned())
+            .collect::<Vec<_>>(),
+    )
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|error| {
@@ -485,9 +494,16 @@ fn child_selector(
     ) else {
         return Err(invalid_selector(transition));
     };
-    // The receiver retires the ENSv1 name and only then registers the successor, so the cleanup is
-    // the same transaction as the boundary and strictly earlier in it. Anything else is a different
-    // sequence and proves nothing about this boundary.
+    // For each migrated name the receiver retires the ENSv1 side and only then registers the
+    // successor
+    // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58,
+    // upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58,
+    // upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58,
+    // upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58),
+    // and the receiver hook runs the whole migration synchronously
+    // (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L119 @ ens_v2@ccaeb58),
+    // so this boundary's cleanup is in the same transaction and strictly earlier in it. A batch may
+    // interleave other names, hence the match is per boundary, never per transaction.
     let log_index = number(seam::LOG_INDEX_KEY).unwrap_or(-1);
     if block_number != transition.block_number
         || transaction_index != transition.transaction_index

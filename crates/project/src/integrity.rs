@@ -239,9 +239,20 @@ async fn assert_exact_name_authority(
 ///
 /// Raw coexistence is not the anomaly: a migrated or positively registered ENSv2
 /// child normally keeps its ENSv1 relation as residue, because neither migration
-/// branch retracts the ENSv1 registry entry. What cannot be reconciled is an ENSv1
+/// branch retracts the ENSv1 registry entry: the locked branch only parks the wrapper
+/// token
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58,
+/// upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L301 @ ens_v1@91c966f), and the
+/// emancipated branch unwraps to a reassignment rather than a deletion
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58,
+/// upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f).
+/// What cannot be reconciled is an ENSv1
 /// relation asserted *after* that authority epoch started — the selection would
 /// silently drop it, and dropping a live contradiction is what this refuses.
+///
+/// A released ENSv2 child is deliberately outside that: release publishes no row and
+/// never falls back to ENSv1, so a later ENSv1 relation is residue with nothing left to
+/// contradict rather than a dual-current pair.
 async fn assert_child_authority(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -249,11 +260,19 @@ async fn assert_child_authority(
 ) -> Result<()> {
     let conflict = sqlx::query(
         r#"
-        WITH conflict AS (
+        WITH target_lineage AS (
+            SELECT canonicality_state
+            FROM chain_lineage
+            WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3
+        ), conflict AS (
             SELECT authority.logical_name_id AS child_logical_name_id,
                    successor.parent_logical_name_id,
                    authority.authority_proof_kind,
                    authority.authority_proof_event_identity,
+                   proof.block_number AS proof_block_number,
+                   proof.block_hash AS proof_block_hash,
+                   proof.canonicality_state AS proof_canonicality_state,
+                   target_lineage.canonicality_state AS target_canonicality_state,
                    COALESCE(
                        (authority.authority_epoch_start_position ->> 'block_number')::bigint, -1
                    ) AS epoch_block_number,
@@ -279,6 +298,12 @@ async fn assert_child_authority(
                    COALESCE(successor.evidence_log_index, -1) AS successor_log_index,
                    successor.canonicality_state AS successor_canonicality_state
             FROM project_name_authority authority
+            CROSS JOIN target_lineage
+            -- The proof event's own block hash and canonicality are recorded so the audit row
+            -- stays resolvable through lineage after a later reorganization.
+            JOIN project_events proof
+              ON proof.normalized_event_id = authority.authority_proof_event_id
+             AND proof.logical_name_id = authority.logical_name_id
             JOIN project_child_candidates successor
               ON successor.child_logical_name_id = authority.logical_name_id
              AND successor.authority_arm = 'ens_v2'
@@ -319,6 +344,7 @@ async fn assert_child_authority(
                            concat_ws(
                                '|', parent_logical_name_id, child_logical_name_id,
                                authority_proof_kind, authority_proof_event_identity,
+                               proof_block_number::text, proof_block_hash,
                                epoch_block_number::text, epoch_transaction_index::text,
                                epoch_log_index::text,
                                predecessor_event_id::text, predecessor_block_number::text,
@@ -335,6 +361,13 @@ async fn assert_child_authority(
                ) AS failure_fingerprint,
                jsonb_build_object(
                    'parent_logical_name_id', parent_logical_name_id,
+                   'authority_proof', jsonb_build_object(
+                       'proof_kind', authority_proof_kind,
+                       'event_identity', authority_proof_event_identity,
+                       'block_number', proof_block_number,
+                       'block_hash', proof_block_hash,
+                       'canonicality_state', proof_canonicality_state
+                   ),
                    'authority_proof_kind', authority_proof_kind,
                    'authority_proof_event_identity', authority_proof_event_identity,
                    'authority_epoch_start_position', jsonb_build_object(
@@ -361,15 +394,20 @@ async fn assert_child_authority(
                        'canonicality_state', successor_canonicality_state
                    ),
                    'target', jsonb_build_object(
-                       'block_number', $1::bigint,
-                       'block_hash', $2::text
+                       'block_number', $2::bigint,
+                       'block_hash', $3::text,
+                       'canonicality_state', target_canonicality_state
                    )
                ) AS payload
         FROM conflict
-        ORDER BY parent_logical_name_id, child_logical_name_id
+        -- One pair can have several candidate rows per arm, so the witness is pinned by the
+        -- candidate events themselves rather than by the pair alone.
+        ORDER BY parent_logical_name_id, child_logical_name_id,
+                 predecessor_event_id, successor_event_id
         LIMIT 1
         "#,
     )
+    .bind(chain_id)
     .bind(target.number)
     .bind(&target.hash)
     .fetch_optional(&mut **transaction)

@@ -10,6 +10,7 @@ pub const PREIMAGE_OBSERVATION_EVENT_KIND: &str = "PreimageObserved";
 pub const SURFACE_BOUND_EVENT_KIND: &str = "SurfaceBound";
 pub const MIGRATION_APPLIED_EVENT_KIND: &str = "MigrationApplied";
 pub const SURFACE_UNBOUND_EVENT_KIND: &str = "SurfaceUnbound";
+pub const TOKEN_CONTROL_TRANSFERRED_EVENT_KIND: &str = "TokenControlTransferred";
 pub const SURFACE_BINDING_ID_KEY: &str = "surface_binding_id";
 pub const TOKEN_LINEAGE_ID_KEY: &str = "token_lineage_id";
 pub const INTERPRETER_STATE_KEY: &str = "interpreter_state_key";
@@ -24,8 +25,31 @@ pub const REGISTRY_ANNOUNCEMENT_EDGE_KIND: &str = "registry_announcement";
 
 pub const ADMISSION_DISCOVERY_EDGE_KINDS: &[&str] = &["resolver", REGISTRY_ANNOUNCEMENT_EDGE_KIND];
 
+/// The only normalized event kinds a child migration boundary's recorded ENSv1 cleanup can be: the
+/// wrapper token parked in the graveyard, or the node unwrapped into it. Which upstream branch a
+/// cleanup came from is adapter knowledge, so the transport matches this set rather than naming
+/// kinds of its own.
+pub const CHILD_CLEANUP_EVENT_KINDS: &[&str] = &[
+    TOKEN_CONTROL_TRANSFERRED_EVENT_KIND,
+    SURFACE_UNBOUND_EVENT_KIND,
+];
+
+/// The instant an event closed bindings at, which is where a redo reopen looks for the close to
+/// undo. Ordinarily that is the event's own log position. A child migration boundary is the
+/// exception: it closes its ENSv1 predecessor at the cleanup it records, earlier in its own
+/// transaction, so keying a reopen on the boundary's own log would find nothing to undo — and for
+/// the `locked_child` shape, whose cleanup closes nothing by itself, that transition write is the
+/// only close there is.
 pub const EVENT_CLOSE_TIME_SQL: &str = "lineage.block_timestamp + make_interval(\
-    secs => COALESCE(event.log_index, 0)::double precision / 1000000.0\
+    secs => COALESCE(\
+        CASE WHEN event.after_state #>> '{predecessor_binding,selection}' \
+                  = 'active_immediately_before_predecessor_cleanup' \
+             THEN (\
+                 event.after_state #>> '{predecessor_binding,predecessor_cleanup,log_index}'\
+             )::bigint \
+        END, \
+        event.log_index, 0\
+    )::double precision / 1000000.0\
 )";
 pub const BINDING_CLOSE_CLAMP_SQL: &str = "GREATEST($2, active_from + interval '1 microsecond')";
 pub const REDO_BINDING_CLOSE_CLAMP_SQL: &str =
@@ -33,11 +57,14 @@ pub const REDO_BINDING_CLOSE_CLAMP_SQL: &str =
 /// The authority arm a closing event's own evidence names, which is the arm a redo reopen may
 /// undo a close on. An ordinary open or unbind closes only its own arm, so that arm is the one the
 /// event identifies: the binding it opened, or failing that its resource. A migration boundary is
-/// deliberately cross-arm and records the predecessor arm it closes. Without exact evidence the
-/// event reopens nothing rather than guessing an arm from position or source family.
-pub const REDO_CLOSED_ARM_SQL: &str = "COALESCE(
-                       event.after_state #>> '{predecessor_binding,authority_epoch}',
-                       (
+/// deliberately cross-arm and records the predecessor arm it closes, and its successor binding is
+/// on the other arm entirely — so a boundary that fails to record a predecessor arm resolves to
+/// NULL and reopens nothing, rather than falling through to the arm it opened. Without exact
+/// evidence the event reopens nothing rather than guessing an arm from position or source family.
+pub const REDO_CLOSED_ARM_SQL: &str = "CASE
+                       WHEN event.event_kind = 'MigrationApplied'
+                           THEN event.after_state #>> '{predecessor_binding,authority_epoch}'
+                       ELSE (
                            SELECT CASE
                                WHEN count(DISTINCT opened.authority_arm) = 1
                                    THEN min(opened.authority_arm)
@@ -46,18 +73,13 @@ pub const REDO_CLOSED_ARM_SQL: &str = "COALESCE(
                            WHERE opened.chain_id = event.chain_id
                              AND opened.logical_name_id = event.logical_name_id
                              AND CASE
-                                 WHEN COALESCE(
-                                     event.after_state ->> 'surface_binding_id',
-                                     event.after_state #>> '{successor_binding,binding_id}'
-                                 ) IS NOT NULL
-                                     THEN opened.surface_binding_id::text = COALESCE(
-                                         event.after_state ->> 'surface_binding_id',
-                                         event.after_state #>> '{successor_binding,binding_id}'
-                                     )
+                                 WHEN event.after_state ->> 'surface_binding_id' IS NOT NULL
+                                     THEN opened.surface_binding_id::text
+                                          = event.after_state ->> 'surface_binding_id'
                                  ELSE opened.resource_id = event.resource_id
                              END
                        )
-                   )";
+                   END";
 pub const REDO_RESOLVER_EVIDENCE_SELECT_SQL: &str = r#"
     SELECT event.chain_id, event.event_identity, event.block_number, event.event_kind,
            event.source_family, event.resource_id,

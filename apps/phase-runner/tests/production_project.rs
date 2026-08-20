@@ -2847,6 +2847,29 @@ async fn a_post_boundary_ens_v1_child_relation_blocks_mainnet_publication() -> R
     assert_eq!(evidence["successor"]["authority_arm"], json!("ens_v2"));
     assert!(evidence["predecessor"]["block_number"].is_number());
     assert!(evidence["authority_epoch_start_position"]["block_number"].is_number());
+    // The proof's own block identity and canonicality are durable, so the row stays
+    // resolvable through lineage once a later reorganization moves the proof.
+    let proof = evidence["authority_proof"].clone();
+    assert_eq!(proof["proof_kind"], json!("migration_authority_transition"));
+    assert_eq!(proof["block_number"], json!(3));
+    assert_eq!(proof["block_hash"], json!(block_hash(CHAIN, 3)));
+    assert_eq!(proof["canonicality_state"], json!("canonical"));
+    assert_eq!(evidence["target"]["canonicality_state"], json!("canonical"));
+    let resolvable: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM chain_lineage
+             WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3
+         )",
+    )
+    .bind(CHAIN)
+    .bind(proof["block_number"].as_i64().expect("proof block number"))
+    .bind(proof["block_hash"].as_str().expect("proof block hash"))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        resolvable,
+        "the recorded proof block resolves through lineage"
+    );
 
     run_project_phase(scratch.pool(), CHAIN, 5)
         .await
@@ -2855,6 +2878,233 @@ async fn a_post_boundary_ens_v1_child_relation_blocks_mainnet_publication() -> R
         generation_failure_rows(scratch.pool(), CHAIN).await?,
         rows,
         "a retried generation records no second row for the same conflict"
+    );
+    scratch.cleanup().await
+}
+
+/// Seeds the same parent-child pair, but with the child's ENSv2 authority proven by a
+/// positive ENSv2 child registration under a migrated parent registry instead of by the
+/// child's own migration boundary. The ENSv1 relation is restated at `v1_block`.
+async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> Result<()> {
+    let subregistry_instance = Uuid::parse_str("00000000-0000-0000-0000-0000000000e4")?;
+    let subregistry_address = "0x00000000000000000000000000000000000000e4";
+    for block in 4..=6 {
+        insert_lineage_block(pool, CHAIN, block).await?;
+    }
+    let registry_manifest = insert_manifest(
+        pool,
+        CHAIN,
+        "ens_v2_registry_l1",
+        "tests/project-v2-registry.toml",
+        json!({"contracts":[]}),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1, $2, 'contract')",
+    )
+    .bind(subregistry_instance)
+    .bind(CHAIN)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number
+         ) VALUES ($1, $2, $3, 0)",
+    )
+    .bind(subregistry_instance)
+    .bind(CHAIN)
+    .bind(subregistry_address)
+    .execute(pool)
+    .await?;
+    // The parent's registry was created by its own migration, which is what lets a positive
+    // ENSv2 registration under it stand as the child's authority proof.
+    sqlx::query(
+        "INSERT INTO migration_discovery_associations (
+             logical_edge_identity, migration_correlation_id, correlation_kind,
+             registry_contract_instance_id, registry_address, source_manifest_id,
+             evidence_refs, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, canonicality_state, consumer_visibility,
+             interpreter_content_hash
+         ) VALUES (
+             $1, $2, 'migration_registry_creation', $3, lower($4), $5, '[]'::jsonb,
+             $6, 1, $7, $8, 0, 0, 'canonical', 'candidate', $9
+         )",
+    )
+    .bind(format!("{CHAIN}:positive-child-registry-edge"))
+    .bind(format!("{CHAIN}:positive-child-registry-correlation"))
+    .bind(subregistry_instance)
+    .bind(subregistry_address)
+    .bind(registry_manifest)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .bind(format!("{CHAIN}:positive-child-registry-tx"))
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, canonicality_state,
+             provenance
+         ) VALUES (
+             $1, 'registry_announcement', $2, $2, 'RegistryCreated',
+             'reachable_from_root', $3, 1, $4, 'canonical',
+             '{\"transaction_index\":0,\"log_index\":0}'::jsonb
+         )",
+    )
+    .bind(CHAIN)
+    .bind(subregistry_instance)
+    .bind(registry_manifest)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xeth"),
+        None,
+        "MigrationApplied",
+        "ens_v2_migration_l1",
+        json!({"successor_binding":{"authority_epoch":"ens_v2"}}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xeth"),
+        None,
+        "SubregistryChanged",
+        "ens_v2_registry_l1",
+        json!({"subregistry":subregistry_address}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({
+            "registry_contract_instance_id":subregistry_instance,
+            "status":"registered",
+            "label":"alice",
+            "registrant":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        v1_block,
+        Some("ens:0xalice"),
+        None,
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xeth",
+            "child_node":"0xalice",
+            "labelhash":"0xalice-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await
+}
+
+// The other ENSv2 child authority proof reaches the same assertion: a positive ENSv2 child
+// registration is an authority epoch too, so an ENSv1 relation asserted after it is the same
+// unreconcilable contradiction as one asserted after a migration boundary.
+#[tokio::test]
+async fn a_post_epoch_ens_v1_relation_blocks_a_positively_registered_child() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_child_positive_conflict").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_positive_child_authority_fixture(scratch.pool(), 5).await?;
+
+    let failure = run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("a post-epoch ENSv1 child relation must not publish");
+    assert!(
+        failure
+            .to_string()
+            .contains("after the child's ENSv2 authority began"),
+        "unexpected failure: {failure}"
+    );
+    let rows = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(rows.len(), 1);
+    let (_, _, _, failure_kind, _, name, evidence) = rows[0].clone();
+    assert_eq!(failure_kind, DUAL_CURRENT_CHILD_AUTHORITY);
+    assert_eq!(name, "ens:0xalice");
+    assert_eq!(
+        evidence["authority_proof"]["proof_kind"],
+        json!("positive_v2_child_registration"),
+        "the positive registration is the proof this conflict is measured against"
+    );
+    scratch.cleanup().await
+}
+
+// Basenames subnames are their own authority arm. The child's authority selects `basenames`,
+// so a Basenames-derived relation publishes only because it is staged under that arm.
+#[tokio::test]
+async fn a_basenames_child_publishes_under_its_own_authority_arm() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_basenames_children").await?;
+    seed_basenames_project_fixture(scratch.pool()).await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version,
+             visibility_state, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             'basenames:0xbase', 'basenames', 'base.eth', ARRAY['base','eth'],
+             decode('00', 'hex'), '0xbase', ARRAY['0xbase','0xeth'], $1, 'active',
+             $2, $3, 1, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(BASE_CHAIN)
+    .bind(block_hash(BASE_CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    insert_namespaced_event(
+        scratch.pool(),
+        "basenames",
+        BASE_CHAIN,
+        3,
+        Some("basenames:0xalice-base"),
+        Some(BASENAMES_RESOURCE),
+        "SubregistryChanged",
+        "basenames_base_registry",
+        1,
+        json!({
+            "node":"0xbase",
+            "child_node":"0xalice-base",
+            "labelhash":"0xalice-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), BASE_CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let published: Option<(String,)> = sqlx::query_as(
+        "SELECT owner FROM children_current
+         WHERE parent_logical_name_id = 'basenames:0xbase'
+           AND child_logical_name_id = 'basenames:0xalice-base'",
+    )
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(
+        published,
+        Some((OWNER.to_owned(),)),
+        "the Basenames relation publishes under the arm its own authority selects"
     );
     scratch.cleanup().await
 }

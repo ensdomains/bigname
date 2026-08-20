@@ -250,18 +250,42 @@ parent; the [migration registry](glossary.md#migration-registry-wrapperregistry)
 returns the ENSv1 fallback resolver for a
 protected child until that child migrates. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58) When a child obtains a current ENSv2 registration, its
 ENSv2 parent-child row is current and the retained ENSv1 row for the same
-parent and child is historical residue. Consumer slice 3B explicitly replaces
-the existing child recency tie-break: the children projection selects the
-parent-child binding established by the child's current authority rather than
-ranking the ENSv1 and ENSv2 bindings by latest block or using ENSv2 as a
-same-position tie-break. Both bindings
-remaining current for one Mainnet parent-child pair is then a
-projection-blocking indexing anomaly rather than a product row: the
-[Project phase](glossary.md#projection) must fail that generation instead of
-choosing or omitting either binding. Until
-that slice is activated, the existing projection
-behavior remains in force and this paragraph is the contract for its
-replacement.
+parent and child is historical residue. Consumer slice 3B has replaced the
+existing child recency tie-break. The [Project phase](glossary.md#projection)
+stages the parent-child relation each authority arm states into
+`project_child_candidates`, then publishes the arm the child's own selected
+[authority epoch](glossary.md#authority-epoch) names, reading the
+`project_name_authority` selection slice 2C already staged rather than
+re-deriving that proof.
+Selection is per child, not per subtree: an unmigrated ENSv1 child below a
+migrated parent publishes its ENSv1 relation on its own authority rather than
+inheriting the parent's, and a child holding ENSv2 authority — through an
+activated ENSv1→ENSv2 migration boundary, or through a current positive ENSv2
+registration with no such boundary — publishes its ENSv2 relation while the
+retained ENSv1 relation stays residue rather than a failure. A released ENSv2
+child publishes no row and does not fall back to ENSv1. A pair whose two arms
+disagree with no authority proof to separate them is omitted as unsupported,
+consistent with the refusal-over-ranking rule below; it is neither ranked nor a
+generation failure. Recency now orders only the current relation within the one
+selected arm; the cross-era block, event-id, and source-priority tie-break is
+gone. Until an ENSv1→ENSv2 migration boundary is activated, the
+activated-boundary branch of this rule has no production input and a child
+reaches ENSv2 authority only through a current positive ENSv2 registration.
+
+Both arms stating a relation for the same Mainnet pair is not itself the
+failure condition. Neither ENSv1→ENSv2 migration branch retracts the ENSv1
+registry entry, so a migrated or positively registered child ordinarily retains
+its ENSv1 relation. The slice 3B child assertion — ordered after the slice 2E
+exact-name assertion and keyed on the parent-child pair — fails the
+[projection generation](glossary.md#projection-generation) only when, on the
+Mainnet deployment profile, a child whose authority proof kind is
+`migration_authority_transition` or `positive_v2_child_registration` has an
+ENSv1 parent-child relation asserted at a position after that child's authority
+epoch start. Such a relation contradicts the selection instead of trailing it,
+so the generation aborts with failure kind `dual_current_child_authority`
+through the same post-rollback audit path described below rather than dropping
+the contradiction silently. Sepolia selects by the same rule but never blocks
+publication on this assertion.
 
 Consumer slice 2C activates the same ownership rule for exact-name coverage. A
 name with an activated transition authority proof, or a current ENSv2 child

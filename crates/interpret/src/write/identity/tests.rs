@@ -2,7 +2,7 @@ use bigname_adapters::schema_v2::{
     BindingClosure, MigrationCandidateEffect, NormalizedEvent, SurfaceBinding,
     seam::{
         MIGRATION_APPLIED_EVENT_KIND, SURFACE_BINDING_ID_KEY, SURFACE_BOUND_EVENT_KIND,
-        raw_block_provenance,
+        SURFACE_UNBOUND_EVENT_KIND, TOKEN_CONTROL_TRANSFERRED_EVENT_KIND, raw_block_provenance,
     },
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -135,16 +135,16 @@ async fn insert_registrar_evidence(
 ) -> TestResult {
     insert_registrar_contract(pool).await?;
     let address = "0x0000000000000000000000000000000000000101";
-    sqlx::query(
+    sqlx::query(&format!(
         "INSERT INTO normalized_events (
              event_identity, namespace, logical_name_id, resource_id, event_kind,
              source_family, manifest_version, chain_id, block_number, block_hash,
              raw_fact_ref, derivation_kind, canonicality_state, after_state
-         ) VALUES ($1, 'ens', $2, $3, 'TokenControlTransferred', 'test', 1,
+         ) VALUES ($1, 'ens', $2, $3, '{TOKEN_CONTROL_TRANSFERRED_EVENT_KIND}', 'test', 1,
                    'ethereum', 1, '0x01', jsonb_build_object('emitting_address', $4::text),
                    'ens_v1_unwrapped_authority', 'canonical',
                    jsonb_build_object('token_id', $5::text))",
-    )
+    ))
     .bind(format!("registrar-evidence-{resource}"))
     .bind(NAME)
     .bind(Uuid::from_u128(resource))
@@ -166,7 +166,7 @@ fn predecessor_evidence(
         namespace: "ens".to_owned(),
         logical_name_id: Some(NAME.to_owned()),
         resource_id: Some(Uuid::from_u128(resource)),
-        event_kind: "TokenControlTransferred".to_owned(),
+        event_kind: TOKEN_CONTROL_TRANSFERRED_EVENT_KIND.to_owned(),
         source_family: "ens_v1_registry_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: None,
@@ -811,13 +811,19 @@ const BOUNDARY_LOG_INDEX: i64 = 5;
 /// The shape slice 3A records for a direct child: its own anchor in the ENSv1 NameWrapper, and a
 /// predecessor selected against the child's ENSv1 cleanup rather than the ENSv2 registration.
 fn child_selector() -> serde_json::Value {
+    child_selector_for("NameUnwrapped")
+}
+
+/// `locked_child` parks the wrapper token, which closes nothing; `emancipated_child` unwraps the
+/// node, which closes the ENSv1 wrapper binding at that same log.
+fn child_selector_for(cleanup_source_event: &str) -> serde_json::Value {
     json!({
         "authority_epoch":"ens_v1",
         "logical_name_id":NAME,
         "selection":"active_immediately_before_predecessor_cleanup",
         "predecessor_cleanup":{
             "event_identity":"child-cleanup",
-            "source_event":"NameUnwrapped",
+            "source_event":cleanup_source_event,
             "block_number":2,
             (TRANSACTION_INDEX_KEY):0,
             (LOG_INDEX_KEY):CLEANUP_LOG_INDEX
@@ -852,6 +858,13 @@ fn cleanup_event(source_event: &str, log_index: i64) -> NormalizedEvent {
 /// One activated child boundary with its recorded cleanup, the ENSv1 wrapper evidence its anchor
 /// resolves through, and the ENSv2 successor the registration opens.
 fn child_activation(selector: serde_json::Value) -> TestResult<BatchOutput> {
+    child_activation_for(selector, "NameUnwrapped")
+}
+
+fn child_activation_for(
+    selector: serde_json::Value,
+    cleanup_source_event: &str,
+) -> TestResult<BatchOutput> {
     let mut output = ordinary_open(12, 2, "ens_v2", 2);
     output.normalized_events.push(predecessor_evidence(
         "same-batch-wrapper-evidence",
@@ -861,7 +874,7 @@ fn child_activation(selector: serde_json::Value) -> TestResult<BatchOutput> {
     ));
     output
         .normalized_events
-        .push(cleanup_event("NameUnwrapped", CLEANUP_LOG_INDEX));
+        .push(cleanup_event(cleanup_source_event, CLEANUP_LOG_INDEX));
     activate_with_selector(&mut output, selector)?;
     boundary_at_log_index(&mut output, BOUNDARY_LOG_INDEX);
     Ok(output)
@@ -1049,6 +1062,104 @@ async fn partial_redo_ignores_a_surviving_successor_in_another_arm() -> TestResu
     transaction.commit().await?;
     assert_eq!(active_to(pool, 11).await?, None);
     database.cleanup().await?;
+    Ok(())
+}
+
+/// A redo reopen undoes the close a closing event caused, so it has to look for that close where
+/// the event actually made it. A child migration boundary closes its ENSv1 predecessor at the
+/// cleanup it records, earlier in its own transaction, not at its own log.
+///
+/// The `locked_child` shape is the one that proves it: parking the wrapper token closes nothing, so
+/// the activated transition is the only close, and a reopen keyed on the boundary's own log finds
+/// no row to undo. `emancipated_child` survives a boundary-keyed reopen only incidentally, through
+/// the unwrap's own `SurfaceUnbound` at that same cleanup log — so both shapes are pinned here.
+#[tokio::test]
+async fn redo_reopens_a_child_predecessor_closed_at_its_cleanup() -> TestResult {
+    for (case, cleanup_source_event, unbind_at_cleanup) in [
+        ("locked_child", "TransferSingle", false),
+        ("emancipated_child", "NameUnwrapped", true),
+    ] {
+        let database = database().await?;
+        let pool = database.pool();
+        insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+        let output = child_activation_for(
+            child_selector_for(cleanup_source_event),
+            cleanup_source_event,
+        )?;
+        close_binding(pool, 11, CLEANUP_LOG_INDEX).await?;
+        apply(pool, &output).await?;
+        let closed_at = active_to(pool, 11).await?.expect("the predecessor closed");
+        assert_eq!(
+            closed_at,
+            time::OffsetDateTime::from_unix_timestamp(2)?
+                + time::Duration::microseconds(CLEANUP_LOG_INDEX),
+            "{case} closes at its cleanup"
+        );
+        if unbind_at_cleanup {
+            insert_unbind_at(pool, 1, CLEANUP_LOG_INDEX).await?;
+        }
+
+        let mut transaction = pool.begin().await?;
+        crate::write::orphan_bindings_started_in_range(&mut transaction, "ethereum", 2, 2).await?;
+        crate::write::reopen_bindings_closed_in_range(&mut transaction, "ethereum", 2, 2).await?;
+        transaction.commit().await?;
+        assert_eq!(
+            active_to(pool, 11).await?,
+            None,
+            "{case} predecessor must reopen when its boundary is redone"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// Re-deriving the same corpus after a redo has to land on the same close, so a redo that reopens
+/// and re-applies converges instead of drifting.
+#[tokio::test]
+async fn a_child_close_survives_reopen_and_identical_redo() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    let output = child_activation_for(child_selector_for("TransferSingle"), "TransferSingle")?;
+    close_binding(pool, 11, CLEANUP_LOG_INDEX).await?;
+    apply(pool, &output).await?;
+    let first = active_to(pool, 11).await?;
+
+    let mut transaction = pool.begin().await?;
+    crate::write::orphan_bindings_started_in_range(&mut transaction, "ethereum", 2, 2).await?;
+    crate::write::reopen_bindings_closed_in_range(&mut transaction, "ethereum", 2, 2).await?;
+    transaction.commit().await?;
+    assert_eq!(active_to(pool, 11).await?, None);
+
+    apply(pool, &output).await?;
+    assert_eq!(
+        active_to(pool, 11).await?,
+        first,
+        "an identical re-derivation converges on the same close"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The ENSv1 unwrap the emancipated shape performs, which closes the wrapper binding at the cleanup
+/// log on its own.
+async fn insert_unbind_at(pool: &sqlx::PgPool, resource: u128, log_index: i64) -> TestResult {
+    sqlx::query(&format!(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state,
+             after_state
+         ) VALUES ('child-unbind', 'ens', $1, $2, '{SURFACE_UNBOUND_EVENT_KIND}',
+                   'ens_v1_wrapper_l1', 1, 'ethereum', 2, '0x02', '0xtx', 0, $3, '{{}}'::jsonb,
+                   'ens_v1_unwrapped_authority', 'canonical',
+                   jsonb_build_object('source_event', 'NameUnwrapped'))",
+    ))
+    .bind(NAME)
+    .bind(Uuid::from_u128(resource))
+    .bind(log_index)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

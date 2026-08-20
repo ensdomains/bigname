@@ -162,7 +162,8 @@ for migration_file in \
     "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
     "$ROOT/migrations/20260814125000_ingest_redo_manifest_authority.sql" \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
-    "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql"
+    "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
+    "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -294,7 +295,9 @@ for migration_file in \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
     "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
-    "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql"
+    "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
+    "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
+    "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
