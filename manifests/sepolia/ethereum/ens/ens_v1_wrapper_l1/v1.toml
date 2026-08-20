@@ -55,12 +55,13 @@ emitter_roles = ["name_wrapper"]
 normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
 # Wrapper authority events consumed by manifest-derived authority topic lookup.
-# NameUnwrapped is also the emancipated-branch cleanup a migrated child's
-# ENSv1 authority ends at:
+# NameUnwrapped is also the emancipated-branch cleanup a migrated child's ENSv1
+# authority ends at: the migration receiver unwraps the node into the Graveyard.
 # (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L238 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L238 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
 [[abi.events]]
 name = "NameUnwrapped"
 fragment = "event NameUnwrapped(bytes32 indexed node, address owner)"
@@ -80,12 +81,14 @@ emitter_roles = ["name_wrapper"]
 normalized_events = ["ExpiryChanged"]
 
 # ERC1155 TransferSingle is emitted by the wrapper's ERC1155Fuse base. It is
-# also the locked-branch cleanup: a wrapper token transferred into the
-# Graveyard, still wrapped.
+# also the locked-branch cleanup: the migration receiver transfers the still-
+# wrapped token to the Graveyard, which is what makes this event the ENSv1
+# authority end for a locked migrated name.
 # (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L258 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L278 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L303 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L368 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L368 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
 [[abi.events]]
 name = "TransferSingle"
 fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"

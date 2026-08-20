@@ -553,6 +553,163 @@ fn sepolia_profile_admits_the_ens_v1_registry_and_wrapper_families() -> Result<(
     Ok(())
 }
 
+/// The declared surface of the two new Sepolia ENSv1 families, pinned field by field. The
+/// admission test above proves the families exist at the right addresses; this one proves the
+/// declarations still say what they said, so that deleting an event block, widening a fragment
+/// type, dropping a normalized event, or downgrading a capability flag fails here rather than
+/// silently changing what gets ingested on a live chain.
+#[test]
+fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let family = |name: &str| {
+        repository
+            .manifests()
+            .iter()
+            .find(|loaded| loaded.manifest.source_family == name)
+            .map(|loaded| &loaded.manifest)
+            .unwrap_or_else(|| panic!("Sepolia {name} family"))
+    };
+    let event_surface = |manifest: &SourceManifest| {
+        let mut events = manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| {
+                (
+                    event.name.clone(),
+                    event.fragment.clone(),
+                    event.emitter_roles.join(","),
+                    event.normalized_events.join(","),
+                )
+            })
+            .collect::<Vec<_>>();
+        events.sort();
+        events
+    };
+    let roots = |manifest: &SourceManifest| {
+        manifest
+            .roots
+            .iter()
+            .map(|root| {
+                (
+                    root.name.clone(),
+                    normalize_address(&root.address),
+                    root.start_block,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let registry = family("ens_v1_registry_l1");
+    assert_eq!(registry.deployment_epoch, "ens_v1");
+    assert_eq!(
+        roots(registry),
+        vec![(
+            "ENSRegistry".to_owned(),
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+            Some(3_702_728)
+        )]
+    );
+    assert_eq!(registry.capability_flags.len(), 1);
+    assert_eq!(
+        registry.capability_flags["declared_children"].status,
+        CapabilitySupportStatus::Supported
+    );
+    assert!(registry.discovery_rules.is_empty());
+    let registry_emitters = "registry,registry_old";
+    assert_eq!(
+        event_surface(registry),
+        vec![
+            (
+                "NewOwner".to_owned(),
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
+                    .to_owned(),
+                registry_emitters.to_owned(),
+                "SubregistryChanged,AuthorityTransferred,PermissionChanged,SurfaceUnbound,\
+                 SurfaceBound,AuthorityEpochChanged,ResolverChanged"
+                    .to_owned(),
+            ),
+            (
+                "NewResolver".to_owned(),
+                "event NewResolver(bytes32 indexed node, address resolver)".to_owned(),
+                registry_emitters.to_owned(),
+                "ResolverChanged,PermissionChanged".to_owned(),
+            ),
+            (
+                "NewTTL".to_owned(),
+                "event NewTTL(bytes32 indexed node, uint64 ttl)".to_owned(),
+                registry_emitters.to_owned(),
+                String::new(),
+            ),
+            (
+                "Transfer".to_owned(),
+                "event Transfer(bytes32 indexed node, address owner)".to_owned(),
+                registry_emitters.to_owned(),
+                "AuthorityTransferred,PermissionChanged,SurfaceUnbound,SurfaceBound,\
+                 AuthorityEpochChanged,ResolverChanged"
+                    .to_owned(),
+            ),
+        ]
+    );
+
+    let wrapper = family("ens_v1_wrapper_l1");
+    assert_eq!(wrapper.deployment_epoch, "ens_v1");
+    assert!(wrapper.roots.is_empty());
+    assert!(wrapper.capability_flags.is_empty());
+    assert!(wrapper.discovery_rules.is_empty());
+    let token_control = "TokenControlTransferred,PermissionChanged";
+    assert_eq!(
+        event_surface(wrapper),
+        vec![
+            (
+                "ExpiryExtended".to_owned(),
+                "event ExpiryExtended(bytes32 indexed node, uint64 expiry)".to_owned(),
+                "name_wrapper".to_owned(),
+                "ExpiryChanged".to_owned(),
+            ),
+            (
+                "FusesSet".to_owned(),
+                "event FusesSet(bytes32 indexed node, uint32 fuses)".to_owned(),
+                "name_wrapper".to_owned(),
+                "PermissionScopeChanged".to_owned(),
+            ),
+            (
+                "NameUnwrapped".to_owned(),
+                "event NameUnwrapped(bytes32 indexed node, address owner)".to_owned(),
+                "name_wrapper".to_owned(),
+                "SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged".to_owned(),
+            ),
+            (
+                "NameWrapped".to_owned(),
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, \
+                 uint64 expiry)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                "TokenControlTransferred,ExpiryChanged,PermissionScopeChanged,SurfaceUnbound,\
+                 SurfaceBound,AuthorityEpochChanged,ResolverChanged,PreimageObserved"
+                    .to_owned(),
+            ),
+            (
+                "TransferBatch".to_owned(),
+                "event TransferBatch(address indexed operator, address indexed from, address \
+                 indexed to, uint256[] ids, uint256[] values)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                token_control.to_owned(),
+            ),
+            (
+                "TransferSingle".to_owned(),
+                "event TransferSingle(address indexed operator, address indexed from, address \
+                 indexed to, uint256 id, uint256 value)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                token_control.to_owned(),
+            ),
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn normalize_address_preserves_legacy_fallbacks() {
     assert_eq!(
