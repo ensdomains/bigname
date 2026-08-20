@@ -4,7 +4,7 @@ use alloy_primitives::LogData;
 
 use super::{
     events::encoded_topics,
-    pool_v1, pool_v2,
+    pool_v1, pool_v1_sepolia, pool_v2,
     rng::Rng,
     world::{BlockSpec, GeneratedLog, Wiring, World},
 };
@@ -391,7 +391,9 @@ pub fn pool(
 ) -> Vec<Action> {
     match world.label {
         "ens_v1_mainnet" => pool_v1::build(wiring, dimensions, settle_timestamp),
-        _ => pool_v2::build(wiring, dimensions, settle_timestamp),
+        "ens_v1_sepolia" => pool_v1_sepolia::build(wiring, dimensions, settle_timestamp),
+        "ens_v2_sepolia" => pool_v2::build(wiring, dimensions, settle_timestamp),
+        label => panic!("unknown permutation world {label}"),
     }
 }
 

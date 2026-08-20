@@ -1146,7 +1146,10 @@ Field ownership:
   value is `{completeness, unsupported_reason?}` using the common
   completeness vocabulary. `networks` is an array of `{network, chain_id?}`
   entries when the namespace has public chain mappings. Control-plane metadata
-  omits `meta.as_of` and `meta.as_of_token`.
+  omits `meta.as_of` and `meta.as_of_token`. Under the Sepolia deployment
+  profile, ENS `name_profile` completeness is `partial`: the ENSv2 registrar
+  declaration is supported while the admitted ENSv1 registrar declaration is
+  shadow because registrar-controller label coverage is absent.
 - Pagination behavior: none.
 - Status semantics: unsupported public namespaces return `404 not_found`.
 - Replaces (v1): `GET /v1/namespaces/{namespace}`. Operational namespace
