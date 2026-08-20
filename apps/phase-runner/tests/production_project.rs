@@ -68,6 +68,7 @@ const BASENAMES_RESOURCE: &str = "00000000-0000-0000-0000-000000000031";
 const EQUIVALENCE_BOB_RESOURCE: &str = "00000000-0000-0000-0000-0000000000b0";
 const EQUIVALENCE_BOB_BINDING: &str = "00000000-0000-0000-0000-0000000000b1";
 const EQUIVALENCE_PARENT_BINDING: &str = "00000000-0000-0000-0000-0000000000b3";
+const EQUIVALENCE_PARENT_RESOURCE: &str = "00000000-0000-0000-0000-0000000000b6";
 const EQUIVALENCE_TRANSFER_RESOURCE: &str = "00000000-0000-0000-0000-0000000000b4";
 const EQUIVALENCE_TRANSFER_BINDING: &str = "00000000-0000-0000-0000-0000000000b5";
 const EQUIVALENCE_V2_RESOLVER: &str = "0x00000000000000000000000000000000000000b2";
@@ -6617,6 +6618,110 @@ async fn selected_children(
     .bind(candidates)
     .fetch_all(pool)
     .await?)
+}
+
+#[tokio::test]
+async fn incremental_sibling_update_retains_unbound_migrated_name_v2_subnames() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_unbound_migrated_subnames").await?;
+    let full = ScratchDatabase::create("project_unbound_migrated_subnames_full").await?;
+
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        extend_incremental_equivalence_fixture(pool).await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 1, 'canonical')",
+        )
+        .bind(Uuid::parse_str(EQUIVALENCE_PARENT_RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE surface_bindings SET resource_id = $1
+             WHERE surface_binding_id = $2",
+        )
+        .bind(Uuid::parse_str(EQUIVALENCE_PARENT_RESOURCE)?)
+        .bind(Uuid::parse_str(EQUIVALENCE_PARENT_BINDING)?)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events SET resource_id = $1
+             WHERE chain_id = $2
+               AND logical_name_id = 'ens:0xequivalence-parent'
+               AND resource_id = $3",
+        )
+        .bind(Uuid::parse_str(EQUIVALENCE_PARENT_RESOURCE)?)
+        .bind(CHAIN)
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .execute(pool)
+        .await?;
+
+        let binding_resources: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT resource_id FROM surface_bindings
+             WHERE logical_name_id IN ('ens:0xalice', 'ens:0xequivalence-parent')
+             ORDER BY logical_name_id",
+        )
+        .fetch_all(pool)
+        .await?;
+        assert_eq!(binding_resources.len(), 2);
+        assert_ne!(binding_resources[0], binding_resources[1]);
+
+        insert_lineage_block(pool, CHAIN, 9).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            9,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "AuthorityTransferred",
+            "ens_v1_registrar_l1",
+            json!({"owner":"0x0000000000000000000000000000000000000099"}),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 8).await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 8,
+            hash: block_hash(CHAIN, 8),
+        }),
+        RunMode::Normal,
+        9,
+        9,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 9).await?;
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(full.pool()).await?;
+    let incremental_children: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(child) ORDER BY child_logical_name_id), '[]'::jsonb)
+         FROM children_current child
+         WHERE parent_logical_name_id = 'ens:0xequivalence-parent'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    let rebuilt_children: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(child) ORDER BY child_logical_name_id), '[]'::jsonb)
+         FROM children_current child
+         WHERE parent_logical_name_id = 'ens:0xequivalence-parent'",
+    )
+    .fetch_one(full.pool())
+    .await?;
+    assert_eq!(
+        incremental_children, rebuilt_children,
+        "an unrelated sibling update must retain the migrated name's ENSv2 subname records"
+    );
+    assert_eq!(rebuilt_children.as_array().map(Vec::len), Some(1));
+
+    incremental.cleanup().await?;
+    full.cleanup().await
 }
 
 #[tokio::test]

@@ -373,12 +373,6 @@ async fn create_identity_views(
              SELECT logical_name_id FROM project_scope_names
              UNION
              SELECT logical_name_id FROM project_scope_children
-             UNION
-             SELECT child.child_logical_name_id
-             FROM project_scope_children parent
-             JOIN children_current child
-               ON child.parent_logical_name_id = parent.logical_name_id
-              AND child.provenance ->> 'chain_id' = $1
          ) scope USING (logical_name_id)"
     };
     let surface_statement = format!(
