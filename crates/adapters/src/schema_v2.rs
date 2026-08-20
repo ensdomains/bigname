@@ -1,8 +1,7 @@
 //! Hash-covered schema-v2 output seam for the production interpret phase.
 //!
-//! The phase runner supplies immutable raw facts and stored manifest/admission rows. Protocol
-//! adapters in this module select and decode those facts, apply ordered state transitions, and
-//! return plain schema-v2 rows. Persistence deliberately remains outside this hash root.
+//! The phase runner supplies immutable raw facts and stored manifest/admission rows. Adapters
+//! decode them into schema-v2 rows; persistence remains outside this hash root.
 
 mod catalog;
 mod common;
@@ -341,6 +340,10 @@ fn settle_block_boundary(
                 )
             })?
             .clone();
+        if let Some(interpreted) = protocol::v2_registry::boundary_reassertion(&transition, block) {
+            identity::materialize_v2_boundary(&source, block, interpreted, state, output)?;
+            continue;
+        }
         let mut interpreted = protocol::v2_boundary_expiration(transition)?;
         if !interpreted.labels.is_empty()
             || !interpreted.names.is_empty()

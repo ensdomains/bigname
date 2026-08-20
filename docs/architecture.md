@@ -692,6 +692,10 @@ empty set, while correlation-dependent events carry their candidate or
 activated derivation-group IDs. Independently admitted ordinary events keep
 those defaults; their ENSv1→ENSv2 relationships live only in the diagnostic
 `migration_event_associations` table.
+Raw-log name observations use the `raw_log_preimage_observation` derivation
+kind. A `PreimageObserved` row produced by a block-boundary survivor
+reassertion instead uses `raw_block_preimage_observation`, matching its
+`raw_fact_ref.kind = raw_block` source.
 
 Normalized events are schema-v2 interpreter transitions. Interpretation loads
 canonical raw facts in chain order. Persisted normalized events are the working

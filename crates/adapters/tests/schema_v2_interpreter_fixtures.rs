@@ -159,7 +159,9 @@ fn canonical_row(row: &Value) -> bool {
 fn runner_for_derivation(derivation: &str) -> Option<Runner> {
     match derivation {
         "ens_v1_reverse_claim" => Some(Runner::ReverseClaim),
-        "proxy_upgrade" | "raw_log_preimage_observation" => Some(Runner::BlockDerived),
+        "proxy_upgrade" | "raw_block_preimage_observation" | "raw_log_preimage_observation" => {
+            Some(Runner::BlockDerived)
+        }
         "ens_v1_unwrapped_authority" => Some(Runner::UnwrappedAuthority),
         "ens_v2_registry_resource_surface" => Some(Runner::EnsV2Registry),
         "ens_v2_permissions" => Some(Runner::EnsV2Permissions),

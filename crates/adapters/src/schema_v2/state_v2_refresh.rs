@@ -60,6 +60,17 @@ impl State {
             .insert(registry.to_ascii_lowercase());
     }
 
+    pub(in crate::schema_v2) fn record_v2_terminal_closure_hit(
+        &mut self,
+        logical_name_id: &str,
+        authority_arm: &str,
+    ) {
+        self.v2_terminal_closure_hits.insert((
+            logical_name_id.to_ascii_lowercase(),
+            authority_arm.to_owned(),
+        ));
+    }
+
     fn advance_v2_timestamp(&mut self, at_unix_timestamp: i64) -> i64 {
         let effective = self
             .latest_v2_timestamp
@@ -133,6 +144,15 @@ impl State {
         at_unix_timestamp: i64,
     ) -> Vec<V2NameTransition> {
         let mut transitions = Vec::new();
+        let mut terminal_closure_hits = std::mem::take(&mut self.v2_terminal_closure_hits);
+        let mut keys = keys.into_iter().collect::<imbl::ordset::OrdSet<String>>();
+        for (logical_name_id, authority_arm) in &terminal_closure_hits {
+            if authority_arm == "ens_v2"
+                && let Some(token_keys) = self.v2_tokens_by_current_name_index.get(logical_name_id)
+            {
+                keys.extend(token_keys.iter().cloned());
+            }
+        }
         #[cfg(test)]
         V2_REFRESH_VISITS.set(V2_REFRESH_VISITS.get() + keys.len());
         for key in keys {
@@ -182,6 +202,14 @@ impl State {
                 .flatten();
             let changed = previous != name || previous_shadow != shadow_name;
             if changed {
+                if token.registration.is_some()
+                    && let Some(previous) = previous.as_ref()
+                    && name
+                        .as_ref()
+                        .is_none_or(|current| current.logical_name_id != previous.logical_name_id)
+                {
+                    self.record_v2_terminal_closure_hit(&previous.logical_name_id, "ens_v2");
+                }
                 let previous_surface = previous.as_ref().map(|name| name.logical_name_id.clone());
                 let current_surface = name.as_ref().map(|name| name.logical_name_id.clone());
                 if let Some(previous) = previous.as_ref()
@@ -237,7 +265,41 @@ impl State {
                 current.shadow_name = shadow_name;
             }
         }
+        terminal_closure_hits.extend(std::mem::take(&mut self.v2_terminal_closure_hits));
+        for (logical_name_id, authority_arm) in terminal_closure_hits {
+            if authority_arm == "ens_v2"
+                && let Some(transition) = self.v2_terminal_reassertion(&logical_name_id)
+            {
+                transitions.push(transition);
+            }
+        }
         transitions
+    }
+
+    fn v2_terminal_reassertion(&self, logical_name_id: &str) -> Option<V2NameTransition> {
+        let winner_key = self.v2_active_resource_winner_key(logical_name_id)?;
+        let (registry, token_id) = winner_key.rsplit_once(':')?;
+        let token = self.v2_tokens.get(&winner_key)?;
+        let current = token
+            .name
+            .as_ref()
+            .filter(|name| name.logical_name_id.eq_ignore_ascii_case(logical_name_id))?
+            .clone();
+        Some(V2NameTransition {
+            registry: registry.to_owned(),
+            registry_contract_instance_id: token.registry_contract_instance_id,
+            token_id: token_id.to_owned(),
+            previous: Some(current.clone()),
+            previous_shadow: token.shadow_name.clone(),
+            current: Some(current),
+            current_shadow: token.shadow_name.clone(),
+            resource_id: token.resource_id,
+            token_lineage_id: token.token_lineage_id,
+            upstream_resource: token.upstream_resource.clone(),
+            registration: token.registration.clone(),
+            resolver: token.resolver.clone(),
+            subregistry: token.subregistry.clone(),
+        })
     }
 
     /// The active resource for a surface is the resource of the greatest token key among retained
@@ -245,17 +307,21 @@ impl State {
     /// re-assert produces on a full ascending walk — so a refresh elects the same resource for
     /// any dirty set that closes over the surface's contention.
     fn v2_active_resource_winner(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
+        self.v2_active_resource_winner_key(logical_name_id)
+            .and_then(|token_key| self.v2_tokens.get(&token_key))
+            .and_then(|token| token.resource_id)
+    }
+
+    fn v2_active_resource_winner_key(&self, logical_name_id: &str) -> Option<String> {
         self.v2_tokens_by_current_name_index
             .get(logical_name_id)?
             .iter()
             .rev()
-            .find_map(|token_key| {
-                let token = self.v2_tokens.get(token_key)?;
-                token
-                    .registration
-                    .is_some()
-                    .then_some(token.resource_id)
-                    .flatten()
+            .find(|token_key| {
+                self.v2_tokens.get(*token_key).is_some_and(|token| {
+                    token.registration.is_some() && token.resource_id.is_some()
+                })
             })
+            .cloned()
     }
 }

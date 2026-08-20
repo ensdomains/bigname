@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS normalized_events (
                 'ens_v2_resolver',
                 'manifest_sync',
                 'proxy_upgrade',
+                'raw_block_preimage_observation',
                 'raw_log_preimage_observation'
             )
         ),

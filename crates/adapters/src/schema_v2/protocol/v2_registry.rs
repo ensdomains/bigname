@@ -17,7 +17,7 @@ use crate::{
             ens_v2_registry_token_lineage_id,
         },
         model::RawLogInput,
-        state::{State, V2TokenState},
+        state::{State, V2NameTransition, V2TokenState},
     },
 };
 
@@ -25,11 +25,10 @@ use super::{
     BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, LabelDraft, NameDraft,
     ResourceDraft, ShadowNameDraft, ensure_declared,
 };
+pub(in crate::schema_v2) use topology::boundary_reassertion;
 use topology::{append_terminal_boundaries, append_v2_name_transitions, discovery_observation_key};
 
-pub(super) fn boundary_expiration(
-    transition: crate::schema_v2::state::V2NameTransition,
-) -> anyhow::Result<Interpreted> {
+pub(super) fn boundary_expiration(transition: V2NameTransition) -> anyhow::Result<Interpreted> {
     topology::boundary_expiration(transition)
 }
 
@@ -387,7 +386,6 @@ fn label_event(
             }),
         );
     }
-    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     let mut output = single_event(kind, logical_name_id, linked.resource_id, event_state);
     if let Some(resource_id) = linked.resource_id {
         output.resources.push(ResourceDraft {
@@ -424,6 +422,7 @@ fn label_event(
     for (replaced_token, previous) in &replaced {
         append_terminal_boundaries(
             &mut output,
+            state,
             Some(previous),
             replaced_token,
             selected.event.name.as_str(),
@@ -438,6 +437,7 @@ fn label_event(
             });
         }
     }
+    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     append_v2_name_transitions(
         &mut output,
         transitions,
@@ -472,7 +472,6 @@ fn label_unregistered(
     )?;
     let token_id = u256_word_hex(event.tokenId);
     let linked = state.release_v2_token(&raw.emitting_address, &token_id);
-    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     // Registration events are partitioned by their emitting registry. PermissionedRegistry emits
     // LabelUnregistered from that registry's public unregister path.
     // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)
@@ -488,7 +487,14 @@ fn label_unregistered(
             "registry_contract_instance_id":selected.contract_instance_id.to_string(),
         }),
     )?;
-    append_terminal_boundaries(&mut output, linked.as_ref(), &token_id, "LabelUnregistered");
+    append_terminal_boundaries(
+        &mut output,
+        state,
+        linked.as_ref(),
+        &token_id,
+        "LabelUnregistered",
+    );
+    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     append_v2_name_transitions(&mut output, transitions, raw, "LabelUnregistered", None);
     for (edge_kind, resolver) in [("subregistry", false), ("resolver", true)] {
         output.discovery.push(DiscoveryDraft::Close {

@@ -44,6 +44,7 @@ use tokio_util::sync::CancellationToken;
 use support::ScratchDatabase;
 
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
+const RIVAL_REGISTRY: &str = "0x0000000000000000000000000000000000000069";
 const REGISTRY: &str = "0x0000000000000000000000000000000000000046";
 const DISCOVERED_RESOLVER: &str = "0x0000000000000000000000000000000000000044";
 const ANNOUNCED_REGISTRY: &str = "0x0000000000000000000000000000000000000045";
@@ -4303,6 +4304,179 @@ async fn redo_without_the_orphaned_terminal_fact_reopens_the_prior_binding() -> 
 }
 
 #[tokio::test]
+async fn raw_log_loser_departure_reorg_reopens_the_survivor_binding() -> Result<()> {
+    assert_loser_departure_reorg_reopens_the_survivor(false).await
+}
+
+#[tokio::test]
+async fn boundary_expiry_loser_departure_reorg_reopens_the_survivor_binding() -> Result<()> {
+    assert_loser_departure_reorg_reopens_the_survivor(true).await
+}
+
+async fn assert_loser_departure_reorg_reopens_the_survivor(boundary_expiry: bool) -> Result<()> {
+    let fixture = if boundary_expiry {
+        "production_interpret_boundary_survivor_redo"
+    } else {
+        "production_interpret_log_survivor_redo"
+    };
+    let chain = if boundary_expiry {
+        "interpret-boundary-survivor-redo"
+    } else {
+        "interpret-log-survivor-redo"
+    };
+    let departure_block = if boundary_expiry { 6 } else { 3 };
+    let scratch = ScratchDatabase::create(fixture).await?;
+    seed_contested_v2_departure_fixture(scratch.pool(), chain, boundary_expiry).await?;
+
+    run_engine(
+        scratch.pool(),
+        chain,
+        if boundary_expiry { 1 } else { 0 },
+        departure_block,
+        InterpretRunMode::Normal,
+    )
+    .await?;
+
+    let (reasserted_binding_id, survivor_resource_id, logical_name_id): (Uuid, Uuid, String) =
+        sqlx::query_as(
+            "SELECT surface_binding_id, resource_id, logical_name_id
+         FROM surface_bindings
+         WHERE chain_id = $1 AND block_number = $2",
+        )
+        .bind(chain)
+        .bind(departure_block)
+        .fetch_one(scratch.pool())
+        .await?;
+    let survivor_binding_id: Uuid = sqlx::query_scalar(
+        "SELECT surface_binding_id
+         FROM surface_bindings
+         WHERE chain_id = $1
+           AND logical_name_id = $2
+           AND resource_id = $3
+           AND block_number < $4
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+         ORDER BY active_from DESC
+         LIMIT 1",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .bind(survivor_resource_id)
+    .bind(departure_block)
+    .fetch_one(scratch.pool())
+    .await?;
+    let forward_open: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT surface_binding_id, resource_id
+         FROM surface_bindings
+         WHERE chain_id = $1
+           AND logical_name_id = $2
+           AND authority_arm = 'ens_v2'
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND active_to IS NULL
+         ORDER BY surface_binding_id",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        forward_open,
+        [(reasserted_binding_id, survivor_resource_id)],
+        "the loser departure must leave only its reasserted survivor binding open"
+    );
+    let close_marker: (String, Uuid) = sqlx::query_as(
+        "SELECT after_state ->> 'closed_authority_arm',
+                (after_state ->> 'surface_binding_id')::uuid
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND block_number = $2
+           AND event_kind = 'PreimageObserved'
+           AND after_state ->> 'arm_wide_binding_close' = 'true'",
+    )
+    .bind(chain)
+    .bind(departure_block)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        close_marker,
+        ("ens_v2".to_owned(), reasserted_binding_id),
+        "redo evidence must name the closed arm and exempt replacement binding"
+    );
+
+    replace_departure_block(scratch.pool(), chain, departure_block, false).await?;
+    run_engine(
+        scratch.pool(),
+        chain,
+        departure_block,
+        departure_block,
+        InterpretRunMode::Redo,
+    )
+    .await?;
+
+    let reasserted_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text
+         FROM surface_bindings
+         WHERE surface_binding_id = $1",
+    )
+    .bind(reasserted_binding_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        reasserted_state, "orphaned",
+        "the replacement block must orphan the removed departure's reassertion"
+    );
+    let replacement_open: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT surface_binding_id, resource_id
+         FROM surface_bindings
+         WHERE chain_id = $1
+           AND logical_name_id = $2
+           AND authority_arm = 'ens_v2'
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND active_to IS NULL
+         ORDER BY surface_binding_id",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        replacement_open,
+        [(survivor_binding_id, survivor_resource_id)],
+        "removing the loser departure must reopen the pre-departure survivor binding"
+    );
+
+    replace_departure_block(scratch.pool(), chain, departure_block, true).await?;
+    run_engine(
+        scratch.pool(),
+        chain,
+        departure_block,
+        departure_block,
+        InterpretRunMode::Redo,
+    )
+    .await?;
+
+    let reapplied_open: Vec<(Uuid, Uuid, i64)> = sqlx::query_as(
+        "SELECT surface_binding_id, resource_id, block_number
+         FROM surface_bindings
+         WHERE chain_id = $1
+           AND logical_name_id = $2
+           AND authority_arm = 'ens_v2'
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND active_to IS NULL
+         ORDER BY surface_binding_id",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        reapplied_open,
+        [(reasserted_binding_id, survivor_resource_id, departure_block)],
+        "reapplying the departure must converge on the original deterministic reassertion"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn binding_open_redo_preserves_a_terminal_close_after_the_range() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_binding_terminal").await?;
     let chain = "interpret-binding-terminal";
@@ -5686,6 +5860,465 @@ async fn seed_v2_lifecycle_fixture(pool: &PgPool, chain_id: &str) -> Result<()> 
         release.data.as_ref(),
     )
     .await
+}
+
+async fn seed_contested_v2_departure_fixture(
+    pool: &PgPool,
+    chain_id: &str,
+    boundary_expiry: bool,
+) -> Result<()> {
+    if boundary_expiry {
+        return seed_contested_v2_expiry_fixture(pool, chain_id).await;
+    }
+    seed_v2_lifecycle_fixture(pool, chain_id).await?;
+    let manifest_id: i64 =
+        sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(pool)
+            .await?;
+    let rival_instance_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+        .bind(rival_instance_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances (
+             manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind,
+             start_block_number
+         ) VALUES ($1, $2, 'contract', 'rival_registry', $3, $4, 'registry', 'none', 0)",
+    )
+    .bind(manifest_id)
+    .bind(chain_id)
+    .bind(rival_instance_id)
+    .bind(RIVAL_REGISTRY)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address,
+             active_from_block_number, source_manifest_id, provenance
+         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(rival_instance_id)
+    .bind(chain_id)
+    .bind(RIVAL_REGISTRY)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query("DELETE FROM raw_logs WHERE chain_id = $1 AND block_number = 2")
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE raw_transactions SET to_address = $2
+         WHERE chain_id = $1 AND block_number = 2",
+    )
+    .bind(chain_id)
+    .bind(RIVAL_REGISTRY)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number, block_timestamp,
+             canonicality_state
+         ) VALUES ($1, $2, $3, 3, to_timestamp(3), 'canonical')",
+    )
+    .bind(chain_id)
+    .bind(block_hash(chain_id, 3))
+    .bind(block_hash(chain_id, 2))
+    .execute(pool)
+    .await?;
+
+    let token_id = versioned_token("alice", 1);
+    let owner: Address = "0x0000000000000000000000000000000000000061".parse()?;
+    let rival_facts = [
+        v2_registry_events::LabelRegistered {
+            tokenId: token_id,
+            labelHash: keccak256(b"alice"),
+            label: "alice".to_owned(),
+            owner,
+            expiry: 100,
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data(),
+        v2_registry_events::TokenResource {
+            tokenId: token_id,
+            resource: U256::from(6001),
+        }
+        .encode_log_data(),
+    ];
+    for (log_index, fact) in rival_facts.into_iter().enumerate() {
+        insert_log_at(
+            pool,
+            chain_id,
+            2,
+            &format!("{chain_id}-transaction-2"),
+            i64::try_from(log_index)?,
+            RIVAL_REGISTRY,
+            fact.topics(),
+            fact.data.as_ref(),
+        )
+        .await?;
+    }
+
+    let transaction_hash = format!("{chain_id}-transaction-3");
+    sqlx::query(
+        "INSERT INTO raw_transactions (
+             chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, from_address, to_address
+         ) VALUES ($1, $2, 3, $3, 0, $4, $5)",
+    )
+    .bind(chain_id)
+    .bind(block_hash(chain_id, 3))
+    .bind(&transaction_hash)
+    .bind(SENDER)
+    .bind(CONTRACT)
+    .execute(pool)
+    .await?;
+    let release = v2_registry_events::LabelUnregistered {
+        tokenId: token_id,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_log_at(
+        pool,
+        chain_id,
+        3,
+        &transaction_hash,
+        0,
+        CONTRACT,
+        release.topics(),
+        release.data.as_ref(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn seed_contested_v2_expiry_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
+    const CLAIM_ROOT: &str = "0x0000000000000000000000000000000000000058";
+    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059";
+    seed_v2_lifecycle_fixture(pool, chain_id).await?;
+    sqlx::query("DELETE FROM raw_logs WHERE chain_id = $1")
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM raw_transactions WHERE chain_id = $1")
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    for block in 3..=6 {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number, block_timestamp,
+                 canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'canonical')",
+        )
+        .bind(chain_id)
+        .bind(block_hash(chain_id, block))
+        .bind(block_hash(chain_id, block - 1))
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
+    let registry_manifest_id: i64 =
+        sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(pool)
+            .await?;
+    let mut root_payload: serde_json::Value =
+        sqlx::query_scalar("SELECT manifest_payload FROM manifest_versions WHERE manifest_id = $1")
+            .bind(registry_manifest_id)
+            .fetch_one(pool)
+            .await?;
+    root_payload["source_family"] = json!("ens_v2_root_l1");
+    root_payload["contracts"] = json!([{
+        "role":"registry",
+        "address":CLAIM_ROOT,
+        "proxy_kind":"none",
+        "implementation":null,
+        "start_block":0,
+    }]);
+    let root_manifest_id = insert_manifest(
+        pool,
+        chain_id,
+        "ens_v2_root_l1",
+        "tests/v2-contested-root.toml",
+        root_payload,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_discovery_rules (
+             manifest_id, edge_kind, from_role, admission
+         ) VALUES ($1, 'subregistry', 'registry', 'linked_subregistry_event')",
+    )
+    .bind(root_manifest_id)
+    .execute(pool)
+    .await?;
+    let declarations = [
+        (registry_manifest_id, "survivor_registry", RIVAL_REGISTRY),
+        (root_manifest_id, "claim_root", CLAIM_ROOT),
+    ];
+    for (source_manifest_id, declaration_name, address) in declarations {
+        let instance_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())",
+        )
+        .bind(instance_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO manifest_contract_instances (
+                 manifest_id, chain_id, declaration_kind, declaration_name,
+                 contract_instance_id, declared_address, role, proxy_kind,
+                 start_block_number
+             ) VALUES ($1, $2, 'contract', $3, $4, $5, 'registry', 'none', 0)",
+        )
+        .bind(source_manifest_id)
+        .bind(chain_id)
+        .bind(declaration_name)
+        .bind(instance_id)
+        .bind(address)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address,
+                 active_from_block_number, source_manifest_id, provenance
+             ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+        )
+        .bind(instance_id)
+        .bind(chain_id)
+        .bind(address)
+        .bind(source_manifest_id)
+        .execute(pool)
+        .await?;
+    }
+    let claim_root_instance_id: Uuid = sqlx::query_scalar(
+        "SELECT contract_instance_id
+         FROM manifest_contract_instances
+         WHERE manifest_id = $1 AND declaration_name = 'claim_root'",
+    )
+    .bind(root_manifest_id)
+    .fetch_one(pool)
+    .await?;
+    let claim_registry_instance_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+        .bind(claim_registry_instance_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address,
+             active_from_block_number, source_manifest_id, provenance
+         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(claim_registry_instance_id)
+    .bind(chain_id)
+    .bind(CLAIM_REGISTRY)
+    .bind(registry_manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             source_manifest_id, active_from_block_number,
+             active_from_block_hash, canonicality_state, provenance
+         ) VALUES (
+             $1, 'registry_announcement', $2, $3, 'RegistryCreated',
+             'reachable_from_root', $4, 0, $5, 'canonical',
+             '{\"observation_key\":\"contested-claim-registry\"}'::jsonb
+         )",
+    )
+    .bind(chain_id)
+    .bind(claim_root_instance_id)
+    .bind(claim_registry_instance_id)
+    .bind(registry_manifest_id)
+    .bind(block_hash(chain_id, 0))
+    .execute(pool)
+    .await?;
+    let transactions = [
+        (1, RIVAL_REGISTRY),
+        (2, CLAIM_ROOT),
+        (3, CLAIM_REGISTRY),
+        (4, CLAIM_ROOT),
+        (5, CLAIM_REGISTRY),
+    ];
+    for (block, to_address) in transactions {
+        sqlx::query(
+            "INSERT INTO raw_transactions (
+                 chain_id, block_hash, block_number, transaction_hash,
+                 transaction_index, from_address, to_address
+             ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
+        )
+        .bind(chain_id)
+        .bind(block_hash(chain_id, block))
+        .bind(block)
+        .bind(format!("{chain_id}-transaction-{block}"))
+        .bind(SENDER)
+        .bind(to_address)
+        .execute(pool)
+        .await?;
+    }
+
+    let owner: Address = "0x0000000000000000000000000000000000000061".parse()?;
+    let alpha = versioned_token("alpha", 1);
+    let eth = versioned_token("eth", 1);
+    // The claim-path registration deliberately has no linked resource, so the fixture keeps the
+    // resource-linked survivor current. Crossing the stored parent-expiry boundary closes the
+    // fixture's ENSv2 bindings for the name and must reassert that survivor.
+    let logs = [
+        (
+            1,
+            0,
+            RIVAL_REGISTRY,
+            v2_registry_events::LabelRegistered {
+                tokenId: alpha,
+                labelHash: keccak256(b"alpha"),
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 100,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            1,
+            1,
+            RIVAL_REGISTRY,
+            v2_registry_events::TokenResource {
+                tokenId: alpha,
+                resource: U256::from(7001),
+            }
+            .encode_log_data(),
+        ),
+        (
+            2,
+            0,
+            CLAIM_ROOT,
+            v2_registry_events::LabelRegistered {
+                tokenId: eth,
+                labelHash: keccak256(b"eth"),
+                label: "eth".to_owned(),
+                owner,
+                expiry: 6,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            3,
+            0,
+            CLAIM_REGISTRY,
+            v2_registry_events::LabelRegistered {
+                tokenId: alpha,
+                labelHash: keccak256(b"alpha"),
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 100,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            4,
+            0,
+            CLAIM_ROOT,
+            v2_registry_events::SubregistryUpdated {
+                tokenId: eth,
+                subregistry: CLAIM_REGISTRY.parse()?,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            5,
+            0,
+            CLAIM_REGISTRY,
+            v2_registry_events::ParentUpdated {
+                parent: CLAIM_ROOT.parse()?,
+                label: "eth".to_owned(),
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (block, log_index, emitter, log) in logs {
+        insert_log_at(
+            pool,
+            chain_id,
+            block,
+            &format!("{chain_id}-transaction-{block}"),
+            log_index,
+            emitter,
+            log.topics(),
+            log.data.as_ref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn replace_departure_block(
+    pool: &PgPool,
+    chain_id: &str,
+    departure_block: i64,
+    reapply: bool,
+) -> Result<()> {
+    let replacement_hash = format!("{chain_id}-replacement-{departure_block}");
+    let mut transaction = pool.begin().await?;
+    if reapply {
+        sqlx::query(
+            "UPDATE chain_lineage
+             SET canonicality_state = 'orphaned'
+             WHERE chain_id = $1 AND block_hash = $2 AND block_number = $3",
+        )
+        .bind(chain_id)
+        .bind(&replacement_hash)
+        .bind(departure_block)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE chain_lineage
+             SET canonicality_state = 'canonical'
+             WHERE chain_id = $1 AND block_hash = $2 AND block_number = $3",
+        )
+        .bind(chain_id)
+        .bind(block_hash(chain_id, departure_block))
+        .bind(departure_block)
+        .execute(&mut *transaction)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE chain_lineage
+             SET canonicality_state = 'orphaned'
+             WHERE chain_id = $1 AND block_number = $2",
+        )
+        .bind(chain_id)
+        .bind(departure_block)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number, block_timestamp,
+                 canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($5), 'canonical')",
+        )
+        .bind(chain_id)
+        .bind(&replacement_hash)
+        .bind(block_hash(chain_id, departure_block - 1))
+        .bind(departure_block)
+        .bind(departure_block - 1)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 async fn seed_announcement_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
