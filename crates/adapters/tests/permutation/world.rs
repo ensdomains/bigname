@@ -446,6 +446,16 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
 /// filtering silently keeps the check below able to report a namespace that appears later.
 const UNMODELLED_NAMESPACES: &[&str] = &["basenames"];
 
+/// Single deployments the lane defers, keyed `namespace/chain/deployment_epoch`. Deferring one
+/// deployment needs this list rather than `UNMODELLED_NAMESPACES`: every ENS deployment shares the
+/// `ens` namespace, so naming a namespace to excuse one of them would stop checking the others too.
+///
+/// `ens/ethereum-sepolia/ens_v1` admits the ENSv1 registry and NameWrapper but not the `.eth`
+/// registrar, whose address the migration family already claims (issue #502). A world built before
+/// that resolves would pin a registrar-less shape that no deployment will run, so the deferral
+/// holds until the registrar family can be admitted.
+const UNMODELLED_DEPLOYMENTS: &[&str] = &["ens/ethereum-sepolia/ens_v1"];
+
 /// The per-world check only looks inside epochs a world already declares, so a deployment that
 /// arrives as a *new* epoch — ENSv2 reaching mainnet, say — would be pinned by nobody and generate
 /// nothing while every other assertion here stayed green. This is the check that notices.
@@ -463,6 +473,7 @@ pub fn assert_worlds_cover_deployments(
         })
         .collect::<BTreeSet<_>>();
     let mut unmodelled = BTreeSet::new();
+    let mut deferred = BTreeSet::new();
     for loaded in checked_in {
         let source = &loaded.manifest;
         if source.rollout_status != RolloutStatus::Active
@@ -475,16 +486,36 @@ pub fn assert_worlds_cover_deployments(
             "{}/{}/{}",
             source.namespace, source.chain, source.deployment_epoch
         );
-        if !modelled.contains(&deployment) {
-            unmodelled.insert(deployment);
+        if modelled.contains(&deployment) {
+            continue;
         }
+        if UNMODELLED_DEPLOYMENTS.contains(&deployment.as_str()) {
+            deferred.insert(deployment);
+            continue;
+        }
+        unmodelled.insert(deployment);
     }
     if !unmodelled.is_empty() {
         bail!(
             "these deployments have active event-bearing manifests but no scenario world, so no \
-             sequence is ever generated against them; add a world or name the namespace in \
-             UNMODELLED_NAMESPACES:\n  {}",
+             sequence is ever generated against them; add a world, or name the deployment in \
+             UNMODELLED_DEPLOYMENTS, or name the namespace in UNMODELLED_NAMESPACES:\n  {}",
             unmodelled.into_iter().collect::<Vec<_>>().join("\n  ")
+        );
+    }
+    // A deferral that no longer describes an unmodelled deployment has outlived its reason: either
+    // a world now covers it, or the manifests are gone. Either way the entry must not linger and
+    // silently excuse some future deployment that lands on the same key.
+    let stale = UNMODELLED_DEPLOYMENTS
+        .iter()
+        .filter(|entry| !deferred.contains(**entry))
+        .copied()
+        .collect::<Vec<_>>();
+    if !stale.is_empty() {
+        bail!(
+            "these UNMODELLED_DEPLOYMENTS entries no longer match an unmodelled active \
+             event-bearing deployment, so the deferral is stale; remove the entry:\n  {}",
+            stale.join("\n  ")
         );
     }
     Ok(())

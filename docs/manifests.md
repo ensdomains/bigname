@@ -19,7 +19,7 @@ manifests/sepolia/ethereum/<namespace>/<source_family>/v1.toml
 manifests/sepolia/base/<namespace>/<source_family>/v1.toml
 ```
 
-One runtime selects exactly one manifest profile root at startup — `manifests/mainnet/` for the shipped mainnet profile, or `manifests/sepolia/` for the ENSv2 Sepolia profile. Deployment-profile selection is not a manifest schema change. A runtime never loads two profile roots into the same canonical corpus, [watch plan](glossary.md), discovery graph, or [projection](glossary.md) set.
+One runtime selects exactly one manifest profile root at startup — `manifests/mainnet/` for the shipped mainnet profile, or `manifests/sepolia/` for the Sepolia profile. Deployment-profile selection is not a manifest schema change. A runtime never loads two profile roots into the same canonical corpus, [watch plan](glossary.md), discovery graph, or [projection](glossary.md) set.
 
 Within a selected profile root, the first directory component is the chain combo. It must match the leading component of each manifest `chain` ID: `ethereum-mainnet` lives under `ethereum/`, `base-mainnet` under `base/`, and `ethereum-sepolia` under `ethereum/`.
 
@@ -242,6 +242,41 @@ Its admission and schema prerequisite are specified below.
 
 The preceding `ens_v2_sepolia_dev` manifest versions remain checked in as `deprecated` historical records and citation evidence. Their addresses and ranges do not participate in the active post-audit watch or replay plan.
 
+### ENSv1 (`sepolia` deployment profile)
+
+The `sepolia` profile also admits the ENSv1 deployment the migration family
+bridges from, in `deployment_epoch = "ens_v1"`:
+
+- `ens_v1_registry_l1` — `ENSRegistry` at `0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e`, `start_block = 3702728`, plus the superseded registry it falls back to as `registry_old` at `0x94f523b8261B815b87EFfCf4d18E6aBeF18d6e4b`, `start_block = 3702721`. The deployed current registry is a fallback registry whose constructor takes that older registry as its `old` delegate, which is what makes the pair the same migration-aware admission the mainnet profile uses.[^v1-sepolia-ensregistry][^v1-sepolia-legacyregistry][^v1-sepolia-fallback]
+- `ens_v1_wrapper_l1` — `NameWrapper` at `0x0635513f179D50A207757E05759CbD106d7dFcE8`, `start_block = 3790153`. This is the contract the migration family names in `correlation_addresses.ens_v1_name_wrapper`; admitting it is what makes a migrated child's ENSv1 cleanup observable.[^v1-sepolia-namewrapper]
+
+Admission is necessary but not sufficient for a migrated child's cleanup to be
+observable. Both cleanup shapes — the wrapper token parked in the Graveyard, and
+the node unwrapped into it — are derived against wrapper state that only exists
+if that child's original `NameWrapped` was itself ingested. A source's ingest
+floor is operator-configured per run, not derived from a manifest
+`start_block`, so a Sepolia runtime started at the ENSv2 floor admits the
+wrapper family but still sees no cleanup for children wrapped earlier. Deriving
+child boundaries on this profile requires an ingest floor at or below the
+wrapper's `start_block`, and below each child's own wrap block.
+
+`ens_v1_registrar_l1` is **not** admitted on this profile, and no ENSv1
+registrar-controller contract is admitted either. The reason is the migration
+family's own `ens_v1_base_registrar` contract role, which already declares the
+Sepolia BaseRegistrar address: see the launch-bounded declaration below.
+Consequences to hold in mind while that stands:
+
+- `.eth` second-level ENSv1 registrar authority has no source on this profile, so an activated migration boundary has no ENSv1 registrar predecessor binding to close.
+- ENSv1 label-bearing registration and renewal observations are absent, so ENSv1-arm Sepolia names carry no registrar lifecycle history.
+- `ens_v1_resolver_l1` is likewise unadmitted here, so an ENSv1-arm Sepolia name can carry a resolver pointer whose resolver logs no watch plan fetches. That is a known coverage asymmetry against the mainnet profile, not a resolver bug.
+
+A name that carries both ENSv1 and ENSv2 evidence on this profile is
+[`independent_ens_deployments_overlap`](architecture.md) rather than a chosen
+authority, because the two Sepolia deployments are independent except where a
+proven migration boundary joins a single name. Admitting ENSv1 sources here
+makes that shape reachable in production for the first time; it does not make
+it a migration.
+
 Exact-name profile [capability promotion](glossary.md) is deployment-profile-scoped: only `exact_name_profile = "supported"` on the active `ens_v2_registrar_l1` version in the `sepolia` root promotes `.eth` exact-name declared reads to supported, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The capability promotion does not apply to mainnet, another manifest profile, or any runtime that has not selected `manifests/sepolia`. Active rollout, raw preimage observations, resolver admission, or backfill completion promote no other capability.
 
 Upstream events map to normalized adapter output: `TokenResource` → `TokenResourceLinked`, `TokenRegenerated` → `TokenRegenerated`, each positive-value item in `TransferSingle` or `TransferBatch` with nonzero `from` and `to` → `TokenControlTransferred`, `SubregistryUpdated` → `SubregistryChanged`, `ParentUpdated` → `ParentChanged`, `AliasChanged` → `AliasChanged`, `EACRolesChanged` → resource- or resolver-scoped permission events.[^v2-iperm-l34][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iperm-resolver-l14][^v2-eac-l19] The deployed `ETHRegistry` and `UserRegistryImpl` ABIs both contain the transfer events, and upstream changes the stored owner only for a positive value; mint and burn use a zero endpoint and therefore do not become token-control transfers. (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L194 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L201 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L208 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L210 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L318 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L333 @ ens_v2@ccaeb58) These are adapter semantics, not manifest schema fields. Role changes remain permission events and are not ownership evidence.
@@ -410,12 +445,29 @@ does not materialize an ENSv1 resource, token lineage, authority transition, or
 surface binding. This
 retains post-boundary ENSv1 residue without allowing it to overwrite ENSv2
 authority. Controller additions and removals remain name-independent permission
-history. The selected Sepolia deployment profile has no pre-existing ENSv1
-registrar source, so every controller event admitted through this launch-bounded
-declaration is candidate in slice 1. The manifest's
+history. The selected Sepolia deployment profile admits no ENSv1 *registrar*
+source family, so every controller event admitted through this launch-bounded
+declaration is candidate in slice 1. That absence is a consequence of this
+manifest rather than an accident of the deployment: the `ens_v1_base_registrar`
+contract role above already declares the Sepolia BaseRegistrar address. Some
+source families recover label preimages from whole-block scans rather than from
+a single declared emitter. When either side of an address collision is such a
+family, two active contract declarations of the same address on the same chain
+would leave one log assignable to either source, and the loader rejects that
+pair outright. The migration family and `ens_v1_registrar_l1` are both such
+families, so an `ens_v1_registrar_l1` family cannot be admitted on this profile
+while that role stands. Resolving which family should own that address is
+[issue #502](https://github.com/ensdomains/bigname/issues/502).
+
+The profile does admit the ENSv1 registry and NameWrapper families
+(`ens_v1_registry_l1`, `ens_v1_wrapper_l1`). The migration manifest's
 `correlation_addresses.ens_v1_name_wrapper` value carries the ETHRenewerV1
-constructor's NameWrapper address as non-emitting correlation metadata; it is
-not a declared contract, discovery edge, or watch-plan input.
+constructor's NameWrapper address as non-emitting correlation metadata: within
+the migration family it is not a declared contract, discovery edge, or
+watch-plan input. The contract it names is separately declared and watched by
+`ens_v1_wrapper_l1`, which is what makes a migrated child's ENSv1 cleanup
+observable at all. The migration family reads that evidence; it does not emit
+it.
 (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L894 @ ens_v2@ccaeb58)
 A controller
 event around a multi-label
@@ -908,6 +960,9 @@ above does not change that provenance rule.
 | WrappedETHRegistrarController | `16925618` | [^v1-wrapethrc-l640] |
 | ETHRegistrarController | `22764821` | [^v1-ethrc-l706] |
 | ENSv1 NameWrapper | `16925608` | [^v1-namewrapper-deploy] |
+| ENSv1 ENSRegistry (Sepolia) | `3702728` | [^v1-sepolia-ensregistry] |
+| ENSv1 superseded registry (Sepolia) | `3702721` | [^v1-sepolia-legacyregistry] |
+| ENSv1 NameWrapper (Sepolia) | `3790153` | [^v1-sepolia-namewrapper] |
 | ENSv1 PublicResolver (latest) | `22764828` | [^v1-publicresolver-deploy] |
 | ENSv1 ReverseRegistrar | `16925606` | [^v1-revreg-deploy-l379] |
 | ENSv2 RootRegistry (post-audit Sepolia) | `11163319` | [^v2-deploy-root] |
@@ -932,6 +987,10 @@ above does not change that provenance rule.
 [^v1-iname-l38]: (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f)
 
 [^v1-namewrapper-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/NameWrapper.json:L1498 @ ens_v1@91c966f)
+[^v1-sepolia-ensregistry]: (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L409 @ ens_v1@91c966f)
+[^v1-sepolia-legacyregistry]: (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L390 @ ens_v1@91c966f)
+[^v1-sepolia-fallback]: (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L148 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L415 @ ens_v1@91c966f)
+[^v1-sepolia-namewrapper]: (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L1512 @ ens_v1@91c966f)
 [^v1-publicresolver-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L1104 @ ens_v1@91c966f)
 [^v1-revreg-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
 [^v1-revreg-deploy-l379]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L379 @ ens_v1@91c966f)
