@@ -158,10 +158,10 @@ pub(super) async fn invalidate_changed_derived_epochs(
         if previous_manifests == desired_manifests {
             continue;
         }
-        if let Some(widened_from) =
+        if let Some(widening) =
             super::watch::discovery_widening_start(&previous.watch, &desired.watch, &chain_id)
         {
-            reject_covered_discovery_widening(transaction, &chain_id, widened_from).await?;
+            reject_covered_discovery_widening(transaction, &chain_id, widening).await?;
         }
         if let Some(widened_from) =
             super::watch::widening_start(&previous.watch, &desired.watch, &chain_id)
@@ -264,10 +264,10 @@ fn record_authority(
 async fn reject_covered_discovery_widening(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-    widened_from: u64,
+    widening: super::watch::DiscoveryWidening,
 ) -> Result<()> {
-    let widened_from =
-        i64::try_from(widened_from).context("manifest discovery start does not fit into BIGINT")?;
+    let widened_from = i64::try_from(widening.start)
+        .context("manifest discovery start does not fit into BIGINT")?;
     let overlaps: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
@@ -294,9 +294,15 @@ async fn reject_covered_discovery_widening(
     .await
     .with_context(|| format!("failed to inspect discovery coverage for chain {chain_id}"))?;
     if overlaps {
+        let transition = match widening.kind {
+            super::watch::DiscoveryWideningKind::Rule => "discovery rule widening",
+            super::watch::DiscoveryWideningKind::SourceReplacement => {
+                "resolver discovery source replacement"
+            }
+        };
         bail!(
-            "manifest discovery rule widening overlaps ingested history for chain {chain_id}; \
-             this transition is unsupported in place and needs a fresh rebuild or a dedicated \
+            "manifest {transition} overlaps ingested history for chain {chain_id}; this \
+             transition is unsupported in place and needs a fresh rebuild or a dedicated \
              discovery backfill mechanism before historical Ingest can be certified"
         );
     }

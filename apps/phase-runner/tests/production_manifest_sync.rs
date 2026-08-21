@@ -136,6 +136,57 @@ admission = "reachable_from_root""#
         fs::write(path, manifest)?;
         Ok(())
     }
+
+    fn replace_source_a(&self, address: &str, start_block: u64) -> Result<()> {
+        let path = self
+            .root
+            .join("test")
+            .join(&self.source_family)
+            .join("v1.toml");
+        let prior = r#"address = "0x0000000000000000000000000000000000000004"
+proxy_kind = "none"
+start_block = 0"#;
+        let replacement = format!(
+            r#"address = "{address}"
+proxy_kind = "none"
+start_block = {start_block}"#
+        );
+        let manifest = fs::read_to_string(&path)?.replacen(prior, &replacement, 1);
+        fs::write(path, manifest)?;
+        Ok(())
+    }
+
+    fn add_source_a_root(&self, address: &str, start_block: u64) -> Result<()> {
+        let path = self
+            .root
+            .join("test")
+            .join(&self.source_family)
+            .join("v1.toml");
+        let root = format!(
+            r#"[[roots]]
+name = "source_a"
+address = "{address}"
+start_block = {start_block}"#
+        );
+        let manifest = fs::read_to_string(&path)?.replace("roots = []", &root);
+        fs::write(path, manifest)?;
+        Ok(())
+    }
+
+    fn move_source_a_root_start(&self, from: u64, to: u64) -> Result<()> {
+        let path = self
+            .root
+            .join("test")
+            .join(&self.source_family)
+            .join("v1.toml");
+        let manifest = fs::read_to_string(&path)?.replacen(
+            &format!("start_block = {from}"),
+            &format!("start_block = {to}"),
+            1,
+        );
+        fs::write(path, manifest)?;
+        Ok(())
+    }
 }
 
 impl Drop for WatchManifestFixture {
@@ -422,6 +473,155 @@ async fn adding_a_discovery_rule_over_ingested_history_is_rejected() -> Result<(
     sync_schema_v2_repository(fresh.pool(), &load_repository(&fresh_fixture.root)?).await?;
 
     fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn replacing_a_resolver_discovery_source_over_ingested_history_is_rejected() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_manifest_resolver_source_replacement").await?;
+    let chain_id = "manifest-resolver-source-replacement";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    fixture.add_discovery_rule("resolver")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.replace_source_a("0x0000000000000000000000000000000000000007", 0)?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(
+                required_ingest_redo(scratch.pool(), chain_id).await?,
+                Some((0, 1)),
+                "the slipped transition should only stamp the new declaration's watched logs"
+            );
+            let resolver_logs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM raw_logs WHERE chain_id = $1")
+                    .bind(chain_id)
+                    .fetch_one(scratch.pool())
+                    .await?;
+            assert_eq!(
+                resolver_logs, 0,
+                "the stamped pass has no resolver addresses until Interpret materializes them"
+            );
+            panic!(
+                "resolver discovery source replacement slipped through as an ordinary watch-plan widening"
+            );
+        }
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("resolver discovery source replacement"),
+        "the loud rejection must name the transition: {error}"
+    );
+
+    scratch.cleanup().await?;
+
+    let fresh = ScratchDatabase::create("production_manifest_fresh_resolver_replacement").await?;
+    let fresh_chain = "manifest-fresh-resolver-replacement";
+    let fresh_fixture = WatchManifestFixture::new(fresh_chain)?;
+    fresh_fixture.write(false, false)?;
+    fresh_fixture.add_discovery_rule("resolver")?;
+    sync_schema_v2_repository(fresh.pool(), &load_repository(&fresh_fixture.root)?).await?;
+    seed_chain_head(fresh.pool(), fresh_chain, 0).await?;
+    fresh_fixture.replace_source_a("0x0000000000000000000000000000000000000007", 0)?;
+    sync_schema_v2_repository(fresh.pool(), &load_repository(&fresh_fixture.root)?).await?;
+    fresh.cleanup().await?;
+
+    let future = ScratchDatabase::create("production_manifest_future_resolver_replacement").await?;
+    let future_chain = "manifest-future-resolver-replacement";
+    let future_fixture = WatchManifestFixture::new(future_chain)?;
+    future_fixture.write(false, false)?;
+    future_fixture.add_discovery_rule("resolver")?;
+    sync_schema_v2_repository(future.pool(), &load_repository(&future_fixture.root)?).await?;
+    seed_completed_ingest_range(&future, future_chain).await?;
+    future_fixture.replace_source_a("0x0000000000000000000000000000000000000007", 2)?;
+    sync_schema_v2_repository(future.pool(), &load_repository(&future_fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(future.pool(), future_chain).await?,
+        None,
+        "a source replacement beginning after retained history remains admissible"
+    );
+
+    future.cleanup().await
+}
+
+#[tokio::test]
+async fn moving_one_of_multiple_resolver_sources_into_history_is_rejected() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_manifest_resolver_source_start_widening").await?;
+    let chain_id = "manifest-resolver-source-start-widening";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    fixture.add_source_a_root("0x0000000000000000000000000000000000000008", 1)?;
+    fixture.add_discovery_rule("resolver")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.move_source_a_root_start(1, 0)?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("each resolver-rule emitter must retain its own covered start");
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn future_resolver_source_replacement_stays_admissible_beside_a_historical_emitter()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_future_resolver_source_set").await?;
+    let chain_id = "manifest-future-resolver-source-set";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    fixture.add_source_a_root("0x0000000000000000000000000000000000000008", 0)?;
+    fixture.add_discovery_rule("resolver")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let path = fixture
+        .root
+        .join("test")
+        .join(&fixture.source_family)
+        .join("v1.toml");
+    let manifest = fs::read_to_string(&path)?.replace(
+        "0x0000000000000000000000000000000000000008",
+        "0x0000000000000000000000000000000000000009",
+    );
+    fs::write(path, manifest)?;
+    fixture.move_source_a_root_start(0, 2)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn adding_a_resolver_source_names_rule_widening_not_replacement() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_resolver_source_addition").await?;
+    let chain_id = "manifest-resolver-source-addition";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    fixture.add_discovery_rule("resolver")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.add_source_a_root("0x0000000000000000000000000000000000000008", 0)?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("adding a historical resolver-rule emitter must reject");
+    assert!(
+        error.to_string().contains("discovery rule widening")
+            && !error.to_string().contains("source replacement"),
+        "an additive transition must be diagnosed accurately: {error}"
+    );
+
+    scratch.cleanup().await
 }
 
 #[tokio::test]

@@ -838,16 +838,22 @@ Adding a less general target already covered by an all-emitter event does not
 count as widening.
 
 Adding or broadening an indexability-producing `resolver` discovery rule over
-an already-ingested range is a different ordering problem: the new discovered
-addresses do not exist until Interpret materializes their edges, so an Ingest
-redo cannot yet fetch their address-scoped history. Manifest synchronization
-rejects that transition instead of mis-certifying a one-pass redo. The operator
-cannot perform that ordering with the current in-place phase workflow, because
-Interpret reads discovery rules only after admission. The transition is
-therefore unsupported over retained history and requires a fresh rebuild or a
-future dedicated discovery backfill mechanism. A new chain with no ingested
-range, discovery-rule narrowing, and rules for topology-only `subregistry` or
-intake-discovered `registry_announcement` edges remain admissible.
+an already-ingested range is a different ordering problem. Replacing a
+declaration that emits an unchanged active resolver rule has the same problem:
+the replacement contract's discovery events name resolver addresses only after
+Interpret materializes their edges, so an Ingest redo cannot yet fetch those
+resolvers' address-scoped history. Resolver-rule comparison therefore preserves
+the normalized address and inclusive start block of each declaration for its
+`from_role`, and manifest synchronization loudly rejects either transition
+instead of mis-certifying a one-pass redo. The operator cannot perform that
+ordering with the current in-place phase workflow, because Interpret reads
+discovery rules only after admission. These transitions are therefore
+unsupported over retained history and require a fresh rebuild or a future
+dedicated discovery backfill mechanism.
+A new chain with no ingested range, a resolver rule or emitting-source
+replacement whose start is after retained history, discovery-rule narrowing,
+and rules for topology-only `subregistry` or intake-discovered
+`registry_announcement` edges remain admissible.
 
 If a newly watched tuple intersects an already-ingested range, synchronization
 records the ordinary [manifest-authority
@@ -880,9 +886,14 @@ range-end hash is the readable hash at that height, so loading a coherent
 sibling fork cannot certify facts for the fork Interpret will read. That
 required-redo range-end check does not change ordinary operator repair redos,
 which may reconcile a cursor to another retained fork before normal head
-publication. Every Base Ingest redo, required or ordinary, also requires the
-overlapping Coinbase/RPC loads to return the same seam-block hash, including
-when the redo fits in one batch.
+publication. Every Base Ingest redo, required or ordinary, whose range includes
+the source seam also requires each redo batch to run one independent Coinbase
+SQL `base.blocks` identity query and the RPC block lookup and to obtain the same
+seam-block hash. Rechecking before every batch prevents a source fork change
+from combining pre-seam coverage across batches. The Coinbase schema exposes
+`block_number`, `block_hash`, and reorganization `action` on that table,
+so this proof does not depend on a watched log being
+present.[^coinbase-sql-blocks]
 
 Removing watched tuples, repeating the same manifest set, adding a chain with
 no Ingest coverage, or adding a watched window that starts after the retained
@@ -1150,3 +1161,4 @@ above does not change that provenance rule.
 [^bn-sha3-l15]: (upstream: .refs/basenames/src/lib/Sha3.sol:L15 @ basenames@1809bbc)
 [^bn-sha3-l20]: (upstream: .refs/basenames/src/lib/Sha3.sol:L20 @ basenames@1809bbc)
 [^bn-sha3-l31]: (upstream: .refs/basenames/src/lib/Sha3.sol:L31 @ basenames@1809bbc)
+[^coinbase-sql-blocks]: [Coinbase SQL API schema — `base.blocks`](https://docs.cdp.coinbase.com/data/sql-api/schema#base-blocks).

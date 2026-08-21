@@ -4,7 +4,10 @@ use sqlx::PgPool;
 
 use crate::{
     BatchRequest, IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result, SourceProgress,
+    coinbase_sql::source_error,
     engine::{Engine, SourceDescriptor},
+    plan::BASE_COINBASE_SEAM_BLOCK,
+    provider::{ProviderKind, normalized_kind},
 };
 
 pub(super) struct LoadedWindow {
@@ -42,6 +45,64 @@ impl RedoWindowLoader for ProductionRedoWindowLoader {
         to: i64,
     ) -> RedoLoadFuture<'a> {
         Box::pin(engine.load_window(chain_id, source, all_sources, from, to))
+    }
+}
+
+impl Engine {
+    pub(super) async fn require_independent_base_source_seam(
+        &self,
+        request: &BatchRequest,
+    ) -> Result<()> {
+        let Some((range_from, range_to)) = request.redo_range else {
+            return Ok(());
+        };
+        if request.chain_id != "base-mainnet"
+            || !(range_from..=range_to).contains(&BASE_COINBASE_SEAM_BLOCK)
+        {
+            return Ok(());
+        }
+        let coinbase = request
+            .sources
+            .iter()
+            .find(|source| normalized_kind(&source.kind) == ProviderKind::Coinbase)
+            .expect("validated Base request has one Coinbase SQL source");
+        let rpc = request
+            .sources
+            .iter()
+            .find(|source| normalized_kind(&source.kind) == ProviderKind::Rpc)
+            .expect("validated Base request has one RPC source");
+        let coinbase_marker = self.coinbase_block_marker(coinbase).await?;
+        let rpc_provider = self.provider(&request.chain_id, rpc).await?;
+        let rpc_marker = super::resolve_marker(&rpc_provider, BASE_COINBASE_SEAM_BLOCK).await?;
+        require_independent_source_seam(
+            &request.chain_id,
+            &coinbase.key,
+            &coinbase_marker,
+            &rpc.key,
+            &rpc_marker,
+        )
+    }
+
+    async fn coinbase_block_marker(&self, source: &SourceDescriptor) -> Result<Marker> {
+        #[cfg(test)]
+        if let Some(marker) = crate::coinbase_sql::test_seam_markers::marker(
+            &source.endpoint,
+            BASE_COINBASE_SEAM_BLOCK,
+        ) {
+            return Ok(marker);
+        }
+        let marker = self
+            .coinbase_source("base-mainnet", source)
+            .await?
+            .block_marker(BASE_COINBASE_SEAM_BLOCK)
+            .await
+            .map_err(|error| {
+                source_error("failed to fetch Coinbase SQL seam block identity", error)
+            })?;
+        Ok(Marker {
+            number: marker.number,
+            hash: marker.hash,
+        })
     }
 }
 
@@ -97,6 +158,24 @@ pub(super) fn require_source_seam(
         }
     }
     Ok(())
+}
+
+pub(super) fn require_independent_source_seam(
+    chain_id: &str,
+    coinbase_key: &str,
+    coinbase: &Marker,
+    rpc_key: &str,
+    rpc: &Marker,
+) -> Result<()> {
+    if coinbase.number == rpc.number && coinbase.hash == rpc.hash {
+        return Ok(());
+    }
+    Err(IngestError::data_integrity(format!(
+        "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {chain_id} at independently queried source \
+         seam block {}: Coinbase SQL source {coinbase_key} returned hash {}, RPC source {rpc_key} \
+         returned hash {}; rerun the Ingest redo after both sources expose the same canonical block",
+        coinbase.number, coinbase.hash, rpc.hash
+    )))
 }
 
 pub(super) fn running_summary_from_loaded_source(

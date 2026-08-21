@@ -264,6 +264,7 @@ impl Engine {
             from.saturating_add(BLOCKS_PER_BATCH - 1).min(range_to)
         });
         let complete = to >= range_to;
+        self.require_independent_base_source_seam(&request).await?;
         let mut written_bytes = 0u64;
         let mut progress = Vec::with_capacity(request.sources.len());
 

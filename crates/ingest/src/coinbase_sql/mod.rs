@@ -15,8 +15,29 @@ mod rate_limit;
 mod rows;
 mod transport;
 
+#[cfg(test)]
+pub(crate) mod test_seam_markers {
+    use bigname_test_support::{ScopedTestHookGuard, ScopedTestHookRegistry};
+
+    use crate::Marker;
+
+    static MARKERS: ScopedTestHookRegistry<(String, i64), Marker> = ScopedTestHookRegistry::new();
+
+    pub(crate) fn install(
+        endpoint: &str,
+        marker: Marker,
+    ) -> ScopedTestHookGuard<(String, i64), Marker> {
+        MARKERS.install((endpoint.to_owned(), marker.number), marker)
+    }
+
+    pub(crate) fn marker(endpoint: &str, number: i64) -> Option<Marker> {
+        MARKERS.get_cloned(&(endpoint.to_owned(), number))
+    }
+}
+
 use client::CoinbaseSqlClient;
 use query::CoinbaseSqlFilterPack;
+use rows::CoinbaseBlockRow;
 
 const DEFAULT_URL: &str = "https://api.cdp.coinbase.com/platform/v2/data/query/run";
 const KEY_ID_ENV: &str = "COINBASE_CDP_SQL_API_KEY_ID";
@@ -31,6 +52,12 @@ const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
 pub struct CoinbaseSqlSource {
     chain_id: String,
     client: CoinbaseSqlClient,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CoinbaseBlockMarker {
+    pub(crate) number: i64,
+    pub(crate) hash: String,
 }
 
 impl CoinbaseSqlSource {
@@ -88,6 +115,36 @@ impl CoinbaseSqlSource {
             }
         }
         Ok(logs.into_values().collect())
+    }
+
+    /// Reads fork identity independently of watched logs. Coinbase documents
+    /// `<network>.blocks` as carrying `block_number`, `block_hash`, and reorg `action`:
+    /// https://docs.cdp.coinbase.com/data/sql-api/schema#base-blocks
+    pub(crate) async fn block_marker(&self, number: i64) -> Result<CoinbaseBlockMarker> {
+        let query = query::build_block_marker_query(&self.chain_id, number)?;
+        let rows = self
+            .client
+            .run_raw_query(&query)
+            .await?
+            .into_iter()
+            .map(CoinbaseBlockRow::from_value)
+            .collect::<Result<Vec<_>>>()?;
+        let [row] = rows.as_slice() else {
+            bail!(
+                "Coinbase SQL returned {} active block identities at height {number}; expected exactly one",
+                rows.len()
+            );
+        };
+        if row.block_number != number {
+            bail!(
+                "Coinbase SQL returned block {} for requested seam height {number}",
+                row.block_number
+            );
+        }
+        Ok(CoinbaseBlockMarker {
+            number: row.block_number,
+            hash: row.block_hash.clone(),
+        })
     }
 
     async fn fetch_window(

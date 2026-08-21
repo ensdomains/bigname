@@ -55,7 +55,7 @@ impl CoinbaseSqlClient {
         rows.into_iter().map(CoinbaseLogRow::from_value).collect()
     }
 
-    async fn run_raw_query(&self, sql: &str) -> Result<Vec<Value>> {
+    pub(super) async fn run_raw_query(&self, sql: &str) -> Result<Vec<Value>> {
         for attempt in 0..MAX_ATTEMPTS {
             self.rate_limiter.wait().await;
             let response = transport::run(

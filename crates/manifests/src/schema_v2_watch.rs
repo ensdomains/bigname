@@ -39,6 +39,28 @@ struct DiscoveryRuleKey {
     edge_kind: String,
     from_role: String,
     admission: String,
+    emitting_address: Option<String>,
+}
+
+impl DiscoveryRuleKey {
+    fn same_rule(&self, other: &Self) -> bool {
+        self.family == other.family
+            && self.edge_kind == other.edge_kind
+            && self.from_role == other.from_role
+            && self.admission == other.admission
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DiscoveryWideningKind {
+    Rule,
+    SourceReplacement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DiscoveryWidening {
+    pub(super) start: u64,
+    pub(super) kind: DiscoveryWideningKind,
 }
 
 #[derive(Default)]
@@ -101,19 +123,45 @@ pub(super) fn discovery_widening_start(
     previous: &Snapshot,
     desired: &Snapshot,
     chain_id: &str,
-) -> Option<u64> {
+) -> Option<DiscoveryWidening> {
     let previous = previous.discovery_by_chain.get(chain_id);
+    let desired = desired.discovery_by_chain.get(chain_id)?;
     desired
-        .discovery_by_chain
-        .get(chain_id)?
         .iter()
         .filter_map(|(rule, start)| {
             let covered = previous
                 .and_then(|rules| rules.get(rule))
                 .is_some_and(|previous_start| previous_start <= start);
-            (!covered).then_some(*start)
+            (!covered).then(|| {
+                let previous_emitters = previous
+                    .into_iter()
+                    .flat_map(|rules| rules.keys())
+                    .filter(|prior| prior.same_rule(rule))
+                    .map(|prior| prior.emitting_address.as_deref())
+                    .collect::<BTreeSet<_>>();
+                let desired_emitters = desired
+                    .keys()
+                    .filter(|candidate| candidate.same_rule(rule))
+                    .map(|candidate| candidate.emitting_address.as_deref())
+                    .collect::<BTreeSet<_>>();
+                DiscoveryWidening {
+                    start: *start,
+                    kind: if !previous_emitters.is_empty()
+                        && !previous_emitters.is_subset(&desired_emitters)
+                    {
+                        DiscoveryWideningKind::SourceReplacement
+                    } else {
+                        DiscoveryWideningKind::Rule
+                    },
+                }
+            })
         })
-        .min()
+        .min_by_key(|widening| {
+            (
+                widening.start,
+                widening.kind != DiscoveryWideningKind::SourceReplacement,
+            )
+        })
 }
 
 fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEntry>> {
@@ -177,16 +225,23 @@ fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEnt
 }
 
 fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) {
-    let starts = manifest
+    let declarations = manifest
         .roots
         .iter()
-        .map(|root| (root.name.as_str(), root.start_block.unwrap_or(0)))
-        .chain(
-            manifest
-                .contracts
-                .iter()
-                .map(|contract| (contract.role.as_str(), contract.start_block.unwrap_or(0))),
-        )
+        .map(|root| {
+            (
+                root.name.as_str(),
+                normalize_address(&root.address),
+                root.start_block.unwrap_or(0),
+            )
+        })
+        .chain(manifest.contracts.iter().map(|contract| {
+            (
+                contract.role.as_str(),
+                normalize_address(&contract.address),
+                contract.start_block.unwrap_or(0),
+            )
+        }))
         .collect::<Vec<_>>();
     let rules = snapshot
         .discovery_by_chain
@@ -197,21 +252,43 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) {
         .iter()
         .filter(|rule| rule.edge_kind == "resolver")
     {
-        let start = starts
+        let mut emitters = BTreeMap::<String, u64>::new();
+        for (_, address, start) in declarations
             .iter()
-            .filter_map(|(role, start)| (*role == rule.from_role).then_some(*start))
-            .min()
-            .unwrap_or(0);
-        rules.insert(
-            DiscoveryRuleKey {
-                family: manifest.source_family.clone(),
-                edge_kind: rule.edge_kind.clone(),
-                from_role: rule.from_role.clone(),
-                admission: rule.admission.clone(),
-            },
-            start,
-        );
+            .filter(|(role, _, _)| *role == rule.from_role)
+        {
+            emitters
+                .entry(address.clone())
+                .and_modify(|existing| *existing = (*existing).min(*start))
+                .or_insert(*start);
+        }
+        if emitters.is_empty() {
+            insert_discovery_rule(rules, manifest, rule, None, 0);
+        } else {
+            for (address, start) in emitters {
+                insert_discovery_rule(rules, manifest, rule, Some(address), start);
+            }
+        }
     }
+}
+
+fn insert_discovery_rule(
+    rules: &mut BTreeMap<DiscoveryRuleKey, u64>,
+    manifest: &SourceManifest,
+    rule: &crate::DiscoveryRule,
+    emitting_address: Option<String>,
+    start: u64,
+) {
+    rules.insert(
+        DiscoveryRuleKey {
+            family: manifest.source_family.clone(),
+            edge_kind: rule.edge_kind.clone(),
+            from_role: rule.from_role.clone(),
+            admission: rule.admission.clone(),
+            emitting_address,
+        },
+        start,
+    );
 }
 
 fn insert_watch(

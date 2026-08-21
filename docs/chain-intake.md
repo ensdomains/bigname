@@ -348,6 +348,13 @@ cargo phase -- redo \
 ```
 
 Ingest and `all` require a `--source` descriptor for every selected chain.
+Before loading each Base Ingest redo batch whose requested range spans the
+Coinbase/RPC seam, the runner independently queries the seam-block identity
+from Coinbase SQL `base.blocks` and from RPC. A mismatch is a terminal data
+integrity error for that attempt and prevents redo completion; retry only after
+the sources agree. This applies to required and ordinary redos. The
+[manifest widening workflow](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)
+documents the source-schema evidence and why the check runs for every batch.
 For `--phase verify`, Base and Ethereum Mainnet require exactly one `drpc` or
 `reth_db` reference source respectively. Base with `reth_db` is rejected during
 configuration validation rather than starting a database walk. Sepolia validates

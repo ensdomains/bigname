@@ -18,6 +18,25 @@ pub(super) const ACTIVE_TRANSACTION_LOG_JOIN: &str = "t.block_number = l.block_n
    AND t.block_hash = l.block_hash
    AND t.transaction_hash = l.transaction_hash";
 
+pub(super) fn build_block_marker_query(chain: &str, block_number: i64) -> Result<String> {
+    let network = coinbase_sql_network(chain)?;
+    if block_number < 0 {
+        bail!("Coinbase SQL block marker number must not be negative");
+    }
+    let action = active_action_expression("action");
+    Ok(format!(
+        r#"SELECT
+  block_number,
+  block_hash
+FROM {network}.blocks
+WHERE block_number = {block_number}
+GROUP BY block_number, block_hash
+HAVING sum({action}) > 0
+ORDER BY block_hash
+LIMIT 2"#
+    ))
+}
+
 pub(super) fn active_transactions_cte(network: &str, from_block: i64, to_block: i64) -> String {
     let tx_action_expr = active_action_expression("action");
     format!(
@@ -323,4 +342,21 @@ pub(super) fn sql_string_literals(values: &[String]) -> String {
         .map(|value| format!("'{}'", value.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_marker_query_selects_one_height_from_the_blocks_change_stream() {
+        let query = build_block_marker_query("base-mainnet", 48_428_000)
+            .expect("Base mainnet has a Coinbase SQL network");
+
+        assert!(query.contains("FROM base.blocks"));
+        assert!(query.contains("WHERE block_number = 48428000"));
+        assert!(query.contains("GROUP BY block_number, block_hash"));
+        assert!(query.contains("HAVING sum("));
+        assert!(query.contains("LIMIT 2"));
+    }
 }
