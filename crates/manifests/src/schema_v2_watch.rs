@@ -152,10 +152,45 @@ pub(super) fn discovery_widening_start(
     desired: &Snapshot,
     chain_id: &str,
 ) -> Option<DiscoveryWidening> {
+    discovery_widening_start_for(previous, desired, chain_id, |rule| {
+        rule.edge_kind == "resolver"
+    })
+}
+
+pub(super) fn registry_announcement_widening_start(
+    previous: &Snapshot,
+    desired: &Snapshot,
+    chain_id: &str,
+) -> Option<u64> {
+    discovery_widening_start_for(previous, desired, chain_id, |rule| {
+        rule.edge_kind == "registry_announcement"
+            && rule.family == crate::ENS_V2_REGISTRY_SOURCE_FAMILY
+    })
+    .map(|widening| widening.start)
+}
+
+pub(super) fn unsupported_registry_announcement_widening(
+    previous: &Snapshot,
+    desired: &Snapshot,
+    chain_id: &str,
+) -> Option<DiscoveryWidening> {
+    discovery_widening_start_for(previous, desired, chain_id, |rule| {
+        rule.edge_kind == "registry_announcement"
+            && rule.family != crate::ENS_V2_REGISTRY_SOURCE_FAMILY
+    })
+}
+
+fn discovery_widening_start_for(
+    previous: &Snapshot,
+    desired: &Snapshot,
+    chain_id: &str,
+    include: impl Fn(&DiscoveryRuleKey) -> bool,
+) -> Option<DiscoveryWidening> {
     let previous = previous.discovery_by_chain.get(chain_id);
     let desired = desired.discovery_by_chain.get(chain_id)?;
     desired
         .iter()
+        .filter(|(rule, _)| include(rule))
         .filter_map(|(rule, start)| {
             let covered = previous
                 .and_then(|rules| rules.get(rule))
@@ -182,21 +217,16 @@ pub(super) fn discovery_widening_start(
             }
             Some(DiscoveryWidening {
                 start: *start,
-                kind: if !previous_emitters.is_empty()
-                    && !previous_emitters.is_subset(&desired_emitters)
+                kind: if previous_emitters.is_empty()
+                    || previous_emitters.is_subset(&desired_emitters)
                 {
-                    DiscoveryWideningKind::SourceReplacement
-                } else {
                     DiscoveryWideningKind::Rule
+                } else {
+                    DiscoveryWideningKind::SourceReplacement
                 },
             })
         })
-        .min_by_key(|widening| {
-            (
-                widening.start,
-                widening.kind != DiscoveryWideningKind::SourceReplacement,
-            )
-        })
+        .min_by_key(|widening| (widening.start, widening.kind == DiscoveryWideningKind::Rule))
 }
 
 fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEntry>> {
@@ -283,11 +313,15 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) {
         .discovery_by_chain
         .entry(manifest.chain.clone())
         .or_default();
-    for rule in manifest
-        .discovery_rules
-        .iter()
-        .filter(|rule| rule.edge_kind == "resolver")
-    {
+    for rule in manifest.discovery_rules.iter().filter(|rule| {
+        // Keep address-admitting kinds explicit so every new edge kind is classified here.
+        // `subregistry` is topology-only, while the `migration` edge is reserved and has no
+        // writer under docs/manifests.md; neither can widen address-scoped historical intake.
+        matches!(
+            rule.edge_kind.as_str(),
+            "resolver" | "registry_announcement"
+        )
+    }) {
         let mut emitters = BTreeMap::<String, u64>::new();
         for (_, address, start) in declarations
             .iter()

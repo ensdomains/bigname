@@ -876,15 +876,27 @@ retained history as a conservative case of the same ordering constraint.
 A `resolver` discovery rule with no matching root or contract declaration is itself historical
 discovery input, so adding such a rule in a new namespace over retained history is rejected like any
 other widening.
+
+`registry_announcement` rules use the same namespace-scoped comparison. In the
+`ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest
+first selects a declared `RegistryCreated` as an all-emitter event, then fetches
+the announcing registry's remaining address-scoped events from that event's
+position in the same window; later windows preload retained canonical
+announcements. Historical rule widening or emitting-source replacement in that
+family therefore stamps a required Ingest redo from the earliest affected
+start. Historical announcement widening in any other family is loudly rejected
+because it has no declared same-window intake path. Fresh and future-only
+transitions remain admissible.
 A chain's retained-history boundary for this check is its latest published
 head. A finite Ingest position left ahead of that head after a rewind is not
 readable coverage; when no published-head row exists, the check falls back to
 the finite Ingest position.
-A new chain with no ingested range, a resolver rule or emitting-source
-replacement whose start is after retained history, [discovery-rule
-narrowing](glossary.md#discovery-rule-widening-and-narrowing),
-and rules for topology-only `subregistry` or intake-discovered
-`registry_announcement` edges remain admissible.
+A new chain with no ingested range, a tracked rule or emitting-source
+replacement whose start is after retained history, and [discovery-rule
+narrowing](glossary.md#discovery-rule-widening-and-narrowing) remain admissible.
+Topology-only `subregistry` rules and the reserved
+[`migration` edge kind](glossary.md#migration-edge-migration) are excluded from
+this comparison because neither admits an address for historical intake.
 
 If a newly watched tuple intersects an already-ingested range, synchronization
 records the ordinary [manifest-authority

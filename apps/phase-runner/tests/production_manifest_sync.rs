@@ -75,6 +75,15 @@ proxy_kind = "none"
 start_block = 0
 "#,
         );
+        let registry_created = (self.source_family == "ens_v2_registry_l1").then_some(
+            r#"[[abi.events]]
+name = "RegistryCreated"
+fragment = "event RegistryCreated()"
+emitter_roles = ["source_a"]
+normalized_events = []
+status = "supported"
+"#,
+        );
         let manifest = format!(
             r#"manifest_version = 1
 namespace = "test"
@@ -102,11 +111,13 @@ emitter_roles = ["source_a"]
 normalized_events = []
 status = "supported"
 {}
+{}
 "#,
             self.source_family,
             self.chain_id,
             source_a_start,
             new_contract.unwrap_or_default(),
+            registry_created.unwrap_or_default(),
             new_event.unwrap_or_default(),
         );
         fs::write(
@@ -497,6 +508,111 @@ async fn widening_an_ingested_manifest_event_blocks_initial_derivation_until_rei
 }
 
 #[tokio::test]
+async fn interrupted_recompute_resume_waits_for_required_ingest() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_recompute_ingest_fence").await?;
+    let chain_id = "manifest-recompute-ingest-fence";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let chain = seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', redo_in_progress = true,
+             current_block_number = 1, current_block_hash = $2,
+             target_block_number = 1, target_block_hash = $2, input_content_hash = $3,
+             redo_mode = CASE phase_name WHEN 'interpret' THEN 'recompute_flags' ELSE 'redo' END,
+             redo_previous_phase_status = 'completed', redo_previous_started_at = now(),
+             redo_previous_finished_at = now(), redo_from_block_number = 0, redo_to_block_number = 1,
+             last_error = CASE phase_name
+                 WHEN 'interpret' THEN 'injected interrupted recompute-flags'
+                 ELSE 'recompute-flags project refresh complete; interpret flags pending' END,
+             started_at = now(), finished_at = NULL
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-manifest-sync-head-1"))
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+
+    fixture.write(true, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
+    );
+    let marker_before = interpret_input_hash(scratch.pool(), chain_id).await?;
+    assert!(marker_before.starts_with("manifest-authority:"));
+
+    let resume_error = loopback_runner(&scratch, "manifest-recompute-ingest-fence-resume")?
+        .redo(
+            &chain,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("recompute-flags must wait for the required Ingest redo");
+    let command = "rerun `phase-runner redo --chain manifest-recompute-ingest-fence --phase \
+                   ingest --from-block 0 --to-block 1`";
+    assert!(resume_error.to_string().contains(command), "{resume_error}");
+
+    let marker_after = interpret_input_hash(scratch.pool(), chain_id).await?;
+    assert_eq!(marker_after, marker_before);
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
+    );
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', finished_at = now(), last_error = NULL,
+             redo_in_progress = false, redo_mode = NULL, redo_previous_phase_status = NULL,
+             redo_previous_last_error = NULL, redo_previous_started_at = NULL,
+             redo_previous_finished_at = NULL, redo_from_block_number = NULL,
+             redo_to_block_number = NULL, redo_current_block_number = NULL,
+             redo_current_block_hash = NULL, redo_target_block_number = NULL, redo_target_block_hash = NULL
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await
+    .context("failed to reset the interrupted Interpret marker")?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET redo_current_block_number = 0, redo_current_block_hash = 'project-checkpoint'
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await
+    .context("failed to seed the Project-only recompute marker")?;
+    loopback_runner(&scratch, "manifest-recompute-ingest-fence-project-resume")?
+        .redo(
+            &chain,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("Project-only recompute resume must wait for required Ingest");
+    let project_checkpoint: (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT redo_current_block_number, redo_current_block_hash
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        project_checkpoint,
+        (Some(0), Some("project-checkpoint".into()))
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn widening_after_rewind_targets_the_readable_head_and_can_complete() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_widening_after_rewind").await?;
     let chain_id = "manifest-widening-after-rewind";
@@ -703,24 +819,62 @@ async fn adding_a_discovery_rule_over_ingested_history_is_rejected() -> Result<(
         .await
         .expect_err("historical indexability admission needs prior discovery derivation");
     assert!(error.to_string().contains("discovery rule"));
-    for edge_kind in ["subregistry", "registry_announcement"] {
-        fixture.write(false, false)?;
-        fixture.add_discovery_rule(edge_kind)?;
-        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
-    }
+    fixture.write(false, false)?;
+    fixture.add_discovery_rule("registry_announcement")?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("unsupported historical announcement widening must reject");
+    assert!(error.to_string().contains("registry announcement"));
+    fixture.write(false, false)?;
+    fixture.add_discovery_rule("subregistry")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
     scratch.cleanup().await?;
 
     let fresh = ScratchDatabase::create("production_manifest_fresh_discovery_rule").await?;
     let fresh_chain = "manifest-fresh-discovery-rule";
-    let fresh_fixture = WatchManifestFixture::new(fresh_chain)?;
+    let fresh_fixture =
+        WatchManifestFixture::with_source_family(fresh_chain, "ens_v2_registry_l1")?;
     fresh_fixture.write(false, false)?;
-    fresh_fixture.add_discovery_rule("resolver")?;
+    fresh_fixture.add_discovery_rule("registry_announcement")?;
     sync_schema_v2_repository(fresh.pool(), &load_repository(&fresh_fixture.root)?).await?;
     seed_completed_ingest_range(&fresh, fresh_chain).await?;
     fresh_fixture.write(false, false)?;
     sync_schema_v2_repository(fresh.pool(), &load_repository(&fresh_fixture.root)?).await?;
 
     fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn historical_registry_announcement_rule_stamps_backfillable_ingest() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_announcement_rule_widening").await?;
+    let chain_id = "manifest-announcement-rule-widening";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.add_discovery_rule("registry_announcement")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn future_registry_announcement_rule_remains_admissible() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_future_announcement").await?;
+    let chain_id = "manifest-future-announcement";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
+    fixture.write_with_start(false, false, 2)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    fixture.add_discovery_rule("registry_announcement")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    scratch.cleanup().await
 }
 
 #[tokio::test]
@@ -1786,6 +1940,14 @@ async fn seed_completed_ingest_range(
     chain_id: &str,
 ) -> Result<ChainConfig> {
     seed_completed_ingest_range_through(scratch, chain_id, 1).await
+}
+
+async fn interpret_input_hash(pool: &sqlx::PgPool, chain_id: &str) -> Result<String> {
+    let query = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    );
+    Ok(query.bind(chain_id).fetch_one(pool).await?)
 }
 
 async fn seed_discovered_resolver_address(

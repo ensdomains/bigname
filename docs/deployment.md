@@ -328,8 +328,9 @@ widening over retained Ingest coverage and stamps the exact required Ingest
 range. Normal phase execution stops and prints the explicit `ingest` redo
 command; it never performs the potentially expensive historical fetch
 automatically. Complete that command before the attested Interpret redo.
-Until it completes, the runner also refuses the start of any explicit Interpret
-or Project redo and repeats the exact required Ingest command. Supplying
+Until it completes, the runner also refuses the start of any explicit
+Interpret, Project, or recompute-flags redo and repeats the exact required
+Ingest command. Supplying
 `--attest-watch-set-coverage` does not override this refusal: the attestation
 describes retained-fact coverage, while the durable Ingest stamp records an
 uncompleted historical-fetch obligation.

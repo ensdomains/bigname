@@ -161,7 +161,21 @@ pub(super) async fn invalidate_changed_derived_epochs(
         if let Some(widening) =
             super::watch::discovery_widening_start(&previous.watch, &desired.watch, &chain_id)
         {
-            reject_covered_discovery_widening(transaction, &chain_id, widening).await?;
+            reject_covered_discovery_widening(transaction, &chain_id, widening, false).await?;
+        }
+        if let Some(widening) = super::watch::unsupported_registry_announcement_widening(
+            &previous.watch,
+            &desired.watch,
+            &chain_id,
+        ) {
+            reject_covered_discovery_widening(transaction, &chain_id, widening, true).await?;
+        }
+        if let Some(widened_from) = super::watch::registry_announcement_widening_start(
+            &previous.watch,
+            &desired.watch,
+            &chain_id,
+        ) {
+            stamp_required_ingest(transaction, &chain_id, widened_from).await?;
         }
         if let Some(widened_from) =
             super::watch::widening_start(&previous.watch, &desired.watch, &chain_id)
@@ -265,6 +279,7 @@ async fn reject_covered_discovery_widening(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     widening: super::watch::DiscoveryWidening,
+    registry_announcement: bool,
 ) -> Result<()> {
     let widened_from = i64::try_from(widening.start)
         .context("manifest discovery start does not fit into BIGINT")?;
@@ -291,14 +306,19 @@ async fn reject_covered_discovery_widening(
     .await
     .with_context(|| format!("failed to inspect discovery coverage for chain {chain_id}"))?;
     if overlaps {
+        let subject = match (registry_announcement, widening.kind) {
+            (true, _) => "registry announcement ",
+            (false, super::watch::DiscoveryWideningKind::SourceReplacement) => "resolver ",
+            _ => "",
+        };
         let transition = match widening.kind {
             super::watch::DiscoveryWideningKind::Rule => "discovery rule widening",
             super::watch::DiscoveryWideningKind::SourceReplacement => {
-                "resolver discovery source replacement"
+                "discovery source replacement"
             }
         };
         bail!(
-            "manifest {transition} overlaps ingested history for chain {chain_id}; this \
+            "manifest {subject}{transition} overlaps ingested history for chain {chain_id}; this \
              transition is unsupported in place and needs a fresh rebuild or a dedicated \
              discovery backfill mechanism before historical Ingest can be certified"
         );

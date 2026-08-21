@@ -162,7 +162,7 @@ fn require_completed_ingest_redo(
     phase: PhaseName,
     mode: &RunMode,
 ) -> RunnerResult<()> {
-    if !matches!(mode, RunMode::Redo(_))
+    if !matches!(mode, RunMode::Redo(_) | RunMode::RecomputeFlags(_))
         || !matches!(phase, PhaseName::Interpret | PhaseName::Project)
     {
         return Ok(());

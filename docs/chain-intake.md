@@ -428,9 +428,9 @@ The range end must already be `canonical`, `safe`, or `finalized`; an
 `observed` staging row is rejected before a redo session is claimed.
 Flag recomputation is supported through `--phase recompute-flags`. Among
 otherwise configured redo requests, historical `live` redo, an unreadable
-range end, and an Interpret or Project redo requested while a required
-Ingest redo is still stamped for that chain are rejected before a redo
-marker is written. These preflight refusals and terminal verification
+range end, and an Interpret, Project, or recompute-flags redo requested while
+a required Ingest redo is still stamped for that chain are rejected before a
+redo marker is written. These preflight refusals and terminal verification
 failures cannot strand unresumable redo state.
 
 The thin rewind command moves only the published latest head:

@@ -11,6 +11,19 @@ use crate::{
 use super::PhaseRunner;
 
 impl PhaseRunner {
+    pub(super) async fn reject_pending_required_ingest(&self, chain_id: &str) -> RunnerResult<()> {
+        if let Some(range) = self
+            .store
+            .required_redo_range(chain_id, PhaseName::Ingest)
+            .await?
+        {
+            return Err(crate::transitions::required_ingest_redo_error(
+                chain_id, range,
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn catch_up_for_required_redo(
         &self,
         chain: &ChainConfig,
