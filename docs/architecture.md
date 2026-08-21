@@ -725,8 +725,11 @@ batch boundaries fall. The guarantee is verified for the divergence classes
 [#336](https://github.com/ensdomains/bigname/issues/336) identified on the
 ENSv1 path and [#348](https://github.com/ensdomains/bigname/issues/348)
 identified on the ENSv2 resolver path; the permutation lane's pinned
-batch-artifact counts sit at zero. Five rules keep the written rows
-batch-independent:
+batch-artifact counts sit at zero. One structurally identified shape remains
+open and unreached by the generated corpus: a name link created only by an
+alias observation is not rebuilt at restore
+([#529](https://github.com/ensdomains/bigname/issues/529)). Five rules keep
+the written rows batch-independent:
 
 - `before_state` chains over the emitted event stream: a retained event's
   `before_state` is the `after_state` of the previous retained event under the

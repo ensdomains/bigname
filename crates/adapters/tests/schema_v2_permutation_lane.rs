@@ -1307,7 +1307,9 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// happen — `counts` omits zero-count classes. The 600-case sweep agrees with the fix on the
 /// classes it covered: ENSv1 `carried_before_states` fell 7 to 0 alongside the anchors, and the
 /// four ENSv2 `rebased_attributions` catalogued by issue #348 fell to 0 when restore began rebuilding
-/// the retained namehash-to-name observation.
+/// the retained namehash-to-name observation. One structurally identified sibling shape stays open
+/// and unreached: a link created only by an alias observation carries no preimage metadata, so
+/// restore cannot rebuild it (issue #529); the corpus generates no alias-only names today.
 const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
     (ENS_V1_MAINNET.label, &[]),
     (ENS_V1_SEPOLIA.label, &[]),
