@@ -157,6 +157,29 @@ files, and docs are not included.
 | 3A. Direct-child correlation | Derive the deferred child-migration shapes that reach no migration controller, where the already-migrated parent's own [migration registry](glossary.md#migration-registry-wrapperregistry) registers the child into itself through the self-call that definition cites; admit the registry a locked child receives from its parent registry so admitted depth is unbounded; derive the child's ENSv1 predecessor from the parent registry's own migration evidence and the registered labelhash rather than inheriting the `.eth` second-level rule, under the separate `wrapper_backed_child_control` anchor defined at [child migration boundary](glossary.md#child-migration-boundary), selected against the child's ENSv1 cleanup rather than the registration; admit both cleanup shapes that definition cites — the `locked_child` path, whose wrapper token is parked in the Graveyard, and the `emancipated_child` path, whose node is unwrapped into it — each only with that ENSv1 predecessor cleanup present, earlier in the registration's own transaction; and reject the clobbered registration, the unmigrated child, factory-only evidence, incomplete parent discovery, and any self-claim lacking ENSv1 predecessor cleanup as non-boundaries, `MigrationHelper` participation being unobservable for the reason cited there and so never a correlation key at all. Correlation reuses `authority_transition`; every child boundary and effect is candidate-only, so no child state, projection, or product row changes — though an admitted child registry does widen Project's delete-and-rebuild scope — and activating a child transition remains an explicit refusal until slice 3B. | 4 |
 | 3B. Children publication invariant | Stage the parent-child relation each authority arm states into `project_child_candidates` and publish the arm the child's own staged authority selects, so recency orders only the current relation inside that one arm and never picks the arm: an unmigrated ENSv1 child keeps its ENSv1 relation below a migrated parent, a child with an activated ENSv1→ENSv2 migration boundary or a current positive ENSv2 registration publishes its ENSv2 relation over retained ENSv1 residue, a released ENSv2 child publishes nothing and does not fall back, and a pair whose arms disagree with no authority proof is omitted as unsupported rather than ranked. Add the ordered child assertion that fails a Mainnet [projection generation](glossary.md#projection-generation) with failure kind `dual_current_child_authority` only when a child holding `migration_authority_transition` or `positive_v2_child_registration` authority has an ENSv1 parent-child relation asserted after its authority epoch started, write the child transition relative to the ENSv1 cleanup, and scope the redo reopen to the authority arm. Activating a complete ENSv1→ENSv2 migration group remains the separate follow-on. | 4 (children projection builder, Project integrity assertion, child transition writer, redo reopen) plus one reviewed schema-migration file for the failure-kind vocabulary |
 
+Issue [#348](https://github.com/ensdomains/bigname/issues/348) ships at its own
+[interpreter content hash](glossary.md#interpreter-content-hash)
+[re-derivation boundary](glossary.md#re-derivation-boundary), before the
+combined slice/PR-#391 boundary. Its allowed product delta arises from late
+ENSv2 resolver `RecordChanged` and `RecordVersionChanged` rows for a retained
+canonical [name surface](glossary.md#surface-name-surface): `event_identity`
+stays fixed, `logical_name_id` becomes non-null, `resource_id` stays null,
+`raw_fact_ref.interpreter_state_key`
+changes with the attribution, and `before_state` may rethread onto the
+logical-name/resource-null state stream. Those rows may newly enter
+name-filtered diagnostics and product history. An ended resource whose latest
+retained `ResolverChanged` pointer names the emitting resolver may also receive
+a different rebuildable `record_inventory_current` row; the released or
+expired name must still have no current binding or resource, and its name and
+record reads must not expose that inventory. The boundary invalidates the
+continuation contract for outstanding collection cursors; consumers restart
+from the first page. Acceptance verifies the declared normalized-event and
+inventory-row deltas, proves the ended name remains unbound with no served
+record inventory, and verifies fresh complete pages, fields, membership, and
+cursor continuation under the new publication. Any other product difference
+blocks that publication. The later combined-boundary gate uses the post-#348
+publication as its behavior-preserving baseline.
+
 Slices 1, 2A, 2B, and 2C are separately reviewed and separately merged implementation
 PRs, but deploy together at the same planned [re-derivation
 boundary](glossary.md#re-derivation-boundary), which also carries

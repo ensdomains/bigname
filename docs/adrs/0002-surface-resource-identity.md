@@ -67,6 +67,10 @@ Public identity rules:
 - permissions and control are resource-first and keyed by `resource_id`
 - token IDs are never treated as logical identity
 - a time-ranged `SurfaceBinding` joins `logical_name_id` to `resource_id`
+- a canonical ENSv2 registry/root `PreimageObserved` keeps its [name
+  surface](../glossary.md#surface-name-surface) known after its active binding
+  and resource end; later node-scoped records keep `logical_name_id` but do not
+  inherit the ended `resource_id`
 
 ENSv1 authority-anchor rules:
 
@@ -126,6 +130,33 @@ Resource-centric permissions follow the same lifecycle: while one ENSv1 authorit
 ### ENSv2 linked surfaces
 
 Two public surfaces may bind to the same `resource_id`. Permissions and role history stay attached to the resource; surface-specific reads keep their own binding provenance.
+
+A retained canonical registry/root `PreimageObserved` rebuilds the known name
+surface during replay even after registration release or expiry closed its
+binding. A later resolver `NameChanged` or `VersionChanged` for that node
+remains attributed to the surface without an active `resource_id`. The
+resolver stores records by node and version. `setName` passes part zero,
+selecting the node-specific, any-part permission resource; the cited
+authorization path reads EnhancedAccessControl role mappings and contains no
+current registry-registration lookup. (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L127-L133 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L77-L85 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L178-L186 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L467-L472 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L66-L78
+@ ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L192 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L374-L382 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L443-L455 @
+ens_v2@ccaeb58)
 
 An ownerless version-zero ENSv2 reservation establishes an unbound registry-entry
 `resource_id` and token-lineage identity before any token mint. Their existence

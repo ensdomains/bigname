@@ -156,6 +156,20 @@ impl State {
                 event.source_family.as_str(),
                 "ens_v2_registry_l1" | "ens_v2_root_l1"
             );
+            if is_v2_topology
+                && event.event_kind == "PreimageObserved"
+                && event
+                    .after_state
+                    .get("visibility_state")
+                    .and_then(Value::as_str)
+                    != Some("shadow")
+                && let Some(logical_name_id) = event.logical_name_id.as_ref()
+            {
+                // A canonical [name surface](../../../../docs/glossary.md#surface-name-surface)
+                // remains known after its registry binding or resource ends.
+                // Normalization-rejected name observations never enter this state.
+                self.observe_name_surface(logical_name_id.clone());
+            }
             if is_v2_topology {
                 latest_delta_timestamp = latest_delta_timestamp.max(
                     event
