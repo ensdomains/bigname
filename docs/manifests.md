@@ -877,6 +877,22 @@ A `resolver` discovery rule with no matching root or contract declaration is its
 discovery input, so adding such a rule in a new namespace over retained history is rejected like any
 other widening.
 
+Runtime resolver admission also requires the registry and resolver families to
+have the same [deployment epoch](glossary.md#deployment-epoch). Manifest
+synchronization compares that relationship for each desired `resolver`
+discovery rule whose source is `ens_v1_registry_l1`, `ens_v2_registry_l1`,
+`ens_v2_root_l1`, or `basenames_base_registry`. When the desired manifests newly
+match where the preceding active pair did not, or both sides rotate to a new
+matching source epoch, synchronization classifies the transition as resolver
+discovery-rule widening. It rejects the change over retained
+history because manifest snapshots cannot prove that Interpret has already
+materialized every resolver discovery edge; one Ingest redo could otherwise
+fetch an incomplete address set and clear the obligation before Interpret adds
+the missing edges. Changing from matching to nonmatching removes resolver
+intervals and is admissible narrowing. A family with no active `resolver` rule
+admits no discovered resolver address, so an epoch match alone is also
+admissible. These transitions remain admissible before any Ingest range is retained.
+
 `registry_announcement` rules use the same namespace-scoped comparison. In the
 `ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest
 first selects a declared `RegistryCreated` as an all-emitter event, then fetches

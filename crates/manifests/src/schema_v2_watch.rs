@@ -78,6 +78,7 @@ impl DiscoveryRuleKey {
 pub(super) enum DiscoveryWideningKind {
     Rule,
     SourceReplacement,
+    DeploymentEpoch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +91,7 @@ pub(super) struct DiscoveryWidening {
 pub(super) struct Snapshot {
     watch_by_chain: BTreeMap<String, BTreeMap<WatchKey, u64>>,
     discovery_by_chain: BTreeMap<String, BTreeMap<DiscoveryRuleKey, u64>>,
+    deployments_by_chain: BTreeMap<String, BTreeMap<(String, String), String>>,
 }
 
 pub(super) fn manifest_payload(manifest: &SourceManifest) -> Result<Value> {
@@ -129,6 +131,14 @@ pub(super) fn record(
             entry.start,
         );
     }
+    snapshot
+        .deployments_by_chain
+        .entry(manifest.chain.clone())
+        .or_default()
+        .insert(
+            (manifest.namespace.clone(), manifest.source_family.clone()),
+            manifest.deployment_epoch.clone(),
+        );
     record_discovery_rules(snapshot, manifest);
     Ok(())
 }
@@ -155,6 +165,51 @@ pub(super) fn discovery_widening_start(
     discovery_widening_start_for(previous, desired, chain_id, |rule| {
         rule.edge_kind == "resolver"
     })
+}
+
+pub(super) fn resolver_deployment_widening(
+    previous: &Snapshot,
+    desired: &Snapshot,
+    chain_id: &str,
+) -> Option<DiscoveryWidening> {
+    let desired_deployments = desired.deployments_by_chain.get(chain_id)?;
+    let previous_deployments = previous.deployments_by_chain.get(chain_id);
+    desired
+        .discovery_by_chain
+        .get(chain_id)?
+        .keys()
+        .filter(|rule| rule.edge_kind == "resolver")
+        .find_map(|rule| {
+            let source_key = (rule.namespace.clone(), rule.family.clone());
+            let source_label = desired_deployments.get(&source_key)?;
+            let target_family = resolver_target_family(&rule.family)?;
+            let target_key = (rule.namespace.clone(), target_family.to_owned());
+            let target_label = desired_deployments.get(&target_key)?;
+            if source_label != target_label {
+                return None;
+            }
+            let remained_admitted = previous_deployments.is_some_and(|manifests| {
+                manifests.get(&source_key).is_some_and(|previous_source| {
+                    previous_source == source_label
+                        && manifests
+                            .get(&target_key)
+                            .is_some_and(|previous_target| previous_source == previous_target)
+                })
+            });
+            (!remained_admitted).then_some(DiscoveryWidening {
+                start: 0,
+                kind: DiscoveryWideningKind::DeploymentEpoch,
+            })
+        })
+}
+
+fn resolver_target_family(source_family: &str) -> Option<&'static str> {
+    match source_family {
+        "ens_v1_registry_l1" => Some("ens_v1_resolver_l1"),
+        "ens_v2_registry_l1" | "ens_v2_root_l1" => Some("ens_v2_resolver_l1"),
+        "basenames_base_registry" => Some("basenames_base_resolver"),
+        _ => None,
+    }
 }
 
 pub(super) fn registry_announcement_widening_start(

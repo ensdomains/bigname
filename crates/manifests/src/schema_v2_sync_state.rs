@@ -159,6 +159,11 @@ pub(super) async fn invalidate_changed_derived_epochs(
             continue;
         }
         if let Some(widening) =
+            super::watch::resolver_deployment_widening(&previous.watch, &desired.watch, &chain_id)
+        {
+            reject_covered_discovery_widening(transaction, &chain_id, widening, false).await?;
+        }
+        if let Some(widening) =
             super::watch::discovery_widening_start(&previous.watch, &desired.watch, &chain_id)
         {
             reject_covered_discovery_widening(transaction, &chain_id, widening, false).await?;
@@ -308,13 +313,20 @@ async fn reject_covered_discovery_widening(
     if overlaps {
         let subject = match (registry_announcement, widening.kind) {
             (true, _) => "registry announcement ",
-            (false, super::watch::DiscoveryWideningKind::SourceReplacement) => "resolver ",
+            (
+                false,
+                super::watch::DiscoveryWideningKind::SourceReplacement
+                | super::watch::DiscoveryWideningKind::DeploymentEpoch,
+            ) => "resolver ",
             _ => "",
         };
         let transition = match widening.kind {
             super::watch::DiscoveryWideningKind::Rule => "discovery rule widening",
             super::watch::DiscoveryWideningKind::SourceReplacement => {
                 "discovery source replacement"
+            }
+            super::watch::DiscoveryWideningKind::DeploymentEpoch => {
+                "discovery rule widening from a newly matching deployment epoch"
             }
         };
         bail!(

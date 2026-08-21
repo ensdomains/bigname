@@ -239,7 +239,11 @@ discovery rules and their emitting declarations. Widening adds a rule or
 emitter, adds the first emitter to a rule that previously matched no
 declaration, or moves an emitter's inclusive start block earlier. Narrowing
 removes rules or emitters, including removal of a rule's last emitter, or moves
-an emitter's start later. Resolver widening over retained history is rejected
+an emitter's start later. For an active resolver discovery rule, widening also
+includes a registry/resolver pair whose desired manifest `deployment_epoch`
+values newly match after the preceding active pair did not, or whose matching
+source epoch changes; changing that pair from matching to nonmatching is
+narrowing. Resolver widening over retained history is rejected
 because the admitted addresses are not known until Interpret materializes
 their discovery edges. Registry-announcement widening instead stamps a required
 Ingest redo for the ENSv2 registry family, whose intake discovers each registry

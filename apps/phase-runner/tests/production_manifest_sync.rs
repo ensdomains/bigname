@@ -446,6 +446,44 @@ normalized_events = []
         }
         Ok(())
     }
+
+    fn set_deployment_epoch(
+        &self,
+        namespace: &str,
+        family: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<()> {
+        let path = self.root.join(namespace).join(family).join("v2.toml");
+        let manifest = fs::read_to_string(&path)?.replacen(
+            &format!("deployment_epoch = \"{from}\""),
+            &format!("deployment_epoch = \"{to}\""),
+            1,
+        );
+        fs::write(path, manifest)?;
+        Ok(())
+    }
+
+    fn replace_deployment_epoch(
+        &self,
+        namespace: &str,
+        family: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<()> {
+        let directory = self.root.join(namespace).join(family);
+        let old_path = directory.join("v2.toml");
+        let manifest = fs::read_to_string(&old_path)?
+            .replacen("manifest_version = 2", "manifest_version = 3", 1)
+            .replacen(
+                &format!("deployment_epoch = \"{from}\""),
+                &format!("deployment_epoch = \"{to}\""),
+                1,
+            );
+        fs::write(directory.join("v3.toml"), manifest)?;
+        fs::remove_file(old_path)?;
+        Ok(())
+    }
 }
 
 impl Drop for WatchManifestFixture {
@@ -1187,6 +1225,167 @@ async fn discovered_family_event_widening_is_namespace_scoped_in_both_orderings(
             Some((0, 1)),
             "{case} namespace must refetch its already-discovered resolver history"
         );
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_epoch_flip_without_complete_discovery_is_rejected() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_resolver_epoch_flip").await?;
+    let chain_id = "manifest-resolver-epoch-flip";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err(
+            "manifest snapshots cannot prove that Interpret materialized every resolver edge",
+        );
+    assert!(
+        error
+            .to_string()
+            .contains("resolver discovery rule widening from a newly matching deployment epoch"),
+        "{error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn resolver_epoch_flip_away_from_registry_is_admissible_narrowing() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_resolver_epoch_narrowing").await?;
+    let chain_id = "manifest-resolver-epoch-narrowing";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "unmatched")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        None,
+        "stopping the label join removes discovered intervals and needs no historical fetch"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn deployment_epoch_match_without_a_resolver_rule_is_admissible() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_epoch_without_rule").await?;
+    let chain_id = "manifest-epoch-without-rule";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let manifest = fs::read_to_string(&path)?
+        .replace("roots = []", "roots = []\ndiscovery_rules = []")
+        .replace(
+            "[[discovery_rules]]\nedge_kind = \"resolver\"\nfrom_role = \"registry\"\nadmission = \"reachable_from_root\"",
+            "",
+        );
+    fs::write(path, manifest)?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "registry-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_registry_l1", "registry-old", "fixture")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn registry_epoch_flip_over_retained_history_is_rejected() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_registry_epoch_flip").await?;
+    let chain_id = "manifest-registry-epoch-flip";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "registry-old")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "matched")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let resolver = "0x0000000000000000000000000000000000000005";
+    seed_discovered_resolver_address(scratch.pool(), chain_id, "test", resolver).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_registry_l1", "registry-old", "matched")?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+            panic!(
+                "registry epoch flip synced without rejection or required Ingest; its retained \
+                 discovery edge still names the deprecated source manifest"
+            );
+        }
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("resolver discovery rule widening from a newly matching deployment epoch"),
+        "{error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn matched_registry_and_resolver_epoch_rotation_is_rejected() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_matched_epoch_rotation").await?;
+    let chain_id = "manifest-matched-epoch-rotation";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "next")?;
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "next")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("replacing the matching source manifest invalidates its retained edges");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn epoch_flips_without_retained_ingest_history_are_admissible() -> Result<()> {
+    for (case, initialize, flipped_family, old_epoch) in [
+        (
+            "fresh-resolver",
+            false,
+            "ens_v2_resolver_l1",
+            "resolver-old",
+        ),
+        (
+            "fresh-registry",
+            false,
+            "ens_v2_registry_l1",
+            "registry-old",
+        ),
+        ("empty-resolver", true, "ens_v2_resolver_l1", "resolver-old"),
+        ("empty-registry", true, "ens_v2_registry_l1", "registry-old"),
+    ] {
+        let scratch = ScratchDatabase::create(&format!("production_manifest_epoch_{case}")).await?;
+        let chain_id = format!("manifest-epoch-{case}");
+        let fixture = WatchManifestFixture::new(&chain_id)?;
+        fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+        fixture.set_deployment_epoch("test", flipped_family, "fixture", old_epoch)?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+        if initialize {
+            PhaseStore::new(scratch.pool().clone())
+                .initialize_chain(&chain_id)
+                .await?;
+        }
+
+        fixture.replace_deployment_epoch("test", flipped_family, old_epoch, "fixture")?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+        assert_eq!(required_ingest_redo(scratch.pool(), &chain_id).await?, None);
         scratch.cleanup().await?;
     }
     Ok(())
