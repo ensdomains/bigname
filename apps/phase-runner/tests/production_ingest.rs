@@ -874,6 +874,84 @@ async fn explicit_ingest_redo_clears_a_manifest_widening_obligation_and_unblocks
 }
 
 #[tokio::test]
+async fn failed_required_ingest_redo_resumes_its_bound_checkpoint() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_required_ingest_retry_resume").await?;
+    let chain_id = "rpc-required-ingest-retry-resume";
+    let manifests = IngestWatchManifestFixture::new(chain_id)?;
+    manifests.write(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let (endpoint, _rpc_state, server) = spawn_watch_plan_boundary_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    run_until_ingest_handoff(
+        production_ingest_runner(scratch.runner(), "required-ingest-retry-seed")?,
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1,
+    )
+    .await?;
+
+    manifests.write(true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    assert_eq!(
+        sqlx::query_as::<_, (Option<i64>, Option<Value>, Option<String>)>(
+            "SELECT redo_current_block_number, redo_source_boundary_markers,
+                    redo_manifest_authority_fingerprint
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'ingest'",
+        )
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?,
+        (None, None, None),
+        "a sync-stamped required Ingest redo must begin without resumable evidence"
+    );
+
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    production_ingest_runner_with_phase(
+        scratch.runner(),
+        "required-ingest-retry",
+        Arc::new(ProgressThenTransientIngestPhase::new(Arc::clone(&observed))),
+    )?
+    .redo(
+        &configured_chain,
+        RedoPhase::Phase(PhaseName::Ingest),
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(
+        *observed
+            .lock()
+            .expect("resume observation lock must not be poisoned"),
+        vec![(Some(0), Some(0))],
+        "the retry must receive the saved checkpoint and per-source boundary marker"
+    );
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+        )
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?
+    );
+
+    server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn pre_upgrade_range_end_redo_checkpoint_requires_loaded_boundary_evidence() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_ingest_redo_pre_upgrade_boundary").await?;
     let chain_id = "rpc-ingest-redo-pre-upgrade-boundary";
@@ -1565,6 +1643,72 @@ async fn fresh_ingest_redo_reports_the_boundary_returned_by_the_load() -> Result
 struct InterruptAfterCompletedIngestBatch {
     inner: IngestPhase,
     interrupt_next_batch: AtomicBool,
+}
+
+type RedoResumeObservation = Arc<Mutex<Vec<(Option<i64>, Option<i64>)>>>;
+
+struct ProgressThenTransientIngestPhase {
+    attempts: AtomicUsize,
+    observed: RedoResumeObservation,
+    loopback: LoopbackPhase,
+}
+
+impl ProgressThenTransientIngestPhase {
+    fn new(observed: RedoResumeObservation) -> Self {
+        Self {
+            attempts: AtomicUsize::new(0),
+            observed,
+            loopback: LoopbackPhase::new(PhaseName::Ingest),
+        }
+    }
+}
+
+impl Phase for ProgressThenTransientIngestPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt > 1 {
+            let boundary = context
+                .resume
+                .ingest_cursors
+                .iter()
+                .find(|cursor| cursor.source_key == "rpc")
+                .and_then(|cursor| cursor.redo_loaded_boundary.as_ref())
+                .map(|marker| marker.number);
+            self.observed
+                .lock()
+                .expect("resume observation lock must not be poisoned")
+                .push((
+                    context.resume.current.as_ref().map(|marker| marker.number),
+                    boundary,
+                ));
+            return self.loopback.run_batch(context);
+        }
+        Box::pin(async move {
+            if attempt == 1 {
+                return Err(RunnerError::transient("forced transient Ingest retry"));
+            }
+            let current = phase_runner::heads::BlockMarker::new(0, BLOCK_0)?;
+            let target = context
+                .available_heads
+                .expect("fixture requires readable Ingest heads")
+                .latest;
+            Ok(PhaseBatchOutcome::Continue(PhaseProgress {
+                current: Some(current.clone()),
+                target: Some(target.clone()),
+                source_progress: vec![phase_runner::phase::SourceProgress {
+                    source_key: "rpc".to_owned(),
+                    current: Some(current.clone()),
+                    target: Some(target),
+                    redo_loaded_boundary: Some(current),
+                }],
+                ..PhaseProgress::default()
+            }))
+        })
+    }
 }
 
 struct IngestWatchManifestFixture {

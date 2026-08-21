@@ -62,7 +62,8 @@ pub(crate) async fn begin(
             .last_error
             .as_deref()
             .is_some_and(crate::redo_recompute::owns_project_refresh);
-    let pending_required_ingest = phase == PhaseName::Ingest
+    let unbound_required_ingest = phase == PhaseName::Ingest
+        && previous.redo_manifest_authority_fingerprint.is_none()
         && previous
             .last_error
             .as_deref()
@@ -138,7 +139,7 @@ pub(crate) async fn begin(
     // operator attempt. Its first explicit execution binds the checkpoint to
     // the exact event/emitter set being loaded; a later crash retry resumes it.
     let same_active_redo =
-        matches_active_redo(&previous, redo_mode, execution_range) && !pending_required_ingest;
+        matches_active_redo(&previous, redo_mode, execution_range) && !unbound_required_ingest;
     let attestation_audit = crate::redo_manifest_audit::record_or_resume(
         &mut transaction,
         chain_id,
