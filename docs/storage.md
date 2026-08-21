@@ -167,8 +167,16 @@ authorizes that transition. This preserved evidence is diagnostic state, not
 permission to publish: provider-trusted Sepolia readiness requires both Ingest
 and Verify to remain completed.
 
-At runner startup, a `running` or `paused` Interpret, Project, or Verify row
-with no explicit redo is resolved only while its advisory lock remains held.
+At runner startup, a `running` or `paused` Interpret, Project, or Verify row with no
+explicit redo is resolved only while its advisory lock remains held. A required Ingest
+redo whose `last_error` begins with `required downstream redo active:` and outlived its
+advisory-lock session is changed back to `required downstream redo:` while the next
+runner holds that lock. Its `redo_from_block_number`, `redo_to_block_number`,
+`redo_current_block_number`, `redo_current_block_hash`, `redo_target_block_number`,
+`redo_target_block_hash`, `redo_source_boundary_markers`, and
+`redo_manifest_authority_fingerprint` remain unchanged for the exact-range retry.
+Pool-backed progress for a required Ingest redo also requires the active `last_error`
+prefix, so a delayed write from the abandoned attempt cannot change those fields.
 A saved Interpret or Project final checkpoint is recorded as `completed`; an
 earlier checkpoint is recorded as `failed` so ordinary phase execution can
 resume it. A saved Verify final checkpoint stays `failed` until current

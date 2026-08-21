@@ -28,14 +28,14 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
-    error::RunnerError,
+    error::{ErrorKind, RunnerError},
     heads::{BlockMarker, HeadMarkers, publish_heads},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
     live_phase::LivePhase,
     phase::{
         BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
-        PhaseProgress, PhaseResume, PhaseSet, RunMode,
+        PhaseProgress, PhaseResume, PhaseSet, RedoAttemptFence, RunMode,
     },
     project_phase::ProjectPhase,
     rewind::rewind_to_ancestor,
@@ -46,7 +46,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::{
     net::TcpListener,
-    sync::{RwLock, Semaphore},
+    sync::{Notify, RwLock, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber;
@@ -266,6 +266,53 @@ impl Phase for FailingIngestPhase {
                 "invalid attestation reached Ingest",
             ))
         })
+    }
+}
+
+struct CrashThenResumeIngestPhase {
+    calls: AtomicUsize,
+    blocked: Notify,
+}
+
+impl CrashThenResumeIngestPhase {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            blocked: Notify::new(),
+        }
+    }
+}
+
+impl Phase for CrashThenResumeIngestPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => Box::pin(async move {
+                let current = BlockMarker::new(0, block_hash(1, 0))?;
+                let target = context
+                    .available_heads
+                    .expect("required Ingest redo needs readable heads")
+                    .latest;
+                Ok(PhaseBatchOutcome::Continue(PhaseProgress {
+                    current: Some(current.clone()),
+                    target: Some(target.clone()),
+                    source_progress: vec![phase_runner::phase::SourceProgress {
+                        source_key: "rpc".to_owned(),
+                        current: Some(current.clone()),
+                        target: Some(target),
+                        redo_loaded_boundary: Some(current),
+                    }],
+                    ..PhaseProgress::default()
+                }))
+            }),
+            _ => Box::pin(async move {
+                self.blocked.notify_one();
+                std::future::pending().await
+            }),
+        }
     }
 }
 
@@ -569,6 +616,173 @@ async fn required_ingest_recovery_uses_the_published_head_without_a_finite_hando
     .fetch_one(scratch.pool())
     .await?;
     assert!(!still_required);
+
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn live_writer_then_crash_orphaned_required_ingest_redo_recovers_after_rewind() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_live_crash_orphaned_required_ingest").await?;
+    let chain = "crash-orphaned-required-ingest";
+    seed_branch(scratch.pool(), chain, 1, 1, None).await?;
+    publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 1, &block_hash(1, 1)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+             redo_previous_phase_status = 'completed',
+             redo_previous_last_error = last_error,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 0, redo_to_block_number = 1,
+             last_error = 'required downstream redo: crash recovery fixture',
+             finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+
+    let ingest = Arc::new(CrashThenResumeIngestPhase::new());
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::clone(&ingest) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LivePhase::with_engine(engine)),
+    )?;
+    let runner = Arc::new(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-live-crash-orphaned-required-ingest",
+        fast_timing(),
+    )?);
+    let fixture = RpcFixture::spawn(1, 1).await?;
+    let configured_chain = live_chain(chain, &fixture.endpoint)?;
+    let redo_range = BlockRange::new(0, 1)?;
+    let crash_runner = Arc::clone(&runner);
+    let crash_chain = configured_chain.clone();
+    let crashed = tokio::spawn(async move {
+        crash_runner
+            .redo(
+                &crash_chain,
+                RedoPhase::Phase(PhaseName::Ingest),
+                redo_range,
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), ingest.blocked.notified())
+        .await
+        .context("required Ingest redo did not reach its crash point")?;
+    let active: (String, Value, i64) = sqlx::query_as(
+        "SELECT last_error,
+                jsonb_build_array(redo_from_block_number, redo_to_block_number,
+                    redo_current_block_number, redo_current_block_hash,
+                    redo_target_block_number, redo_target_block_hash,
+                    redo_source_boundary_markers, redo_manifest_authority_fingerprint),
+                redo_attempt_generation
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        active.0,
+        "required downstream redo active: crash recovery fixture"
+    );
+    let live_writer_error = runner
+        .run_chain(&configured_chain, CancellationToken::new())
+        .await
+        .expect_err("a live required Ingest writer must block restart recovery");
+    assert_eq!(live_writer_error.kind(), ErrorKind::LockHeld);
+    crashed.abort();
+    crashed.await.expect_err("redo task must abort");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0::bigint))")
+        .bind(format!("phase-runner:{chain}:ingest"))
+        .execute(scratch.pool())
+        .await?;
+
+    rewind_to_ancestor(
+        &scratch.runner(),
+        chain,
+        BlockMarker::new(0, block_hash(1, 0))?,
+    )
+    .await?;
+    let retry_error = runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            redo_range,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the rewind must make the exact redo retry fail preflight");
+    assert!(retry_error.to_string().contains("redo range end 1"));
+    assert!(retry_error.to_string().contains("is not readable"));
+
+    let live_error = tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.run_chain(&configured_chain, CancellationToken::new()),
+    )
+    .await
+    .context("Live did not attempt crash recovery")?
+    .expect_err("the required historical fetch must remain an operator decision");
+    assert!(
+        live_error
+            .to_string()
+            .contains("manifest watch plan widened"),
+        "Live recovery refused before settling the crashed ACTIVE row; exact retry refusal: \
+         {retry_error}; Live refusal: {live_error}"
+    );
+    let settled: (String, Value, i64) = sqlx::query_as(
+        "SELECT last_error,
+                jsonb_build_array(redo_from_block_number, redo_to_block_number,
+                    redo_current_block_number, redo_current_block_hash,
+                    redo_target_block_number, redo_target_block_hash,
+                    redo_source_boundary_markers, redo_manifest_authority_fingerprint),
+                redo_attempt_generation
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        settled.0,
+        "required downstream redo: crash recovery fixture"
+    );
+    assert_eq!((settled.1, settled.2), (active.1, active.2));
+    let stale_write = PhaseStore::new(scratch.pool().clone())
+        .record_progress(
+            chain,
+            PhaseName::Ingest,
+            &RunMode::Redo(redo_range),
+            Some(RedoAttemptFence {
+                generation: active.2,
+                execution_range: redo_range,
+            }),
+            &PhaseProgress::default(),
+        )
+        .await
+        .expect_err("settlement must reject delayed progress from the abandoned attempt");
+    assert!(stale_write.to_string().contains("redo attempt superseded"));
+
+    loopback_runner(&scratch, "crash-orphaned-required-ingest-retry")?
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            redo_range,
+            CancellationToken::new(),
+        )
+        .await
+        .context("exact redo retry did not resume after Live republished its end")?;
 
     fixture.server.abort();
     scratch.cleanup().await

@@ -156,7 +156,12 @@ impl PhaseRunner {
     }
 
     pub(super) async fn recover_stopped_phases(&self, chain: &ChainConfig) -> RunnerResult<()> {
-        for phase in [PhaseName::Interpret, PhaseName::Project, PhaseName::Verify] {
+        for phase in [
+            PhaseName::Ingest,
+            PhaseName::Interpret,
+            PhaseName::Project,
+            PhaseName::Verify,
+        ] {
             let mut phase_lock =
                 PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase).await?;
             let result =
@@ -182,6 +187,33 @@ async fn resolve_stopped_phase(
     chain_id: &str,
     phase: PhaseName,
 ) -> RunnerResult<()> {
+    if phase == PhaseName::Ingest {
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET last_error = $3 || substring(last_error FROM char_length($4) + 1),
+                 updated_at = now()
+             WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress
+               AND last_error LIKE $5",
+        )
+        .bind(chain_id)
+        .bind(phase.as_str())
+        .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
+        .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
+        .bind(format!(
+            "{}%",
+            crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX
+        ))
+        .execute(lock_connection)
+        .await
+        .map_err(|error| {
+            RunnerError::lock_connection_lost(format!(
+                "advisory-lock connection was lost while settling a stopped required Ingest redo \
+                 for chain {chain_id}; stopping so the next runner can recheck durable phase \
+                 state: {error}"
+            ))
+        })?;
+        return Ok(());
+    }
     sqlx::query(
         "UPDATE chain_phase_state
          SET phase_status = CASE
