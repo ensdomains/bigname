@@ -281,7 +281,20 @@ impl PhaseRunner {
             None => load_available_heads(self.store.pool(), &chain.chain_id).await?,
         };
         let live_handoff = if phase == PhaseName::Live && matches!(mode, RunMode::Normal) {
-            let handoff = self.store.ingest_handoff(&chain.chain_id).await?;
+            let mut handoff = self.store.ingest_handoff(&chain.chain_id).await?;
+            if handoff.is_none()
+                && self
+                    .store
+                    .required_redo_range(&chain.chain_id, PhaseName::Ingest)
+                    .await?
+                    .is_some()
+            {
+                // A rewind may be the only way to replace a provider fork after manifest sync
+                // stamped Ingest while finite intake was interrupted before recording its
+                // handoff. The published readable head is the recovery anchor; Live validates
+                // the provider path from it before publishing a replacement suffix.
+                handoff = available_heads.as_ref().map(|heads| heads.latest.clone());
+            }
             if handoff.is_none() {
                 return Err(RunnerError::data_integrity(format!(
                     "cannot start live phase for chain {} without the ingest handoff block",

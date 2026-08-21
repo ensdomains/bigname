@@ -1174,11 +1174,17 @@ then runs the required downstream redo.
 Historical work is a finite `ingest`, `interpret`, `project`, or `verify` run.
 An explicit redo can select one phase or all four in dependency order for one,
 several, or every active-manifest chain; it is not a persisted old-schema
-backfill job. Live follow starts at the completed ingest handoff and only walks
-the current head and a winning-fork gap; it never provides historical coverage.
+backfill job. Live follow normally starts at the completed ingest handoff and
+only walks the current head and a winning-fork gap; it never provides historical
+coverage. The recovery-only exception starts at the published readable head
+when a required Ingest redo end became unreadable and interrupted finite Ingest
+recorded no handoff. That pass only republishes the winning suffix; it does not
+execute or clear the operator-owned historical redo.
 `--phase recompute-flags` supports bounded flag recomputation. Among otherwise
-configured redo requests, only historical `live` redo and unreadable range ends
-are rejected before redo state is written. A deployment therefore still needs
+configured redo requests, historical `live` redo, unreadable range ends, and an
+Interpret, Project, or recompute-flags redo requested while a required Ingest
+redo is still stamped for that chain are rejected before redo state is written.
+A deployment therefore still needs
 complete admitted history for ENSv1, ENSv2, and Basenames source families.
 Wildcard and offchain names remain
 discovery/observed-answer based rather than exhaustively enumerable.

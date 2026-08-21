@@ -3,9 +3,19 @@ use std::{future::Future, pin::Pin};
 use sqlx::PgPool;
 
 use crate::{
-    IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result, SourceProgress,
-    engine::{Engine, LoadedWindow, SourceDescriptor},
+    BatchRequest, IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result, SourceProgress,
+    coinbase_sql::source_error,
+    engine::{Engine, SourceDescriptor},
+    plan::BASE_COINBASE_SEAM_BLOCK,
+    provider::{ProviderKind, normalized_kind},
 };
+
+pub(super) struct LoadedWindow {
+    pub(super) first: Marker,
+    pub(super) marker: Marker,
+    pub(super) first_parent_hash: Option<String>,
+    pub(super) estimated_write_bytes: u64,
+}
 
 pub(super) type RedoLoadFuture<'a> =
     Pin<Box<dyn Future<Output = Result<LoadedWindow>> + Send + 'a>>;
@@ -36,6 +46,156 @@ impl RedoWindowLoader for ProductionRedoWindowLoader {
     ) -> RedoLoadFuture<'a> {
         Box::pin(engine.load_window(chain_id, source, all_sources, from, to))
     }
+}
+
+impl Engine {
+    pub(super) async fn require_independent_base_source_seam(
+        &self,
+        request: &BatchRequest,
+    ) -> Result<()> {
+        let Some((range_from, range_to)) = request.redo_range else {
+            return Ok(());
+        };
+        if request.chain_id != "base-mainnet"
+            || !(range_from..=range_to).contains(&BASE_COINBASE_SEAM_BLOCK)
+        {
+            return Ok(());
+        }
+        let coinbase = request
+            .sources
+            .iter()
+            .find(|source| normalized_kind(&source.kind) == ProviderKind::Coinbase)
+            .expect("validated Base request has one Coinbase SQL source");
+        let rpc = request
+            .sources
+            .iter()
+            .find(|source| normalized_kind(&source.kind) == ProviderKind::Rpc)
+            .expect("validated Base request has one RPC source");
+        let coinbase_marker = self.coinbase_block_marker(coinbase).await?;
+        let rpc_provider = self.provider(&request.chain_id, rpc).await?;
+        let rpc_marker = super::resolve_marker(&rpc_provider, BASE_COINBASE_SEAM_BLOCK).await?;
+        require_independent_source_seam(
+            &request.chain_id,
+            &coinbase.key,
+            &coinbase_marker,
+            &rpc.key,
+            &rpc_marker,
+        )
+    }
+
+    async fn coinbase_block_marker(&self, source: &SourceDescriptor) -> Result<Marker> {
+        let coinbase = self
+            .coinbase_source("base-mainnet", source)
+            .await
+            .map_err(|error| {
+                IngestError::with_source(
+                    error.kind(),
+                    "failed to fetch Coinbase SQL seam block identity",
+                    error,
+                )
+            })?;
+        let marker = coinbase
+            .block_marker(BASE_COINBASE_SEAM_BLOCK)
+            .await
+            .map_err(|error| {
+                source_error("failed to fetch Coinbase SQL seam block identity", error)
+            })?;
+        Ok(Marker {
+            number: marker.number,
+            hash: marker.hash,
+        })
+    }
+}
+
+pub(super) fn require_resumed_window_parent(
+    chain_id: &str,
+    source_key: &str,
+    resume: Option<&Marker>,
+    window_from: i64,
+    first_parent_hash: Option<&str>,
+) -> Result<()> {
+    let Some(resume) = resume.filter(|marker| marker.number.checked_add(1) == Some(window_from))
+    else {
+        return Ok(());
+    };
+    if first_parent_hash == Some(resume.hash.as_str()) {
+        return Ok(());
+    }
+    Err(IngestError::data_integrity(format!(
+        "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {chain_id} source {source_key} at block \
+         {window_from}: loaded window parent {}, durable prior-batch hash {}; rerun the Ingest \
+         redo so it starts fresh and reloads the full range on one fork under the current watch plan",
+        first_parent_hash.unwrap_or("missing"),
+        resume.hash
+    )))
+}
+
+pub(super) fn require_source_seam(
+    request: &BatchRequest,
+    source: &SourceDescriptor,
+    prior_progress: &[SourceProgress],
+    loaded_first: &Marker,
+) -> Result<()> {
+    for prior in prior_progress {
+        let Some(prior_boundary) = prior
+            .current
+            .as_ref()
+            .filter(|marker| marker.number == loaded_first.number)
+        else {
+            continue;
+        };
+        if prior_boundary.hash != loaded_first.hash {
+            return Err(IngestError::data_integrity(format!(
+                "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {} at cross-source block {}: source \
+                 {} loaded hash {}, source {} loaded hash {}; rerun the Ingest redo so it starts \
+                 fresh and reloads the full range on one fork under the current watch plan",
+                request.chain_id,
+                loaded_first.number,
+                prior.key,
+                prior_boundary.hash,
+                source.key,
+                loaded_first.hash
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn require_independent_source_seam(
+    chain_id: &str,
+    coinbase_key: &str,
+    coinbase: &Marker,
+    rpc_key: &str,
+    rpc: &Marker,
+) -> Result<()> {
+    if coinbase.number == rpc.number && coinbase.hash == rpc.hash {
+        return Ok(());
+    }
+    Err(IngestError::data_integrity(format!(
+        "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {chain_id} at independently queried source \
+         seam block {}: Coinbase SQL source {coinbase_key} returned hash {}, RPC source {rpc_key} \
+         returned hash {}; rerun the Ingest redo after both sources expose the same canonical block",
+        coinbase.number, coinbase.hash, rpc.hash
+    )))
+}
+
+pub(super) fn running_summary_from_loaded_source(
+    progress: &[SourceProgress],
+    primary_key: &str,
+    block_number: i64,
+) -> Option<(Marker, Marker)> {
+    let primary = progress.iter().find(|source| source.key == primary_key)?;
+    let loaded = primary
+        .current
+        .as_ref()
+        .filter(|marker| marker.number == block_number)
+        .or_else(|| {
+            progress
+                .iter()
+                .filter_map(|source| source.current.as_ref())
+                .find(|marker| marker.number == block_number)
+        })?;
+    Some((loaded.clone(), primary.target.clone()))
 }
 
 pub(super) fn must_reload_completed_source_boundary(
@@ -180,6 +340,28 @@ mod tests {
             number,
             hash: format!("hash-{number}"),
         }
+    }
+
+    #[test]
+    fn running_summary_uses_a_source_that_loaded_the_height_before_primary_start() {
+        let progress = [
+            SourceProgress {
+                key: "bulk".to_owned(),
+                current: Some(marker(100)),
+                target: marker(200),
+                loaded_boundary: None,
+            },
+            SourceProgress {
+                key: "rpc".to_owned(),
+                current: None,
+                target: marker(300),
+                loaded_boundary: None,
+            },
+        ];
+        assert_eq!(
+            running_summary_from_loaded_source(&progress, "rpc", 100),
+            Some((marker(100), marker(300)))
+        );
     }
 
     #[test]

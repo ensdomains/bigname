@@ -839,11 +839,89 @@ lineage selection plus an explicit derived-range redo.
 A manifest change widens the [watch
 plan](glossary.md#watch-plan--watched-tuple) when it adds an address, event
 signature, or active block range whose facts were not selected when older
-blocks were loaded. Manifest synchronization records a
-[manifest-authority marker](glossary.md#manifest-authority-marker) on Interpret
-and Project, but it does not fetch the newly watched history. Before rebuilding
-derived state, run an ingest redo over every affected historical range with the
-new manifest profile and the chain's configured sources. For example:
+blocks were loaded. Manifest synchronization compares the previous and desired
+[compiled watch plans](glossary.md#compiled-watch-plan). Each stored manifest
+payload carries the compiled
+emitter/event/start entries produced when it was admitted, so a later binary
+change to emitter-scope policy is compared with the policy that actually
+preceded it rather than recompiling both sides with the new binary. This
+internal snapshot is not an authorable TOML field. An all-emitter event covers
+the same event for every namespace, family, and address. A family-wide event
+covers emitters admitted through that family's discovery edges in the same
+manifest namespace, but it does not cover a newly declared direct address;
+declared addresses remain explicit watch targets.
+Adding a less general target already covered by an all-emitter event does not
+count as widening.
+
+Adding or broadening an indexability-producing `resolver` discovery rule over
+an already-ingested range is a different ordering problem. Replacing a
+declaration that emits an unchanged active resolver rule has the same problem:
+the replacement contract's discovery events name resolver addresses only after
+Interpret materializes their edges, so an Ingest redo cannot yet fetch those
+resolvers' address-scoped history. `resolver` [discovery-rule widening and
+narrowing](glossary.md#discovery-rule-widening-and-narrowing) comparison is
+scoped within one chain by
+`(namespace, source_family, edge_kind, from_role, admission)` and preserves the
+normalized address and inclusive start block of each declaration for its
+`from_role`. Manifest synchronization loudly rejects either transition
+instead of mis-certifying a one-pass redo. The operator cannot perform that
+ordering with the current in-place phase workflow, because Interpret reads
+discovery rules only after admission. These transitions are therefore
+unsupported over retained history and require a fresh rebuild or a future
+dedicated discovery backfill mechanism. Adding the first emitting declaration
+to a resolver rule that previously matched no root or contract declaration is
+classified as [discovery-rule
+widening](glossary.md#discovery-rule-widening-and-narrowing) and is intentionally rejected over
+retained history as a conservative case of the same ordering constraint.
+A `resolver` discovery rule with no matching root or contract declaration is itself historical
+discovery input, so adding such a rule in a new namespace over retained history is rejected like any
+other widening.
+
+Runtime resolver admission also requires the registry and resolver families to
+have the same [deployment epoch](glossary.md#deployment-epoch). Manifest
+synchronization compares that relationship for each desired `resolver`
+discovery rule whose source is `ens_v1_registry_l1`, `ens_v2_registry_l1`,
+`ens_v2_root_l1`, or `basenames_base_registry`. When the desired manifests newly
+match where the preceding active pair did not, or both sides rotate to a new
+matching source epoch, synchronization classifies the transition as resolver
+discovery-rule widening. It rejects the change over retained
+history because manifest snapshots cannot prove that Interpret has already
+materialized every resolver discovery edge; one Ingest redo could otherwise
+fetch an incomplete address set and clear the obligation before Interpret adds
+the missing edges. Changing from matching to nonmatching removes resolver
+intervals and is admissible narrowing. A family with no active `resolver` rule
+admits no discovered resolver address, so an epoch match alone is also
+admissible. These transitions remain admissible before any Ingest range is retained.
+
+`registry_announcement` rules use the same namespace-scoped comparison. In the
+`ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest
+first selects a declared `RegistryCreated` as an all-emitter event, then fetches
+the announcing registry's remaining address-scoped events from that event's
+position in the same window; later windows preload retained canonical
+announcements. Historical rule widening or emitting-source replacement in that
+family therefore stamps a required Ingest redo from the earliest affected
+start. Historical announcement widening in any other family is loudly rejected
+because it has no declared same-window intake path. Fresh and future-only
+transitions remain admissible.
+A chain's retained-history boundary for this check is its latest published
+head. A finite Ingest position left ahead of that head after a rewind is not
+readable coverage; when no published-head row exists, the check falls back to
+the finite Ingest position.
+A new chain with no ingested range, a tracked rule or emitting-source
+replacement whose start is after retained history, and [discovery-rule
+narrowing](glossary.md#discovery-rule-widening-and-narrowing) remain admissible.
+Topology-only `subregistry` rules and the reserved
+[`migration` edge kind](glossary.md#migration-edge-migration) are excluded from
+this comparison because neither admits an address for historical intake.
+
+If a newly watched tuple intersects an already-ingested range, synchronization
+records the ordinary [manifest-authority
+marker](glossary.md#manifest-authority-marker) on Interpret and Project and
+stamps a required Ingest redo from the first newly watched block through the
+latest published ingested head. It does not contact a provider or perform that
+potentially expensive fetch. The phase runner fails closed before derivation
+and prints the exact operator command. Run that command with the updated
+manifests active and the chain's configured sources. Its shape is:
 
 ```sh
 phase-runner redo \
@@ -859,7 +937,31 @@ does not advance the finite `ingest_cursors` used by the initial spine. Finite
 cursors prove that a source reached its target, and readable lineage proves
 which blocks were loaded, but both cover only the facts selected by the watch
 plan active at load time. Neither proves that a later widening's facts were
-fetched.
+fetched. Successful completion of the stamped redo clears the Ingest
+obligation; only then may ordinary derivation resume. The redo includes a
+Live-loaded suffix through the latest published head even though Live does not
+advance finite source cursors. A required redo clears only when its loaded
+range-end hash is the readable hash at that height, so loading a coherent
+sibling fork cannot certify facts for the fork Interpret will read. That
+required-redo range-end check does not change ordinary operator repair redos,
+which may reconcile a cursor to another retained fork before normal head
+publication. Every Base Ingest redo, required or ordinary, whose range includes
+the source seam also requires each redo batch to run one independent Coinbase
+SQL `base.blocks` identity query and the RPC block lookup and to obtain the same
+seam-block hash. Rechecking before every batch prevents a source fork change
+from combining pre-seam coverage across batches. The Coinbase schema exposes
+`block_number`, `block_hash`, and reorganization `action` on that table,
+so this proof does not depend on a watched log being
+present.[^coinbase-sql-blocks]
+
+Removing watched tuples, repeating the same manifest set, adding a chain with
+no Ingest coverage, or adding a watched window that starts after the retained
+head does not stamp Ingest. A later widening extends an existing required or
+interrupted Ingest redo rather than replacing it. Once stamped, the obligation
+persists across a later narrow-back: synchronization has no clearing path, and
+only successful completion of the recorded redo clears it. Completing that redo
+after narrowing is safe because the extra work is fetch cost only; it cannot
+reduce retained fact coverage. Do not edit cursors to clear the obligation.
 
 The fence error prints the invalidation token from the current marker. After
 the fetch, re-run the required full Interpret redo with
@@ -887,14 +989,13 @@ interrupted, re-run that exact range with the same token. The new binary retains
 the audit association but clears progress written under the prior hash and
 walks the range again from its beginning.
 
-The system cannot verify that the historical fetch or the no-widening review
-happened. Supplying the current token records the operator's responsibility for
-that check until issue #376 binds the watch-plan fingerprint to coverage
-evidence. Every
-authority-marked Interpret redo requires the flag, whether its range is covered
-by finite cursors, readable lineage, or both. An interpreter content hash
-rotation with neither a current manifest-authority marker nor an active audited
-redo remains flagless.
+Manifest synchronization now distinguishes manifest-authored watch-plan
+widening from narrowing and unrelated authority changes and enforces the
+historical fetch with the required Ingest redo. The attestation remains the
+operator's durable acknowledgement of the whole authority transition and is
+still required for every authority-marked Interpret redo, whether or not that
+transition stamped Ingest. An interpreter content hash rotation with neither a
+current manifest-authority marker nor an active audited redo remains flagless.
 
 ## Manifest change propagation
 
@@ -1119,3 +1220,4 @@ above does not change that provenance rule.
 [^bn-sha3-l15]: (upstream: .refs/basenames/src/lib/Sha3.sol:L15 @ basenames@1809bbc)
 [^bn-sha3-l20]: (upstream: .refs/basenames/src/lib/Sha3.sol:L20 @ basenames@1809bbc)
 [^bn-sha3-l31]: (upstream: .refs/basenames/src/lib/Sha3.sol:L31 @ basenames@1809bbc)
+[^coinbase-sql-blocks]: [Coinbase SQL API schema — `base.blocks`](https://docs.cdp.coinbase.com/data/sql-api/schema#base-blocks).

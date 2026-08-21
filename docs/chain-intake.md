@@ -36,9 +36,12 @@ For each configured chain, the path is:
    Every runner start checks the current source configuration and cursor again
    against that completion-time target; later Live finality does not extend the
    completed Verify extent.
-5. `live` follows a provider snapshot from the completed ingest handoff, walks
-   backward to a stored readable ancestor, loads at most one bounded winning
-   suffix batch, and publishes the resulting head through the shared head path.
+5. `live` normally follows a provider snapshot from the completed ingest
+   handoff, walks backward to a stored readable ancestor, loads at most one
+   bounded winning suffix batch, and publishes the resulting head through the
+   shared head path. Only recovery of an unreadable required Ingest end may use
+   the published readable head when an interrupted finite Ingest recorded no
+   handoff.
 
 The runner persists phase and per-source cursors. A phase advances only through
 the exact block-number/hash markers returned by its implementation. `interpret`
@@ -345,6 +348,13 @@ cargo phase -- redo \
 ```
 
 Ingest and `all` require a `--source` descriptor for every selected chain.
+Before loading each Base Ingest redo batch whose requested range spans the
+Coinbase/RPC seam, the runner independently queries the seam-block identity
+from Coinbase SQL `base.blocks` and from RPC. A mismatch is a terminal data
+integrity error for that attempt and prevents redo completion; retry only after
+the sources agree. This applies to required and ordinary redos. The
+[manifest widening workflow](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)
+documents the source-schema evidence and why the check runs for every batch.
 For `--phase verify`, Base and Ethereum Mainnet require exactly one `drpc` or
 `reth_db` reference source respectively. Base with `reth_db` is rejected during
 configuration validation rather than starting a database walk. Sepolia validates
@@ -395,13 +405,19 @@ token remains invalid everywhere else. If the interpreter content hash changes
 while the redo is interrupted, the same token preserves the audit association,
 but the new binary clears the redo cursor written under the prior interpreter
 content hash and walks the exact audited range again from its beginning.
-The system cannot verify the fetch or the no-widening review. This conservative
-step applies to every manifest-authority change, including ranges fully covered
-by finite ingest cursors, until issue #376 binds watch-plan evidence to the
-loaded facts. Cursors and readable lineage prove only the facts selected by the
-watch plan active when each block was loaded. Interpreter content hash rotations
-remain flagless only when neither a current manifest-authority marker nor an
-active audited redo exists. Verify redo uses the same scanner as normal
+Manifest synchronization compares the previous and desired [compiled watch
+plans](glossary.md#compiled-watch-plan). A widening over retained Ingest
+coverage stamps a required Ingest redo
+from the earliest newly watched block through the latest published head. The
+ordinary runner reports the exact command and refuses to run that potentially
+expensive fetch automatically; successful explicit completion clears the
+obligation. Narrowing, a same-set sync, and a chain with no retained Ingest
+coverage stamp nothing. The attestation remains required for every
+manifest-authority change, including one with no Ingest stamp. Cursors and
+readable lineage prove only the facts selected by the watch plan active when
+each block was loaded. Interpreter content hash rotations remain flagless only
+when neither a current manifest-authority marker nor an active audited redo
+exists. Verify redo uses the same scanner as normal
 verification, rechecks the requested finalized range, and persists the level
 reported by the phase. A partial redo retains the level for the full recorded
 extent; a full-extent redo can report the level fixed by the reference source.
@@ -411,10 +427,11 @@ rerunning the same command after wipe-and-resync repair resumes the attempt.
 The range end must already be `canonical`, `safe`, or `finalized`; an
 `observed` staging row is rejected before a redo session is claimed.
 Flag recomputation is supported through `--phase recompute-flags`. Among
-otherwise configured redo requests, only historical `live` redo and an
-unreadable range end are rejected before a redo marker is written. These
-preflight refusals and terminal verification failures cannot strand
-unresumable redo state.
+otherwise configured redo requests, historical `live` redo, an unreadable
+range end, and an Interpret, Project, or recompute-flags redo requested while
+a required Ingest redo is still stamped for that chain are rejected before a
+redo marker is written. These preflight refusals and terminal verification
+failures cannot strand unresumable redo state.
 
 The thin rewind command moves only the published latest head:
 
@@ -428,9 +445,15 @@ cargo phase -- rewind \
 It takes the ingest, interpret, project, and live advisory locks so no head
 publisher or downstream writer can overlap it, requires the exact ancestor to
 be stored and readable, refuses to cross the safe head, and invokes normal head
-publication. It does not write raw facts or normalized events. The resulting
-orphaning stamps downstream redo; the next supervised run fills the winning
-path before consuming those stamps.
+publication. It does not write raw facts or normalized events. An uncompleted
+required Ingest redo remains stamped if its end moves above the readable head.
+The next supervised run uses Live intake to publish the winning suffix under
+the current watch plan, then repeats the exact required Ingest command; it does
+not perform that operator-owned historical fetch automatically. If finite
+Ingest was interrupted before recording its handoff, this recovery-only Live
+pass anchors at the published readable ancestor. The resulting orphaning also
+stamps downstream redo, which remains fenced until the suffix is readable
+again.
 
 The retained schema-v2 inspection windows are read-only `phase-runner`
 subcommands alongside redo and rewind:

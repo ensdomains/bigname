@@ -149,6 +149,16 @@ boundary* is the earliest block from which replaying that state is
 deterministic. The deleted old runtime called its cross-family operation a
 *full-closure replay*; Stage B uses explicit interpret redo state instead.
 
+**Compiled watch plan** — the non-authorable snapshot stored inside each
+manifest payload as `_bigname_compiled_watch`. It records the emitter scope,
+event topic, and inclusive start block compiled by the binary that admitted the
+manifest. Manifest synchronization decodes the prior snapshot instead of
+recompiling old TOML with the current binary, so a binary policy widening is
+detected even when authored manifests are unchanged. Every coverage-bearing
+dimension must remain represented in a backward-decodable format; an
+incompatible decode stops synchronization rather than accepting coverage whose
+meaning the binary cannot establish.
+
 **Companion rows** — the same-transaction raw context rows demanded for a
 family-selected log (emitter watched under a source family, block inside that
 entry's active window, topic0 in the family's manifest ABI): the transaction,
@@ -222,6 +232,23 @@ admits an emitter or only records topology. In particular, a registry
 announcement admits an ENSv2 registry independently of parent reachability,
 while a subregistry edge records parent-child reachability without admitting
 its target.
+
+**Discovery-rule widening and narrowing** — manifest-synchronization
+classifications for address-admitting `resolver` and `registry_announcement`
+discovery rules and their emitting declarations. Widening adds a rule or
+emitter, adds the first emitter to a rule that previously matched no
+declaration, or moves an emitter's inclusive start block earlier. Narrowing
+removes rules or emitters, including removal of a rule's last emitter, or moves
+an emitter's start later. For an active resolver discovery rule, widening also
+includes a registry/resolver pair whose desired manifest `deployment_epoch`
+values newly match after the preceding active pair did not, or whose matching
+source epoch changes; changing that pair from matching to nonmatching is
+narrowing. Resolver widening over retained history is rejected
+because the admitted addresses are not known until Interpret materializes
+their discovery edges. Registry-announcement widening instead stamps a required
+Ingest redo for the ENSv2 registry family, whose intake discovers each registry
+and fetches its remaining events in the same window; other families reject the
+historical transition. Narrowing introduces no missing historical discovery input.
 
 **Migration edge** (`migration`) — the fifth discovery edge kind. It is
 [reserved surface](#reserved-surface): the schema-v2 baseline accepts the
@@ -1117,10 +1144,13 @@ manifest set. The database mints a new invalidation token for every transition,
 including a later return to the same desired set. The marker poisons ordinary
 hash adoption until the required full redo begins. It proves that authority
 changed; it does not prove that facts required by a widened watch plan were
-fetched. When Interpret would discharge the marker, the operator must complete
-the manifest widening procedure or confirm that nothing widened, then attest
-with the current token. Finite cursors and readable lineage both prove only the
-watch plan active when facts were loaded.
+fetched. When manifest synchronization detects that the desired watch plan
+widens over retained Ingest coverage, it also stamps a required Ingest redo for
+the affected range. That marker blocks ordinary derivation until the operator
+runs the exact redo under the new manifest authority. When Interpret would
+discharge its marker, the operator must complete any stamped Ingest redo, then
+attest with the current token. Finite cursors and readable lineage both prove
+only the watch plan active when facts were loaded.
 
 **Non-name form** — a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its
@@ -1381,12 +1411,17 @@ live/indexed comparison.
 proving all layers connect. In this repo it names the first e2e scenario
 (`register_eth_name`); prefer "the first end-to-end scenario" in prose.
 
-**Watch plan / watched tuple** — the materialized set of
-(source family, address, active block range) targets derived from manifest
-declarations plus indexability-producing discovery edges. Topology-only edges,
-including ENSv2 subregistry edges, do not add targets. A *watched tuple* is one
-such entry; its *watched window* is the active block range. Addresses are
-derived watch targets, never the durable identity.
+**Watch plan / watched tuple** — the materialized set of (source family,
+emitter scope, event signature, active block range) targets derived from
+manifest declarations plus indexability-producing discovery edges. An emitter
+scope may be one declared address, every discovered address in a source family
+within one manifest namespace, or every emitter for the small set of globally
+watched announcements and resolver events. Manifest namespace is part of a
+family-wide emitter scope's identity, so another namespace's discovered
+addresses do not provide its event coverage. Topology-only edges, including
+ENSv2 subregistry edges, do not add targets. A *watched tuple* is one such
+entry; its *watched window* is the active block range. Addresses are derived
+watch targets, never the durable identity.
 
 **Wrapped NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
 a name whose wrapper token has a nonzero owner and whose registry owner is the

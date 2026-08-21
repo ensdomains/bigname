@@ -28,6 +28,15 @@ impl CoinbaseSqlClient {
         timeout_secs: u64,
         qps: u32,
     ) -> Result<Self> {
+        #[cfg(test)]
+        if super::test_raw_queries::installed(url) {
+            return Ok(Self {
+                url: url.to_owned(),
+                auth: CoinbaseSqlAuth::scripted(),
+                rate_limiter: Arc::new(CoinbaseSqlRateLimiter::new(qps)),
+                timeout_secs,
+            });
+        }
         let url = reqwest::Url::parse(url)
             .with_context(|| format!("failed to parse Coinbase SQL URL {url}"))?;
         if url.scheme() != "https" {
@@ -55,7 +64,11 @@ impl CoinbaseSqlClient {
         rows.into_iter().map(CoinbaseLogRow::from_value).collect()
     }
 
-    async fn run_raw_query(&self, sql: &str) -> Result<Vec<Value>> {
+    pub(super) async fn run_raw_query(&self, sql: &str) -> Result<Vec<Value>> {
+        #[cfg(test)]
+        if let Some(response) = super::test_raw_queries::response(&self.url, sql) {
+            return Ok(response);
+        }
         for attempt in 0..MAX_ATTEMPTS {
             self.rate_limiter.wait().await;
             let response = transport::run(

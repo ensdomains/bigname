@@ -186,6 +186,12 @@ pub(crate) async fn update_redo_progress(
               phase_name != 'ingest'
               OR redo_manifest_authority_fingerprint = {}
           )
+          AND (
+              phase_name != 'ingest'
+              OR last_error IS NULL
+              OR last_error NOT LIKE $12
+              OR last_error LIKE $13
+          )
         ",
         crate::redo_manifest_authority::FINGERPRINT_SQL
     );
@@ -201,6 +207,11 @@ pub(crate) async fn update_redo_progress(
         .bind(expected_mode)
         .bind(attempt.execution_range.from)
         .bind(attempt.execution_range.to)
+        .bind(crate::redo_stamp::required_redo_owner_pattern())
+        .bind(format!(
+            "{}%",
+            crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX
+        ))
         .execute(pool)
         .await
         .map_err(|error| {

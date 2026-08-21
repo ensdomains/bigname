@@ -14,6 +14,8 @@ mod schema_v2;
 mod tests;
 #[path = "lib/views.rs"]
 mod views;
+#[path = "lib/watch_policy.rs"]
+mod watch_policy;
 
 const REACHABLE_FROM_ROOT_ADMISSION: &str = "reachable_from_root";
 
@@ -25,5 +27,6 @@ pub use role_insensitivity::{
 };
 pub use schema_v2::{SchemaV2ManifestSyncSummary, sync_schema_v2_repository};
 pub use views::*;
+pub use watch_policy::*;
 
 pub(crate) use repository::normalize_address;

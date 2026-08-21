@@ -15,8 +15,12 @@ mod rate_limit;
 mod rows;
 mod transport;
 
+#[cfg(test)]
+pub(crate) mod test_raw_queries;
+
 use client::CoinbaseSqlClient;
 use query::CoinbaseSqlFilterPack;
+use rows::CoinbaseBlockRow;
 
 const DEFAULT_URL: &str = "https://api.cdp.coinbase.com/platform/v2/data/query/run";
 const KEY_ID_ENV: &str = "COINBASE_CDP_SQL_API_KEY_ID";
@@ -31,6 +35,12 @@ const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
 pub struct CoinbaseSqlSource {
     chain_id: String,
     client: CoinbaseSqlClient,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CoinbaseBlockMarker {
+    pub(crate) number: i64,
+    pub(crate) hash: String,
 }
 
 impl CoinbaseSqlSource {
@@ -88,6 +98,36 @@ impl CoinbaseSqlSource {
             }
         }
         Ok(logs.into_values().collect())
+    }
+
+    /// Reads fork identity independently of watched logs. Coinbase documents
+    /// `<network>.blocks` as carrying `block_number`, `block_hash`, and reorg `action`:
+    /// https://docs.cdp.coinbase.com/data/sql-api/schema#base-blocks
+    pub(crate) async fn block_marker(&self, number: i64) -> Result<CoinbaseBlockMarker> {
+        let query = query::build_block_marker_query(&self.chain_id, number)?;
+        let rows = self
+            .client
+            .run_raw_query(&query)
+            .await?
+            .into_iter()
+            .map(CoinbaseBlockRow::from_value)
+            .collect::<Result<Vec<_>>>()?;
+        let [row] = rows.as_slice() else {
+            bail!(
+                "Coinbase SQL returned {} active block identities at height {number}; expected exactly one",
+                rows.len()
+            );
+        };
+        if row.block_number != number {
+            bail!(
+                "Coinbase SQL returned block {} for requested seam height {number}",
+                row.block_number
+            );
+        }
+        Ok(CoinbaseBlockMarker {
+            number: row.block_number,
+            hash: row.block_hash.clone(),
+        })
     }
 
     async fn fetch_window(
@@ -245,6 +285,73 @@ pub fn source_error(context: &str, error: anyhow::Error) -> crate::IngestError {
 mod tests {
     use super::*;
     use crate::ErrorKind;
+
+    fn block_row(number: i64, hash_byte: u8) -> serde_json::Value {
+        serde_json::json!({
+            "block_number": number,
+            "block_hash": format!("0x{}", format!("{hash_byte:02x}").repeat(32)),
+        })
+    }
+
+    #[tokio::test]
+    async fn block_marker_rejects_two_active_hashes_from_raw_query() {
+        let endpoint = "coinbase-sql://two-active-marker-rows";
+        let number = 48_428_000;
+        let script = test_raw_queries::install(
+            endpoint,
+            [vec![block_row(number, 0x11), block_row(number, 0x22)]],
+        );
+        let source = CoinbaseSqlSource::new("base-mainnet", endpoint)
+            .expect("scripted Coinbase SQL source should configure");
+
+        let error = source
+            .block_marker(number)
+            .await
+            .expect_err("two active identities must be rejected");
+
+        assert!(
+            error.to_string().contains("2 active block identities"),
+            "{error}"
+        );
+        let queries = script.queries();
+        assert_eq!(queries.len(), 1, "one marker must spend one raw query");
+        assert!(queries[0].contains("FROM base.blocks"));
+        assert!(queries[0].contains("LIMIT 2"));
+    }
+
+    #[tokio::test]
+    async fn block_marker_rejects_empty_wrong_height_and_malformed_raw_rows() {
+        let requested = 48_428_000;
+        for (case, rows, expected) in [
+            ("empty", vec![], "0 active block identities"),
+            (
+                "wrong-height",
+                vec![block_row(requested + 1, 0x33)],
+                "for requested seam height",
+            ),
+            (
+                "malformed",
+                vec![serde_json::json!({
+                    "block_number": requested,
+                    "block_hash": "not-a-hash",
+                })],
+                "invalid Coinbase SQL hash",
+            ),
+        ] {
+            let endpoint = format!("coinbase-sql://invalid-marker-{case}");
+            let script = test_raw_queries::install(&endpoint, [rows]);
+            let source = CoinbaseSqlSource::new("base-mainnet", &endpoint)
+                .expect("scripted Coinbase SQL source should configure");
+
+            let error = source
+                .block_marker(requested)
+                .await
+                .expect_err("invalid marker response must be rejected");
+
+            assert!(error.to_string().contains(expected), "{case}: {error}");
+            assert_eq!(script.queries().len(), 1, "{case} must use one raw query");
+        }
+    }
 
     #[test]
     fn all_emitter_scope_is_a_terminal_bulk_source_error() {
