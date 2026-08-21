@@ -1383,12 +1383,14 @@ proving all layers connect. In this repo it names the first e2e scenario
 **Watch plan / watched tuple** — the materialized set of (source family,
 emitter scope, event signature, active block range) targets derived from
 manifest declarations plus indexability-producing discovery edges. An emitter
-scope may be one declared address, every discovered address in a source family,
-or every emitter for the small set of globally watched announcements and
-resolver events. Topology-only edges, including ENSv2 subregistry edges, do not
-add targets. A *watched tuple* is one such entry; its *watched window* is the
-active block range. Addresses are derived watch targets, never the durable
-identity.
+scope may be one declared address, every discovered address in a source family
+within one manifest namespace, or every emitter for the small set of globally
+watched announcements and resolver events. Manifest namespace is part of a
+family-wide emitter scope's identity, so another namespace's discovered
+addresses do not provide its event coverage. Topology-only edges, including
+ENSv2 subregistry edges, do not add targets. A *watched tuple* is one such
+entry; its *watched window* is the active block range. Addresses are derived
+watch targets, never the durable identity.
 
 **Wrapped NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
 a name whose wrapper token has a nonzero owner and whose registry owner is the

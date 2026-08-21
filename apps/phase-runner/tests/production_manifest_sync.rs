@@ -5,6 +5,7 @@ use std::{fs, time::Duration};
 
 use alloy_primitives::keccak256;
 use anyhow::{Context, Result};
+use bigname_ingest::load_persisted_watch_filter;
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
@@ -341,6 +342,97 @@ status = "supported"
         let directory = self.root.join(namespace).join(&self.source_family);
         fs::create_dir_all(&directory)?;
         fs::write(directory.join("v1.toml"), manifest)?;
+        Ok(())
+    }
+
+    fn write_discovered_resolver_namespaces(
+        &self,
+        widening_namespace: &str,
+        peer_namespace: &str,
+        widening_has_address_changed: bool,
+    ) -> Result<()> {
+        for (namespace, registry_address, has_address_changed) in [
+            (
+                widening_namespace,
+                "0x0000000000000000000000000000000000000004",
+                widening_has_address_changed,
+            ),
+            (
+                peer_namespace,
+                "0x0000000000000000000000000000000000000006",
+                true,
+            ),
+        ] {
+            let registry = format!(
+                r#"manifest_version = 2
+namespace = "{namespace}"
+source_family = "ens_v2_registry_l1"
+chain = "{}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+
+[capability_flags]
+
+[[contracts]]
+role = "registry"
+address = "{registry_address}"
+proxy_kind = "none"
+start_block = 0
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[abi.events]]
+name = "RegistryCreated"
+fragment = "event RegistryCreated()"
+emitter_roles = ["registry"]
+normalized_events = []
+"#,
+                self.chain_id,
+            );
+            let registry_dir = self.root.join(namespace).join("ens_v2_registry_l1");
+            fs::create_dir_all(&registry_dir)?;
+            fs::write(registry_dir.join("v2.toml"), registry)?;
+
+            let address_changed = has_address_changed.then_some(
+                r#"
+[[abi.events]]
+name = "AddressChanged"
+fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+normalized_events = []
+"#,
+            );
+            let resolver = format!(
+                r#"manifest_version = 2
+namespace = "{namespace}"
+source_family = "ens_v2_resolver_l1"
+chain = "{}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+contracts = []
+discovery_rules = []
+
+[capability_flags]
+
+[[abi.events]]
+name = "TextChanged"
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+normalized_events = []
+{}
+"#,
+                self.chain_id,
+                address_changed.unwrap_or_default(),
+            );
+            let resolver_dir = self.root.join(namespace).join("ens_v2_resolver_l1");
+            fs::create_dir_all(&resolver_dir)?;
+            fs::write(resolver_dir.join("v2.toml"), resolver)?;
+        }
         Ok(())
     }
 }
@@ -893,6 +985,60 @@ async fn cross_namespace_watch_plan_entries_min_merge_the_earlier_start() -> Res
 }
 
 #[tokio::test]
+async fn discovered_family_event_widening_is_namespace_scoped_in_both_orderings() -> Result<()> {
+    for (case, widening_namespace, peer_namespace, widening_address, peer_address) in [
+        (
+            "first",
+            "alpha",
+            "zeta",
+            "0x0000000000000000000000000000000000000005",
+            "0x0000000000000000000000000000000000000007",
+        ),
+        (
+            "last",
+            "zeta",
+            "alpha",
+            "0x0000000000000000000000000000000000000005",
+            "0x0000000000000000000000000000000000000007",
+        ),
+    ] {
+        let scratch = ScratchDatabase::create(&format!(
+            "production_manifest_discovered_namespace_watch_{case}"
+        ))
+        .await?;
+        let chain_id = format!("manifest-discovered-namespace-watch-{case}");
+        let fixture = WatchManifestFixture::new(&chain_id)?;
+        fixture.write_discovered_resolver_namespaces(widening_namespace, peer_namespace, false)?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+        seed_discovered_resolver_address(
+            scratch.pool(),
+            &chain_id,
+            widening_namespace,
+            widening_address,
+        )
+        .await?;
+        seed_discovered_resolver_address(scratch.pool(), &chain_id, peer_namespace, peer_address)
+            .await?;
+
+        let filter = load_persisted_watch_filter(scratch.pool(), &chain_id, 0, 1).await?;
+        let address_changed = format!("{:#x}", keccak256(b"AddressChanged(bytes32,uint256,bytes)"));
+        assert!(!filter.includes(widening_address, &address_changed, 0));
+        assert!(filter.includes(peer_address, &address_changed, 0));
+
+        seed_completed_ingest_range(&scratch, &chain_id).await?;
+        fixture.write_discovered_resolver_namespaces(widening_namespace, peer_namespace, true)?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+        assert_eq!(
+            required_ingest_redo(scratch.pool(), &chain_id).await?,
+            Some((0, 1)),
+            "{case} namespace must refetch its already-discovered resolver history"
+        );
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn future_resolver_source_replacement_stays_admissible_beside_a_historical_emitter()
 -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_future_resolver_source_set").await?;
@@ -1143,6 +1289,87 @@ async fn legacy_payload_upgrade_materializes_compiled_watch_without_spurious_ing
         scratch.cleanup().await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn legacy_family_watch_without_namespace_syncs_without_spurious_ingest() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_legacy_family_namespace").await?;
+    let chain_id = "manifest-legacy-family-namespace";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_resolver_l1")?;
+    fixture.write(false, false)?;
+    let repository = load_repository(&fixture.root)?;
+    sync_schema_v2_repository(scratch.pool(), &repository).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', current_block_number = 1,
+             current_block_hash = $2, target_block_number = 1,
+             target_block_hash = $2, input_content_hash = $3,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-manifest-sync-head-1"))
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+
+    let changed = sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = jsonb_set(
+             manifest_payload,
+             '{_bigname_compiled_watch}',
+             (
+                 SELECT jsonb_agg(
+                     CASE WHEN entry -> 'emitter' ->> 'kind' = 'family'
+                          THEN jsonb_set(
+                              entry, '{emitter}', (entry -> 'emitter') - 'namespace'
+                          )
+                          ELSE entry
+                     END ORDER BY position
+                 )
+                 FROM jsonb_array_elements(
+                     manifest_payload -> '_bigname_compiled_watch'
+                 ) WITH ORDINALITY AS compiled(entry, position)
+             )
+         )
+         WHERE chain_id = $1 AND rollout_status = 'active'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    assert_eq!(changed.rows_affected(), 1);
+
+    sync_schema_v2_repository(scratch.pool(), &repository).await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    let derived_hashes: Vec<String> = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert!(
+        derived_hashes
+            .iter()
+            .all(|hash| hash.starts_with("manifest-authority:"))
+    );
+    let missing_namespace: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM manifest_versions manifest
+         CROSS JOIN LATERAL jsonb_array_elements(
+             manifest.manifest_payload -> '_bigname_compiled_watch'
+         ) AS compiled(entry)
+         WHERE manifest.chain_id = $1
+           AND entry -> 'emitter' ->> 'kind' = 'family'
+           AND NOT (entry -> 'emitter' ? 'namespace')",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(missing_namespace, 0, "sync must rewrite the enriched shape");
+
+    scratch.cleanup().await
 }
 
 #[tokio::test]
@@ -1559,6 +1786,74 @@ async fn seed_completed_ingest_range(
     chain_id: &str,
 ) -> Result<ChainConfig> {
     seed_completed_ingest_range_through(scratch, chain_id, 1).await
+}
+
+async fn seed_discovered_resolver_address(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    namespace: &str,
+    address: &str,
+) -> Result<()> {
+    let (source_manifest_id, source_instance_id): (i64, Uuid) = sqlx::query_as(
+        "SELECT manifest.manifest_id, declaration.contract_instance_id
+         FROM manifest_versions manifest
+         JOIN manifest_contract_instances declaration
+           ON declaration.manifest_id = manifest.manifest_id
+         WHERE manifest.chain_id = $1 AND manifest.namespace = $2
+           AND manifest.source_family = 'ens_v2_registry_l1'",
+    )
+    .bind(chain_id)
+    .bind(namespace)
+    .fetch_one(pool)
+    .await?;
+    let resolver_manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = $1 AND namespace = $2
+           AND source_family = 'ens_v2_resolver_l1'",
+    )
+    .bind(chain_id)
+    .bind(namespace)
+    .fetch_one(pool)
+    .await?;
+    let resolver_instance_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind, provenance
+         ) VALUES ($1, $2, 'contract', '{}'::jsonb)",
+    )
+    .bind(resolver_instance_id)
+    .bind(chain_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(resolver_instance_id)
+    .bind(chain_id)
+    .bind(address)
+    .bind(resolver_manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, canonicality_state,
+             provenance
+         ) VALUES ($1, 'resolver', $2, $3, 'fixture', 'reachable_from_root',
+                   $4, 0, $5, 'finalized', '{}'::jsonb)",
+    )
+    .bind(chain_id)
+    .bind(source_instance_id)
+    .bind(resolver_instance_id)
+    .bind(source_manifest_id)
+    .bind(format!("{chain_id}-{namespace}-discovery-block-0"))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn seed_completed_ingest_range_through(

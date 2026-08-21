@@ -12,8 +12,29 @@ const COMPILED_WATCH_FIELD: &str = "_bigname_compiled_watch";
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WatchEmitter {
     All,
-    Family { family: String },
-    Address { family: String, address: String },
+    Family {
+        #[serde(default)]
+        namespace: String,
+        family: String,
+    },
+    // Declared intervals retain their manifest IDs, so overlapping declarations produce one
+    // runtime query per exact topic vector and collectively fetch the union for this address.
+    Address {
+        family: String,
+        address: String,
+    },
+}
+
+impl WatchEmitter {
+    fn with_legacy_namespace(self, enclosing_namespace: &str) -> Self {
+        match self {
+            Self::Family { namespace, family } if namespace.is_empty() => Self::Family {
+                namespace: enclosing_namespace.to_owned(),
+                family,
+            },
+            emitter => emitter,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -101,7 +122,12 @@ pub(super) fn record(
         .entry(manifest.chain.clone())
         .or_default();
     for entry in compiled {
-        insert_watch(watch, entry.emitter, &entry.topic0, entry.start);
+        insert_watch(
+            watch,
+            entry.emitter.with_legacy_namespace(&manifest.namespace),
+            &entry.topic0,
+            entry.start,
+        );
     }
     record_discovery_rules(snapshot, manifest);
     Ok(())
@@ -193,6 +219,7 @@ fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEnt
             insert_watch(
                 &mut watch,
                 WatchEmitter::Family {
+                    namespace: manifest.namespace.clone(),
                     family: manifest.source_family.clone(),
                 },
                 topic0,
@@ -337,7 +364,8 @@ fn watch_is_covered(
     }
     match &desired.emitter {
         WatchEmitter::All => false,
-        WatchEmitter::Family { family } => covered(WatchEmitter::Family {
+        WatchEmitter::Family { namespace, family } => covered(WatchEmitter::Family {
+            namespace: namespace.clone(),
             family: family.clone(),
         }),
         WatchEmitter::Address { family, address } => covered(WatchEmitter::Address {

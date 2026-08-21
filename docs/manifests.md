@@ -831,9 +831,10 @@ emitter/event/start entries produced when it was admitted, so a later binary
 change to emitter-scope policy is compared with the policy that actually
 preceded it rather than recompiling both sides with the new binary. This
 internal snapshot is not an authorable TOML field. An all-emitter event covers
-the same event for every family and address. A family-wide event covers emitters
-admitted through that family's discovery edges, but it does not cover a newly
-declared direct address; declared addresses remain explicit watch targets.
+the same event for every namespace, family, and address. A family-wide event
+covers emitters admitted through that family's discovery edges in the same
+manifest namespace, but it does not cover a newly declared direct address;
+declared addresses remain explicit watch targets.
 Adding a less general target already covered by an all-emitter event does not
 count as widening.
 

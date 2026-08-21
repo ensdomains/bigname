@@ -362,6 +362,13 @@ refetch: when the prior payload lacks the compiled field, watch comparison
 compiles that side from the same TOML under this binary. Once that snapshot
 exists, a later binary-policy widening is detectable.
 
+The binary that adds the manifest namespace to stored family-emitter entries
+likewise enriches legacy `_bigname_compiled_watch` payloads from their enclosing
+manifest. On chains with derived output, that payload rewrite mints a
+manifest-authority marker and requires the same full attested Interpret redo
+and downstream Project redo even when the TOML is unchanged. It stamps no
+Ingest redo when namespace enrichment reveals no actual watch-plan widening.
+
 `recompute-flags` recalculates label and name-surface normalization metadata
 under the current normalizer and refreshes the scoped primary-name projection.
 Names that remain active or remain shadow complete without replay. Names that
