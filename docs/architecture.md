@@ -747,15 +747,13 @@ admissions: a fresh full walk, an incremental follow, and a resumed session
 over identical input must write identical rows no matter where the 500-block
 batch boundaries fall. The guarantee is verified for the divergence classes
 [#336](https://github.com/ensdomains/bigname/issues/336) identified on the
-ENSv1 path — the permutation lane's pinned batch-artifact counts sit at zero —
-with one known open exception.
-[#348](https://github.com/ensdomains/bigname/issues/348) is a batch-boundary
-divergence of exactly the kind this rule condemns, on the ENSv2 resolver
-path: a late resolver `RecordChanged` on a lapsed registration keeps an
-attribution in an uninterrupted walk that a walk split across a batch
-boundary does not reproduce, and production, which always walks in physical
-batches, does not carry the attribution across a boundary.
-Four rules keep the written rows batch-independent:
+ENSv1 path and [#348](https://github.com/ensdomains/bigname/issues/348)
+identified on the ENSv2 resolver path; the permutation lane's pinned
+batch-artifact counts sit at zero. One structurally identified shape remains
+open and unreached by the generated corpus: a name link created only by an
+alias observation is not rebuilt at restore
+([#529](https://github.com/ensdomains/bigname/issues/529)). Five rules keep
+the written rows batch-independent:
 
 - `before_state` chains over the emitted event stream: a retained event's
   `before_state` is the `after_state` of the previous retained event under the
@@ -792,6 +790,41 @@ Four rules keep the written rows batch-independent:
   bounded redo's orphan healing above: an identity still orphaned after a
   replay re-anchors to the earliest surviving reference outside the redone
   range.
+- An ENSv2 registry/root `PreimageObserved` event for a canonical [name
+  surface](glossary.md#surface-name-surface) is lasting evidence that the
+  surface exists. Registration release, expiry, or a topology change may close
+  the current binding and remove its `resource_id`, but does not erase the
+  surface. A cold restore rebuilds the canonical surface observation from the
+  retained event; normalization-rejected name observations are not admitted
+  to that state. A later resolver `RecordChanged` or `RecordVersionChanged`
+  remains attributed to the logical name while remaining resource-less when no
+  current resource exists. If an ended resource's latest retained
+  `ResolverChanged` pointer still names that resolver, Project can rebuild a
+  different resource-keyed record-inventory row from the newly attributed
+  event. It does not restore the current binding or expose that inventory
+  through a name whose `name_current.resource_id` is null. ENSv2 resolver
+  records are stored by node and record version. `setName`
+  passes part zero, selecting the node-specific, any-part permission resource;
+  the cited authorization path reads EnhancedAccessControl role mappings and
+  contains no current registry-registration lookup. (upstream:
+  .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L127-L133 @
+  ens_v2@ccaeb58) (upstream:
+  .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L77-L85 @
+  ens_v2@ccaeb58) (upstream:
+  .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L178-L186 @
+  ens_v2@ccaeb58) (upstream:
+  .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L467-L472 @
+  ens_v2@ccaeb58) (upstream:
+  .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
+  ens_v2@ccaeb58) (upstream:
+  .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L66-L78
+  @ ens_v2@ccaeb58) (upstream:
+  .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L192
+  @ ens_v2@ccaeb58) (upstream:
+  .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L374-L382
+  @ ens_v2@ccaeb58) (upstream:
+  .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L443-L455
+  @ ens_v2@ccaeb58)
 - ENSv1 time-derived lifecycle changes at the start of a block read ENSv1
   protocol state rebuilt from the preceding block's normalized events after
   same-transaction reconciliation. The interpreter applies that rule between

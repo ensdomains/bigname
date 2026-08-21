@@ -124,8 +124,14 @@ outcomes, or durable traces.
 - Readers fail closed when selected positions, canonical lineage, or the current
   Project generation cannot be proven. They do not patch a missing row from raw
   facts, adapter internals, provider data, or a newer projection.
-- Resource-keyed projections consume an event only when its `resource_id`
-  resolves to a readable identity row.
+- Resource-keyed projections require their selected resource to resolve to a
+  readable identity row. Their input events normally carry that `resource_id`.
+  `record_inventory_current` is the deliberate exception: it starts from the
+  resource's latest retained `ResolverChanged` pointer, then joins
+  `RecordChanged` and `RecordVersionChanged` by logical name and emitting
+  resolver even when the record event itself is resource-less. Serving still
+  attaches that inventory to a name only through the name's current readable
+  resource.
 - Project stages only ordinary or `consumer_visibility=activated` interpreted
   input. It excludes candidate normalized events and never reads the planned
   `migration_event_associations` or candidate identity/discovery effect tables.
@@ -301,10 +307,15 @@ remain on their name-side projections and routes instead of being duplicated
 into one resolver row. The resolver summary is diagnostic and does not replace
 exact-name topology.
 
-`record_inventory_current` records the selectors observed for the current
-resource and boundary, explicit gaps, unsupported families, and any retained
-indexed values. Resolver-local events are accepted only under the manifest and
-current-resolver rules documented in [`manifests.md`](manifests.md).
+`record_inventory_current` records the selectors observed under a resource's
+latest retained resolver pointer and record boundary, explicit gaps,
+unsupported families, and any retained indexed values. The record event need
+not carry that resource: Project joins its `logical_name_id` and emitting
+resolver to the pointer. A resource-less record event cannot create a binding,
+and name and record reads expose the inventory only when the name's current
+readable `resource_id` selects it. Resolver-local events are accepted only under
+the manifest and current-resolver rules documented in
+[`manifests.md`](manifests.md).
 
 For ENSv1, an admitted current resolver may contribute supported address, text,
 and contenthash inventory. An unlisted or unsupported resolver family stays

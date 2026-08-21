@@ -666,6 +666,44 @@ the adapter advances time-derived protocol state to that timestamp. Exact
 cold-restore reconstruction therefore depends on the predecessor remaining
 readable in the same input snapshot.
 
+For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
+[name surface](glossary.md#surface-name-surface) permanently establishes that
+the surface is known in restored protocol state. A registration release or
+expiry can remove the current binding and resource without removing that
+observation. Normalization-rejected name observations are not admitted to
+this state. Later `RecordChanged` and `RecordVersionChanged` resolver events
+therefore retain the logical-name attribution but carry no `resource_id` when
+no current resource exists, identically in a continuous walk and after a cold
+restore. Project's resource-keyed record inventory follows the resource's
+latest retained `ResolverChanged` pointer. When an ended resource still has a
+pointer to the emitting resolver, the newly attributed event can therefore
+change that resource's rebuildable inventory row even though the event remains
+resource-less. This does not restore a current binding: name and record reads
+join inventory through `name_current.resource_id`, which remains null for the
+released or expired name. ENSv2 stores resolver records by node and version.
+`setName` passes
+part zero, selecting the node-specific, any-part permission resource; the cited
+authorization path reads EnhancedAccessControl role mappings and contains no
+current registry-registration lookup. (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L127-L133 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L77-L85 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L178-L186 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L467-L472 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L66-L78
+@ ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L192 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L374-L382 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L443-L455 @
+ens_v2@ccaeb58)
+
 Redo preparation restages only identities anchored inside the range, so an
 identity derived before it keeps its anchor even when an in-range event
 references it. An identity the replay re-observes is restored by the ordinary

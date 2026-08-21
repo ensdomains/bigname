@@ -83,6 +83,25 @@ token through stable `event_identity` plus its stored sort tuple; these are
 alternative storage strategies. Freshly issued cursor bytes may differ. The
 gate separately verifies fresh post-re-walk cursors on every covered route.
 
+That identical-product continuation rule applies to a re-walk whose declared
+contract preserves product behavior. An intentional [interpreter content
+hash](glossary.md#interpreter-content-hash) change may instead have a documented
+field and route-membership delta. For the
+[#348](https://github.com/ensdomains/bigname/issues/348) change, an existing late
+ENSv2 resolver `RecordChanged` or `RecordVersionChanged` keeps its
+`event_identity`, gains `logical_name_id`, keeps `resource_id=null`, and updates
+the corresponding `raw_fact_ref.interpreter_state_key` attribution field. Its
+`before_state` may also become the preceding `after_state` from the
+logical-name/resource-null state stream that the event now joins. Those events
+may consequently enter name-filtered diagnostics and product history. An
+outstanding cursor has no continuation guarantee across this behavior-changing
+boundary and may be rejected. Consumers must discard pre-#348 cursors and
+restart from the first page; fresh post-publication cursors continue normally.
+If an ended resource retains a resolver pointer to the emitter, its rebuildable
+record-inventory projection may change. The event remains resource-less and
+does not restore `name_current.resource_id`, so the released or expired name's
+name and record routes still expose no current record inventory.
+
 Field ownership:
 
 - Shared record, lookup, primary-name, event, and count concepts are dictionary
@@ -1306,10 +1325,14 @@ so there is no persisted artifact to explain. See
   When `address` is present, diagnostics derives its name/resource anchor set
   from both activated and candidate address-relation evidence. Candidate
   evidence never contributes anchors to `/v2/events` or product history routes.
-  A full re-walk may assign a different numeric `normalized_event_id` to a
-  pre-existing row. Its `event_identity` and pre-existing semantic fields remain
-  stable; the numeric ID change and the candidate fields are explicit
-  diagnostic-only deltas.
+  A behavior-preserving full re-walk may assign a different numeric
+  `normalized_event_id` to a pre-existing row while its `event_identity` and
+  pre-existing semantic fields remain stable; the numeric ID change and the
+  candidate fields are explicit diagnostic-only deltas. The intentional #348
+  interpreter change is the documented exception above: `RecordChanged` and
+  `RecordVersionChanged` can gain `logical_name_id`, keep `resource_id=null`,
+  update `raw_fact_ref.interpreter_state_key`, and rethread `before_state` on
+  the same resolver event identity.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: diagnostic event rows come from current state, but their
   `migration_associations` are the raw lineage evidence described above, not
