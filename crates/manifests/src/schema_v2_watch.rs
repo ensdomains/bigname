@@ -35,6 +35,7 @@ struct CompiledWatchEntry {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DiscoveryRuleKey {
+    namespace: String,
     family: String,
     edge_kind: String,
     from_role: String,
@@ -44,7 +45,8 @@ struct DiscoveryRuleKey {
 
 impl DiscoveryRuleKey {
     fn same_rule(&self, other: &Self) -> bool {
-        self.family == other.family
+        self.namespace == other.namespace
+            && self.family == other.family
             && self.edge_kind == other.edge_kind
             && self.from_role == other.from_role
             && self.admission == other.admission
@@ -286,16 +288,17 @@ fn insert_discovery_rule(
     emitting_address: Option<String>,
     start: u64,
 ) {
-    rules.insert(
-        DiscoveryRuleKey {
+    rules
+        .entry(DiscoveryRuleKey {
+            namespace: manifest.namespace.clone(),
             family: manifest.source_family.clone(),
             edge_kind: rule.edge_kind.clone(),
             from_role: rule.from_role.clone(),
             admission: rule.admission.clone(),
             emitting_address,
-        },
-        start,
-    );
+        })
+        .and_modify(|existing| *existing = (*existing).min(start))
+        .or_insert(start);
 }
 
 fn insert_watch(

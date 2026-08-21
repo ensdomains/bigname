@@ -191,6 +191,86 @@ start_block = {start_block}"#
         fs::write(path, manifest)?;
         Ok(())
     }
+
+    fn write_cross_namespace_pair(
+        &self,
+        earlier_start: u64,
+        later_start: u64,
+        edge_kind: &str,
+    ) -> Result<()> {
+        self.write_namespace_emitter("alpha", earlier_start, edge_kind, true)?;
+        self.write_namespace_emitter("zeta", later_start, edge_kind, false)
+    }
+
+    fn write_namespace_emitter(
+        &self,
+        namespace: &str,
+        start: u64,
+        edge_kind: &str,
+        as_root: bool,
+    ) -> Result<()> {
+        let (roots, contracts, emitter_role) = if as_root {
+            (
+                format!(
+                    r#"[[roots]]
+name = "source_a"
+address = "0x0000000000000000000000000000000000000004"
+start_block = {start}"#
+                ),
+                r#"[[contracts]]
+role = "event_source"
+address = "0x0000000000000000000000000000000000000005"
+proxy_kind = "none"
+start_block = 100"#
+                    .to_owned(),
+                "event_source",
+            )
+        } else {
+            (
+                "roots = []".to_owned(),
+                format!(
+                    r#"[[contracts]]
+role = "source_a"
+address = "0x0000000000000000000000000000000000000004"
+proxy_kind = "none"
+start_block = {start}"#
+                ),
+                "source_a",
+            )
+        };
+        let manifest = format!(
+            r#"manifest_version = 1
+namespace = "{namespace}"
+source_family = "{}"
+chain = "{}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+{roots}
+
+[capability_flags]
+
+{contracts}
+
+[[discovery_rules]]
+edge_kind = "{edge_kind}"
+from_role = "source_a"
+admission = "reachable_from_root"
+
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
+emitter_roles = ["{emitter_role}"]
+normalized_events = []
+status = "supported"
+"#,
+            self.source_family, self.chain_id,
+        );
+        let directory = self.root.join(namespace).join(&self.source_family);
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("v1.toml"), manifest)?;
+        Ok(())
+    }
 }
 
 impl Drop for WatchManifestFixture {
@@ -571,6 +651,66 @@ async fn moving_one_of_multiple_resolver_sources_into_history_is_rejected() -> R
     assert!(
         error.to_string().contains("discovery rule widening"),
         "{error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn cross_namespace_resolver_start_widening_is_order_independent() -> Result<()> {
+    for (case, earlier_start, later_start) in
+        [("earlier-namespace", 50, 100), ("later-namespace", 100, 50)]
+    {
+        let scratch = ScratchDatabase::create(&format!(
+            "production_manifest_cross_namespace_resolver_{case}"
+        ))
+        .await?;
+        let chain_id = format!("manifest-cross-namespace-resolver-{case}");
+        let fixture = WatchManifestFixture::with_source_family(&chain_id, "ens_v1_registrar_l1")?;
+        fixture.write_cross_namespace_pair(100, 100, "resolver")?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+        seed_completed_ingest_range_through(&scratch, &chain_id, 100).await?;
+
+        fixture.write_cross_namespace_pair(earlier_start, later_start, "resolver")?;
+        let result =
+            sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => {
+                assert_eq!(
+                    required_ingest_redo(scratch.pool(), &chain_id).await?,
+                    Some((50, 100)),
+                    "the slipped transition should stamp only an ordinary Ingest redo"
+                );
+                panic!(
+                    "{case} resolver discovery widening slipped through as an ordinary watch-plan widening"
+                );
+            }
+        };
+        assert!(
+            error.to_string().contains("discovery rule widening"),
+            "the loud rejection must name the transition for {case}: {error}"
+        );
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cross_namespace_watch_entries_min_merge_the_earlier_start() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_cross_namespace_watch_min").await?;
+    let chain_id = "manifest-cross-namespace-watch-min";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v1_registrar_l1")?;
+    fixture.write_cross_namespace_pair(100, 100, "subregistry")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 100).await?;
+
+    fixture.write_cross_namespace_pair(50, 100, "subregistry")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((50, 100)),
+        "duplicate cross-namespace watch keys must retain the minimum start"
     );
 
     scratch.cleanup().await
@@ -1242,6 +1382,14 @@ async fn seed_completed_ingest_range(
     scratch: &ScratchDatabase,
     chain_id: &str,
 ) -> Result<ChainConfig> {
+    seed_completed_ingest_range_through(scratch, chain_id, 1).await
+}
+
+async fn seed_completed_ingest_range_through(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+    through: i64,
+) -> Result<ChainConfig> {
     let source = SourceConfig::new(
         chain_id,
         "rpc",
@@ -1255,28 +1403,30 @@ async fn seed_completed_ingest_range(
     store.initialize_chain(chain_id).await?;
     store.ensure_ingest_sources(chain_id, &[source]).await?;
     seed_chain_head(scratch.pool(), chain_id, 0).await?;
-    advance_chain_head(scratch.pool(), chain_id, 1).await?;
-    let block_hash = format!("{chain_id}-manifest-sync-head-1");
+    advance_chain_head(scratch.pool(), chain_id, through).await?;
+    let block_hash = format!("{chain_id}-manifest-sync-head-{through}");
     sqlx::query(
         "UPDATE ingest_cursors
-         SET next_block_number = 2, target_block_number = 1,
-             last_processed_block_number = 1,
-             last_processed_block_hash = $2
+         SET next_block_number = $2 + 1, target_block_number = $2,
+             last_processed_block_number = $2,
+             last_processed_block_hash = $3
          WHERE chain_id = $1 AND source_key = 'rpc'",
     )
     .bind(chain_id)
+    .bind(through)
     .bind(&block_hash)
     .execute(scratch.pool())
     .await?;
     sqlx::query(
         "UPDATE chain_phase_state
-         SET phase_status = 'completed', current_block_number = 1,
-             current_block_hash = $2, target_block_number = 1,
-             target_block_hash = $2, live_handoff_block_number = 1,
-             live_handoff_block_hash = $2, started_at = now(), finished_at = now()
+         SET phase_status = 'completed', current_block_number = $2,
+             current_block_hash = $3, target_block_number = $2,
+             target_block_hash = $3, live_handoff_block_number = $2,
+             live_handoff_block_hash = $3, started_at = now(), finished_at = now()
          WHERE chain_id = $1 AND phase_name = 'ingest'",
     )
     .bind(chain_id)
+    .bind(through)
     .bind(block_hash)
     .execute(scratch.pool())
     .await?;

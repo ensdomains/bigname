@@ -842,9 +842,12 @@ an already-ingested range is a different ordering problem. Replacing a
 declaration that emits an unchanged active resolver rule has the same problem:
 the replacement contract's discovery events name resolver addresses only after
 Interpret materializes their edges, so an Ingest redo cannot yet fetch those
-resolvers' address-scoped history. Resolver-rule comparison therefore preserves
-the normalized address and inclusive start block of each declaration for its
-`from_role`, and manifest synchronization loudly rejects either transition
+resolvers' address-scoped history. `resolver` [discovery-rule widening and
+narrowing](glossary.md#discovery-rule-widening-and-narrowing) comparison is
+scoped within one chain by
+`(namespace, source_family, edge_kind, from_role, admission)` and preserves the
+normalized address and inclusive start block of each declaration for its
+`from_role`. Manifest synchronization loudly rejects either transition
 instead of mis-certifying a one-pass redo. The operator cannot perform that
 ordering with the current in-place phase workflow, because Interpret reads
 discovery rules only after admission. These transitions are therefore
