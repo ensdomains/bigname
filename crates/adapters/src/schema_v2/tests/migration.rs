@@ -210,7 +210,13 @@ fn cross_family_registrar_transfer_emits_one_unwrapped_candidate_boundary() -> a
     );
     assert_eq!(
         boundary.after_state["predecessor_binding"]["selection"],
-        "active_immediately_before_boundary"
+        "active_immediately_before_predecessor_cleanup"
+    );
+    let cleanup = &boundary.after_state["predecessor_binding"]["predecessor_cleanup"];
+    assert_eq!(cleanup["source_event"], "Transfer");
+    assert_eq!(
+        cleanup["log_index"],
+        scenario["graveyard_transfer_log_index"]
     );
     assert_eq!(
         boundary.after_state["predecessor_binding"]["resource"]["token_id"],
@@ -389,6 +395,17 @@ fn co_admitted_registrar_transfer_keeps_ordinary_event_and_gains_association() -
         &fixture,
         true,
     );
+    let without_predecessor = interpret_test_batch(input.clone())?;
+    let fallback_cleanup_identity = without_predecessor
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "MigrationApplied")
+        .and_then(|boundary| {
+            boundary.after_state["predecessor_binding"]["predecessor_cleanup"]["event_identity"]
+                .as_str()
+        })
+        .expect("candidate without ordinary predecessor evidence still records cleanup identity")
+        .to_owned();
     input.prior_events = setup
         .normalized_events
         .iter()
@@ -407,6 +424,20 @@ fn co_admitted_registrar_transfer_keeps_ordinary_event_and_gains_association() -
         .expect("the independently admitted registrar Transfer remains an ordinary event");
     assert_eq!(transfer.consumer_visibility, "activated");
     assert!(transfer.migration_correlation_ids.is_empty());
+    let boundary_cleanup_identity = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "MigrationApplied")
+        .and_then(|boundary| {
+            boundary.after_state["predecessor_binding"]["predecessor_cleanup"]["event_identity"]
+                .as_str()
+        })
+        .expect("co-admitted predecessor boundary records its cleanup identity");
+    assert_eq!(boundary_cleanup_identity, transfer.event_identity);
+    assert_eq!(
+        fallback_cleanup_identity, transfer.event_identity,
+        "candidate cleanup identity must not depend on whether ordinary predecessor evidence materialized"
+    );
     assert!(
         output
             .migration_event_associations
@@ -665,8 +696,37 @@ fn unlocked_wrapped_catalog_shape_is_distinguished_per_name() -> anyhow::Result<
     let label = scenario["label"].as_str().unwrap();
     let block = scenario["migration_block"].as_i64().unwrap();
     let owner = Address::from([0x11; 20]);
+    let mut dns_name = Vec::with_capacity(label.len() + 6);
+    dns_name.push(u8::try_from(label.len())?);
+    dns_name.extend_from_slice(label.as_bytes());
+    dns_name.extend_from_slice(b"\x03eth\0");
     let mut output = interpret_test_batch(batch(
         vec![
+            raw_at_transaction(
+                super::NameWrapped {
+                    node: scenario["namehash"].as_str().unwrap().parse()?,
+                    name: dns_name.into(),
+                    owner,
+                    fuses: 0,
+                    expiry: scenario["stored_expiry"].as_u64().unwrap() + (90 * 24 * 60 * 60),
+                }
+                .encode_log_data(),
+                block - 1,
+                0,
+                0,
+                addresses["name_wrapper"].as_str().unwrap(),
+            ),
+            raw_at_transaction(
+                super::NameUnwrapped {
+                    node: scenario["namehash"].as_str().unwrap().parse()?,
+                    owner: address(addresses, "graveyard")?,
+                }
+                .encode_log_data(),
+                block,
+                0,
+                scenario["name_unwrapped_log_index"].as_i64().unwrap(),
+                addresses["name_wrapper"].as_str().unwrap(),
+            ),
             raw_at_transaction(
                 super::v1_registrar::Transfer {
                     from: address(addresses, "name_wrapper")?,
@@ -717,16 +777,31 @@ fn unlocked_wrapped_catalog_shape_is_distinguished_per_name() -> anyhow::Result<
     assert_eq!(boundary.after_state["migration_path"], "unlocked_wrapped");
     assert_eq!(
         boundary.after_state["predecessor_binding"]["resource"]["anchor_kind"],
-        "wrapper_backed_control"
+        "registrar_backed_registration"
     );
     assert_eq!(
-        boundary.after_state["predecessor_binding"]["resource"]["contract_address"],
-        addresses["name_wrapper"]
+        boundary.after_state["predecessor_binding"]["selection"],
+        "active_immediately_before_predecessor_cleanup"
     );
     assert!(
         boundary.after_state["predecessor_binding"]["resource"]
             .get("contract_instance_id")
-            .is_none()
+            .is_some()
+    );
+    assert_eq!(
+        boundary.after_state["predecessor_binding"]["resource"]["selection"],
+        "current_registrar_resource_immediately_before_predecessor_cleanup"
+    );
+    assert_eq!(
+        boundary.after_state["predecessor_binding"]["predecessor_cleanup"]["log_index"],
+        scenario["predecessor_cleanup_log_index"]
+    );
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.event_kind == "SurfaceUnbound"
+                && event.after_state["source_event"] == "NameUnwrapped"
+        }),
+        "the unlocked-wrapped catalog fixture includes the ordinary NameUnwrapped that closes wrapper authority"
     );
     assert_eq!(
         boundary.after_state["stored_expiry"],
@@ -3348,7 +3423,11 @@ fn assert_activated_transition(output: &mut BatchOutput, path: &str) -> anyhow::
     assert_eq!(transition.successor_arm, "ens_v2");
     assert_eq!(
         transition.predecessor_selector["selection"],
-        "active_immediately_before_boundary"
+        if matches!(path, "unwrapped" | "unlocked_wrapped") {
+            "active_immediately_before_predecessor_cleanup"
+        } else {
+            "active_immediately_before_boundary"
+        }
     );
     let successor = output
         .surface_bindings
@@ -3424,7 +3503,24 @@ fn unlocked_name_logs(
         controller
     };
     let token = decimal_u256(&scenario["v2_token_id"])?;
-    Ok(vec![
+    let mut logs = Vec::new();
+    let transfer_log = if wrapped {
+        logs.push(raw_at_transaction(
+            super::NameUnwrapped {
+                node: scenario["namehash"].as_str().unwrap().parse()?,
+                owner: address(addresses, "graveyard")?,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            first_log,
+            addresses["name_wrapper"].as_str().unwrap(),
+        ));
+        first_log + 1
+    } else {
+        first_log
+    };
+    logs.extend([
         raw_at_transaction(
             super::v1_registrar::Transfer {
                 from,
@@ -3434,7 +3530,7 @@ fn unlocked_name_logs(
             .encode_log_data(),
             block,
             0,
-            first_log,
+            transfer_log,
             addresses["base_registrar"].as_str().unwrap(),
         ),
         raw_at_transaction(
@@ -3449,7 +3545,7 @@ fn unlocked_name_logs(
             .encode_log_data(),
             block,
             0,
-            first_log + 1,
+            transfer_log + 1,
             addresses["eth_registry"].as_str().unwrap(),
         ),
         raw_at_transaction(
@@ -3460,10 +3556,11 @@ fn unlocked_name_logs(
             .encode_log_data(),
             block,
             0,
-            first_log + 2,
+            transfer_log + 2,
             addresses["eth_registry"].as_str().unwrap(),
         ),
-    ])
+    ]);
+    Ok(logs)
 }
 
 fn batch(raw_logs: Vec<RawLogInput>, fixture: &Value, include_registry_setup: bool) -> BatchInput {

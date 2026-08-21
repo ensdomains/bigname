@@ -9,6 +9,17 @@ use crate::schema_v2::{
     model::DiscoveryEdge, protocol::MigrationObservation, state_key::interpreter_state_key,
 };
 
+pub(super) fn registrar_transfer_event_identity(observation: &MigrationObservation) -> String {
+    super::super::normalized::raw_log_event_identity(
+        &observation.source_family,
+        observation.source_manifest_id,
+        &observation.raw,
+        "TokenControlTransferred",
+        "TokenControlTransferred",
+        0,
+    )
+}
+
 #[derive(Clone)]
 pub(super) struct RegistryGroup {
     pub(super) correlation_id: String,

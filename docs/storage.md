@@ -304,6 +304,22 @@ cross-arm close and successor retain/open in that same transaction. It never
 ranks multiple predecessors and never applies the transition to descendants.
 There is no runtime or manifest activation flag.
 
+The `.eth` second-level selector is path-specific. The registrar-token
+`unwrapped` and `unlocked_wrapped` paths record their exact BaseRegistrar
+transfer to the Graveyard, select the registrar resource immediately before
+that cleanup, and close it at the cleanup position. The `locked_wrapped` path
+selects the live NameWrapper resource immediately before the ENSv2 registration
+boundary and closes it there. The unlocked wrapped controller unwraps before
+injecting the ENSv2 registration, so ordinary ENSv1 interpretation has already
+closed its wrapper binding and reactivated its registrar position before that
+recorded transfer. If no prior registrar identity was materialized, that exact
+transfer confirms the fallback identity with its binding effective from the
+preceding `NameUnwrapped`; the cleanup-relative time predicate remains strict.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+
 For the `.eth` second-level names covered by slice 2A, zero matching ENSv1
 predecessors and multiple matching ENSv1 predecessors are both integrity
 errors. The unlocked ERC-721 entry accepts transfers only from BaseRegistrar,

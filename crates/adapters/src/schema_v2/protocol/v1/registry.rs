@@ -259,6 +259,7 @@ pub(super) fn interpret(
         raw,
         &after,
         state.v1_resolver(&selected.source.namespace, &affected_node),
+        None,
     );
     if selected.event.name == "NewResolver" {
         let resolver = after
@@ -327,6 +328,7 @@ pub(super) fn append_authority_transition(
     raw: &RawLogInput,
     observation_state: &Value,
     resolver: Option<String>,
+    binding_active_from: Option<time::OffsetDateTime>,
 ) {
     if let Some(linked) = linked.filter(|state| state.token_lineage_id.is_none()) {
         output.resources.push(ResourceDraft {
@@ -351,6 +353,7 @@ pub(super) fn append_authority_transition(
                     event_time(raw).unix_timestamp_nanos()
                 ))
             }),
+            active_from: binding_active_from,
         });
     } else if let Some(previous) = previous.filter(|authority| authority.surface_known) {
         output.binding_closures.push(BindingClosureDraft {

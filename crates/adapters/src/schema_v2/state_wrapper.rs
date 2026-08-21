@@ -15,17 +15,18 @@ impl State {
         );
     }
 
-    pub(in crate::schema_v2) fn matches_v1_unwrap(
+    pub(in crate::schema_v2) fn matching_v1_unwrap_time(
         &self,
         namespace: &str,
         namehash: &str,
         from: &str,
         raw: &RawLogInput,
-    ) -> bool {
+    ) -> Option<time::OffsetDateTime> {
         self.v1_pending_unwraps
             .get(&v1_key(namespace, namehash))
-            .is_some_and(|(transaction, unwrapped_log)| {
-                transaction == &unwrap_transaction(from, raw) && *unwrapped_log < raw.log_index
+            .and_then(|(transaction, unwrapped_log)| {
+                (transaction == &unwrap_transaction(from, raw) && *unwrapped_log < raw.log_index)
+                    .then(|| super::super::seam::event_time(raw.block_timestamp, *unwrapped_log))
             })
     }
 

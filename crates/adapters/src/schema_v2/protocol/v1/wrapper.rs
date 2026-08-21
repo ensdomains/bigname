@@ -372,6 +372,7 @@ fn name_wrapped(
         raw,
         &after,
         state.v1_resolver(&selected.source.namespace, &raw_namehash),
+        None,
     );
     if let Some(labels) = labels {
         output.names.push(NameDraft {
@@ -444,6 +445,7 @@ fn name_unwrapped(
         raw,
         &after,
         state.v1_resolver(&selected.source.namespace, &namehash),
+        None,
     );
     Ok(output)
 }

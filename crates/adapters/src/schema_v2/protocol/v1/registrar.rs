@@ -89,11 +89,13 @@ fn transfer(
     let raw_namehash = registrar_namehash(selected, labelhash);
     let previous_active = state.v1_name(&selected.source.namespace, &raw_namehash);
     let mut wrapper_fallback = false;
+    let mut fallback_active_from = None;
     if state
         .v1_registrar(&selected.source.namespace, &raw_namehash)
         .is_none()
         && state.v1_surface_materialized(&selected.source.namespace, &raw_namehash)
-        && state.matches_v1_unwrap(&selected.source.namespace, &raw_namehash, &from, raw)
+        && let Some(unwrapped_at) =
+            state.matching_v1_unwrap_time(&selected.source.namespace, &raw_namehash, &from, raw)
         && let Some(expiry) =
             state.v1_registrar_expiry_from_wrapper(&selected.source.namespace, &raw_namehash)
     {
@@ -116,6 +118,7 @@ fn transfer(
             false,
         );
         wrapper_fallback = true;
+        fallback_active_from = Some(unwrapped_at);
     }
     let Some((before, linked)) =
         state.transfer_v1_registrar_owner(&selected.source.namespace, &raw_namehash, to.clone())
@@ -214,6 +217,7 @@ fn transfer(
         raw,
         &json!({"source_event":"Transfer"}),
         state.v1_resolver(&selected.source.namespace, &raw_namehash),
+        fallback_active_from,
     );
     Ok(output)
 }
@@ -516,6 +520,7 @@ fn name_event(
             raw,
             &after,
             state.v1_resolver(&selected.source.namespace, &raw_namehash),
+            None,
         );
     }
     if let Some(labels) = labels {

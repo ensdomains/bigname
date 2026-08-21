@@ -340,9 +340,12 @@ mixed-history ownership remains capability-gated separately. Distinct from
 bigname's own *schema-migration* history; see the note at the top of this file.
 
 **Migration authority transition** (`MigrationAuthorityTransition`) —
-Interpret's validated operation for changing one exact logical name from an
-`ens_v1` predecessor binding to a concrete `ens_v2` successor binding at an
-activated [migration boundary](#migration-boundary). It is the only writer
+Interpret's validated operation associated with an activated
+[migration boundary](#migration-boundary) for changing one exact logical name
+from an `ens_v1` predecessor binding to a concrete `ens_v2` successor binding.
+Child, registrar-token `unwrapped`, and `unlocked_wrapped` second-level
+predecessors close at their recorded ENSv1 cleanup; `locked_wrapped`
+second-level predecessors close at the boundary. It is the only writer
 allowed to cross those `authority_arm` values. The transition and its activated
 `MigrationApplied` event correspond one-to-one, so Project consumes the event's
 already-validated successor, position, and correlation ID without correlating
@@ -358,7 +361,10 @@ selection. Slice 2A defines the explicit activated transition operation and
 tests it through a code-only injection seam, but production still emits only
 candidates. A future activation re-derives the candidate with
 `consumer_visibility=activated` and performs that deferred binding transition
-at the recorded position without deleting ENSv1 history. The transition carries
+without deleting ENSv1 history. The child, registrar-token `unwrapped`, and
+`unlocked_wrapped` second-level forms close their predecessor at a recorded
+earlier cleanup in the same transaction; the `locked_wrapped` second-level form
+closes it at the boundary position. The transition carries
 the exact name, full block/transaction/log position, an `ens_v1` predecessor
 selector, and the concrete `ens_v2` successor binding and resource. A candidate or
 activated boundary is derived only from the complete admitted successful
@@ -368,23 +374,42 @@ their own activated boundary or obtain a current registration in the admitted
 migration registry below that migrated parent; the latter does not invent a
 child boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) The unlocked path transfers the
 ENSv1 position to the
-Graveyard before registering the reserved ENSv2 label, while the locked
-receiver moves the wrapper token to the Graveyard and injects the ENSv2
-registration.
+Graveyard before registering the reserved ENSv2 label. For an unlocked wrapped
+input, it unwraps into the Graveyard before injecting that registration. The
+locked receiver moves the wrapper token to the Graveyard and injects the ENSv2
+registration without unwrapping it.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58).
 
 At an activated `.eth` second-level boundary, Interpret locks the current
 matching ENSv1 predecessor and changes the predecessor and successor binding
-ranges in one transaction. Zero or multiple matching predecessors are integrity
-errors; it never ranks candidates. The zero case is corruption because both the
-registrar-token and wrapper-token migration entries require a transferable live
-ENSv1 token. This rule does not cover emancipated children: their transfer gate
-uses wrapper expiry rather than the parent's registrar grace boundary. Slice 3A
-defines that separate predecessor rule under
+ranges in one transaction. For both the registrar-token `unwrapped` path and
+the `unlocked_wrapped` path, the boundary records the exact BaseRegistrar
+`Transfer` cleanup, resolves the registrar predecessor immediately before that
+cleanup, and preserves its cleanup-time close; the transfer occurs before the
+later ENSv2 registration. Ordinary interpretation of the unlocked wrapped
+path's earlier `NameUnwrapped` closes the wrapper binding and reactivates that
+registrar position. The `locked_wrapped` path resolves its wrapper predecessor
+immediately before the boundary. Zero or multiple matching predecessors are
+integrity errors; it never ranks candidates. The zero case is corruption
+because both the registrar-token and wrapper-token migration entries require a
+transferable live ENSv1 token.
+If the deployment profile had not materialized the registrar identity before
+the unwrap, the exact following BaseRegistrar transfer confirms the fallback
+identity with a binding effective from `NameUnwrapped`; it is therefore still
+the one registrar predecessor active immediately before cleanup.
+This rule does not cover emancipated children: their transfer gate uses wrapper
+expiry rather than the parent's registrar grace boundary. Slice 3A defines that
+separate predecessor rule under
 [child migration boundary](#child-migration-boundary).
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L103 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L48-L55 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
@@ -704,10 +729,12 @@ using it yields the same log sequence as sending those transfers directly
 (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2@ccaeb58),
 and there is nothing for correlation to key on in the first place.
 
-Activation is consumer slice 3B. Until then Interpret's activated-transition
-writer deliberately does not admit the `wrapper_backed_child_control` anchor:
-attempting to activate a child transition is an explicit data-integrity refusal
-rather than a silent fallback to the second-level predecessor rule.
+Consumer slice 3B part 2 admits `wrapper_backed_child_control` through
+Interpret's explicit activated test seam and resolves it only against the
+child's recorded cleanup; it never falls back to the second-level predecessor
+rule. Production adapters still leave complete groups candidate-only, so
+production activation and publication remain a separate follow-on on issue
+#318.
 
 **Migratable child** — a child of an already-migrated name whose label its
 parent's [migration registry](#migration-registry-wrapperregistry) will not let
