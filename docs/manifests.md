@@ -825,7 +825,8 @@ A manifest change widens the [watch
 plan](glossary.md#watch-plan--watched-tuple) when it adds an address, event
 signature, or active block range whose facts were not selected when older
 blocks were loaded. Manifest synchronization compares the previous and desired
-compiled watch plans. Each stored manifest payload carries the compiled
+[compiled watch plans](glossary.md#compiled-watch-plan). Each stored manifest
+payload carries the compiled
 emitter/event/start entries produced when it was admitted, so a later binary
 change to emitter-scope policy is compared with the policy that actually
 preceded it rather than recompiling both sides with the new binary. This
@@ -876,15 +877,21 @@ obligation; only then may ordinary derivation resume. The redo includes a
 Live-loaded suffix through the latest published head even though Live does not
 advance finite source cursors. A required redo clears only when its loaded
 range-end hash is the readable hash at that height, so loading a coherent
-sibling fork cannot certify facts for the fork Interpret will read. This
-additional check does not change ordinary operator repair redos, which may
-reconcile a cursor to another retained fork before normal head publication.
+sibling fork cannot certify facts for the fork Interpret will read. That
+required-redo range-end check does not change ordinary operator repair redos,
+which may reconcile a cursor to another retained fork before normal head
+publication. Every Base Ingest redo, required or ordinary, also requires the
+overlapping Coinbase/RPC loads to return the same seam-block hash, including
+when the redo fits in one batch.
 
 Removing watched tuples, repeating the same manifest set, adding a chain with
 no Ingest coverage, or adding a watched window that starts after the retained
 head does not stamp Ingest. A later widening extends an existing required or
-interrupted Ingest redo rather than replacing it. Do not edit cursors to clear
-the obligation.
+interrupted Ingest redo rather than replacing it. Once stamped, the obligation
+persists across a later narrow-back: synchronization has no clearing path, and
+only successful completion of the recorded redo clears it. Completing that redo
+after narrowing is safe because the extra work is fetch cost only; it cannot
+reduce retained fact coverage. Do not edit cursors to clear the obligation.
 
 The fence error prints the invalidation token from the current marker. After
 the fetch, re-run the required full Interpret redo with

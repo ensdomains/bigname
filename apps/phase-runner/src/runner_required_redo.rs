@@ -24,16 +24,8 @@ impl PhaseRunner {
             else {
                 return Ok(());
             };
-            if required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
-                return Ok(());
-            }
-            self.run_phase_with_restart(
-                chain,
-                PhaseName::Live,
-                RunMode::Normal,
-                cancellation.clone(),
-            )
-            .await?;
+            self.catch_up_required_range(chain, range, cancellation.clone())
+                .await?;
             if cancellation.is_cancelled() {
                 return Ok(());
             }
@@ -45,6 +37,33 @@ impl PhaseRunner {
                 () = tokio::time::sleep(self.timing.live_poll_interval) => {}
             }
         }
+    }
+
+    async fn catch_up_required_range(
+        &self,
+        chain: &ChainConfig,
+        range: BlockRange,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        while !required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
+            self.run_phase_with_restart(
+                chain,
+                PhaseName::Live,
+                RunMode::Normal,
+                cancellation.clone(),
+            )
+            .await?;
+            if cancellation.is_cancelled() {
+                return Ok(());
+            }
+            if !required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(self.timing.live_poll_interval) => {}
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn run_spine_phase(
@@ -62,13 +81,35 @@ impl PhaseRunner {
             .await?
         {
             if phase == PhaseName::Ingest {
-                return Err(RunnerError::data_integrity(format!(
-                    "manifest watch plan widened over already-ingested blocks for chain {}; \
-                     automatic re-ingest is disabled because historical fetch cost is an operator \
-                     decision; rerun `phase-runner redo --chain {} --phase ingest --from-block {} \
-                     --to-block {}` with the configured sources before derivation",
-                    chain.chain_id, chain.chain_id, range.from, range.to
-                )));
+                let mut current = range;
+                loop {
+                    self.catch_up_required_range(chain, current, cancellation.clone())
+                        .await?;
+                    if cancellation.is_cancelled() {
+                        return Ok(());
+                    }
+                    let Some(updated) = self
+                        .store
+                        .required_redo_range(&chain.chain_id, PhaseName::Ingest)
+                        .await?
+                    else {
+                        return self
+                            .run_phase_with_restart(
+                                chain,
+                                PhaseName::Ingest,
+                                RunMode::Normal,
+                                cancellation,
+                            )
+                            .await;
+                    };
+                    if updated == current {
+                        return Err(crate::transitions::required_ingest_redo_error(
+                            &chain.chain_id,
+                            current,
+                        ));
+                    }
+                    current = updated;
+                }
             }
             if phase == PhaseName::Interpret {
                 self.recover_stopped_live(chain).await?;

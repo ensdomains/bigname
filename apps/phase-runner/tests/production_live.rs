@@ -15,7 +15,7 @@ use std::{
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolValue;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, routing::post};
 use bigname_ingest::{Engine, LiveBatchRequest, Marker, SourceDescriptor, load_watch_filter};
 use bigname_lookup::ChainRpcUrls;
@@ -461,6 +461,117 @@ async fn live_reorg_above_the_ingest_handoff_replays_through_the_live_head() -> 
 }
 
 #[tokio::test]
+async fn required_ingest_recovery_uses_the_published_head_without_a_finite_handoff() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_live_required_ingest_without_handoff").await?;
+    let chain = "required-ingest-without-handoff";
+    let manifests = WatchManifestFixture::new(chain)?;
+    manifests.write(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    seed_branch(scratch.pool(), chain, 1, 1, None).await?;
+    publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 1, &block_hash(1, 1)).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'idle', current_block_number = NULL, current_block_hash = NULL,
+             target_block_number = NULL, target_block_hash = NULL, input_content_hash = NULL,
+             started_at = NULL, finished_at = NULL
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', live_handoff_block_number = NULL,
+             live_handoff_block_hash = NULL, target_block_number = 3,
+             target_block_hash = $2, finished_at = NULL
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain)
+    .bind(block_hash(1, 3))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 2, target_block_number = 3,
+             last_processed_block_number = 1, last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'rpc'",
+    )
+    .bind(chain)
+    .bind(block_hash(1, 1))
+    .execute(scratch.pool())
+    .await?;
+
+    let fixture = RpcFixture::spawn(1, 3).await?;
+    let runner = production_runner(
+        &scratch,
+        Arc::new(Engine::new(scratch.pool().clone())),
+        chain,
+    )?;
+    manifests.write(true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    fixture.reorg(2, 0, 3).await;
+    rewind_to_ancestor(
+        &scratch.runner(),
+        chain,
+        BlockMarker::new(0, block_hash(1, 0))?,
+    )
+    .await?;
+
+    let pending = tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.run_chain(
+            &live_chain(chain, &fixture.endpoint)?,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .context("Live did not recover the unreadable required Ingest end")?
+    .expect_err("normal supervision must leave the historical fetch to the operator");
+    assert!(pending.to_string().contains("--phase ingest"));
+    assert!(pending.to_string().contains("--from-block 0 --to-block 1"));
+    let republished: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(republished, (3, block_hash(2, 3)));
+    let handoff: Option<i64> = sqlx::query_scalar(
+        "SELECT live_handoff_block_number FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        handoff, None,
+        "Live recovery must not forge a finite handoff"
+    );
+
+    runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let still_required: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!still_required);
+
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_manifest_authority_fence").await?;
     let chain = "manifest-authority-live-suffix";
@@ -593,14 +704,98 @@ async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Res
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(required_ingest, (0, 3));
-    redo_runner
+
+    let premature_attested_runner = loopback_runner(
+        &scratch,
+        "production-live-premature-attested-interpret-redo",
+    )?
+    .with_watch_set_coverage_attestation(chain, &first_b_generation);
+    for (phase, runner, range) in [
+        (
+            PhaseName::Interpret,
+            &premature_attested_runner,
+            BlockRange::new(0, 3)?,
+        ),
+        (PhaseName::Project, &redo_runner, BlockRange::new(0, 4)?),
+    ] {
+        let error = runner
+            .redo(
+                &live_chain(chain, &fixture.endpoint)?,
+                RedoPhase::Phase(phase),
+                range,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("derived redo must wait for the required Ingest redo");
+        assert_eq!(
+            error.to_string(),
+            "manifest watch plan widened over already-ingested blocks for chain \
+manifest-authority-live-suffix; automatic re-ingest is disabled because historical fetch cost is \
+an operator decision; rerun `phase-runner redo --chain manifest-authority-live-suffix --phase \
+ingest --from-block 0 --to-block 3` with the configured sources before derivation"
+        );
+    }
+
+    fixture.state.write().await.logs.clear();
+    fixture.reorg(2, 1, 3).await;
+    let sibling_error = runner
         .redo(
             &live_chain(chain, &fixture.endpoint)?,
             RedoPhase::Phase(PhaseName::Ingest),
             BlockRange::new(0, 3)?,
             CancellationToken::new(),
         )
-        .await?;
+        .await
+        .expect_err("the required Ingest redo must not certify a provider sibling fork");
+    for expected in ["loaded boundary hash", "readable boundary hash", "rerun"] {
+        assert!(
+            sibling_error.to_string().contains(expected),
+            "missing {expected:?} in sibling-fork refusal: {sibling_error}"
+        );
+    }
+
+    rewind_to_ancestor(
+        &scratch.runner(),
+        chain,
+        BlockMarker::new(1, block_hash(1, 1))?,
+    )
+    .await
+    .context("operator rewind must preserve a recovery path for the pending Ingest redo")?;
+    let pending = tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.run_chain(
+            &live_chain(chain, &fixture.endpoint)?,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .context("Live did not republish the winning suffix for the pending Ingest redo")?
+    .expect_err("normal supervision must still leave the historical fetch to the operator");
+    assert_eq!(
+        pending.to_string(),
+        "manifest watch plan widened over already-ingested blocks for chain \
+         manifest-authority-live-suffix; automatic re-ingest is disabled because historical \
+         fetch cost is an operator decision; rerun `phase-runner redo --chain \
+         manifest-authority-live-suffix --phase ingest --from-block 0 --to-block 3` with the \
+         configured sources before derivation"
+    );
+    let republished: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(republished, (3, block_hash(2, 3)));
+
+    runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await
+        .context("required Ingest redo must complete against the republished winning fork")?;
 
     // After the required Ingest obligation is discharged, Interpret still needs the separate
     // authority-transition attestation before adopting the new manifest.

@@ -36,9 +36,12 @@ For each configured chain, the path is:
    Every runner start checks the current source configuration and cursor again
    against that completion-time target; later Live finality does not extend the
    completed Verify extent.
-5. `live` follows a provider snapshot from the completed ingest handoff, walks
-   backward to a stored readable ancestor, loads at most one bounded winning
-   suffix batch, and publishes the resulting head through the shared head path.
+5. `live` normally follows a provider snapshot from the completed ingest
+   handoff, walks backward to a stored readable ancestor, loads at most one
+   bounded winning suffix batch, and publishes the resulting head through the
+   shared head path. Only recovery of an unreadable required Ingest end may use
+   the published readable head when an interrupted finite Ingest recorded no
+   handoff.
 
 The runner persists phase and per-source cursors. A phase advances only through
 the exact block-number/hash markers returned by its implementation. `interpret`
@@ -395,8 +398,9 @@ token remains invalid everywhere else. If the interpreter content hash changes
 while the redo is interrupted, the same token preserves the audit association,
 but the new binary clears the redo cursor written under the prior interpreter
 content hash and walks the exact audited range again from its beginning.
-Manifest synchronization compares the previous and desired compiled watch
-plans. A widening over retained Ingest coverage stamps a required Ingest redo
+Manifest synchronization compares the previous and desired [compiled watch
+plans](glossary.md#compiled-watch-plan). A widening over retained Ingest
+coverage stamps a required Ingest redo
 from the earliest newly watched block through the latest published head. The
 ordinary runner reports the exact command and refuses to run that potentially
 expensive fetch automatically; successful explicit completion clears the
@@ -433,9 +437,15 @@ cargo phase -- rewind \
 It takes the ingest, interpret, project, and live advisory locks so no head
 publisher or downstream writer can overlap it, requires the exact ancestor to
 be stored and readable, refuses to cross the safe head, and invokes normal head
-publication. It does not write raw facts or normalized events. The resulting
-orphaning stamps downstream redo; the next supervised run fills the winning
-path before consuming those stamps.
+publication. It does not write raw facts or normalized events. An uncompleted
+required Ingest redo remains stamped if its end moves above the readable head.
+The next supervised run uses Live intake to publish the winning suffix under
+the current watch plan, then repeats the exact required Ingest command; it does
+not perform that operator-owned historical fetch automatically. If finite
+Ingest was interrupted before recording its handoff, this recovery-only Live
+pass anchors at the published readable ancestor. The resulting orphaning also
+stamps downstream redo, which remains fenced until the suffix is readable
+again.
 
 The retained schema-v2 inspection windows are read-only `phase-runner`
 subcommands alongside redo and rewind:

@@ -23,6 +23,10 @@ struct WatchKey {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// This is the persisted [compiled watch plan](../../../docs/glossary.md#compiled-watch-plan).
+/// Format changes must remain backward-decodable: decode failure stops manifest sync fleet-wide,
+/// and a field rename would brick sync with no recovery short of direct database surgery. A
+/// coverage-bearing field must not be removed merely because serde can ignore the old key.
 struct CompiledWatchEntry {
     emitter: WatchEmitter,
     topic0: String,

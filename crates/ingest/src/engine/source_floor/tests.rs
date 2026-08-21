@@ -20,7 +20,7 @@ struct ScriptedRedoWindowLoader {
     loaded: Arc<Mutex<Vec<(String, Marker)>>>,
 }
 
-type ScriptedWindow = (String, i64, i64, Marker, Option<String>);
+type ScriptedWindow = (String, i64, i64, Marker, Marker, Option<String>);
 
 impl ScriptedRedoWindowLoader {
     fn new(windows: impl IntoIterator<Item = ScriptedWindow>) -> Self {
@@ -42,12 +42,12 @@ impl crate::engine::redo::RedoWindowLoader for ScriptedRedoWindowLoader {
         to: i64,
     ) -> crate::engine::redo::RedoLoadFuture<'a> {
         Box::pin(async move {
-            let (expected_source, expected_from, expected_to, marker, first_parent_hash) = self
-                .windows
-                .lock()
-                .expect("scripted redo windows lock")
-                .pop_front()
-                .expect("scripted redo window");
+            let (expected_source, expected_from, expected_to, first, marker, first_parent_hash) =
+                self.windows
+                    .lock()
+                    .expect("scripted redo windows lock")
+                    .pop_front()
+                    .expect("scripted redo window");
             assert_eq!(
                 (source.key.as_str(), from, to),
                 (expected_source.as_str(), expected_from, expected_to)
@@ -57,6 +57,7 @@ impl crate::engine::redo::RedoWindowLoader for ScriptedRedoWindowLoader {
                 .expect("loaded redo windows lock")
                 .push((source.key.clone(), marker.clone()));
             Ok(crate::engine::LoadedWindow {
+                first,
                 marker,
                 first_parent_hash,
                 estimated_write_bytes: 0,
@@ -400,6 +401,137 @@ async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> A
 }
 
 #[tokio::test]
+async fn one_batch_redo_rejects_a_fork_switch_at_the_base_source_seam() -> AnyResult<()> {
+    let database = intake_database("ingest_redo_one_batch_source_seam", "base-mainnet").await?;
+    let seam = crate::BASE_COINBASE_SEAM_BLOCK;
+    let coinbase_seam = Marker {
+        number: seam,
+        hash: marker_hash(seam + 10),
+    };
+    let rpc_end = Marker {
+        number: seam + 1,
+        hash: marker_hash(seam + 20),
+    };
+    let rpc_seam = Marker {
+        number: seam,
+        hash: marker_hash(seam + 30),
+    };
+    let endpoint = scripted_marker_endpoint(BTreeMap::from([
+        (seam, vec![coinbase_seam.hash.clone()]),
+        (seam + 1, vec![rpc_end.hash.clone()]),
+    ]))
+    .await?;
+    let loader = ScriptedRedoWindowLoader::new([
+        (
+            "base-coinbase".to_owned(),
+            seam - 1,
+            seam,
+            Marker {
+                number: seam - 1,
+                hash: marker_hash(seam - 1),
+            },
+            coinbase_seam.clone(),
+            None,
+        ),
+        (
+            "base-rpc".to_owned(),
+            seam,
+            seam + 1,
+            rpc_seam.clone(),
+            rpc_end.clone(),
+            None,
+        ),
+    ]);
+    let engine = Engine::new(database.pool().clone());
+    let error = engine
+        .run_redo_batch_with_loader(
+            &loader,
+            BatchRequest {
+                chain_id: "base-mainnet".to_owned(),
+                sources: vec![
+                    SourceDescriptor {
+                        key: "base-coinbase".to_owned(),
+                        kind: "coinbase-sql".to_owned(),
+                        start_block: 0,
+                        endpoint: "https://unused.invalid/".to_owned(),
+                    },
+                    SourceDescriptor {
+                        key: "base-rpc".to_owned(),
+                        kind: "rpc".to_owned(),
+                        start_block: seam,
+                        endpoint,
+                    },
+                ],
+                cursors: Vec::new(),
+                redo_range: Some((seam - 1, seam + 1)),
+                resume_current: None,
+            },
+        )
+        .await
+        .expect_err("one completed batch must not join different forks at the source seam");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains(&coinbase_seam.hash)
+            && error.to_string().contains(&rpc_seam.hash),
+        "the refusal must identify both seam hashes: {error}"
+    );
+
+    let consistent_endpoint = scripted_marker_endpoint(BTreeMap::from([
+        (seam, vec![coinbase_seam.hash.clone()]),
+        (seam + 1, vec![rpc_end.hash.clone()]),
+    ]))
+    .await?;
+    let consistent = engine
+        .run_redo_batch_with_loader(
+            &ScriptedRedoWindowLoader::new([
+                (
+                    "base-coinbase".to_owned(),
+                    seam - 1,
+                    seam,
+                    Marker {
+                        number: seam - 1,
+                        hash: marker_hash(seam - 1),
+                    },
+                    coinbase_seam.clone(),
+                    None,
+                ),
+                (
+                    "base-rpc".to_owned(),
+                    seam,
+                    seam + 1,
+                    coinbase_seam,
+                    rpc_end,
+                    None,
+                ),
+            ]),
+            BatchRequest {
+                chain_id: "base-mainnet".to_owned(),
+                sources: vec![
+                    SourceDescriptor {
+                        key: "base-coinbase".to_owned(),
+                        kind: "coinbase-sql".to_owned(),
+                        start_block: 0,
+                        endpoint: "https://unused.invalid/".to_owned(),
+                    },
+                    SourceDescriptor {
+                        key: "base-rpc".to_owned(),
+                        kind: "rpc".to_owned(),
+                        start_block: seam,
+                        endpoint: consistent_endpoint,
+                    },
+                ],
+                cursors: Vec::new(),
+                redo_range: Some((seam - 1, seam + 1)),
+                resume_current: None,
+            },
+        )
+        .await?;
+    assert!(consistent.complete);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn an_equal_height_source_boundary_uses_loaded_evidence_without_reloading() -> AnyResult<()> {
     let database = intake_database("ingest_redo_equal_source_boundary", "base-mainnet").await?;
     let endpoint = marker_resolution_endpoint().await?;
@@ -459,8 +591,7 @@ async fn an_equal_height_source_boundary_uses_loaded_evidence_without_reloading(
 }
 
 #[tokio::test]
-async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summary() -> AnyResult<()>
-{
+async fn a_cross_source_seam_mismatch_is_rejected_before_a_phase_summary() -> AnyResult<()> {
     let database =
         intake_database("ingest_redo_intermediate_source_boundary", "base-mainnet").await?;
     let seam = crate::BASE_COINBASE_SEAM_BLOCK;
@@ -490,6 +621,10 @@ async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summa
             "base-coinbase".to_owned(),
             seam - 255,
             seam,
+            Marker {
+                number: seam - 255,
+                hash: marker_hash(seam - 255),
+            },
             loaded_fork.clone(),
             None,
         ),
@@ -498,12 +633,14 @@ async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summa
             seam,
             seam,
             summary_fork.clone(),
+            summary_fork.clone(),
             None,
         ),
         (
             "base-rpc".to_owned(),
             seam + 1,
             seam + 1,
+            range_end.clone(),
             range_end.clone(),
             Some(summary_fork.hash.clone()),
         ),
@@ -523,41 +660,19 @@ async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summa
         },
     ];
     let engine = Engine::new(database.pool().clone());
-    let first = engine
-        .run_redo_batch_with_loader(
-            &loader,
-            BatchRequest {
-                chain_id: "base-mainnet".to_owned(),
-                sources: sources.clone(),
-                cursors: Vec::new(),
-                redo_range: Some((seam - 255, seam + 1)),
-                resume_current: None,
-            },
-        )
-        .await?;
-    assert!(!first.complete);
-    assert_eq!(first.current, summary_fork);
-    assert_eq!(first.sources[0].current, Some(loaded_fork.clone()));
-
     let error = engine
         .run_redo_batch_with_loader(
             &loader,
             BatchRequest {
                 chain_id: "base-mainnet".to_owned(),
                 sources,
-                cursors: vec![SourceCursor {
-                    key: "base-coinbase".to_owned(),
-                    next_block: seam + 1,
-                    target_block: Some(seam),
-                    last_processed: None,
-                    redo_loaded_boundary: first.sources[0].loaded_boundary.clone(),
-                }],
+                cursors: Vec::new(),
                 redo_range: Some((seam - 255, seam + 1)),
-                resume_current: Some(first.current),
+                resume_current: None,
             },
         )
         .await
-        .expect_err("batch two must reject a fresh fork that differs from its loaded boundary");
+        .expect_err("the first batch must reject mismatched overlapping source loads");
     assert_eq!(error.kind(), ErrorKind::DataIntegrity);
     assert!(
         error
@@ -567,17 +682,6 @@ async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summa
             && error.to_string().contains(&loaded_fork.hash)
             && error.to_string().contains(&summary_fork.hash),
         "{error}"
-    );
-    assert_eq!(
-        loader
-            .loaded
-            .lock()
-            .expect("loaded redo windows lock")
-            .iter()
-            .filter(|(source, _)| source == "base-coinbase")
-            .count(),
-        1,
-        "batch two silently substituted the fresh phase summary without reloading Coinbase"
     );
 
     let consistent_endpoint = scripted_marker_endpoint(BTreeMap::from([(
@@ -594,14 +698,26 @@ async fn an_intermediate_loaded_source_boundary_is_not_replaced_by_a_phase_summa
             "base-coinbase".to_owned(),
             seam - 255,
             seam,
+            Marker {
+                number: seam - 255,
+                hash: marker_hash(seam - 255),
+            },
             loaded_fork.clone(),
             None,
         ),
-        ("base-rpc".to_owned(), seam, seam, loaded_fork.clone(), None),
+        (
+            "base-rpc".to_owned(),
+            seam,
+            seam,
+            loaded_fork.clone(),
+            loaded_fork.clone(),
+            None,
+        ),
         (
             "base-rpc".to_owned(),
             seam + 1,
             seam + 1,
+            range_end.clone(),
             range_end.clone(),
             Some(loaded_fork.hash.clone()),
         ),
@@ -686,6 +802,10 @@ async fn resumed_redo_rejects_a_loaded_window_from_a_sibling_fork() -> AnyResult
             0,
             255,
             Marker {
+                number: 0,
+                hash: marker_hash(0),
+            },
+            Marker {
                 number: 255,
                 hash: a_255.clone(),
             },
@@ -695,6 +815,10 @@ async fn resumed_redo_rejects_a_loaded_window_from_a_sibling_fork() -> AnyResult
             "rpc".to_owned(),
             256,
             256,
+            Marker {
+                number: 256,
+                hash: c_256.clone(),
+            },
             Marker {
                 number: 256,
                 hash: c_256,

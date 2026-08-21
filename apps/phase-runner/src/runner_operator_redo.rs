@@ -375,6 +375,17 @@ impl PhaseRunner {
             .get(phase)
             .preflight(&chain.chain_id, &chain.sources, &mode)?;
         self.store.initialize_chain(&chain.chain_id).await?;
+        if matches!(phase, PhaseName::Interpret | PhaseName::Project)
+            && let Some(required) = self
+                .store
+                .required_redo_range(&chain.chain_id, PhaseName::Ingest)
+                .await?
+        {
+            return Err(crate::transitions::required_ingest_redo_error(
+                &chain.chain_id,
+                required,
+            ));
+        }
         self.require_readable_redo_end(&chain.chain_id, range)
             .await?;
         self.run_phase_with_restart(chain, phase, mode, cancellation)

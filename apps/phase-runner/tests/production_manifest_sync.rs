@@ -11,10 +11,10 @@ use phase_runner::{
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     heads::BlockMarker,
-    phase::{BlockRange, PhaseName, PhaseSet},
+    phase::{BlockRange, PhaseName, PhaseSet, RunMode},
     rewind::rewind_to_ancestor,
     runner::{PhaseRunner, RedoPhase},
-    state::PhaseStore,
+    state::{PhaseStore, StartDisposition},
 };
 use sqlx::types::Uuid;
 use tokio_util::sync::CancellationToken;
@@ -46,6 +46,15 @@ impl WatchManifestFixture {
     }
 
     fn write(&self, include_new_event: bool, include_new_contract: bool) -> Result<()> {
+        self.write_with_start(include_new_event, include_new_contract, 0)
+    }
+
+    fn write_with_start(
+        &self,
+        include_new_event: bool,
+        include_new_contract: bool,
+        source_a_start: u64,
+    ) -> Result<()> {
         let new_event = include_new_event.then_some(
             r#"
 [[abi.events]]
@@ -82,7 +91,7 @@ discovery_rules = []
 role = "source_a"
 address = "0x0000000000000000000000000000000000000004"
 proxy_kind = "none"
-start_block = 0
+start_block = {}
 {}
 
 [[abi.events]]
@@ -95,6 +104,7 @@ status = "supported"
 "#,
             self.source_family,
             self.chain_id,
+            source_a_start,
             new_contract.unwrap_or_default(),
             new_event.unwrap_or_default(),
         );
@@ -195,6 +205,23 @@ async fn widening_after_rewind_targets_the_readable_head_and_can_complete() -> R
     fixture.write(false, false)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
     let chain = seed_completed_ingest_range(&scratch, chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed',
+             current_block_number = CASE WHEN phase_name = 'interpret' THEN 1 ELSE 0 END,
+             current_block_hash = CASE WHEN phase_name = 'interpret' THEN $2 ELSE $3 END,
+             target_block_number = CASE WHEN phase_name = 'interpret' THEN 1 ELSE 0 END,
+             target_block_hash = CASE WHEN phase_name = 'interpret' THEN $2 ELSE $3 END,
+             input_content_hash = $4,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-manifest-sync-head-1"))
+    .bind(format!("{chain_id}-manifest-sync-head-0"))
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
 
     let block_0 = format!("{chain_id}-manifest-sync-head-0");
     rewind_to_ancestor(&scratch.runner(), chain_id, BlockMarker::new(0, block_0)?).await?;
@@ -215,35 +242,96 @@ async fn widening_after_rewind_targets_the_readable_head_and_can_complete() -> R
         )
         .await?;
     assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+
+    let disposition = PhaseStore::new(scratch.pool().clone())
+        .start_phase(chain_id, PhaseName::Live, &RunMode::Normal)
+        .await
+        .context("Live must be able to republish the replacement suffix before derived redo")?;
+    assert_eq!(disposition, StartDisposition::Started);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn rewind_preserves_a_required_ingest_obligation_above_the_new_head() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_widening_before_rewind").await?;
+    let chain_id = "manifest-widening-before-rewind";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.write(true, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
+    );
+
+    let block_0 = format!("{chain_id}-manifest-sync-head-0");
+    rewind_to_ancestor(&scratch.runner(), chain_id, BlockMarker::new(0, block_0)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1)),
+        "rewind must preserve the obligation for Live to make readable again"
+    );
+    let latest: i64 =
+        sqlx::query_scalar("SELECT latest_block_number FROM chain_heads WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(
+        latest, 0,
+        "rewind must publish the requested readable ancestor"
+    );
+
     scratch.cleanup().await
 }
 
 #[tokio::test]
 async fn manifest_watch_comparison_trips_only_for_covered_widenings() -> Result<()> {
-    for (name, before, after, already_ingested, expected_redo) in [
+    for (name, before, after, before_start, after_start, already_ingested, expected_redo) in [
         (
             "new-contract",
             (false, false),
             (false, true),
+            0,
+            0,
             true,
             Some((0, 1)),
         ),
-        ("narrowing", (true, true), (false, false), true, None),
-        ("same-set", (false, false), (false, false), true, None),
-        ("fresh-chain", (false, false), (true, false), false, None),
+        (
+            "start-block-lowering",
+            (false, false),
+            (false, false),
+            1,
+            0,
+            true,
+            Some((0, 1)),
+        ),
+        ("narrowing", (true, true), (false, false), 0, 0, true, None),
+        ("same-set", (false, false), (false, false), 0, 0, true, None),
+        (
+            "fresh-chain",
+            (false, false),
+            (true, false),
+            0,
+            0,
+            false,
+            None,
+        ),
     ] {
         let scratch =
             ScratchDatabase::create(&format!("production_manifest_watch_comparison_{}", name))
                 .await?;
         let chain_id = format!("manifest-watch-{name}");
         let fixture = WatchManifestFixture::new(&chain_id)?;
-        fixture.write(before.0, before.1)?;
+        fixture.write_with_start(before.0, before.1, before_start)?;
         sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
         if already_ingested {
             seed_completed_ingest_range(&scratch, &chain_id).await?;
         }
 
-        fixture.write(after.0, after.1)?;
+        fixture.write_with_start(after.0, after.1, after_start)?;
         sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
         assert_eq!(
             required_ingest_redo(scratch.pool(), &chain_id).await?,
@@ -253,6 +341,33 @@ async fn manifest_watch_comparison_trips_only_for_covered_widenings() -> Result<
         scratch.cleanup().await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn required_ingest_obligation_persists_after_the_watch_plan_narrows_back() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_narrow_back_keeps_redo").await?;
+    let chain_id = "manifest-narrow-back-keeps-redo";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.write(true, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
+    );
+
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1)),
+        "narrowing must not clear an uncompleted historical-fetch obligation"
+    );
+
+    scratch.cleanup().await
 }
 
 #[tokio::test]
@@ -374,6 +489,94 @@ async fn compiled_emitter_policy_widening_with_unchanged_manifest_requires_reing
     assert_eq!(discarded_checkpoint, (None, None));
 
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn legacy_payload_upgrade_materializes_compiled_watch_without_spurious_ingest() -> Result<()>
+{
+    for (case, has_derived_output) in [("derived", true), ("fresh", false)] {
+        let scratch =
+            ScratchDatabase::create(&format!("production_manifest_legacy_compiled_watch_{case}"))
+                .await?;
+        let chain_id = format!("manifest-legacy-compiled-watch-{case}");
+        let fixture = WatchManifestFixture::new(&chain_id)?;
+        fixture.write(false, false)?;
+        let repository = load_repository(&fixture.root)?;
+        sync_schema_v2_repository(scratch.pool(), &repository).await?;
+
+        if has_derived_output {
+            seed_completed_ingest_range(&scratch, &chain_id).await?;
+            let head_hash = format!("{chain_id}-manifest-sync-head-1");
+            sqlx::query(
+                "UPDATE chain_phase_state
+                 SET phase_status = 'completed', current_block_number = 1,
+                     current_block_hash = $2, target_block_number = 1,
+                     target_block_hash = $2, input_content_hash = $3,
+                     started_at = now(), finished_at = now()
+                 WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+            )
+            .bind(&chain_id)
+            .bind(head_hash)
+            .bind(INTERPRETER_CONTENT_HASH)
+            .execute(scratch.pool())
+            .await?;
+        } else {
+            PhaseStore::new(scratch.pool().clone())
+                .initialize_chain(&chain_id)
+                .await?;
+        }
+
+        let removed = sqlx::query(
+            "UPDATE manifest_versions
+             SET manifest_payload = manifest_payload - '_bigname_compiled_watch'
+             WHERE chain_id = $1 AND rollout_status = 'active'",
+        )
+        .bind(&chain_id)
+        .execute(scratch.pool())
+        .await?;
+        assert_eq!(removed.rows_affected(), 1);
+
+        sync_schema_v2_repository(scratch.pool(), &repository).await?;
+
+        let snapshot_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM manifest_versions
+             WHERE chain_id = $1 AND rollout_status = 'active'
+               AND manifest_payload ? '_bigname_compiled_watch'",
+        )
+        .bind(&chain_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(
+            snapshot_count, 1,
+            "the first upgraded sync must persist the snapshot"
+        );
+        assert_eq!(
+            required_ingest_redo(scratch.pool(), &chain_id).await?,
+            None,
+            "compiling the legacy side under the current binary must not invent widening"
+        );
+
+        let derived_hashes: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT input_content_hash FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+             ORDER BY phase_name",
+        )
+        .bind(&chain_id)
+        .fetch_all(scratch.pool())
+        .await?;
+        assert_eq!(derived_hashes.len(), 2);
+        if has_derived_output {
+            assert!(derived_hashes.iter().all(|hash| {
+                hash.as_deref()
+                    .is_some_and(|hash| hash.starts_with("manifest-authority:"))
+            }));
+        } else {
+            assert_eq!(derived_hashes, [None, None]);
+        }
+
+        scratch.cleanup().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]

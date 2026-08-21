@@ -23,6 +23,8 @@ mod query;
 mod redo;
 mod source_floor;
 
+use redo::LoadedWindow;
+
 const BLOCKS_PER_BATCH: i64 = 256;
 const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
 
@@ -293,6 +295,7 @@ impl Engine {
                     window_from,
                     loaded.first_parent_hash.as_deref(),
                 )?;
+                redo::require_source_seam(&request, source, &progress, &loaded.first)?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
                 let at_boundary = window_to == source_target_number;
                 let marker = if at_boundary {
@@ -491,7 +494,12 @@ impl Engine {
         let last = resolved
             .last()
             .ok_or_else(|| IngestError::data_integrity("ingest window resolved no blocks"))?;
+        let first = &resolved[0];
         Ok(LoadedWindow {
+            first: Marker {
+                number: first.number,
+                hash: first.hash.clone(),
+            },
             marker: Marker {
                 number: last.number,
                 hash: last.hash.clone(),
@@ -574,12 +582,6 @@ struct NormalSourceState<'a> {
     next: i64,
     current: Option<Marker>,
     target: Marker,
-}
-
-pub(super) struct LoadedWindow {
-    pub(super) marker: Marker,
-    pub(super) first_parent_hash: Option<String>,
-    pub(super) estimated_write_bytes: u64,
 }
 
 async fn resolve_marker(provider: &ChainProvider, number: i64) -> Result<Marker> {

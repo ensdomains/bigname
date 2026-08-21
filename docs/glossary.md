@@ -152,6 +152,16 @@ boundary* is the earliest block from which replaying that state is
 deterministic. The deleted old runtime called its cross-family operation a
 *full-closure replay*; Stage B uses explicit interpret redo state instead.
 
+**Compiled watch plan** — the non-authorable snapshot stored inside each
+manifest payload as `_bigname_compiled_watch`. It records the emitter scope,
+event topic, and inclusive start block compiled by the binary that admitted the
+manifest. Manifest synchronization decodes the prior snapshot instead of
+recompiling old TOML with the current binary, so a binary policy widening is
+detected even when authored manifests are unchanged. Every coverage-bearing
+dimension must remain represented in a backward-decodable format; an
+incompatible decode stops synchronization rather than accepting coverage whose
+meaning the binary cannot establish.
+
 **Companion rows** — the same-transaction raw context rows demanded for a
 family-selected log (emitter watched under a source family, block inside that
 entry's active window, topic0 in the family's manifest ABI): the transaction,

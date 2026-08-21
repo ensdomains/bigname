@@ -337,6 +337,9 @@ async fn stamp_required_ingest(
     let widened_from = i64::try_from(widened_from)
         .context("manifest watch start does not fit into BIGINT")?
         .max(cursor_start);
+    // The published head is the readable coverage boundary. After a rewind, the finite Ingest
+    // current position may remain ahead on orphaned lineage; taking max(latest, current) here
+    // would stamp an unreadable suffix that the required redo cannot discharge.
     let through = bounds.1.unwrap_or(current);
     if widened_from > through {
         return Ok(());

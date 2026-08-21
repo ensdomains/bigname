@@ -3,9 +3,16 @@ use std::{future::Future, pin::Pin};
 use sqlx::PgPool;
 
 use crate::{
-    IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result, SourceProgress,
-    engine::{Engine, LoadedWindow, SourceDescriptor},
+    BatchRequest, IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result, SourceProgress,
+    engine::{Engine, SourceDescriptor},
 };
+
+pub(super) struct LoadedWindow {
+    pub(super) first: Marker,
+    pub(super) marker: Marker,
+    pub(super) first_parent_hash: Option<String>,
+    pub(super) estimated_write_bytes: u64,
+}
 
 pub(super) type RedoLoadFuture<'a> =
     Pin<Box<dyn Future<Output = Result<LoadedWindow>> + Send + 'a>>;
@@ -59,6 +66,37 @@ pub(super) fn require_resumed_window_parent(
         first_parent_hash.unwrap_or("missing"),
         resume.hash
     )))
+}
+
+pub(super) fn require_source_seam(
+    request: &BatchRequest,
+    source: &SourceDescriptor,
+    prior_progress: &[SourceProgress],
+    loaded_first: &Marker,
+) -> Result<()> {
+    for prior in prior_progress {
+        let Some(prior_boundary) = prior
+            .current
+            .as_ref()
+            .filter(|marker| marker.number == loaded_first.number)
+        else {
+            continue;
+        };
+        if prior_boundary.hash != loaded_first.hash {
+            return Err(IngestError::data_integrity(format!(
+                "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {} at cross-source block {}: source \
+                 {} loaded hash {}, source {} loaded hash {}; rerun the Ingest redo so it starts \
+                 fresh and reloads the full range on one fork under the current watch plan",
+                request.chain_id,
+                loaded_first.number,
+                prior.key,
+                prior_boundary.hash,
+                source.key,
+                loaded_first.hash
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn running_summary_from_loaded_source(
