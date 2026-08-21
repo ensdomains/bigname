@@ -1325,6 +1325,116 @@ async fn attestation_audit_survives_a_crash_before_telemetry_and_reemits_on_rest
 }
 
 #[tokio::test]
+async fn failed_reorg_required_attested_interpret_redo_resumes_its_audit() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_reorg_attested_redo_retry").await?;
+    let chain = "reorg-attested-redo-retry";
+    let generation = "reorg-attested-redo-retry-generation";
+    seed_branch(scratch.pool(), chain, 1, 3, None).await?;
+    publish(scratch.pool(), chain, 1, 3, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 3, &block_hash(1, 3)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+
+    seed_branch(scratch.pool(), chain, 2, 3, Some((0, block_hash(1, 0)))).await?;
+    publish(scratch.pool(), chain, 2, 3, 0, 0).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(manifest_authority_marker(generation))
+    .execute(scratch.pool())
+    .await?;
+
+    let first_error = runner_with_interpret_phase(
+        &scratch,
+        "production-reorg-attested-redo-first-attempt",
+        Arc::new(ProgressThenFailInterpretPhase::new()),
+    )?
+    .with_watch_set_coverage_attestation(chain, generation)
+    .redo(
+        &live_chain(chain, "http://unused.invalid")?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 3)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("the first attested attempt must fail after recording mid-range progress");
+    assert!(
+        first_error
+            .to_string()
+            .contains("forced interruption after interpreted redo progress")
+    );
+    let interrupted: (Option<i64>, String, bool, i64, i64) = sqlx::query_as(
+        "SELECT phase.redo_current_block_number, phase.last_error,
+                phase.started_at = audit.attested_at,
+                audit.redo_from_block_number, audit.redo_to_block_number
+         FROM chain_phase_state phase
+         JOIN manifest_authority_attestations audit
+           ON audit.chain_id = phase.chain_id
+          AND audit.phase_name = phase.phase_name
+          AND audit.generation_token = $2
+         WHERE phase.chain_id = $1 AND phase.phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(interrupted.0, Some(1));
+    assert!(interrupted.1.starts_with("required downstream redo: "));
+    assert!(
+        interrupted.2,
+        "failure must preserve the audited start time"
+    );
+    assert_eq!((interrupted.3, interrupted.4), (0, 3));
+
+    let resumed_from = Arc::new(Mutex::new(Vec::new()));
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+    runner_with_interpret_phase(
+        &scratch,
+        "production-reorg-attested-redo-retry",
+        Arc::new(ObserveRedoResumeInterpretPhase::new(Arc::clone(
+            &resumed_from,
+        ))),
+    )?
+    .with_watch_set_coverage_attestation(chain, generation)
+    .redo(
+        &live_chain(chain, "http://unused.invalid")?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 3)?,
+        CancellationToken::new(),
+    )
+    .with_subscriber(subscriber)
+    .await?;
+    assert_eq!(
+        *resumed_from
+            .lock()
+            .expect("resume observation lock must not be poisoned"),
+        vec![Some(1)]
+    );
+    assert!(logs.text().contains("\"replayed\":true"));
+    let completed: (bool, i64) = sqlx::query_as(
+        "SELECT phase.redo_in_progress,
+                (SELECT count(*) FROM manifest_authority_attestations audit
+                 WHERE audit.chain_id = $1 AND audit.generation_token = $2)
+         FROM chain_phase_state phase
+         WHERE phase.chain_id = $1 AND phase.phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(completed, (false, 1));
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn attested_redo_restart_resets_progress_after_interpreter_hash_rotation() -> Result<()> {
     let scratch = ScratchDatabase::create("production_attested_redo_cross_hash_restart").await?;
     let chain = "attested-redo-interpreter-content-hash-restart";
