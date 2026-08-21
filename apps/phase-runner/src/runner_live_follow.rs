@@ -1,4 +1,4 @@
-use std::{sync::Arc, sync::OnceLock};
+use std::{future::Future, pin::Pin, sync::Arc, sync::OnceLock};
 
 use tokio_util::sync::CancellationToken;
 
@@ -6,12 +6,103 @@ use crate::{
     config::ChainConfig,
     error::{ErrorKind, RunnerResult},
     phase::{PhaseName, RunMode},
+    phase_lock::PhaseLock,
     runner_support::record_live_mismatch_with_lock,
 };
 
 use super::{LiveMismatchReason, PhaseRunner};
 
+pub(super) type AfterRequiredRedoCatchUp =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 impl PhaseRunner {
+    #[doc(hidden)]
+    pub fn with_after_required_redo_catch_up<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.after_required_redo_catch_up = Some(Arc::new(move || Box::pin(hook())));
+        self
+    }
+
+    async fn after_required_redo_catch_up(&self) {
+        if let Some(hook) = self.after_required_redo_catch_up.as_deref() {
+            hook().await;
+        }
+    }
+
+    async fn acquire_post_live_ingest_fence(
+        &self,
+        chain: &ChainConfig,
+        cancellation: &CancellationToken,
+    ) -> RunnerResult<Option<PhaseLock>> {
+        loop {
+            match PhaseLock::acquire(
+                self.database.connect_options(),
+                &chain.chain_id,
+                PhaseName::Ingest,
+            )
+            .await
+            {
+                Ok(phase_lock) => return Ok(Some(phase_lock)),
+                Err(error) if error.kind() == ErrorKind::LockHeld || error.is_retryable() => {
+                    tokio::select! {
+                        () = cancellation.cancelled() => return Ok(None),
+                        () = tokio::time::sleep(self.timing.live_poll_interval) => {}
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn run_post_live_downstream(
+        &self,
+        chain: &ChainConfig,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        let Some(mut ingest_fence) = self
+            .acquire_post_live_ingest_fence(chain, &cancellation)
+            .await?
+        else {
+            return Ok(());
+        };
+        let result = ingest_fence
+            .run_while_alive(self.timing.live_poll_interval, async {
+                if let Some(range) = self
+                    .store
+                    .required_redo_range(&chain.chain_id, PhaseName::Ingest)
+                    .await?
+                {
+                    self.catch_up_required_range(chain, range, cancellation.clone())
+                        .await?;
+                    if cancellation.is_cancelled() {
+                        return Ok(());
+                    }
+                    return Err(crate::transitions::required_ingest_redo_error(
+                        &chain.chain_id,
+                        range,
+                    ));
+                }
+                for phase in [PhaseName::Interpret, PhaseName::Project] {
+                    self.run_spine_phase(chain, phase, cancellation.clone())
+                        .await?;
+                }
+                Ok(())
+            })
+            .await;
+        let release = ingest_fence.release().await;
+        match (result, release) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(release_error)) => Err(error.with_secondary(
+                "release the post-Live Ingest coordination lock",
+                release_error,
+            )),
+        }
+    }
+
     pub(super) async fn run_live_follow(
         &self,
         chain: &ChainConfig,
@@ -33,13 +124,12 @@ impl PhaseRunner {
             }
             self.catch_up_for_required_redo(chain, cancellation.clone())
                 .await?;
+            self.after_required_redo_catch_up().await;
             if cancellation.is_cancelled() {
                 return Ok(());
             }
-            for phase in [PhaseName::Interpret, PhaseName::Project] {
-                self.run_spine_phase(chain, phase, cancellation.clone())
-                    .await?;
-            }
+            self.run_post_live_downstream(chain, cancellation.clone())
+                .await?;
             if !self.phases.continuous_live_follow() {
                 return Ok(());
             }
@@ -174,13 +264,12 @@ impl PhaseRunner {
             }
             self.catch_up_for_required_redo(chain, cancellation.clone())
                 .await?;
+            self.after_required_redo_catch_up().await;
             if cancellation.is_cancelled() {
                 return self.record_mismatch_if_present(chain, &live_mismatch).await;
             }
-            for phase in [PhaseName::Interpret, PhaseName::Project] {
-                self.run_spine_phase(chain, phase, cancellation.clone())
-                    .await?;
-            }
+            self.run_post_live_downstream(chain, cancellation.clone())
+                .await?;
             if !self.phases.continuous_live_follow() {
                 return Ok(());
             }

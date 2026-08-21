@@ -74,6 +74,7 @@ pub struct PhaseRunner {
     watch_set_coverage_attestations: BTreeMap<String, String>,
     manifest_authority_audit_before_emit: Option<Arc<dyn Fn() + Send + Sync>>,
     before_redo_progress_write: Option<batch::BeforeRedoProgressWrite>,
+    after_required_redo_catch_up: Option<live_follow::AfterRequiredRedoCatchUp>,
     loop_heartbeat: Option<RunnerLoopHeartbeat>,
 }
 
@@ -104,6 +105,7 @@ impl PhaseRunner {
             watch_set_coverage_attestations: BTreeMap::new(),
             manifest_authority_audit_before_emit: None,
             before_redo_progress_write: None,
+            after_required_redo_catch_up: None,
             loop_heartbeat: None,
         })
     }

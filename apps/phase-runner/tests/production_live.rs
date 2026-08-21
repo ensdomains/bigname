@@ -44,7 +44,10 @@ use phase_runner::{
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::{
+    net::TcpListener,
+    sync::{RwLock, Semaphore},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::fmt::MakeWriter;
@@ -566,6 +569,111 @@ async fn required_ingest_recovery_uses_the_published_head_without_a_finite_hando
     .fetch_one(scratch.pool())
     .await?;
     assert!(!still_required);
+
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn live_follow_routes_a_mid_loop_manifest_widening_like_restart() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_mid_loop_manifest_widening").await?;
+    let chain = "live-mid-loop-manifest-widening";
+    let manifests = WatchManifestFixture::new(chain)?;
+    manifests.write(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    seed_branch(scratch.pool(), chain, 1, 1, None).await?;
+    publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 1, &block_hash(1, 1)).await?;
+    let fixture = RpcFixture::spawn(1, 2).await?;
+    let configured_chain = live_chain(chain, &fixture.endpoint)?;
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(IngestPhase::with_engine(Arc::clone(&engine))),
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LivePhase::with_engine(engine)),
+    )?;
+    let catch_up_calls = Arc::new(AtomicUsize::new(0));
+    let sync_gap = Arc::new(Semaphore::new(0));
+    let resume_runner = Arc::new(Semaphore::new(0));
+    let runner = Arc::new(
+        PhaseRunner::new(
+            scratch.runner(),
+            phases,
+            CapacityGuard::system(CapacityConfig::default()),
+            "production-live-mid-loop-manifest-widening",
+            TimingConfig {
+                live_poll_interval: Duration::from_secs(1),
+                ..fast_timing()
+            },
+        )?
+        .with_after_required_redo_catch_up({
+            let catch_up_calls = Arc::clone(&catch_up_calls);
+            let sync_gap = Arc::clone(&sync_gap);
+            let resume_runner = Arc::clone(&resume_runner);
+            move || {
+                let catch_up_calls = Arc::clone(&catch_up_calls);
+                let sync_gap = Arc::clone(&sync_gap);
+                let resume_runner = Arc::clone(&resume_runner);
+                async move {
+                    if catch_up_calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                        sync_gap.add_permits(1);
+                        let _permit = resume_runner
+                            .acquire()
+                            .await
+                            .expect("runner resume semaphore must remain open");
+                    }
+                }
+            }
+        }),
+    );
+    let task_chain = configured_chain.clone();
+    let task_runner = Arc::clone(&runner);
+    let mut task = tokio::spawn(async move {
+        task_runner
+            .run_chain(&task_chain, CancellationToken::new())
+            .await
+    });
+
+    wait_for_rederived_or_runner_stop(scratch.pool(), chain, 2, &block_hash(1, 2), &mut task)
+        .await
+        .context("Live did not reach the scripted manifest-sync gap")?;
+
+    manifests.write(true)?;
+    fixture.reorg(1, 2, 3).await;
+    let _gap = tokio::time::timeout(Duration::from_secs(10), sync_gap.acquire())
+        .await
+        .context("Live did not pause after its required-redo catch-up")?
+        .expect("manifest-sync gap semaphore must remain open");
+    let repository = load_repository(&manifests.root)?;
+    sync_schema_v2_repository(scratch.pool(), &repository)
+        .await
+        .context("manifest sync did not commit after post-Live catch-up")?;
+    resume_runner.add_permits(1);
+
+    let live_error = tokio::time::timeout(Duration::from_secs(10), &mut task)
+        .await
+        .context("Live follow did not revisit the mid-loop manifest widening")??
+        .expect_err("the required historical fetch remains an operator decision");
+    let restart_error = production_runner(
+        &scratch,
+        Arc::new(Engine::new(scratch.pool().clone())),
+        chain,
+    )?
+    .run_chain(&configured_chain, CancellationToken::new())
+    .await
+    .expect_err("restart must route to the pending required Ingest redo");
+    assert_eq!(
+        live_error.to_string(),
+        restart_error.to_string(),
+        "loop continuation and restart must route the same required Ingest obligation"
+    );
+    assert!(
+        live_error
+            .to_string()
+            .contains("--phase ingest --from-block 0 --to-block 3")
+    );
 
     fixture.server.abort();
     scratch.cleanup().await

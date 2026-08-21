@@ -39,7 +39,7 @@ impl PhaseRunner {
         }
     }
 
-    async fn catch_up_required_range(
+    pub(super) async fn catch_up_required_range(
         &self,
         chain: &ChainConfig,
         range: BlockRange,
