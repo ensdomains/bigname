@@ -354,6 +354,10 @@ fn validate_loaded_lineage(
 #[path = "engine/tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "engine/activation_tests.rs"]
+mod activation_tests;
+
 fn validate_contiguous_markers(
     chain_id: &str,
     expected_from: i64,

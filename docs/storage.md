@@ -304,6 +304,22 @@ cross-arm close and successor retain/open in that same transaction. It never
 ranks multiple predecessors and never applies the transition to descendants.
 There is no runtime or manifest activation flag.
 
+The `.eth` second-level selector is path-specific. The registrar-token
+`unwrapped` and `unlocked_wrapped` paths record their exact BaseRegistrar
+transfer to the Graveyard, select the registrar resource immediately before
+that cleanup, and close it at the cleanup position. The `locked_wrapped` path
+selects the live NameWrapper resource immediately before the ENSv2 registration
+boundary and closes it there. The unlocked wrapped controller unwraps before
+injecting the ENSv2 registration, so ordinary ENSv1 interpretation has already
+closed its wrapper binding and reactivated its registrar position before that
+recorded transfer. If no prior registrar identity was materialized, that exact
+transfer confirms the fallback identity with its binding effective from the
+preceding `NameUnwrapped`; the cleanup-relative time predicate remains strict.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+
 For the `.eth` second-level names covered by slice 2A, zero matching ENSv1
 predecessors and multiple matching ENSv1 predecessors are both integrity
 errors. The unlocked ERC-721 entry accepts transfers only from BaseRegistrar,
@@ -639,11 +655,14 @@ one value stream.
 
 Values derived while a physical batch is being interpreted are a separate,
 batch-bounded working set. They are not reloadable before the batch commits.
-After reconciliation, before-state chaining starts from the cached or reloaded
-pre-batch value and advances through the exact surviving normalized-event
-sequence. Only those survivors update the retained cache after the database
-transaction persists the batch. This keeps dropped or retargeted provisional
-events out of both retained memory and future restore input.
+After each block's same-transaction reconciliation, ENSv1 protocol state
+advances through only that block's surviving normalized events before the next
+block's time-derived ENSv1 lifecycle checks run. Before-state chaining still
+starts from the cached or reloaded pre-batch value and advances through the
+exact surviving normalized-event sequence. Only those survivors update the
+retained cache after the database transaction persists the batch. This keeps
+dropped or retargeted provisional events out of later ENSv1 block-boundary
+decisions, retained memory, and future restore input.
 
 A cold restore streams the latest readable event per retained state key in
 chain order. It rebuilds the adapter's protocol state while admitting at most
@@ -659,6 +678,44 @@ or before the first retained lineage block. After replaying retained events,
 the adapter advances time-derived protocol state to that timestamp. Exact
 cold-restore reconstruction therefore depends on the predecessor remaining
 readable in the same input snapshot.
+
+For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
+[name surface](glossary.md#surface-name-surface) permanently establishes that
+the surface is known in restored protocol state. A registration release or
+expiry can remove the current binding and resource without removing that
+observation. Normalization-rejected name observations are not admitted to
+this state. Later `RecordChanged` and `RecordVersionChanged` resolver events
+therefore retain the logical-name attribution but carry no `resource_id` when
+no current resource exists, identically in a continuous walk and after a cold
+restore. Project's resource-keyed record inventory follows the resource's
+latest retained `ResolverChanged` pointer. When an ended resource still has a
+pointer to the emitting resolver, the newly attributed event can therefore
+change that resource's rebuildable inventory row even though the event remains
+resource-less. This does not restore a current binding: name and record reads
+join inventory through `name_current.resource_id`, which remains null for the
+released or expired name. ENSv2 stores resolver records by node and version.
+`setName` passes
+part zero, selecting the node-specific, any-part permission resource; the cited
+authorization path reads EnhancedAccessControl role mappings and contains no
+current registry-registration lookup. (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L127-L133 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L77-L85 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L178-L186 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L467-L472 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L66-L78
+@ ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L192 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L374-L382 @
+ens_v2@ccaeb58) (upstream:
+.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L443-L455 @
+ens_v2@ccaeb58)
 
 Redo preparation restages only identities anchored inside the range, so an
 identity derived before it keeps its anchor even when an in-range event

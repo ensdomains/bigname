@@ -1773,8 +1773,11 @@ dependencies = [
 name = "bigname-interpret"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
  "bigname-adapters",
  "bigname-domain",
+ "bigname-manifests",
  "bigname-test-support",
  "futures-util",
  "serde_json",

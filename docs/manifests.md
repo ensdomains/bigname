@@ -375,6 +375,21 @@ wrapped names or mix unwrapped, unlocked-wrapped, and locked-wrapped groups, so
 correlation and transition identity remain per logical name.
 (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L132-L154 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L89-L135 @ ens_v2@ccaeb58)
+The three controller-mediated second-level shapes keep distinct predecessor
+selectors. `unwrapped` and `unlocked_wrapped` record the exact BaseRegistrar
+transfer to the Graveyard and select the registrar resource immediately before
+that cleanup; `locked_wrapped` selects the NameWrapper resource immediately
+before the ENSv2 registration boundary. The unlocked wrapped controller unwraps
+before it injects the ENSv2 registration, while the locked receiver instead
+parks the wrapper token before injecting.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144-L168 @ ens_v2@ccaeb58)
+When the deployment profile has no prior registrar identity, the ordered
+`NameUnwrapped` and exact following BaseRegistrar transfer confirm the fallback
+identity with its binding effective from the unwrap, preserving the
+cleanup-relative selector.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 The registrant is not a predecessor selector: an approved operator can drive
 the transfer, while the v2 owner is caller-supplied payload data and may differ
 from the v1 registrant.

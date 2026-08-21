@@ -934,3 +934,62 @@ fn block_number_from_hash(hash: &str) -> Option<i64> {
 fn transaction_hash(number: i64) -> String {
     format!("0x{:064x}", number + 10_000)
 }
+
+/// The [migration authority transition](../../../docs/glossary.md#migration-authority-transition)
+/// writer requires exactly one matching ENSv1 registrar predecessor for each activated
+/// controller-mediated `.eth` second-level
+/// [migration boundary](../../../docs/glossary.md#migration-boundary). The checked-in Sepolia
+/// [deployment profile](../../../docs/glossary.md#deployment-profile) now makes that requirement
+/// satisfiable: one active
+/// `ens_v1_registrar_l1` declaration owns the BaseRegistrar address that the ENSv1→ENSv2
+/// migration family names for correlation, while registrar-controller contracts remain
+/// unadmitted. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
+#[tokio::test]
+async fn sepolia_manifest_set_admits_exactly_one_ens_v1_registrar_predecessor_source() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("migration_sepolia_manifest_arms").await?;
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(scratch.pool(), &load_repository(manifest_root)?).await?;
+
+    let registrar_sources: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT declaration.contract_instance_id::text,
+                lower(declaration.declared_address), declaration.role
+         FROM manifest_versions manifest
+         JOIN manifest_contract_instances declaration
+           ON declaration.manifest_id = manifest.manifest_id
+          AND declaration.chain_id = manifest.chain_id
+         WHERE manifest.chain_id = $1
+           AND manifest.source_family = 'ens_v1_registrar_l1'
+           AND manifest.rollout_status = 'active'
+           AND declaration.declaration_kind = 'contract'
+         ORDER BY declaration.role, declaration.declared_address",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        registrar_sources.len(),
+        1,
+        "an activated `.eth` second-level boundary must have one registrar source"
+    );
+    let (_, registrar_address, role) = &registrar_sources[0];
+    assert_eq!(registrar_address, BASE_REGISTRAR);
+    assert_eq!(role, "registrar");
+
+    let migration_registrar: String = sqlx::query_scalar(
+        "SELECT lower(manifest_payload #>> '{correlation_addresses,ens_v1_base_registrar}')
+         FROM manifest_versions
+         WHERE chain_id = $1 AND source_family = 'ens_v2_migration_l1'
+           AND rollout_status = 'active'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        migration_registrar, *registrar_address,
+        "the transition selector and admitted predecessor source must name the same registrar"
+    );
+    scratch.cleanup().await
+}

@@ -33,7 +33,7 @@ mod permutation;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{BatchInput, BatchOutput};
@@ -44,30 +44,21 @@ use permutation::{
     directed::Directed,
     events::{
         V1LegacyController, V1Registry, V1Resolver, V1UnwrappedController, V1WrappedController,
-        declared_events,
+        V1Wrapper, V2Registry, V2Resolver, declared_events,
     },
     invariants::{IdentityReferences, assert_upsert_guards_agree, converge, split},
     names::{labelhash, namehash},
     scenario::{self, BurstPhase},
     world::{
-        ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
+        BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
         assert_pins_are_current, assert_worlds_cover_deployments, checked_in_manifests,
         declared_event_kinds, declared_event_topics,
     },
 };
 
-/// 48 permutations per world, so this is a runtime budget, and below the rate of the rarer
-/// batch-boundary artifacts — see `EXPECTED_ARTIFACTS` for the residual a 600-case sweep still
-/// reaches.
-///
-/// It is no longer below a known failure. Once the ENSv1 pool started emitting the registrar mint
-/// that a wrapped registration really makes, a sweep of 600 per world fails 3 of 1200 sequences,
-/// every one of them `registration_path: Wrapped` with `expiry_window: PastGrace`: the split replay
-/// derives an `AuthorityEpochChanged` and its `PermissionChanged` that the whole pass does not, so
-/// the two disagree about when the wrapper's authority lapsed. That is a live interpreter
-/// divergence this lane found and not a batch-boundary artifact — the whole pass derives strictly
-/// less, which is the direction `EXPECTED_ARTIFACTS` does not cover. It is issue #347. Raising this
-/// knob will report it; the fix belongs there, not in a wider allowance here.
+/// 48 permutations per world is a runtime budget. The directed
+/// `wrapped_past_grace_lapse_is_batch_grid_independent` test pins issue #347 independently of the
+/// generator depth that first exposed it.
 const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that increment
@@ -277,6 +268,486 @@ fn production_lease_release_sequence_holds_the_same_invariants() -> Result<()> {
         .map(|batch| batch.output)
         .collect::<Vec<_>>();
     directed.assert_release_reached(&outputs)
+}
+
+#[test]
+fn wrapped_past_grace_lapse_is_batch_grid_independent() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V1_MAINNET, &checked_in)?;
+    let input = wrapped_past_grace_lapse_input(&wiring)?;
+    let boundary_block = input.blocks[1].block_number;
+    let converged = converge("directed=wrapped-past-grace-lapse", input, vec![0..1, 1..2])?;
+    let boundary_kinds = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .filter(|event| event.block_number == Some(boundary_block))
+        .map(|event| event.event_kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        boundary_kinds,
+        [
+            "RegistrationReleased",
+            "PermissionChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "PermissionChanged",
+        ],
+        "the observing block must carry the complete lease-lapse transition"
+    );
+    Ok(())
+}
+
+#[test]
+fn v2_unregistered_record_name_link_is_batch_grid_independent() -> Result<()> {
+    // Four logs distilled from generated seed 17846172577370688067: register and link a
+    // resource without a resolver, unregister, then write the late resolver record in a later
+    // block.
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let node = namehash(&["alpha", "eth"]);
+    let expected_name = format!("ens:{node:#x}");
+    let input = v2_released_name_record_input(
+        &wiring,
+        vec![
+            V2Resolver::NameChanged {
+                node,
+                name: "alpha.eth".to_owned(),
+            }
+            .encode_log_data(),
+        ],
+    )?;
+    let converged = converge(
+        "directed=v2-unregistered-record-name-link",
+        input,
+        vec![0..2, 2..3],
+    )?;
+    let whole_record = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("whole pass omitted the resolver record change")?;
+    let split_record = converged
+        .batches
+        .iter()
+        .flat_map(|batch| &batch.output.normalized_events)
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("split replay omitted the resolver record change")?;
+    assert_eq!(
+        whole_record.logical_name_id, split_record.logical_name_id,
+        "the durable namehash-to-name link must not depend on the physical batch boundary"
+    );
+    assert_eq!(
+        whole_record.logical_name_id.as_deref(),
+        Some(expected_name.as_str())
+    );
+    assert_eq!(
+        whole_record.resource_id, None,
+        "a released registration must not leave its resource on the late record"
+    );
+    assert_eq!(whole_record.resource_id, split_record.resource_id);
+    assert!(
+        converged.artifacts.counts().is_empty(),
+        "the directed replay retained batch-boundary artifacts: {}",
+        converged.artifacts
+    );
+    Ok(())
+}
+
+/// `clearRecords` emits `VersionChanged` for the node after incrementing its record version.
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
+/// ens_v2@ccaeb58)
+#[test]
+fn v2_unregistered_record_version_name_link_is_batch_grid_independent() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let node = namehash(&["alpha", "eth"]);
+    let expected_name = format!("ens:{node:#x}");
+    let input = v2_released_name_record_input(
+        &wiring,
+        vec![
+            V2Resolver::VersionChanged {
+                node,
+                newVersion: 1,
+            }
+            .encode_log_data(),
+        ],
+    )?;
+    let converged = converge(
+        "directed=v2-unregistered-record-version-name-link",
+        input,
+        vec![0..2, 2..3],
+    )?;
+    let whole_record = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordVersionChanged")
+        .context("whole pass omitted the resolver record-version change")?;
+    let split_record = converged
+        .batches
+        .iter()
+        .flat_map(|batch| &batch.output.normalized_events)
+        .find(|event| event.event_kind == "RecordVersionChanged")
+        .context("split replay omitted the resolver record-version change")?;
+    assert_eq!(whole_record.logical_name_id, split_record.logical_name_id);
+    assert_eq!(
+        whole_record.logical_name_id.as_deref(),
+        Some(expected_name.as_str())
+    );
+    assert_eq!(whole_record.resource_id, None);
+    assert_eq!(whole_record.resource_id, split_record.resource_id);
+    assert!(
+        converged.artifacts.counts().is_empty(),
+        "the directed replay retained batch-boundary artifacts: {}",
+        converged.artifacts
+    );
+    Ok(())
+}
+
+#[test]
+fn v2_unregistered_record_stream_rethreads_before_state_after_restore() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let node = namehash(&["alpha", "eth"]);
+    let input = v2_released_name_record_input(
+        &wiring,
+        vec![
+            V2Resolver::NameChanged {
+                node,
+                name: "alpha.eth".to_owned(),
+            }
+            .encode_log_data(),
+            V2Resolver::NameChanged {
+                node,
+                name: "alpha.eth".to_owned(),
+            }
+            .encode_log_data(),
+        ],
+    )?;
+    let converged = converge(
+        "directed=v2-unregistered-record-before-state",
+        input,
+        vec![0..2, 2..3, 3..4],
+    )?;
+    let records = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "RecordChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1].before_state, records[0].after_state);
+    assert_ne!(records[1].before_state, Value::Object(Default::default()));
+    assert!(
+        converged.artifacts.counts().is_empty(),
+        "the directed replay retained batch-boundary artifacts: {}",
+        converged.artifacts
+    );
+    Ok(())
+}
+
+#[test]
+fn v2_shadow_registry_preimage_does_not_gain_record_attribution_after_restore() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shadow_registry_record_input(&wiring)?;
+    let converged = converge(
+        "directed=v2-shadow-registry-preimage",
+        input,
+        vec![0..1, 1..2],
+    )?;
+    let whole_record = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("whole pass omitted the resolver record change")?;
+    let split_record = converged
+        .batches
+        .iter()
+        .flat_map(|batch| &batch.output.normalized_events)
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("split replay omitted the resolver record change")?;
+    assert_eq!(whole_record.logical_name_id, None);
+    assert_eq!(
+        whole_record.logical_name_id, split_record.logical_name_id,
+        "a normalization-rejected name must not become attributable after restore"
+    );
+    Ok(())
+}
+
+/// Builds a released-name sequence followed by the supplied resolver events.
+fn v2_released_name_record_input(
+    wiring: &Wiring,
+    resolver_events: Vec<LogData>,
+) -> Result<BatchInput> {
+    const REGISTRY: &str = "ens_v2_registry_l1";
+    const RESOLVER: &str = "ens_v2_resolver_l1";
+    let registry = wiring.address(REGISTRY, "registry");
+    let resolver = wiring.address(RESOLVER, "resolver");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let label = labelhash("alpha");
+    let token = U256::from_be_bytes(label.0);
+    let resource = U256::from(0x0348_u64);
+    let mut blocks = vec![
+        BlockSpec {
+            number: 20_000_000,
+            hash: format!("0x{:064x}", 0x3480_u64),
+            timestamp: 1_700_000_000,
+        },
+        BlockSpec {
+            number: 20_000_001,
+            hash: format!("0x{:064x}", 0x3481_u64),
+            timestamp: 1_700_000_001,
+        },
+    ];
+    blocks.extend((0..resolver_events.len()).map(|index| BlockSpec {
+        number: 20_000_002 + index as i64,
+        hash: format!("0x{:064x}", 0x3482_u64 + index as u64),
+        // Consecutive Ethereum blocks may share a timestamp. Keeping the last topology and
+        // resolver blocks on one clock isolates this fixture to name-surface restoration.
+        timestamp: 1_700_000_001,
+    }));
+    let log = |block_index: usize, ordinal: u64, emitter: &str, encoded: LogData| {
+        let emission = scenario::emission(emitter, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x3480_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let mut logs = vec![
+        log(
+            0,
+            0,
+            registry,
+            V2Registry::LabelRegistered {
+                tokenId: token,
+                labelHash: label,
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            0,
+            1,
+            registry,
+            V2Registry::TokenResource {
+                tokenId: token,
+                resource,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            2,
+            registry,
+            V2Registry::LabelUnregistered {
+                tokenId: token,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    logs.extend(
+        resolver_events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| log(2 + index, 3 + index as u64, resolver, event)),
+    );
+    wiring.batch_input(&blocks, &logs)
+}
+
+/// A normalization-rejected registry label establishes only a [shadow name
+/// surface](../../../docs/glossary.md#surface-name-surface). Restoring its preimage must not turn it
+/// into a name that later resolver records can reference.
+fn v2_shadow_registry_record_input(wiring: &Wiring) -> Result<BatchInput> {
+    const REGISTRY: &str = "ens_v2_registry_l1";
+    const RESOLVER: &str = "ens_v2_resolver_l1";
+    const SHADOW_LABEL: &str = "\0alpha";
+    let registry = wiring.address(REGISTRY, "registry");
+    let resolver = wiring.address(RESOLVER, "resolver");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let label = labelhash(SHADOW_LABEL);
+    let token = U256::from_be_bytes(label.0);
+    let node = namehash(&[SHADOW_LABEL, "eth"]);
+    let blocks = [
+        BlockSpec {
+            number: 20_000_010,
+            hash: format!("0x{:064x}", 0x348a_u64),
+            timestamp: 1_700_000_010,
+        },
+        BlockSpec {
+            number: 20_000_011,
+            hash: format!("0x{:064x}", 0x348b_u64),
+            timestamp: 1_700_000_011,
+        },
+    ];
+    let log = |block_index: usize, ordinal: u64, emitter: &str, encoded: LogData| {
+        let emission = scenario::emission(emitter, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x348a_0000_u64 + ordinal),
+            transaction_index: 0,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = [
+        log(
+            0,
+            0,
+            registry,
+            V2Registry::LabelRegistered {
+                tokenId: token,
+                labelHash: label,
+                label: SHADOW_LABEL.to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            1,
+            resolver,
+            V2Resolver::NameChanged {
+                node,
+                name: SHADOW_LABEL.to_owned(),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
+}
+
+/// Five raw logs distilled from generated seed 18434531763410729552. The second block observes the
+/// registrar lease one second after its 90-day grace period. A wrapped `.eth` registration stores
+/// that grace-adjusted expiry in NameWrapper, whose `getData` clears the emancipated owner after it
+/// passes. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L77 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297-L303 @
+/// ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L153 @
+/// ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L852 @
+/// ens_v1@91c966f)
+fn wrapped_past_grace_lapse_input(wiring: &Wiring) -> Result<BatchInput> {
+    const REGISTRY: &str = "ens_v1_registry_l1";
+    const REGISTRAR: &str = "ens_v1_registrar_l1";
+    const WRAPPER: &str = "ens_v1_wrapper_l1";
+    const EXPIRY: u64 = 1_608_204_400;
+    let registry = wiring.address(REGISTRY, "registry");
+    let wrapped_controller = wiring.address(REGISTRAR, "wrapped_registrar_controller");
+    let wrapper = wiring.address(WRAPPER, "name_wrapper");
+    let wrapper_address: Address = wrapper.parse()?;
+    let registrant: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let eth_node = namehash(&["eth"]);
+    let label = labelhash("alpha");
+    let node = namehash(&["alpha", "eth"]);
+    let blocks = [
+        BlockSpec {
+            number: 15_000_000,
+            hash: format!("0x{:064x}", 0xb1f0_e1c0_u64),
+            timestamp: 1_600_000_000,
+        },
+        BlockSpec {
+            number: 15_000_001,
+            hash: format!("0x{:064x}", 0xb1f0_e1c1_u64),
+            timestamp: EXPIRY as i64 + (90 * 24 * 60 * 60) + 1,
+        },
+    ];
+    let log = |transaction_index: i64, log_index: i64, emitter: &str, encoded: LogData| {
+        let emission = scenario::emission(emitter, encoded);
+        GeneratedLog {
+            block_index: 0,
+            transaction_hash: format!("0x{:064x}", transaction_index),
+            transaction_index,
+            log_index,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = [
+        log(
+            0,
+            1,
+            registry,
+            V1Registry::NewOwner {
+                node: eth_node,
+                label,
+                owner: wrapper_address,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            0,
+            2,
+            wrapped_controller,
+            V1WrappedController::NameRegistered {
+                name: "alpha".to_owned(),
+                label,
+                owner: registrant,
+                baseCost: U256::from(1),
+                premium: U256::ZERO,
+                expires: U256::from(EXPIRY),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            0,
+            registry,
+            V1Registry::Transfer {
+                node,
+                owner: registrant,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            0,
+            wrapper,
+            V1Wrapper::NameUnwrapped {
+                node,
+                owner: registrant,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            1,
+            registry,
+            V1Registry::Transfer {
+                node,
+                owner: registrant,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
 }
 
 /// The `sol!` fragments this lane emits decide every topic0 and every topic layout it produces.
@@ -834,12 +1305,11 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 ///
 /// A class missing from a row means the default corpus does not reach it, not that it cannot
 /// happen — `counts` omits zero-count classes. The 600-case sweep agrees with the fix on the
-/// classes it covered (ENSv1 `carried_before_states` fell 7 to 0 alongside the anchors), with one
-/// survivor it did not cover: ENSv2 `rebased_attributions` still occurs 4 times, each a late
-/// resolver `RecordChanged` on a lapsed registration that the whole pass attributes through the
-/// in-memory known-surface carry a boundary-restored split replay does not hold — the v2-path
-/// counterpart of the stale reach the fix constrained on the v1 path, and a live residual, not a
-/// pin — tracked by issue #348.
+/// classes it covered: ENSv1 `carried_before_states` fell 7 to 0 alongside the anchors, and the
+/// four ENSv2 `rebased_attributions` catalogued by issue #348 fell to 0 when restore began rebuilding
+/// the retained namehash-to-name observation. One structurally identified sibling shape stays open
+/// and unreached: a link created only by an alias observation carries no preimage metadata, so
+/// restore cannot rebuild it (issue #529); the corpus generates no alias-only names today.
 const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
     (ENS_V1_MAINNET.label, &[]),
     (ENS_V1_SEPOLIA.label, &[]),
@@ -948,7 +1418,8 @@ const UNREACHED_EVENT_KINDS: &[(&str, &str, &str)] = &[
     (
         ENS_V2_SEPOLIA.label,
         "RecordVersionChanged",
-        "the resolver pool emits no VersionChanged, so no record-version bump is generated",
+        "the generated resolver pool emits no VersionChanged; the directed released-name replay \
+         covers record-version attribution",
     ),
     (
         ENS_V2_SEPOLIA.label,

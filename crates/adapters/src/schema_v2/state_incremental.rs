@@ -85,6 +85,21 @@ impl State {
         self.v2_terminal_closure_hits.get_min()
     }
 
+    pub(in crate::schema_v2) fn replace_ens_v1_protocol_state_from_replay(
+        &mut self,
+        replayed: Self,
+    ) {
+        self.v1_names = replayed.v1_names;
+        self.v1_wrapper_data = replayed.v1_wrapper_data;
+        self.v1_registrars = replayed.v1_registrars;
+        self.v1_expiries = replayed.v1_expiries;
+        self.v1_registry_authorities = replayed.v1_registry_authorities;
+        self.v1_registry_owners = replayed.v1_registry_owners;
+        self.v1_resolvers = replayed.v1_resolvers;
+        self.v1_migrated_nodes = replayed.v1_migrated_nodes;
+        self.v1_materialized_surfaces = replayed.v1_materialized_surfaces;
+    }
+
     pub(in crate::schema_v2) fn commit_v2_batch_boundary(&mut self, at_unix_timestamp: i64) {
         if self.latest_v2_timestamp.is_none() && self.v2_tokens.is_empty() {
             return;
@@ -141,6 +156,20 @@ impl State {
                 event.source_family.as_str(),
                 "ens_v2_registry_l1" | "ens_v2_root_l1"
             );
+            if is_v2_topology
+                && event.event_kind == "PreimageObserved"
+                && event
+                    .after_state
+                    .get("visibility_state")
+                    .and_then(Value::as_str)
+                    != Some("shadow")
+                && let Some(logical_name_id) = event.logical_name_id.as_ref()
+            {
+                // A canonical [name surface](../../../../docs/glossary.md#surface-name-surface)
+                // remains known after its registry binding or resource ends.
+                // Normalization-rejected name observations never enter this state.
+                self.observe_name_surface(logical_name_id.clone());
+            }
             if is_v2_topology {
                 latest_delta_timestamp = latest_delta_timestamp.max(
                     event

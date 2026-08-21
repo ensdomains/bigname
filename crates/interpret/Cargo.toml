@@ -14,6 +14,9 @@ sqlx = { workspace = true, features = ["time"] }
 time = { version = "0.3.47", features = ["serde"] }
 
 [dev-dependencies]
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
 bigname-adapters = { workspace = true, features = ["test-activation"] }
+bigname-manifests.workspace = true
 bigname-test-support.workspace = true
 tokio.workspace = true

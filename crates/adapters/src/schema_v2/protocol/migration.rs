@@ -43,6 +43,7 @@ pub(super) fn interpret(selected: &Selected, raw: &RawLogInput) -> anyhow::Resul
     };
     output.migration_observations.push(MigrationObservation {
         source_family: selected.source.source_family.clone(),
+        source_manifest_id: selected.source.manifest_id,
         event_name: selected.event.name.clone(),
         emitter_role: selected.emitter_role.clone(),
         contract_instance_id: selected.contract_instance_id,
@@ -77,6 +78,7 @@ pub(super) fn interpret_base_registrar(
     output.migration_events = std::mem::take(&mut output.events);
     output.migration_observations.push(MigrationObservation {
         source_family: selected.source.source_family.clone(),
+        source_manifest_id: selected.source.manifest_id,
         event_name: selected.event.name.clone(),
         emitter_role: selected.emitter_role.clone(),
         contract_instance_id: selected.contract_instance_id,

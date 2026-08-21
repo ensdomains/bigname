@@ -625,6 +625,26 @@ issued cursor bytes may differ. The boundary acceptance gate exercises both the
 product and diagnostic continuation contracts, then separately verifies fresh
 post-re-walk cursors.
 
+That identical-product continuation rule applies only when the declared
+[re-derivation boundary](glossary.md#re-derivation-boundary) preserves product
+semantics. The intentional
+[#348](https://github.com/ensdomains/bigname/issues/348) interpreter change keeps
+an ENSv2 resolver `RecordChanged.event_identity` or
+`RecordVersionChanged.event_identity`, changes `logical_name_id` from null to
+the retained canonical [name surface](glossary.md#surface-name-surface), keeps
+`resource_id` null, and updates the attribution embedded in
+`raw_fact_ref.interpreter_state_key`. Its `before_state` may also become the
+preceding `after_state` from the logical-name/resource-null state stream that
+the event now joins. The event may therefore newly enter name-filtered
+diagnostics and product history. A cursor issued before that change has no
+continuation guarantee and may be rejected. Consumers must discard
+pre-#348 cursors and restart from the first page; fresh post-publication cursors
+continue normally. If an ended resource still retains a resolver pointer to the
+emitter, its rebuildable record-inventory projection may change too. The
+resource-less late event does not restore `name_current.resource_id`, so name
+and record reads for the released or expired name continue to expose no current
+record inventory.
+
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.
 For reverse address inputs to `POST /v2/lookup` whose relation set maps directly

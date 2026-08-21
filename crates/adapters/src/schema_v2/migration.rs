@@ -469,8 +469,38 @@ fn correlate_authority_transitions(
                 evidence.clone(),
             )?;
         }
+        let registrar_cleanup_sender = match migration_path {
+            "unwrapped" => Some(unlocked),
+            "unlocked_wrapped" => Some(name_wrapper),
+            _ => None,
+        };
+        let registrar_cleanup = registrar_cleanup_sender
+            .and_then(|cleanup_sender| {
+                transfers.iter().copied().find(|observation| {
+                    observation.decoded["from"]
+                        .as_str()
+                        .is_some_and(|from| from.eq_ignore_ascii_case(cleanup_sender))
+                })
+            })
+            .map(|observation| {
+                let event_identity = independently_admitted_transfer_events
+                    .iter()
+                    .find(|event| {
+                        event.event_kind == "TokenControlTransferred"
+                            && same_position(event, &observation.raw)
+                    })
+                    .map(|event| event.event_identity.clone())
+                    .unwrap_or_else(|| registrar_transfer_event_identity(observation));
+                json!({
+                    "event_identity":event_identity,
+                    "source_event":"Transfer",
+                    "block_number":observation.raw.block_number,
+                    "transaction_index":observation.raw.transaction_index,
+                    "log_index":observation.raw.log_index,
+                })
+            });
         let predecessor_resource = match migration_path {
-            "unwrapped" => {
+            "unwrapped" | "unlocked_wrapped" => {
                 let base_registrar_instance = catalog
                     .contract_instance_for_address(
                         base_registrar,
@@ -478,18 +508,16 @@ fn correlate_authority_transitions(
                             .block_number
                             .context("migration registration has no block number")?,
                     )?
-                    .context(
-                        "ENSv1 BaseRegistrar correlation address has no active contract instance",
-                    )?;
+                    .context("ENSv1 BaseRegistrar has no active contract instance")?;
                 json!({
                     "anchor_kind":"registrar_backed_registration",
                     "contract_instance_id":base_registrar_instance,
                     "token_id":labelhash,
                     "labelhash":labelhash,
-                    "selection":"current_registrar_resource_immediately_before_boundary",
+                    "selection":"current_registrar_resource_immediately_before_predecessor_cleanup",
                 })
             }
-            "unlocked_wrapped" | "locked_wrapped" => json!({
+            "locked_wrapped" => json!({
                 "anchor_kind":"wrapper_backed_control",
                 "contract_address":name_wrapper,
                 "wrapper_token_id":logical_name_id.split_once(':').map(|(_, hash)| hash),
@@ -498,12 +526,19 @@ fn correlate_authority_transitions(
             }),
             _ => unreachable!("migration path was selected above"),
         };
-        let before = json!({
+        let mut before = json!({
             "authority_epoch":"ens_v1",
             "logical_name_id":logical_name_id,
-            "selection":"active_immediately_before_boundary",
+            "selection":if registrar_cleanup.is_some() {
+                "active_immediately_before_predecessor_cleanup"
+            } else {
+                "active_immediately_before_boundary"
+            },
             "resource":predecessor_resource,
         });
+        if let Some(cleanup) = registrar_cleanup {
+            before["predecessor_cleanup"] = cleanup;
+        }
         let after = json!({
             "source_event":"MigrationApplied",
             "logical_name_id":logical_name_id,
