@@ -632,6 +632,57 @@ async fn adding_a_discovery_rule_over_ingested_history_is_rejected() -> Result<(
 }
 
 #[tokio::test]
+async fn resolver_discovery_widening_uses_the_published_head_after_a_rewind() -> Result<()> {
+    for (case, published_head, emitter_start, should_admit) in [
+        ("future-of-published-head", Some(4), 7, true),
+        ("at-published-head", Some(4), 4, false),
+        ("missing-published-head", None, 10, false),
+    ] {
+        let scratch = ScratchDatabase::create(&format!(
+            "production_manifest_discovery_published_head_{case}"
+        ))
+        .await?;
+        let chain_id = format!("manifest-discovery-published-head-{case}");
+        let fixture = WatchManifestFixture::new(&chain_id)?;
+        fixture.write_namespace_resolver_source(
+            "test",
+            "0x0000000000000000000000000000000000000005",
+            None,
+        )?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+        seed_completed_ingest_range_through(&scratch, &chain_id, 10).await?;
+        if let Some(head) = published_head {
+            advance_chain_head(scratch.pool(), &chain_id, head).await?;
+        } else {
+            sqlx::query("DELETE FROM chain_heads WHERE chain_id = $1")
+                .bind(&chain_id)
+                .execute(scratch.pool())
+                .await?;
+        }
+
+        fixture.write_namespace_resolver_source(
+            "test",
+            "0x0000000000000000000000000000000000000005",
+            Some(("0x0000000000000000000000000000000000000004", emitter_start)),
+        )?;
+        let result =
+            sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+        if should_admit {
+            result.context("future resolver discovery work must be admitted after a rewind")?;
+            assert_eq!(required_ingest_redo(scratch.pool(), &chain_id).await?, None);
+        } else {
+            let error = result.expect_err("covered resolver discovery work must still reject");
+            assert!(
+                error.to_string().contains("discovery rule widening"),
+                "{error}"
+            );
+        }
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn replacing_a_resolver_discovery_source_over_ingested_history_is_rejected() -> Result<()> {
     let scratch =
         ScratchDatabase::create("production_manifest_resolver_source_replacement").await?;

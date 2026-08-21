@@ -25,7 +25,7 @@ pub async fn fetch_selected_facts(
         if pair[1].number != pair[0].number + 1
             || pair[1].parent_hash.as_deref() != Some(pair[0].hash.as_str())
         {
-            return Err(IngestError::data_integrity(format!(
+            return Err(IngestError::transient(format!(
                 "loaded block window changes lineage between blocks {} and {}",
                 pair[0].number, pair[1].number
             )));

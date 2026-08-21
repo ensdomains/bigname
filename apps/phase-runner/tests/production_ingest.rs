@@ -49,6 +49,7 @@ const BLOCK_1: &str = "0x0000000000000000000000000000000000000000000000000000000
 const BLOCK_1_REORG: &str = "0x0000000000000000000000000000000000000000000000000000000000000012";
 const BLOCK_1_SECOND_REORG: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000022";
+const FORK_BLOCK_0: &str = "0x0000000000000000000000000000000000000000000000000000000000000032";
 const BLOCK_2: &str = "0x0000000000000000000000000000000000000000000000000000000000000007";
 const TRANSACTION: &str = "0x0000000000000000000000000000000000000000000000000000000000000003";
 const REORG_TRANSACTION: &str =
@@ -2758,6 +2759,77 @@ async fn block_hash_pinned_log_mismatch_is_terminal_data_integrity() -> Result<(
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn ingest_retries_a_fork_straddled_resolved_window() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_fork_straddled_window").await?;
+    let chain_id = "rpc-ingest-fork-straddled-window";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, rpc_state, server) = spawn_fork_straddle_rpc().await?;
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+    let request = || BatchRequest {
+        chain_id: chain_id.to_owned(),
+        sources: vec![SourceDescriptor {
+            key: "rpc".to_owned(),
+            kind: "rpc".to_owned(),
+            start_block: 0,
+            endpoint: endpoint.clone(),
+        }],
+        cursors: Vec::new(),
+        redo_range: None,
+        resume_current: None,
+    };
+
+    rpc_state.script_straddled_attempts(1);
+    let error = engine
+        .run_batch(request())
+        .await
+        .expect_err("a fork-straddled resolved window must be retried");
+    assert_eq!(error.kind(), IngestErrorKind::Transient);
+    assert!(error.to_string().contains("between blocks 0 and 1"));
+
+    rpc_state.script_straddled_attempts(3);
+    let persistent = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut last_error = None;
+        for _ in 0..3 {
+            last_error = Some(
+                engine
+                    .run_batch(request())
+                    .await
+                    .expect_err("persistent fork churn must keep surfacing"),
+            );
+        }
+        last_error.expect("bounded persistent retry produced an error")
+    })
+    .await
+    .context("persistent fork-straddle retries must stay bounded by the caller")?;
+    assert_eq!(persistent.kind(), IngestErrorKind::Transient);
+    assert!(persistent.to_string().contains("between blocks 0 and 1"));
+
+    rpc_state.script_straddled_attempts(1);
+    let chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner_with_phase(
+        scratch.runner(),
+        "fork-straddle-retry-runner",
+        Arc::new(IngestPhase::with_engine(engine)),
+    )?;
+    run_until_ingest_handoff(runner, chain, scratch.pool(), BLOCK_1).await?;
+    assert!(rpc_state.window_resolves() >= 12);
+
+    server.abort();
+    scratch.cleanup().await
+}
+
 struct CrashAfterCommitIngest {
     inner: IngestPhase,
 }
@@ -4079,6 +4151,114 @@ async fn spawn_rpc(
         .expect("test RPC server");
     });
     Ok((format!("http://{address}/"), server))
+}
+
+#[derive(Clone)]
+struct ForkStraddleRpcState {
+    remaining_straddled_resolves: Arc<AtomicUsize>,
+    window_resolves: Arc<AtomicUsize>,
+}
+
+impl ForkStraddleRpcState {
+    fn script_straddled_attempts(&self, attempts: usize) {
+        self.remaining_straddled_resolves
+            .store(attempts.saturating_mul(2), Ordering::SeqCst);
+    }
+
+    fn claim_straddled_resolve(&self) -> bool {
+        self.window_resolves.fetch_add(1, Ordering::SeqCst);
+        self.remaining_straddled_resolves
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+
+    fn window_resolves(&self) -> usize {
+        self.window_resolves.load(Ordering::SeqCst)
+    }
+}
+
+async fn spawn_fork_straddle_rpc()
+-> Result<(String, ForkStraddleRpcState, tokio::task::JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let state = ForkStraddleRpcState {
+        remaining_straddled_resolves: Arc::new(AtomicUsize::new(0)),
+        window_resolves: Arc::new(AtomicUsize::new(0)),
+    };
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/", post(fork_straddle_rpc))
+                .with_state(server_state),
+        )
+        .await
+        .expect("fork-straddle test RPC server");
+    });
+    Ok((format!("http://{address}/"), state, server))
+}
+
+async fn fork_straddle_rpc(
+    State(state): State<ForkStraddleRpcState>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    let straddled = request.as_array().is_some_and(|requests| {
+        let resolves_window = requests.len() == 2
+            && requests
+                .iter()
+                .all(|request| request["method"] == "eth_getBlockByNumber")
+            && requests
+                .iter()
+                .any(|request| request.pointer("/params/0") == Some(&json!("0x0")))
+            && requests
+                .iter()
+                .any(|request| request.pointer("/params/0") == Some(&json!("0x1")));
+        resolves_window && state.claim_straddled_resolve()
+    });
+    if let Some(requests) = request.as_array() {
+        return Json(Value::Array(
+            requests
+                .iter()
+                .map(|request| fork_straddle_rpc_response(request, straddled))
+                .collect(),
+        ));
+    }
+    Json(fork_straddle_rpc_response(&request, false))
+}
+
+fn fork_straddle_rpc_response(request: &Value, straddled: bool) -> Value {
+    let id = request.get("id").cloned().unwrap_or(json!(1));
+    let method = request["method"].as_str().unwrap_or_default();
+    let selection = request
+        .pointer("/params/0")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let full = request.pointer("/params/1") == Some(&Value::Bool(true));
+    let result = match method {
+        "eth_getBlockByNumber" => match selection {
+            "0x0" => Some(block(0, full)),
+            "0x1" if straddled => Some(straddled_block_1(full)),
+            "latest" | "safe" | "finalized" | "0x1" => Some(block(1, full)),
+            _ => None,
+        },
+        "eth_getBlockByHash" if selection == BLOCK_0 => Some(block(0, full)),
+        "eth_getBlockByHash" if selection == BLOCK_1 => Some(block(1, full)),
+        "eth_getBlockByHash" if selection == BLOCK_1_REORG => Some(straddled_block_1(full)),
+        "eth_getLogs" | "eth_getBlockReceipts" => Some(json!([])),
+        _ => None,
+    };
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn straddled_block_1(full_transactions: bool) -> Value {
+    let mut value = block(1, full_transactions);
+    value["hash"] = json!(BLOCK_1_REORG);
+    value["parentHash"] = json!(FORK_BLOCK_0);
+    value["transactions"] = json!([]);
+    value
 }
 
 async fn rpc(

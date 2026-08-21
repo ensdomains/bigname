@@ -278,12 +278,9 @@ async fn reject_covered_discovery_widening(
                    SELECT 1 FROM ingest_cursors cursor
                    WHERE cursor.chain_id = $1
                      AND GREATEST(cursor.start_block_number, $2)
-                         <= GREATEST(
-                             phase.current_block_number,
-                             COALESCE(
-                                 (SELECT latest_block_number FROM chain_heads WHERE chain_id = $1),
-                                 phase.current_block_number
-                             )
+                         <= COALESCE(
+                             (SELECT latest_block_number FROM chain_heads WHERE chain_id = $1),
+                             phase.current_block_number
                          )
                )
          )",

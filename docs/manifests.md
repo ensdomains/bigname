@@ -860,6 +860,10 @@ retained history as a conservative case of the same ordering constraint.
 A `resolver` discovery rule with no matching root or contract declaration is itself historical
 discovery input, so adding such a rule in a new namespace over retained history is rejected like any
 other widening.
+A chain's retained-history boundary for this check is its latest published
+head. A finite Ingest position left ahead of that head after a rewind is not
+readable coverage; when no published-head row exists, the check falls back to
+the finite Ingest position.
 A new chain with no ingested range, a resolver rule or emitting-source
 replacement whose start is after retained history, [discovery-rule
 narrowing](glossary.md#discovery-rule-widening-and-narrowing),
