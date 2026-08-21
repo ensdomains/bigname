@@ -642,11 +642,14 @@ one value stream.
 
 Values derived while a physical batch is being interpreted are a separate,
 batch-bounded working set. They are not reloadable before the batch commits.
-After reconciliation, before-state chaining starts from the cached or reloaded
-pre-batch value and advances through the exact surviving normalized-event
-sequence. Only those survivors update the retained cache after the database
-transaction persists the batch. This keeps dropped or retargeted provisional
-events out of both retained memory and future restore input.
+After each block's same-transaction reconciliation, ENSv1 protocol state
+advances through only that block's surviving normalized events before the next
+block's time-derived ENSv1 lifecycle checks run. Before-state chaining still
+starts from the cached or reloaded pre-batch value and advances through the
+exact surviving normalized-event sequence. Only those survivors update the
+retained cache after the database transaction persists the batch. This keeps
+dropped or retargeted provisional events out of later ENSv1 block-boundary
+decisions, retained memory, and future restore input.
 
 A cold restore streams the latest readable event per retained state key in
 chain order. It rebuilds the adapter's protocol state while admitting at most

@@ -33,7 +33,7 @@ mod permutation;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{BatchInput, BatchOutput};
@@ -44,30 +44,21 @@ use permutation::{
     directed::Directed,
     events::{
         V1LegacyController, V1Registry, V1Resolver, V1UnwrappedController, V1WrappedController,
-        declared_events,
+        V1Wrapper, declared_events,
     },
     invariants::{IdentityReferences, assert_upsert_guards_agree, converge, split},
     names::{labelhash, namehash},
     scenario::{self, BurstPhase},
     world::{
-        ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
+        BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
         assert_pins_are_current, assert_worlds_cover_deployments, checked_in_manifests,
         declared_event_kinds, declared_event_topics,
     },
 };
 
-/// 48 permutations per world, so this is a runtime budget, and below the rate of the rarer
-/// batch-boundary artifacts — see `EXPECTED_ARTIFACTS` for the residual a 600-case sweep still
-/// reaches.
-///
-/// It is no longer below a known failure. Once the ENSv1 pool started emitting the registrar mint
-/// that a wrapped registration really makes, a sweep of 600 per world fails 3 of 1200 sequences,
-/// every one of them `registration_path: Wrapped` with `expiry_window: PastGrace`: the split replay
-/// derives an `AuthorityEpochChanged` and its `PermissionChanged` that the whole pass does not, so
-/// the two disagree about when the wrapper's authority lapsed. That is a live interpreter
-/// divergence this lane found and not a batch-boundary artifact — the whole pass derives strictly
-/// less, which is the direction `EXPECTED_ARTIFACTS` does not cover. It is issue #347. Raising this
-/// knob will report it; the fix belongs there, not in a wider allowance here.
+/// 48 permutations per world is a runtime budget. The directed
+/// `wrapped_past_grace_lapse_is_batch_grid_independent` test pins issue #347 independently of the
+/// generator depth that first exposed it.
 const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that increment
@@ -277,6 +268,143 @@ fn production_lease_release_sequence_holds_the_same_invariants() -> Result<()> {
         .map(|batch| batch.output)
         .collect::<Vec<_>>();
     directed.assert_release_reached(&outputs)
+}
+
+#[test]
+fn wrapped_past_grace_lapse_is_batch_grid_independent() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V1_MAINNET, &checked_in)?;
+    let input = wrapped_past_grace_lapse_input(&wiring)?;
+    let boundary_block = input.blocks[1].block_number;
+    let converged = converge("directed=wrapped-past-grace-lapse", input, vec![0..1, 1..2])?;
+    let boundary_kinds = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .filter(|event| event.block_number == Some(boundary_block))
+        .map(|event| event.event_kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        boundary_kinds,
+        [
+            "RegistrationReleased",
+            "PermissionChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "PermissionChanged",
+        ],
+        "the observing block must carry the complete lease-lapse transition"
+    );
+    Ok(())
+}
+
+/// Five raw logs distilled from generated seed 18434531763410729552. The second block observes the
+/// registrar lease one second after its 90-day grace period. A wrapped `.eth` registration stores
+/// that grace-adjusted expiry in NameWrapper, whose `getData` clears the emancipated owner after it
+/// passes. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L77 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297-L303 @
+/// ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L153 @
+/// ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L852 @
+/// ens_v1@91c966f)
+fn wrapped_past_grace_lapse_input(wiring: &Wiring) -> Result<BatchInput> {
+    const REGISTRY: &str = "ens_v1_registry_l1";
+    const REGISTRAR: &str = "ens_v1_registrar_l1";
+    const WRAPPER: &str = "ens_v1_wrapper_l1";
+    const EXPIRY: u64 = 1_608_204_400;
+    let registry = wiring.address(REGISTRY, "registry");
+    let wrapped_controller = wiring.address(REGISTRAR, "wrapped_registrar_controller");
+    let wrapper = wiring.address(WRAPPER, "name_wrapper");
+    let wrapper_address: Address = wrapper.parse()?;
+    let registrant: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let eth_node = namehash(&["eth"]);
+    let label = labelhash("alpha");
+    let node = namehash(&["alpha", "eth"]);
+    let blocks = [
+        BlockSpec {
+            number: 15_000_000,
+            hash: format!("0x{:064x}", 0xb1f0_e1c0_u64),
+            timestamp: 1_600_000_000,
+        },
+        BlockSpec {
+            number: 15_000_001,
+            hash: format!("0x{:064x}", 0xb1f0_e1c1_u64),
+            timestamp: EXPIRY as i64 + (90 * 24 * 60 * 60) + 1,
+        },
+    ];
+    let log = |transaction_index: i64, log_index: i64, emitter: &str, encoded: LogData| {
+        let emission = scenario::emission(emitter, encoded);
+        GeneratedLog {
+            block_index: 0,
+            transaction_hash: format!("0x{:064x}", transaction_index),
+            transaction_index,
+            log_index,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = [
+        log(
+            0,
+            1,
+            registry,
+            V1Registry::NewOwner {
+                node: eth_node,
+                label,
+                owner: wrapper_address,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            0,
+            2,
+            wrapped_controller,
+            V1WrappedController::NameRegistered {
+                name: "alpha".to_owned(),
+                label,
+                owner: registrant,
+                baseCost: U256::from(1),
+                premium: U256::ZERO,
+                expires: U256::from(EXPIRY),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            0,
+            registry,
+            V1Registry::Transfer {
+                node,
+                owner: registrant,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            0,
+            wrapper,
+            V1Wrapper::NameUnwrapped {
+                node,
+                owner: registrant,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            1,
+            registry,
+            V1Registry::Transfer {
+                node,
+                owner: registrant,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
 }
 
 /// The `sol!` fragments this lane emits decide every topic0 and every topic layout it produces.
