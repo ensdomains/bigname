@@ -3069,6 +3069,116 @@ async fn reinsert_events_with_new_ids(pool: &PgPool, chain: &str, to_block: i64)
     Ok(())
 }
 
+async fn clone_event_with_identity(
+    pool: &PgPool,
+    source_identity: &str,
+    cloned_identity: &str,
+) -> Result<()> {
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'normalized_events'
+           AND column_name NOT IN ('normalized_event_id', 'event_identity')
+           AND is_identity = 'NO' AND is_generated = 'NEVER'
+         ORDER BY ordinal_position",
+    )
+    .fetch_all(pool)
+    .await?;
+    let list = columns.join(", ");
+    sqlx::query(&format!(
+        "INSERT INTO normalized_events (event_identity, {list})
+         SELECT $1, {list} FROM normalized_events WHERE event_identity = $2"
+    ))
+    .bind(cloned_identity)
+    .bind(source_identity)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn stage_same_position_child_candidates_per_arm(pool: &PgPool) -> Result<()> {
+    let v1_source: String = sqlx::query_scalar(
+        "SELECT event_identity FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'SubregistryChanged'
+           AND source_family = 'ens_v1_registry_l1'
+           AND block_number = 5
+           AND after_state ->> 'child_node' = '0xalice'",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET event_identity = 'child-conflict-v1-a',
+             transaction_hash = 'child-conflict-v1-position',
+             transaction_index = 0, log_index = 0
+         WHERE event_identity = $1",
+    )
+    .bind(v1_source)
+    .execute(pool)
+    .await?;
+    clone_event_with_identity(pool, "child-conflict-v1-a", "child-conflict-v1-z").await?;
+
+    let v2_source: String = sqlx::query_scalar(
+        "SELECT event_identity FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationGranted'
+           AND source_family = 'ens_v2_registry_l1'
+           AND logical_name_id = 'ens:0xalice'
+           AND block_number = 1",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET event_identity = 'child-conflict-v2-a',
+             transaction_hash = 'child-conflict-v2-position',
+             transaction_index = 0, log_index = 0
+         WHERE event_identity = $1",
+    )
+    .bind(v2_source)
+    .execute(pool)
+    .await?;
+    clone_event_with_identity(pool, "child-conflict-v2-a", "child-conflict-v2-z").await?;
+    Ok(())
+}
+
+async fn reinsert_events_in_reverse_identity_order(
+    pool: &PgPool,
+    chain: &str,
+    to_block: i64,
+) -> Result<()> {
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'normalized_events'
+           AND is_identity = 'NO' AND is_generated = 'NEVER'
+         ORDER BY ordinal_position",
+    )
+    .fetch_all(pool)
+    .await?;
+    let list = columns.join(", ");
+    sqlx::query(&format!(
+        "CREATE TABLE redo_replay AS SELECT {list} FROM normalized_events
+         WHERE chain_id = $1 AND block_number <= $2"
+    ))
+    .bind(chain)
+    .bind(to_block)
+    .execute(pool)
+    .await?;
+    sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1 AND block_number <= $2")
+        .bind(chain)
+        .bind(to_block)
+        .execute(pool)
+        .await?;
+    sqlx::query(&format!(
+        "INSERT INTO normalized_events ({list})
+         SELECT {list} FROM redo_replay ORDER BY event_identity DESC"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query("DROP TABLE redo_replay").execute(pool).await?;
+    Ok(())
+}
+
 // The audit row is keyed by a fingerprint of the conflict, so the same semantic conflict
 // after a redo must hash to the same value. Generated row ids do not survive a redo; the
 // event identities the fingerprint is built from do.
@@ -3121,6 +3231,58 @@ async fn a_replayed_child_conflict_keeps_its_fingerprint_and_records_no_second_r
     assert_eq!(second[0].6, first[0].6, "so does its evidence payload");
     scratch.cleanup().await
 }
+
+// This synthetic duplicate stages multiple rows for each arm at one exact chain position to
+// isolate the final tie-break. A replay may assign their generated database IDs in any order, so
+// the chosen conflict witness must follow stable event identity rather than insertion order.
+#[tokio::test]
+async fn same_position_multi_candidate_child_conflict_is_replay_stable_within_each_arm()
+-> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_project_child_multi_candidate_replay").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_child_authority_fixture(scratch.pool(), 5, 3).await?;
+    stage_same_position_child_candidates_per_arm(scratch.pool()).await?;
+
+    run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("the multi-candidate conflict must block publication");
+    let first = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0].6["predecessor"]["event_identity"],
+        "child-conflict-v1-z"
+    );
+    assert_eq!(
+        first[0].6["successor"]["event_identity"],
+        "child-conflict-v2-z"
+    );
+
+    reinsert_events_in_reverse_identity_order(scratch.pool(), CHAIN, 5).await?;
+    run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("the replayed multi-candidate conflict must still block publication");
+    let replayed = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(
+        replayed.len(),
+        1,
+        "one semantic conflict has one audit identity"
+    );
+    assert_eq!(
+        replayed[0].4, first[0].4,
+        "the witness fingerprint is replay-stable"
+    );
+    assert_eq!(
+        replayed[0].6, first[0].6,
+        "the witness evidence is replay-stable"
+    );
+    scratch.cleanup().await
+}
+
+// There is no corresponding same-arm publish fixture with two registry contract instances at one
+// address. `contract_instance_addresses_active_idx` admits at most one non-deactivated instance
+// for a chain/address, and `ranked_v2_registrations` keeps one current row per child and admitted
+// instance, so that proposed second candidate cannot reach `publish` after candidate construction.
 
 // The other ENSv2 child authority proof reaches the same assertion: a positive ENSv2 child
 // registration is an authority epoch too, so an ENSv1 relation asserted after it is the same

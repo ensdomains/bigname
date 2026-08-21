@@ -232,7 +232,7 @@ pub(super) fn materialize(
             resource_id: binding.resource_id,
             binding_kind: binding.binding_kind.clone(),
             authority_arm: binding.authority_arm.clone(),
-            active_from: transition_time,
+            active_from: binding.active_from.unwrap_or(transition_time),
             chain_id: raw.chain_id.clone(),
             block_hash: raw.block_hash.clone(),
             block_number: raw.block_number,

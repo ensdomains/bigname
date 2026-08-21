@@ -64,14 +64,13 @@ pub(super) fn materialize_for_source(
                 )),
             );
         output.normalized_events.push(NormalizedEvent {
-            event_identity: format!(
-                "{derivation}:{}:{}:{}:{}:{}:{}:{ordinal}",
+            event_identity: raw_log_event_identity(
+                &source.source_family,
                 source.manifest_id,
-                raw.chain_id,
-                raw.block_hash,
-                raw.transaction_hash,
-                raw.log_index,
-                draft.identity_suffix,
+                raw,
+                &draft.event_kind,
+                &draft.identity_suffix,
+                ordinal,
             ),
             namespace: source.namespace.clone(),
             logical_name_id: draft.logical_name_id,
@@ -96,6 +95,21 @@ pub(super) fn materialize_for_source(
             before_state_explicit,
         });
     }
+}
+
+pub(super) fn raw_log_event_identity(
+    source_family: &str,
+    source_manifest_id: i64,
+    raw: &RawLogInput,
+    event_kind: &str,
+    identity_suffix: &str,
+    ordinal: usize,
+) -> String {
+    let derivation = derivation_kind(source_family, event_kind);
+    format!(
+        "{derivation}:{source_manifest_id}:{}:{}:{}:{}:{identity_suffix}:{ordinal}",
+        raw.chain_id, raw.block_hash, raw.transaction_hash, raw.log_index,
+    )
 }
 
 pub(super) fn materialize_boundary(

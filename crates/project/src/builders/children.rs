@@ -31,7 +31,9 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                        ORDER BY event.block_number DESC NULLS LAST,
                                 event.transaction_index DESC NULLS LAST,
                                 event.log_index DESC NULLS LAST,
-                                event.normalized_event_id DESC
+                                -- Stable identity resolves only an exact-position duplicate;
+                                -- generated IDs never participate.
+                                event.event_identity DESC
                    ) AS current_rank
             FROM project_events event
             WHERE event.event_kind = 'SubregistryChanged'
@@ -106,7 +108,9 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                        ORDER BY event.block_number DESC NULLS LAST,
                                 event.transaction_index DESC NULLS LAST,
                                 event.log_index DESC NULLS LAST,
-                                event.normalized_event_id DESC
+                                -- Stable identity resolves only an exact-position duplicate;
+                                -- generated IDs never participate.
+                                event.event_identity DESC
                    ) AS current_rank
             FROM project_events event
             WHERE event.event_kind = 'SubregistryChanged'
@@ -130,7 +134,9 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                        ORDER BY event.block_number DESC NULLS LAST,
                                 event.transaction_index DESC NULLS LAST,
                                 event.log_index DESC NULLS LAST,
-                                event.normalized_event_id DESC
+                                -- Stable identity resolves only an exact-position duplicate;
+                                -- generated IDs never participate.
+                                event.event_identity DESC
                    ) AS current_rank
             FROM project_events event
             WHERE event.event_kind IN (
@@ -249,7 +255,10 @@ async fn publish(
                        -- Recency picks the current relation inside one selected arm; it never
                        -- picks the arm.
                        ORDER BY candidate.block_number DESC NULLS LAST,
-                                candidate.normalized_event_id DESC
+                                candidate.evidence_transaction_index DESC NULLS LAST,
+                                candidate.evidence_log_index DESC NULLS LAST,
+                                -- Stable identity is the final exact-position tie-break.
+                                candidate.event_identity DESC
                    ) AS pair_rank
             FROM project_child_candidates candidate
             LEFT JOIN project_name_authority authority

@@ -89,6 +89,7 @@ impl Interpreted {
 #[derive(Clone, Debug)]
 pub(super) struct MigrationObservation {
     pub source_family: String,
+    pub source_manifest_id: i64,
     pub event_name: String,
     pub emitter_role: Option<String>,
     pub contract_instance_id: Uuid,
@@ -196,6 +197,7 @@ pub(super) struct BindingDraft {
     pub binding_kind: String,
     pub authority_arm: String,
     pub surface_binding_id: Option<Uuid>,
+    pub active_from: Option<time::OffsetDateTime>,
 }
 
 #[derive(Clone, Debug)]
