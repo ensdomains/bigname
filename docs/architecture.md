@@ -1110,8 +1110,9 @@ when a required Ingest redo end became unreadable and interrupted finite Ingest
 recorded no handoff. That pass only republishes the winning suffix; it does not
 execute or clear the operator-owned historical redo.
 `--phase recompute-flags` supports bounded flag recomputation. Among otherwise
-configured redo requests, only historical `live` redo and unreadable range ends
-are rejected before redo state is written. A deployment therefore still needs
+configured redo requests, historical `live` redo, unreadable range ends, and an
+Interpret or Project redo requested while a required Ingest redo is still
+stamped for that chain are rejected before redo state is written. A deployment therefore still needs
 complete admitted history for ENSv1, ENSv2, and Basenames source families.
 Wildcard and offchain names remain
 discovery/observed-answer based rather than exhaustively enumerable.

@@ -420,10 +420,11 @@ rerunning the same command after wipe-and-resync repair resumes the attempt.
 The range end must already be `canonical`, `safe`, or `finalized`; an
 `observed` staging row is rejected before a redo session is claimed.
 Flag recomputation is supported through `--phase recompute-flags`. Among
-otherwise configured redo requests, only historical `live` redo and an
-unreadable range end are rejected before a redo marker is written. These
-preflight refusals and terminal verification failures cannot strand
-unresumable redo state.
+otherwise configured redo requests, historical `live` redo, an unreadable
+range end, and an Interpret or Project redo requested while a required
+Ingest redo is still stamped for that chain are rejected before a redo
+marker is written. These preflight refusals and terminal verification
+failures cannot strand unresumable redo state.
 
 The thin rewind command moves only the published latest head:
 
