@@ -202,6 +202,78 @@ start_block = {start_block}"#
         self.write_namespace_emitter("zeta", later_start, edge_kind, false)
     }
 
+    fn write_cross_namespace_resolver_sources(
+        &self,
+        alpha: Option<(&str, u64)>,
+        zeta: Option<(&str, u64)>,
+    ) -> Result<()> {
+        self.write_namespace_resolver_source(
+            "alpha",
+            "0x0000000000000000000000000000000000000005",
+            alpha,
+        )?;
+        self.write_namespace_resolver_source(
+            "zeta",
+            "0x0000000000000000000000000000000000000007",
+            zeta,
+        )
+    }
+
+    fn write_namespace_resolver_source(
+        &self,
+        namespace: &str,
+        event_source: &str,
+        source: Option<(&str, u64)>,
+    ) -> Result<()> {
+        let source = source.map_or_else(String::new, |(address, start)| {
+            format!(
+                r#"[[contracts]]
+role = "source_a"
+address = "{address}"
+proxy_kind = "none"
+start_block = {start}"#
+            )
+        });
+        let manifest = format!(
+            r#"manifest_version = 1
+namespace = "{namespace}"
+source_family = "{}"
+chain = "{}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+
+[capability_flags]
+
+[[contracts]]
+role = "event_source"
+address = "{event_source}"
+proxy_kind = "none"
+start_block = 0
+
+{source}
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "source_a"
+admission = "reachable_from_root"
+
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
+emitter_roles = ["event_source"]
+normalized_events = []
+status = "supported"
+"#,
+            self.source_family, self.chain_id,
+        );
+        let directory = self.root.join(namespace).join(&self.source_family);
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("v1.toml"), manifest)?;
+        Ok(())
+    }
+
     fn write_namespace_emitter(
         &self,
         namespace: &str,
@@ -697,7 +769,60 @@ async fn cross_namespace_resolver_start_widening_is_order_independent() -> Resul
 }
 
 #[tokio::test]
-async fn cross_namespace_watch_entries_min_merge_the_earlier_start() -> Result<()> {
+async fn namespace_scoped_resolver_start_widening_is_not_masked_by_an_earlier_peer() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_namespace_start_key").await?;
+    let chain_id = "manifest-namespace-start-key";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v1_registrar_l1")?;
+    fixture.write_cross_namespace_pair(100, 30, "resolver")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 100).await?;
+
+    fixture.write_cross_namespace_pair(50, 30, "resolver")?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("an earlier peer namespace must not mask resolver discovery widening");
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "the namespace-scoped transition must reject loudly: {error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn cross_namespace_different_address_swap_is_rule_widening_not_replacement() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_namespace_address_key").await?;
+    let chain_id = "manifest-namespace-address-key";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v1_registrar_l1")?;
+    fixture.write_cross_namespace_resolver_sources(
+        Some(("0x0000000000000000000000000000000000000004", 0)),
+        None,
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.write_cross_namespace_resolver_sources(
+        None,
+        Some(("0x0000000000000000000000000000000000000006", 0)),
+    )?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("adding zeta's historical emitter must reject as rule widening");
+    assert!(
+        error.to_string().contains("discovery rule widening")
+            && !error.to_string().contains("source replacement"),
+        "alpha's removed emitter must not leak into zeta's diagnosis: {error}"
+    );
+
+    scratch.cleanup().await
+}
+
+// This covers only `insert_watch`'s minimum merge. `insert_discovery_rule`'s equivalent merge is
+// defensive: repository loading permits only one active manifest per namespace/source family, and
+// each manifest has already merged declarations with the same role/address to their earliest start,
+// so a valid repository cannot insert one discovery-rule key with differing starts.
+#[tokio::test]
+async fn cross_namespace_watch_plan_entries_min_merge_the_earlier_start() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_cross_namespace_watch_min").await?;
     let chain_id = "manifest-cross-namespace-watch-min";
     let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v1_registrar_l1")?;

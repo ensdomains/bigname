@@ -857,6 +857,9 @@ to a resolver rule that previously matched no root or contract declaration is
 classified as [discovery-rule
 widening](glossary.md#discovery-rule-widening-and-narrowing) and is intentionally rejected over
 retained history as a conservative case of the same ordering constraint.
+A `resolver` discovery rule with no matching root or contract declaration is itself historical
+discovery input, so adding such a rule in a new namespace over retained history is rejected like any
+other widening.
 A new chain with no ingested range, a resolver rule or emitting-source
 replacement whose start is after retained history, [discovery-rule
 narrowing](glossary.md#discovery-rule-widening-and-narrowing),
