@@ -236,6 +236,15 @@ announcement admits an ENSv2 registry independently of parent reachability,
 while a subregistry edge records parent-child reachability without admitting
 its target.
 
+**Discovery-rule widening and narrowing** — manifest-synchronization
+classifications for `resolver` discovery rules and their emitting declarations.
+Widening adds a rule or emitter, adds the first emitter to a rule that previously
+matched no declaration, or moves an emitter's inclusive start block earlier.
+Narrowing removes rules or emitters, including removal of a rule's last emitter,
+or moves an emitter's start later. Widening over retained history is rejected
+because resolver addresses are not known until Interpret materializes their
+discovery edges; narrowing introduces no missing historical discovery input.
+
 **Migration edge** (`migration`) — the fifth discovery edge kind. It is
 [reserved surface](#reserved-surface): the schema-v2 baseline accepts the
 value, and three manifest views explicitly exclude it from watch-plan,

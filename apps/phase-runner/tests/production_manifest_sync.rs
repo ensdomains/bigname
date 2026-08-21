@@ -119,6 +119,10 @@ status = "supported"
     }
 
     fn add_discovery_rule(&self, edge_kind: &str) -> Result<()> {
+        self.add_discovery_rule_from_role(edge_kind, "source_a")
+    }
+
+    fn add_discovery_rule_from_role(&self, edge_kind: &str, from_role: &str) -> Result<()> {
         let path = self
             .root
             .join("test")
@@ -129,7 +133,7 @@ status = "supported"
             &format!(
                 r#"[[discovery_rules]]
 edge_kind = "{edge_kind}"
-from_role = "source_a"
+from_role = "{from_role}"
 admission = "reachable_from_root""#
             ),
         );
@@ -619,6 +623,52 @@ async fn adding_a_resolver_source_names_rule_widening_not_replacement() -> Resul
         error.to_string().contains("discovery rule widening")
             && !error.to_string().contains("source replacement"),
         "an additive transition must be diagnosed accurately: {error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn removing_the_only_resolver_rule_emitter_is_admissible_narrowing() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_resolver_emitter_removal").await?;
+    let chain_id = "manifest-resolver-emitter-removal";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, true)?;
+    fixture.add_discovery_rule_from_role("resolver", "source_b")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.write(false, false)?;
+    fixture.add_discovery_rule_from_role("resolver", "source_b")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        None,
+        "removing the only emitter narrows the discovery rule and needs no redo"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn adding_the_first_resolver_rule_emitter_names_rule_widening() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_first_resolver_emitter").await?;
+    let chain_id = "manifest-first-resolver-emitter";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    fixture.add_discovery_rule_from_role("resolver", "source_b")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.write(false, true)?;
+    fixture.add_discovery_rule_from_role("resolver", "source_b")?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("adding the first historical resolver-rule emitter must reject");
+    assert!(
+        error.to_string().contains("discovery rule widening")
+            && !error.to_string().contains("source replacement"),
+        "the first emitter is widening, not replacement: {error}"
     );
 
     scratch.cleanup().await

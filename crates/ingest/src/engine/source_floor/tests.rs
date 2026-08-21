@@ -397,6 +397,17 @@ async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> A
     let endpoint = marker_resolution_endpoint().await?;
     let engine = Engine::new(database.pool().clone());
     let seam = crate::BASE_COINBASE_SEAM_BLOCK;
+    let coinbase_endpoint = "coinbase-sql://must-be-reloaded";
+    let _coinbase_script = crate::coinbase_sql::test_raw_queries::install(
+        coinbase_endpoint,
+        [
+            vec![coinbase_block_row(&Marker {
+                number: seam,
+                hash: marker_hash(seam),
+            })],
+            vec![json!({ "unexpected": "boundary-load row" })],
+        ],
+    );
 
     let error = engine
         .run_batch(BatchRequest {
@@ -406,7 +417,7 @@ async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> A
                     key: "base-coinbase".to_owned(),
                     kind: "coinbase-sql".to_owned(),
                     start_block: 0,
-                    endpoint: "coinbase-sql://must-be-reloaded".to_owned(),
+                    endpoint: coinbase_endpoint.to_owned(),
                 },
                 SourceDescriptor {
                     key: "base-rpc".to_owned(),
@@ -425,12 +436,52 @@ async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> A
         .await
         .expect_err("the final batch must attempt to reload the earlier Coinbase boundary");
 
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("failed to fetch Coinbase SQL logs"),
+        "the observed error must come from entering the boundary load: {error}"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_coinbase_seam_configuration_failure_names_the_identity_check() -> AnyResult<()> {
+    let database =
+        intake_database("ingest_redo_coinbase_seam_configuration", "base-mainnet").await?;
+    let endpoint = marker_resolution_endpoint().await?;
+    let seam = crate::BASE_COINBASE_SEAM_BLOCK;
+    let error = Engine::new(database.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: "base-mainnet".to_owned(),
+            sources: vec![
+                SourceDescriptor {
+                    key: "base-coinbase".to_owned(),
+                    kind: "coinbase-sql".to_owned(),
+                    start_block: 0,
+                    endpoint: "coinbase-sql://unconfigured-seam".to_owned(),
+                },
+                SourceDescriptor {
+                    key: "base-rpc".to_owned(),
+                    kind: "rpc".to_owned(),
+                    start_block: seam,
+                    endpoint,
+                },
+            ],
+            cursors: Vec::new(),
+            redo_range: Some((seam, seam)),
+            resume_current: None,
+        })
+        .await
+        .expect_err("an unconfigured Coinbase seam source must fail");
+
     assert_eq!(error.kind(), ErrorKind::Configuration);
     assert!(
         error
             .to_string()
-            .contains("failed to configure Coinbase SQL source"),
-        "the observed error must come from entering the boundary load: {error}"
+            .starts_with("failed to fetch Coinbase SQL seam block identity"),
+        "the guard and boundary-load contexts must be distinguishable: {error}"
     );
     database.cleanup().await
 }
@@ -459,9 +510,9 @@ async fn one_batch_redo_rejects_a_fork_switch_at_the_base_source_seam() -> AnyRe
         (seam + 1, vec![rpc_end.hash.clone()]),
     ]))
     .await?;
-    let _coinbase_marker = crate::coinbase_sql::test_seam_markers::install(
+    let _coinbase_marker = scripted_coinbase_markers(
         "https://one-batch-seam.invalid/",
-        coinbase_seam.clone(),
+        &[coinbase_seam.clone(), coinbase_seam.clone()],
     );
     let loader = ScriptedRedoWindowLoader::new([
         (
@@ -607,8 +658,7 @@ async fn production_resolver_path_compares_the_actual_coinbase_seam_marker() -> 
         },
     ];
 
-    let matching_coinbase_marker =
-        crate::coinbase_sql::test_seam_markers::install(coinbase_endpoint, rpc_seam.clone());
+    let matching_coinbase_marker = scripted_coinbase_marker(coinbase_endpoint, &rpc_seam);
     let first = engine
         .run_redo_batch_with_loader(
             &loader,
@@ -624,8 +674,7 @@ async fn production_resolver_path_compares_the_actual_coinbase_seam_marker() -> 
     assert!(!first.complete);
     drop(matching_coinbase_marker);
 
-    let divergent_coinbase_marker =
-        crate::coinbase_sql::test_seam_markers::install(coinbase_endpoint, coinbase_seam.clone());
+    let divergent_coinbase_marker = scripted_coinbase_marker(coinbase_endpoint, &coinbase_seam);
     let continuation = BatchRequest {
         chain_id: "base-mainnet".to_owned(),
         sources,
@@ -647,8 +696,7 @@ async fn production_resolver_path_compares_the_actual_coinbase_seam_marker() -> 
     );
     drop(divergent_coinbase_marker);
 
-    let _matching_coinbase_marker =
-        crate::coinbase_sql::test_seam_markers::install(coinbase_endpoint, rpc_seam);
+    let _matching_coinbase_marker = scripted_coinbase_marker(coinbase_endpoint, &rpc_seam);
     let completion = engine
         .run_redo_batch_with_loader(&loader, continuation)
         .await?;
@@ -665,9 +713,9 @@ async fn an_equal_height_source_boundary_uses_loaded_evidence_without_reloading(
     let endpoint = marker_resolution_endpoint().await?;
     let engine = Engine::new(database.pool().clone());
     let seam = crate::BASE_COINBASE_SEAM_BLOCK;
-    let _coinbase_marker = crate::coinbase_sql::test_seam_markers::install(
+    let _coinbase_marker = scripted_coinbase_marker(
         "coinbase-sql://must-not-be-reloaded",
-        Marker {
+        &Marker {
             number: seam,
             hash: marker_hash(seam),
         },
@@ -738,19 +786,26 @@ async fn a_cross_source_seam_mismatch_is_rejected_before_a_phase_summary() -> An
         number: seam,
         hash: marker_hash(seam + 20),
     };
-    let endpoint = scripted_marker_endpoint(BTreeMap::from([(
-        seam,
-        vec![
-            loaded_fork.hash.clone(),
-            loaded_fork.hash.clone(),
-            summary_fork.hash.clone(),
-            summary_fork.hash.clone(),
-        ],
-    )]))
+    let endpoint = scripted_marker_endpoint(BTreeMap::from([
+        (
+            seam,
+            vec![
+                loaded_fork.hash.clone(),
+                loaded_fork.hash.clone(),
+                summary_fork.hash.clone(),
+                summary_fork.hash.clone(),
+            ],
+        ),
+        (seam + 1, vec![marker_hash(seam + 1)]),
+    ]))
     .await?;
-    let _coinbase_marker = crate::coinbase_sql::test_seam_markers::install(
+    let _coinbase_marker = scripted_coinbase_markers(
         "https://cross-source-seam.invalid/",
-        loaded_fork.clone(),
+        &[
+            loaded_fork.clone(),
+            loaded_fork.clone(),
+            loaded_fork.clone(),
+        ],
     );
     let range_end = Marker {
         number: seam + 1,
@@ -824,15 +879,21 @@ async fn a_cross_source_seam_mismatch_is_rejected_before_a_phase_summary() -> An
         "{error}"
     );
 
-    let consistent_endpoint = scripted_marker_endpoint(BTreeMap::from([(
-        seam,
-        vec![
-            loaded_fork.hash.clone(),
-            loaded_fork.hash.clone(),
-            loaded_fork.hash.clone(),
-            loaded_fork.hash.clone(),
-        ],
-    )]))
+    let consistent_endpoint = scripted_marker_endpoint(BTreeMap::from([
+        (
+            seam,
+            vec![
+                loaded_fork.hash.clone(),
+                loaded_fork.hash.clone(),
+                loaded_fork.hash.clone(),
+                loaded_fork.hash.clone(),
+            ],
+        ),
+        (
+            seam + 1,
+            vec![range_end.hash.clone(), range_end.hash.clone()],
+        ),
+    ]))
     .await?;
     let consistent_loader = ScriptedRedoWindowLoader::new([
         (
@@ -1313,6 +1374,32 @@ async fn intake_database(name: &str, chain_id: &str) -> AnyResult<TestDatabase> 
     Ok(database)
 }
 
+fn scripted_coinbase_marker(
+    endpoint: &str,
+    marker: &Marker,
+) -> crate::coinbase_sql::test_raw_queries::RawQueryScriptGuard {
+    scripted_coinbase_markers(endpoint, std::slice::from_ref(marker))
+}
+
+fn scripted_coinbase_markers(
+    endpoint: &str,
+    markers: &[Marker],
+) -> crate::coinbase_sql::test_raw_queries::RawQueryScriptGuard {
+    crate::coinbase_sql::test_raw_queries::install(
+        endpoint,
+        markers
+            .iter()
+            .map(|marker| vec![coinbase_block_row(marker)]),
+    )
+}
+
+fn coinbase_block_row(marker: &Marker) -> Value {
+    json!({
+        "block_number": marker.number,
+        "block_hash": marker.hash,
+    })
+}
+
 async fn marker_resolution_endpoint() -> AnyResult<String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}/", listener.local_addr()?);
@@ -1399,14 +1486,14 @@ fn scripted_marker_response(
         .and_then(|selector| selector.strip_prefix("0x"))
         .and_then(|number| i64::from_str_radix(number, 16).ok())
         .unwrap_or_default();
-    if let Some(hash) = markers
-        .lock()
-        .expect("scripted marker lock")
+    let mut markers = markers.lock().expect("scripted marker lock");
+    let responses = markers
         .get_mut(&number)
-        .and_then(VecDeque::pop_front)
-    {
-        response["result"]["hash"] = json!(hash);
-    }
+        .unwrap_or_else(|| panic!("no scripted marker responses for block {number}"));
+    let hash = responses
+        .pop_front()
+        .unwrap_or_else(|| panic!("scripted marker responses exhausted for block {number}"));
+    response["result"]["hash"] = json!(hash);
     response
 }
 

@@ -849,9 +849,14 @@ instead of mis-certifying a one-pass redo. The operator cannot perform that
 ordering with the current in-place phase workflow, because Interpret reads
 discovery rules only after admission. These transitions are therefore
 unsupported over retained history and require a fresh rebuild or a future
-dedicated discovery backfill mechanism.
+dedicated discovery backfill mechanism. Adding the first emitting declaration
+to a resolver rule that previously matched no root or contract declaration is
+classified as [discovery-rule
+widening](glossary.md#discovery-rule-widening-and-narrowing) and is intentionally rejected over
+retained history as a conservative case of the same ordering constraint.
 A new chain with no ingested range, a resolver rule or emitting-source
-replacement whose start is after retained history, discovery-rule narrowing,
+replacement whose start is after retained history, [discovery-rule
+narrowing](glossary.md#discovery-rule-widening-and-narrowing),
 and rules for topology-only `subregistry` or intake-discovered
 `registry_announcement` edges remain admissible.
 

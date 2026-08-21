@@ -132,28 +132,35 @@ pub(super) fn discovery_widening_start(
             let covered = previous
                 .and_then(|rules| rules.get(rule))
                 .is_some_and(|previous_start| previous_start <= start);
-            (!covered).then(|| {
-                let previous_emitters = previous
-                    .into_iter()
-                    .flat_map(|rules| rules.keys())
-                    .filter(|prior| prior.same_rule(rule))
-                    .map(|prior| prior.emitting_address.as_deref())
-                    .collect::<BTreeSet<_>>();
-                let desired_emitters = desired
-                    .keys()
-                    .filter(|candidate| candidate.same_rule(rule))
-                    .map(|candidate| candidate.emitting_address.as_deref())
-                    .collect::<BTreeSet<_>>();
-                DiscoveryWidening {
-                    start: *start,
-                    kind: if !previous_emitters.is_empty()
-                        && !previous_emitters.is_subset(&desired_emitters)
-                    {
-                        DiscoveryWideningKind::SourceReplacement
-                    } else {
-                        DiscoveryWideningKind::Rule
-                    },
-                }
+            if covered {
+                return None;
+            }
+            let previous_rule = previous
+                .into_iter()
+                .flat_map(|rules| rules.keys())
+                .filter(|prior| prior.same_rule(rule))
+                .collect::<Vec<_>>();
+            let previous_emitters = previous_rule
+                .iter()
+                .filter_map(|prior| prior.emitting_address.as_deref())
+                .collect::<BTreeSet<_>>();
+            let desired_emitters = desired
+                .keys()
+                .filter(|candidate| candidate.same_rule(rule))
+                .filter_map(|candidate| candidate.emitting_address.as_deref())
+                .collect::<BTreeSet<_>>();
+            if !previous_rule.is_empty() && desired_emitters.is_empty() {
+                return None;
+            }
+            Some(DiscoveryWidening {
+                start: *start,
+                kind: if !previous_emitters.is_empty()
+                    && !previous_emitters.is_subset(&desired_emitters)
+                {
+                    DiscoveryWideningKind::SourceReplacement
+                } else {
+                    DiscoveryWideningKind::Rule
+                },
             })
         })
         .min_by_key(|widening| {

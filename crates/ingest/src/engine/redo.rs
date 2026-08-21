@@ -84,16 +84,17 @@ impl Engine {
     }
 
     async fn coinbase_block_marker(&self, source: &SourceDescriptor) -> Result<Marker> {
-        #[cfg(test)]
-        if let Some(marker) = crate::coinbase_sql::test_seam_markers::marker(
-            &source.endpoint,
-            BASE_COINBASE_SEAM_BLOCK,
-        ) {
-            return Ok(marker);
-        }
-        let marker = self
+        let coinbase = self
             .coinbase_source("base-mainnet", source)
-            .await?
+            .await
+            .map_err(|error| {
+                IngestError::with_source(
+                    error.kind(),
+                    "failed to fetch Coinbase SQL seam block identity",
+                    error,
+                )
+            })?;
+        let marker = coinbase
             .block_marker(BASE_COINBASE_SEAM_BLOCK)
             .await
             .map_err(|error| {
