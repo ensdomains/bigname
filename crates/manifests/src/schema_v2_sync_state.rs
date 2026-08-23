@@ -180,6 +180,9 @@ pub(super) async fn invalidate_changed_derived_epochs(
             &desired.watch,
             &chain_id,
         ) {
+            let widened_from =
+                earliest_retained_registry_announcement(transaction, &chain_id, widened_from)
+                    .await?;
             stamp_required_ingest(transaction, &chain_id, widened_from).await?;
         }
         if let Some(widened_from) =
@@ -435,6 +438,45 @@ async fn stamp_required_ingest(
         bail!("Ingest coverage changed while stamping manifest widening for chain {chain_id}");
     }
     Ok(())
+}
+
+async fn earliest_retained_registry_announcement(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    declared_start: u64,
+) -> Result<u64> {
+    // RegistryCreated is already retained by the all-emitter
+    // [watch plan](../../../docs/glossary.md#watch-plan--watched-tuple) from block zero. Mirror the
+    // Ingest preload's canonical-lineage test, bounded by the same readable head used for widening.
+    let earliest: Option<i64> = sqlx::query_scalar(
+        "SELECT min(raw.block_number)
+         FROM raw_logs raw
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = raw.chain_id
+          AND lineage.block_hash = raw.block_hash
+          AND lineage.block_number = raw.block_number
+         JOIN chain_phase_state phase
+           ON phase.chain_id = raw.chain_id AND phase.phase_name = 'ingest'
+         LEFT JOIN chain_heads head ON head.chain_id = raw.chain_id
+         WHERE raw.chain_id = $1
+           AND raw.block_number <= COALESCE(
+               head.latest_block_number, phase.current_block_number
+           )
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lower(raw.topics[1]) = lower($2)",
+    )
+    .bind(chain_id)
+    .bind(crate::registry_announcement_topic0())
+    .fetch_one(&mut **transaction)
+    .await
+    .with_context(|| {
+        format!("failed to load retained registry announcements for chain {chain_id}")
+    })?;
+    let Some(earliest) = earliest else {
+        return Ok(declared_start);
+    };
+    Ok(declared_start
+        .min(u64::try_from(earliest).context("retained registry announcement block is negative")?))
 }
 
 fn authority_payload(mut payload: Value) -> Result<String> {

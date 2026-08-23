@@ -62,6 +62,8 @@ struct DiscoveryRuleKey {
     from_role: String,
     admission: String,
     emitting_address: Option<String>,
+    announcement_backed: bool,
+    producer_topic0: Option<String>,
 }
 
 impl DiscoveryRuleKey {
@@ -87,11 +89,17 @@ pub(super) struct DiscoveryWidening {
     pub(super) kind: DiscoveryWideningKind,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeploymentIdentity {
+    epoch: String,
+    manifest_version: u64,
+}
+
 #[derive(Default)]
 pub(super) struct Snapshot {
     watch_by_chain: BTreeMap<String, BTreeMap<WatchKey, u64>>,
     discovery_by_chain: BTreeMap<String, BTreeMap<DiscoveryRuleKey, u64>>,
-    deployments_by_chain: BTreeMap<String, BTreeMap<(String, String), String>>,
+    deployments_by_chain: BTreeMap<String, BTreeMap<(String, String), DeploymentIdentity>>,
 }
 
 pub(super) fn manifest_payload(manifest: &SourceManifest) -> Result<Value> {
@@ -137,9 +145,12 @@ pub(super) fn record(
         .or_default()
         .insert(
             (manifest.namespace.clone(), manifest.source_family.clone()),
-            manifest.deployment_epoch.clone(),
+            DeploymentIdentity {
+                epoch: manifest.deployment_epoch.clone(),
+                manifest_version: manifest.manifest_version,
+            },
         );
-    record_discovery_rules(snapshot, manifest);
+    record_discovery_rules(snapshot, manifest)?;
     Ok(())
 }
 
@@ -177,30 +188,38 @@ pub(super) fn resolver_deployment_widening(
     desired
         .discovery_by_chain
         .get(chain_id)?
-        .keys()
-        .filter(|rule| rule.edge_kind == "resolver")
-        .find_map(|rule| {
+        .iter()
+        .filter(|(rule, _)| rule.edge_kind == "resolver")
+        .filter_map(|(rule, start)| {
             let source_key = (rule.namespace.clone(), rule.family.clone());
-            let source_label = desired_deployments.get(&source_key)?;
+            let source = desired_deployments.get(&source_key)?;
             let target_family = resolver_target_family(&rule.family)?;
             let target_key = (rule.namespace.clone(), target_family.to_owned());
-            let target_label = desired_deployments.get(&target_key)?;
-            if source_label != target_label {
+            let target = desired_deployments.get(&target_key)?;
+            if source.epoch != target.epoch {
                 return None;
             }
-            let remained_admitted = previous_deployments.is_some_and(|manifests| {
-                manifests.get(&source_key).is_some_and(|previous_source| {
-                    previous_source == source_label
-                        && manifests
-                            .get(&target_key)
-                            .is_some_and(|previous_target| previous_source == previous_target)
+            let kind = previous_deployments
+                .and_then(|manifests| {
+                    Some((manifests.get(&source_key)?, manifests.get(&target_key)?))
                 })
-            });
-            (!remained_admitted).then_some(DiscoveryWidening {
-                start: 0,
-                kind: DiscoveryWideningKind::DeploymentEpoch,
+                .and_then(|(previous_source, previous_target)| {
+                    (previous_source.epoch == source.epoch && previous_target.epoch == source.epoch)
+                        .then_some(previous_source)
+                })
+                .map_or(DiscoveryWideningKind::DeploymentEpoch, |previous_source| {
+                    if previous_source.manifest_version == source.manifest_version {
+                        DiscoveryWideningKind::Rule
+                    } else {
+                        DiscoveryWideningKind::SourceReplacement
+                    }
+                });
+            (kind != DiscoveryWideningKind::Rule).then_some(DiscoveryWidening {
+                start: *start,
+                kind,
             })
         })
+        .min_by_key(|widening| widening.start)
 }
 
 fn resolver_target_family(source_family: &str) -> Option<&'static str> {
@@ -267,7 +286,8 @@ fn discovery_widening_start_for(
                 .filter(|candidate| candidate.same_rule(rule))
                 .filter_map(|candidate| candidate.emitting_address.as_deref())
                 .collect::<BTreeSet<_>>();
-            if !previous_rule.is_empty() && desired_emitters.is_empty() {
+            if !previous_rule.is_empty() && desired_emitters.is_empty() && !rule.announcement_backed
+            {
                 return None;
             }
             Some(DiscoveryWidening {
@@ -345,7 +365,17 @@ fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEnt
         .collect())
 }
 
-fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) {
+fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) -> Result<()> {
+    let registry_announcement_topic = discovery_producer_topic0(manifest, "registry_announcement")?;
+    let resolver_topic = discovery_producer_topic0(manifest, "resolver")?;
+    let resolver_accepts_announced_registries = manifest.source_family
+        == crate::ENS_V2_REGISTRY_SOURCE_FAMILY
+        && manifest
+            .discovery_rules
+            .iter()
+            .any(|rule| rule.edge_kind == "registry_announcement")
+        && registry_announcement_topic.is_some()
+        && resolver_topic.is_some();
     let declarations = manifest
         .roots
         .iter()
@@ -377,6 +407,7 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) {
             "resolver" | "registry_announcement"
         )
     }) {
+        let producer_topic0 = discovery_producer_topic0(manifest, &rule.edge_kind)?;
         let mut emitters = BTreeMap::<String, u64>::new();
         for (_, address, start) in declarations
             .iter()
@@ -388,13 +419,68 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) {
                 .or_insert(*start);
         }
         if emitters.is_empty() {
-            insert_discovery_rule(rules, manifest, rule, None, 0);
-        } else {
-            for (address, start) in emitters {
-                insert_discovery_rule(rules, manifest, rule, Some(address), start);
-            }
+            insert_discovery_rule(
+                rules,
+                manifest,
+                rule,
+                None,
+                false,
+                producer_topic0.clone(),
+                0,
+            );
+        }
+        if rule.edge_kind == "resolver" && resolver_accepts_announced_registries {
+            // `RegistryCreated` admits a registry without a declaration role, and that registry
+            // can emit `ResolverUpdated`. Keep this actual path distinct from the conservative
+            // emitterless-rule placeholder.
+            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58)
+            // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58)
+            insert_discovery_rule(
+                rules,
+                manifest,
+                rule,
+                None,
+                true,
+                producer_topic0.clone(),
+                0,
+            );
+        }
+        for (address, start) in emitters {
+            insert_discovery_rule(
+                rules,
+                manifest,
+                rule,
+                Some(address),
+                false,
+                producer_topic0.clone(),
+                start,
+            );
         }
     }
+    Ok(())
+}
+
+fn discovery_producer_topic0(manifest: &SourceManifest, edge_kind: &str) -> Result<Option<String>> {
+    let (name, signature) = match (manifest.source_family.as_str(), edge_kind) {
+        ("ens_v2_registry_l1", "registry_announcement") => ("RegistryCreated", "RegistryCreated()"),
+        ("ens_v2_registry_l1" | "ens_v2_root_l1", "resolver") => (
+            "ResolverUpdated",
+            "ResolverUpdated(uint256,address,address)",
+        ),
+        _ => return Ok(None),
+    };
+    for event in manifest
+        .abi
+        .events
+        .iter()
+        .filter(|event| event.name == name)
+    {
+        let parsed = event.parsed_event_view()?;
+        if parsed.canonical_signature() == signature {
+            return Ok(parsed.topic0());
+        }
+    }
+    Ok(None)
 }
 
 fn insert_discovery_rule(
@@ -402,6 +488,8 @@ fn insert_discovery_rule(
     manifest: &SourceManifest,
     rule: &crate::DiscoveryRule,
     emitting_address: Option<String>,
+    announcement_backed: bool,
+    producer_topic0: Option<String>,
     start: u64,
 ) {
     rules
@@ -412,6 +500,8 @@ fn insert_discovery_rule(
             from_role: rule.from_role.clone(),
             admission: rule.admission.clone(),
             emitting_address,
+            announcement_backed,
+            producer_topic0,
         })
         .and_modify(|existing| *existing = (*existing).min(start))
         .or_insert(start);

@@ -6,7 +6,7 @@ use std::{fs, time::Duration};
 use alloy_primitives::keccak256;
 use anyhow::{Context, Result};
 use bigname_ingest::load_persisted_watch_filter;
-use bigname_manifests::{load_repository, sync_schema_v2_repository};
+use bigname_manifests::{load_repository, registry_announcement_topic0, sync_schema_v2_repository};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
@@ -401,7 +401,13 @@ admission = "reachable_from_root"
 name = "RegistryCreated"
 fragment = "event RegistryCreated()"
 emitter_roles = ["registry"]
-normalized_events = []
+normalized_events = ["RegistryCreated"]
+
+[[abi.events]]
+name = "ResolverUpdated"
+fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["ResolverChanged"]
 "#,
                 self.chain_id,
             );
@@ -482,6 +488,88 @@ normalized_events = []
             );
         fs::write(directory.join("v3.toml"), manifest)?;
         fs::remove_file(old_path)?;
+        Ok(())
+    }
+
+    fn rotate_manifest_version(&self, namespace: &str, family: &str) -> Result<()> {
+        let directory = self.root.join(namespace).join(family);
+        let old_path = directory.join("v2.toml");
+        let manifest = fs::read_to_string(&old_path)?.replacen(
+            "manifest_version = 2",
+            "manifest_version = 3",
+            1,
+        );
+        fs::write(directory.join("v3.toml"), manifest)?;
+        fs::remove_file(old_path)?;
+        Ok(())
+    }
+
+    fn set_contract_start(&self, namespace: &str, family: &str, from: u64, to: u64) -> Result<()> {
+        let path = self.root.join(namespace).join(family).join("v2.toml");
+        let manifest = fs::read_to_string(&path)?.replacen(
+            &format!("start_block = {from}"),
+            &format!("start_block = {to}"),
+            1,
+        );
+        fs::write(path, manifest)?;
+        Ok(())
+    }
+
+    fn use_only_announced_test_registry_emitters(&self) -> Result<()> {
+        let path = self.root.join("test/ens_v2_registry_l1/v2.toml");
+        let manifest = fs::read_to_string(&path)?
+            .replacen(r#"role = "registry""#, r#"role = "event_source""#, 1)
+            .replace(
+                r#"emitter_roles = ["registry"]"#,
+                r#"emitter_roles = ["event_source"]"#,
+            );
+        fs::write(path, manifest)?;
+        Ok(())
+    }
+
+    fn add_test_registry_announcement_rule(&self) -> Result<()> {
+        let path = self.root.join("test/ens_v2_registry_l1/v2.toml");
+        let manifest = fs::read_to_string(&path)?.replacen(
+            "[[abi.events]]",
+            r#"[[discovery_rules]]
+edge_kind = "registry_announcement"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[abi.events]]"#,
+            1,
+        );
+        fs::write(path, manifest)?;
+        Ok(())
+    }
+
+    fn set_test_registry_discovery_events(&self, present: bool) -> Result<()> {
+        let path = self.root.join("test/ens_v2_registry_l1/v2.toml");
+        let mut manifest = fs::read_to_string(&path)?;
+        if present {
+            manifest.push_str(
+                r#"
+[[abi.events]]
+name = "RegistryCreated"
+fragment = "event RegistryCreated()"
+emitter_roles = ["event_source"]
+normalized_events = ["RegistryCreated"]
+
+[[abi.events]]
+name = "ResolverUpdated"
+fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
+emitter_roles = ["event_source"]
+normalized_events = ["ResolverChanged"]
+"#,
+            );
+        } else {
+            manifest = manifest
+                .split_once("[[abi.events]]")
+                .context("test registry has no discovery event section")?
+                .0
+                .to_owned();
+        }
+        fs::write(path, manifest)?;
         Ok(())
     }
 }
@@ -902,6 +990,27 @@ async fn historical_registry_announcement_rule_stamps_backfillable_ingest() -> R
 }
 
 #[tokio::test]
+async fn announcement_widening_starts_at_an_earlier_retained_announcement() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_pre_anchor_announcement").await?;
+    let chain_id = "manifest-pre-anchor-announcement";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
+    fixture.write_with_start(false, false, 3)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 5).await?;
+    seed_retained_registry_announcement(scratch.pool(), chain_id, 1).await?;
+
+    fixture.add_discovery_rule("registry_announcement")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((1, 5)),
+        "the redo must include the earliest retained announcement admitted by the new rule"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn future_registry_announcement_rule_remains_admissible() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_future_announcement").await?;
     let chain_id = "manifest-future-announcement";
@@ -1258,6 +1367,59 @@ async fn resolver_epoch_flip_without_complete_discovery_is_rejected() -> Result<
 }
 
 #[tokio::test]
+async fn future_only_resolver_epoch_match_is_admissible() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_future_epoch_match").await?;
+    let chain_id = "manifest-future-epoch-match";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_contract_start("test", "ens_v2_registry_l1", 0, 2)?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn retained_announcement_precedes_a_future_direct_epoch_emitter() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_epoch_announcement_floor").await?;
+    let chain_id = "manifest-epoch-announcement-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_contract_start("test", "ens_v2_registry_l1", 0, 2)?;
+    fixture.add_test_registry_announcement_rule()?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    seed_announced_registry_address(
+        scratch.pool(),
+        chain_id,
+        "test",
+        "0x0000000000000000000000000000000000000009",
+    )
+    .await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("the role-free announcement path starts before the direct declaration");
+    assert!(
+        error
+            .to_string()
+            .contains("resolver discovery rule widening from a newly matching deployment epoch"),
+        "{error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn resolver_epoch_flip_away_from_registry_is_admissible_narrowing() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_resolver_epoch_narrowing").await?;
     let chain_id = "manifest-resolver-epoch-narrowing";
@@ -1350,6 +1512,170 @@ async fn matched_registry_and_resolver_epoch_rotation_is_rejected() -> Result<()
     sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
         .await
         .expect_err("replacing the matching source manifest invalidates its retained edges");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn same_epoch_registry_rotation_with_resolver_event_widening_is_rejected() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_manifest_registry_rotation_with_resolver_widening")
+            .await?;
+    let chain_id = "manifest-registry-rotation-with-resolver-widening";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let resolver = "0x0000000000000000000000000000000000000005";
+    seed_discovered_resolver_address(scratch.pool(), chain_id, "test", resolver).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.rotate_manifest_version("test", "ens_v2_registry_l1")?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(
+                required_ingest_redo(scratch.pool(), chain_id).await?,
+                Some((0, 1))
+            );
+            let filter = load_persisted_watch_filter(scratch.pool(), chain_id, 0, 1).await?;
+            let widened_topic =
+                format!("{:#x}", keccak256(b"AddressChanged(bytes32,uint256,bytes)"));
+            assert!(
+                !filter.includes(resolver, &widened_topic, 0),
+                "the redo filter omits edges anchored by the deprecated registry manifest"
+            );
+            panic!("same-epoch source-manifest replacement was not classified");
+        }
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("resolver discovery source replacement"),
+        "{error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn same_epoch_registry_rotation_without_retained_history_is_admissible() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_fresh_registry_rotation").await?;
+    let chain_id = "manifest-fresh-registry-rotation";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    fixture.rotate_manifest_version("test", "ens_v2_registry_l1")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn emitterless_resolver_rule_with_retained_announced_registry_epoch_match_is_rejected()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_announced_registry_epoch").await?;
+    let chain_id = "manifest-announced-registry-epoch";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", false)?;
+    fixture.add_test_registry_announcement_rule()?;
+    fixture.use_only_announced_test_registry_emitters()?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    seed_announced_registry_address(
+        scratch.pool(),
+        chain_id,
+        "test",
+        "0x0000000000000000000000000000000000000009",
+    )
+    .await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("announced registries can emit resolver discovery events without a role");
+    assert!(
+        error
+            .to_string()
+            .contains("resolver discovery rule widening from a newly matching deployment epoch"),
+        "{error}"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn adding_announcement_path_to_emitterless_resolver_rule_is_rejected() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_manifest_add_announcement_resolver_path").await?;
+    let chain_id = "manifest-add-announcement-resolver-path";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", false)?;
+    fixture.use_only_announced_test_registry_emitters()?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    fixture.add_test_registry_announcement_rule()?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(
+                required_ingest_redo(scratch.pool(), chain_id).await?,
+                Some((0, 1)),
+                "only the announcement redo was stamped"
+            );
+            panic!("the new role-free resolver emitter path evaded widening classification");
+        }
+    };
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn adding_discovery_producer_topics_without_version_rotation_is_rejected() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_add_discovery_topics").await?;
+    let chain_id = "manifest-add-discovery-topics";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", false)?;
+    fixture.add_test_registry_announcement_rule()?;
+    fixture.use_only_announced_test_registry_emitters()?;
+    fixture.set_test_registry_discovery_events(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    fixture.set_test_registry_discovery_events(true)?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(
+                required_ingest_redo(scratch.pool(), chain_id).await?,
+                Some((0, 1)),
+                "only ordinary ABI watch widening was stamped"
+            );
+            let resolver = "0x0000000000000000000000000000000000000005";
+            let text_changed = format!(
+                "{:#x}",
+                keccak256(b"TextChanged(bytes32,string,string,string)")
+            );
+            let filter = load_persisted_watch_filter(scratch.pool(), chain_id, 0, 1).await?;
+            assert!(
+                !filter.includes(resolver, &text_changed, 0),
+                "the one-pass redo cannot watch a resolver edge that Interpret has not created"
+            );
+            panic!("discovery-producing ABI topics evaded discovery widening classification");
+        }
+    };
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
     scratch.cleanup().await
 }
 
@@ -2212,6 +2538,109 @@ async fn seed_discovered_resolver_address(
     .bind(resolver_instance_id)
     .bind(source_manifest_id)
     .bind(format!("{chain_id}-{namespace}-discovery-block-0"))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_announced_registry_address(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    namespace: &str,
+    address: &str,
+) -> Result<()> {
+    let source_manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = $1 AND namespace = $2
+           AND source_family = 'ens_v2_registry_l1' AND rollout_status = 'active'",
+    )
+    .bind(chain_id)
+    .bind(namespace)
+    .fetch_one(pool)
+    .await?;
+    let instance_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind, provenance
+         ) VALUES ($1, $2, 'contract', '{}'::jsonb)",
+    )
+    .bind(instance_id)
+    .bind(chain_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(instance_id)
+    .bind(chain_id)
+    .bind(address)
+    .bind(source_manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, canonicality_state,
+             provenance
+         ) VALUES ($1, 'registry_announcement', $2, $2, 'RegistryCreated',
+                   'reachable_from_root', $3, 0, $4, 'finalized', '{}'::jsonb)",
+    )
+    .bind(chain_id)
+    .bind(instance_id)
+    .bind(source_manifest_id)
+    .bind(format!("{chain_id}-manifest-sync-head-0"))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_retained_registry_announcement(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    block_number: i64,
+) -> Result<()> {
+    let block_hash = format!("{chain_id}-manifest-sync-head-{block_number}");
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, to_timestamp($3), 'canonical')",
+    )
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    let transaction_hash = format!("{chain_id}-announcement-{block_number}");
+    sqlx::query(
+        "INSERT INTO raw_transactions (
+             chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, from_address, to_address
+         ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
+    )
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .bind(&transaction_hash)
+    .bind("0x0000000000000000000000000000000000000008")
+    .bind("0x0000000000000000000000000000000000000009")
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO raw_logs (
+             chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, log_index, emitting_address, topics
+         ) VALUES ($1, $2, $3, $4, 0, 0, $5, $6)",
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(transaction_hash)
+    .bind("0x0000000000000000000000000000000000000009")
+    .bind(vec![registry_announcement_topic0()])
     .execute(pool)
     .await?;
     Ok(())

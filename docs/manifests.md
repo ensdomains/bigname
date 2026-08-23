@@ -884,14 +884,36 @@ discovery rule whose source is `ens_v1_registry_l1`, `ens_v2_registry_l1`,
 `ens_v2_root_l1`, or `basenames_base_registry`. When the desired manifests newly
 match where the preceding active pair did not, or both sides rotate to a new
 matching source epoch, synchronization classifies the transition as resolver
-discovery-rule widening. It rejects the change over retained
-history because manifest snapshots cannot prove that Interpret has already
-materialized every resolver discovery edge; one Ingest redo could otherwise
-fetch an incomplete address set and clear the obligation before Interpret adds
-the missing edges. Changing from matching to nonmatching removes resolver
-intervals and is admissible narrowing. A family with no active `resolver` rule
-admits no discovered resolver address, so an epoch match alone is also
-admissible. These transitions remain admissible before any Ingest range is retained.
+discovery-rule widening. A manifest-version rotation of the rule-bearing
+registry within the same matching epoch is a [discovery source
+replacement](glossary.md#discovery-rule-widening-and-narrowing), because each
+materialized edge still names the preceding source manifest. Synchronization
+rejects either change when the earliest desired emitter candidate intersects
+retained history: manifest snapshots cannot prove that Interpret has
+already materialized every resolver discovery edge, so one Ingest redo could
+otherwise fetch an incomplete address set and clear the obligation before
+Interpret adds the missing edges. The boundary is the earliest candidate among
+the desired declarations that emit the rule. A rule with no matching
+declaration contributes block zero as a conservative historical input. An
+`ens_v2_registry_l1` manifest that also has a `registry_announcement` rule
+contributes a distinct block-zero candidate even when the emitterless candidate
+or direct declarations already exist. Adding that role-free path is resolver
+discovery-rule widening: a registry admitted by `RegistryCreated` has no
+declaration role, but its `ResolverUpdated` event can still match the active
+rule. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58) A matching-epoch transition whose earliest candidate starts
+after the latest published head is future-only and remains admissible, as does
+a source-manifest rotation before any Ingest range is retained. Changing from
+matching to nonmatching removes resolver intervals and is admissible narrowing.
+A family with no active `resolver` rule admits no discovered resolver address,
+so an epoch match alone is also admissible.
+
+Each ENSv2 discovery candidate records whether its canonical discovery-producing
+event is present in the compiled ABI: `RegistryCreated()` for registry
+announcements and `ResolverUpdated(uint256,address,address)` for resolver edges.
+Adding either producer changes discovery coverage even when `manifest_version`
+is unchanged; ordinary ABI watch widening is insufficient because Interpret,
+not Ingest, materializes the newly discovered address intervals. Other ABI
+events continue through the ordinary watch-plan widening path.
 
 `registry_announcement` rules use the same namespace-scoped comparison. In the
 `ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest
@@ -899,10 +921,15 @@ first selects a declared `RegistryCreated` as an all-emitter event, then fetches
 the announcing registry's remaining address-scoped events from that event's
 position in the same window; later windows preload retained canonical
 announcements. Historical rule widening or emitting-source replacement in that
-family therefore stamps a required Ingest redo from the earliest affected
-start. Historical announcement widening in any other family is loudly rejected
-because it has no declared same-window intake path. Fresh and future-only
-transitions remain admissible.
+family therefore stamps a required Ingest redo from the earlier of the desired
+emitting declaration's start and the earliest retained canonical
+`RegistryCreated` selected by the block-zero all-emitter watch. Starting at that
+retained announcement lets its address-scoped events enter the same redo even
+when the announcement predates the declaration used to anchor the rule
+comparison. Historical announcement widening in any other family is loudly
+rejected because it has no declared same-window intake path. Fresh transitions,
+and future-only transitions with no earlier retained announcement, remain
+admissible.
 A chain's retained-history boundary for this check is its latest published
 head. A finite Ingest position left ahead of that head after a rewind is not
 readable coverage; when no published-head row exists, the check falls back to
