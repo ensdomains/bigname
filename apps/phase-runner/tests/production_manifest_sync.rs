@@ -572,6 +572,20 @@ normalized_events = ["ResolverChanged"]
         fs::write(path, manifest)?;
         Ok(())
     }
+
+    fn use_test_root_source(&self) -> Result<()> {
+        let registry_dir = self.root.join("test/ens_v2_registry_l1");
+        let root_dir = self.root.join("test/ens_v2_root_l1");
+        let manifest = fs::read_to_string(registry_dir.join("v2.toml"))?.replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v2_root_l1\"",
+            1,
+        );
+        fs::create_dir_all(&root_dir)?;
+        fs::write(root_dir.join("v2.toml"), manifest)?;
+        fs::remove_dir_all(registry_dir)?;
+        Ok(())
+    }
 }
 
 impl Drop for WatchManifestFixture {
@@ -1386,6 +1400,34 @@ async fn future_only_resolver_epoch_match_is_admissible() -> Result<()> {
 }
 
 #[tokio::test]
+async fn unrelated_same_address_role_does_not_lower_future_candidate() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_future_role_floor").await?;
+    let chain_id = "manifest-future-role-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_contract_start("test", "ens_v2_registry_l1", 0, 2)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let manifest = fs::read_to_string(&path)?.replacen(
+        "roots = []",
+        r#"[[roots]]
+name = "early_root"
+address = "0x0000000000000000000000000000000000000004"
+start_block = 0"#,
+        1,
+    );
+    fs::write(path, manifest)?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn retained_announcement_precedes_a_future_direct_epoch_emitter() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_epoch_announcement_floor").await?;
     let chain_id = "manifest-epoch-announcement-floor";
@@ -1672,6 +1714,248 @@ async fn adding_discovery_producer_topics_without_version_rotation_is_rejected()
             panic!("discovery-producing ABI topics evaded discovery widening classification");
         }
     };
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn enabling_resolver_producer_for_rule_role_is_rejected() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_enable_resolver_role").await?;
+    let chain_id = "manifest-enable-resolver-role";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let manifest = fs::read_to_string(&path)?
+        .replacen(
+            "[[discovery_rules]]",
+            r#"[[contracts]]
+role = "event_source"
+address = "0x0000000000000000000000000000000000000008"
+proxy_kind = "none"
+start_block = 0
+
+[[discovery_rules]]"#,
+            1,
+        )
+        .replacen(
+            "name = \"ResolverUpdated\"\nfragment = \"event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)\"\nemitter_roles = [\"registry\"]",
+            "name = \"ResolverUpdated\"\nfragment = \"event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)\"\nemitter_roles = [\"event_source\"]",
+            1,
+        );
+    fs::write(&path, manifest)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let manifest = fs::read_to_string(&path)?.replacen(
+        "emitter_roles = [\"event_source\"]\nnormalized_events = [\"ResolverChanged\"]",
+        "emitter_roles = [\"registry\"]\nnormalized_events = [\"ResolverChanged\"]",
+        1,
+    );
+    fs::write(path, manifest)?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+            panic!("role flip enabled resolver discovery with redo=None and an accepted sync");
+        }
+    };
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn declaring_required_resolver_output_is_discovery_widening() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_enable_resolver_output").await?;
+    let chain_id = "manifest-enable-resolver-output";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let manifest = fs::read_to_string(&path)?.replacen(
+        "normalized_events = [\"ResolverChanged\"]",
+        "normalized_events = []",
+        1,
+    );
+    fs::write(&path, manifest)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let manifest = fs::read_to_string(&path)?.replacen(
+        "normalized_events = []",
+        "normalized_events = [\"ResolverChanged\"]",
+        1,
+    );
+    fs::write(path, manifest)?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+            panic!(
+                "normalized-event declaration enabled resolver discovery without classification"
+            );
+        }
+    };
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn unrelated_normalized_event_change_stays_admissible() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_unrelated_event_attributes").await?;
+    let chain_id = "manifest-unrelated-event-attributes";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let path = fixture.root.join("test/ens_v2_resolver_l1/v2.toml");
+    let manifest = fs::read_to_string(&path)?.replacen(
+        "name = \"TextChanged\"\nfragment = \"event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)\"\nnormalized_events = []",
+        "name = \"TextChanged\"\nfragment = \"event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)\"\nnormalized_events = [\"RecordChanged\"]",
+        1,
+    );
+    fs::write(path, manifest)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn persisted_admission_floors_future_resolver_epoch_candidate() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_epoch_admission_floor").await?;
+    let chain_id = "manifest-epoch-admission-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.set_contract_start("test", "ens_v2_registry_l1", 0, 2)?;
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            let floor: Option<i64> = sqlx::query_scalar(
+                "SELECT active_from_block_number FROM contract_instance_addresses \
+                 WHERE chain_id = $1 AND lower(address) = $2 AND deactivated_at IS NULL",
+            )
+            .bind(chain_id)
+            .bind("0x0000000000000000000000000000000000000004")
+            .fetch_one(scratch.pool())
+            .await?;
+            assert_eq!(
+                floor,
+                Some(0),
+                "re-admission must preserve its historical floor"
+            );
+            assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+            panic!("epoch match was accepted as future-only despite admission from block zero");
+        }
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("newly matching deployment epoch"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn persisted_admission_floors_direct_rule_widening() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_rule_admission_floor").await?;
+    let chain_id = "manifest-rule-admission-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let rule = "[[discovery_rules]]\nedge_kind = \"resolver\"\nfrom_role = \"registry\"\nadmission = \"reachable_from_root\"";
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?
+            .replacen("roots = []", "roots = []\ndiscovery_rules = []", 1)
+            .replacen(rule, "", 1),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let manifest = fs::read_to_string(&path)?
+        .replacen("start_block = 0", "start_block = 2", 1)
+        .replacen("discovery_rules = []", rule, 1);
+    fs::write(path, manifest)?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("the persisted block-zero admission makes this historical widening");
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn root_resolver_producer_topic_is_part_of_discovery_key() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_root_resolver_topic_key").await?;
+    let chain_id = "manifest-root-resolver-topic-key";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_test_registry_discovery_events(false)?;
+    fixture.use_test_root_source()?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let path = fixture.root.join("test/ens_v2_root_l1/v2.toml");
+    let mut manifest = fs::read_to_string(&path)?;
+    manifest.push_str(
+        r#"
+[[abi.events]]
+name = "ResolverUpdated"
+fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
+emitter_roles = ["registry"]
+normalized_events = ["ResolverChanged"]
+"#,
+    );
+    fs::write(path, manifest)?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("the root family has no announcement-backed fallback candidate");
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn removing_discovery_producer_topic_is_rejected_conservatively() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_remove_resolver_topic").await?;
+    let chain_id = "manifest-remove-resolver-topic";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let manifest = fs::read_to_string(&path)?
+        .split_once("\n[[abi.events]]\nname = \"ResolverUpdated\"")
+        .context("test registry has no ResolverUpdated producer")?
+        .0
+        .to_owned();
+    fs::write(path, manifest)?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("producer removal is an explicit conservative fail-closed policy");
     assert!(
         error.to_string().contains("discovery rule widening"),
         "{error}"

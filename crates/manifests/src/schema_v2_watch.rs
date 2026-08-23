@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::{SourceManifest, all_emitter_topic0s, normalize_address};
 
 const COMPILED_WATCH_FIELD: &str = "_bigname_compiled_watch";
+pub(super) type AdmissionFloors = BTreeMap<(String, String, String, String), u64>;
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -172,8 +173,9 @@ pub(super) fn discovery_widening_start(
     previous: &Snapshot,
     desired: &Snapshot,
     chain_id: &str,
+    admission_floors: &AdmissionFloors,
 ) -> Option<DiscoveryWidening> {
-    discovery_widening_start_for(previous, desired, chain_id, |rule| {
+    discovery_widening_start_for(previous, desired, chain_id, admission_floors, |rule| {
         rule.edge_kind == "resolver"
     })
 }
@@ -182,6 +184,7 @@ pub(super) fn resolver_deployment_widening(
     previous: &Snapshot,
     desired: &Snapshot,
     chain_id: &str,
+    admission_floors: &AdmissionFloors,
 ) -> Option<DiscoveryWidening> {
     let desired_deployments = desired.deployments_by_chain.get(chain_id)?;
     let previous_deployments = previous.deployments_by_chain.get(chain_id);
@@ -215,7 +218,7 @@ pub(super) fn resolver_deployment_widening(
                     }
                 });
             (kind != DiscoveryWideningKind::Rule).then_some(DiscoveryWidening {
-                start: *start,
+                start: discovery_start(rule, *start, admission_floors),
                 kind,
             })
         })
@@ -235,8 +238,9 @@ pub(super) fn registry_announcement_widening_start(
     previous: &Snapshot,
     desired: &Snapshot,
     chain_id: &str,
+    admission_floors: &AdmissionFloors,
 ) -> Option<u64> {
-    discovery_widening_start_for(previous, desired, chain_id, |rule| {
+    discovery_widening_start_for(previous, desired, chain_id, admission_floors, |rule| {
         rule.edge_kind == "registry_announcement"
             && rule.family == crate::ENS_V2_REGISTRY_SOURCE_FAMILY
     })
@@ -247,8 +251,9 @@ pub(super) fn unsupported_registry_announcement_widening(
     previous: &Snapshot,
     desired: &Snapshot,
     chain_id: &str,
+    admission_floors: &AdmissionFloors,
 ) -> Option<DiscoveryWidening> {
-    discovery_widening_start_for(previous, desired, chain_id, |rule| {
+    discovery_widening_start_for(previous, desired, chain_id, admission_floors, |rule| {
         rule.edge_kind == "registry_announcement"
             && rule.family != crate::ENS_V2_REGISTRY_SOURCE_FAMILY
     })
@@ -258,6 +263,7 @@ fn discovery_widening_start_for(
     previous: &Snapshot,
     desired: &Snapshot,
     chain_id: &str,
+    admission_floors: &AdmissionFloors,
     include: impl Fn(&DiscoveryRuleKey) -> bool,
 ) -> Option<DiscoveryWidening> {
     let previous = previous.discovery_by_chain.get(chain_id);
@@ -266,9 +272,13 @@ fn discovery_widening_start_for(
         .iter()
         .filter(|(rule, _)| include(rule))
         .filter_map(|(rule, start)| {
-            let covered = previous
-                .and_then(|rules| rules.get(rule))
-                .is_some_and(|previous_start| previous_start <= start);
+            let start = discovery_start(rule, *start, admission_floors);
+            let covered =
+                previous
+                    .and_then(|rules| rules.get(rule))
+                    .is_some_and(|previous_start| {
+                        discovery_start(rule, *previous_start, admission_floors) <= start
+                    });
             if covered {
                 return None;
             }
@@ -291,7 +301,7 @@ fn discovery_widening_start_for(
                 return None;
             }
             Some(DiscoveryWidening {
-                start: *start,
+                start,
                 kind: if previous_emitters.is_empty()
                     || previous_emitters.is_subset(&desired_emitters)
                 {
@@ -302,6 +312,24 @@ fn discovery_widening_start_for(
             })
         })
         .min_by_key(|widening| (widening.start, widening.kind == DiscoveryWideningKind::Rule))
+}
+
+fn discovery_start(
+    rule: &DiscoveryRuleKey,
+    declared_start: u64,
+    admission_floors: &AdmissionFloors,
+) -> u64 {
+    rule.emitting_address
+        .as_ref()
+        .and_then(|address| {
+            admission_floors.get(&(
+                rule.namespace.clone(),
+                rule.family.clone(),
+                rule.from_role.clone(),
+                address.clone(),
+            ))
+        })
+        .map_or(declared_start, |floor| declared_start.min(*floor))
 }
 
 fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEntry>> {
@@ -366,8 +394,9 @@ fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEnt
 }
 
 fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) -> Result<()> {
-    let registry_announcement_topic = discovery_producer_topic0(manifest, "registry_announcement")?;
-    let resolver_topic = discovery_producer_topic0(manifest, "resolver")?;
+    let registry_announcement_topic =
+        discovery_producer_topic0(manifest, "registry_announcement", None, false)?;
+    let resolver_topic = discovery_producer_topic0(manifest, "resolver", None, true)?;
     let resolver_accepts_announced_registries = manifest.source_family
         == crate::ENS_V2_REGISTRY_SOURCE_FAMILY
         && manifest
@@ -407,7 +436,6 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) ->
             "resolver" | "registry_announcement"
         )
     }) {
-        let producer_topic0 = discovery_producer_topic0(manifest, &rule.edge_kind)?;
         let mut emitters = BTreeMap::<String, u64>::new();
         for (_, address, start) in declarations
             .iter()
@@ -425,7 +453,7 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) ->
                 rule,
                 None,
                 false,
-                producer_topic0.clone(),
+                discovery_producer_topic0(manifest, &rule.edge_kind, None, false)?,
                 0,
             );
         }
@@ -434,18 +462,12 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) ->
             // can emit `ResolverUpdated`. Keep this actual path distinct from the conservative
             // emitterless-rule placeholder.
             // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58)
-            // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58)
-            insert_discovery_rule(
-                rules,
-                manifest,
-                rule,
-                None,
-                true,
-                producer_topic0.clone(),
-                0,
-            );
+            // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@ccaeb58)
+            insert_discovery_rule(rules, manifest, rule, None, true, resolver_topic.clone(), 0);
         }
         for (address, start) in emitters {
+            let producer_topic0 =
+                discovery_producer_topic0(manifest, &rule.edge_kind, Some(&rule.from_role), false)?;
             insert_discovery_rule(
                 rules,
                 manifest,
@@ -460,21 +482,39 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) ->
     Ok(())
 }
 
-fn discovery_producer_topic0(manifest: &SourceManifest, edge_kind: &str) -> Result<Option<String>> {
-    let (name, signature) = match (manifest.source_family.as_str(), edge_kind) {
-        ("ens_v2_registry_l1", "registry_announcement") => ("RegistryCreated", "RegistryCreated()"),
+fn discovery_producer_topic0(
+    manifest: &SourceManifest,
+    edge_kind: &str,
+    emitter_role: Option<&str>,
+    announcement_backed: bool,
+) -> Result<Option<String>> {
+    let (name, signature, normalized_event) = match (manifest.source_family.as_str(), edge_kind) {
+        ("ens_v2_registry_l1", "registry_announcement") => {
+            ("RegistryCreated", "RegistryCreated()", "RegistryCreated")
+        }
         ("ens_v2_registry_l1" | "ens_v2_root_l1", "resolver") => (
             "ResolverUpdated",
             "ResolverUpdated(uint256,address,address)",
+            "ResolverChanged",
         ),
         _ => return Ok(None),
     };
-    for event in manifest
-        .abi
-        .events
-        .iter()
-        .filter(|event| event.name == name)
-    {
+    for event in manifest.abi.events.iter().filter(|event| {
+        event.name == name
+            && event
+                .normalized_events
+                .iter()
+                .any(|declared| declared == normalized_event)
+            && (event.emitter_roles.is_empty()
+                || edge_kind == "registry_announcement"
+                || announcement_backed
+                || emitter_role.is_some_and(|role| {
+                    event
+                        .emitter_roles
+                        .iter()
+                        .any(|candidate| candidate == role)
+                }))
+    }) {
         let parsed = event.parsed_event_view()?;
         if parsed.canonical_signature() == signature {
             return Ok(parsed.topic0());

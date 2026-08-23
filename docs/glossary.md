@@ -248,13 +248,18 @@ edges retain the preceding manifest identity; changing the pair from matching
 to nonmatching is narrowing. Resolver widening or source replacement whose
 earliest desired emitter candidate intersects retained history is rejected
 because the admitted addresses are not known until Interpret materializes their
-discovery edges. Direct declarations contribute their inclusive starts. A rule
+discovery edges. Direct declarations contribute their inclusive starts floored
+by the preceding manifest-specific admitted interval, which combines the
+persisted address admission with that preceding declaration start. A rule
 with no matching declaration contributes block zero, and an ENSv2 registry
 manifest with an active `registry_announcement` rule contributes a distinct
 block-zero, role-free emitter path even when an emitterless candidate or direct
 declarations already exist. Adding that path is widening because an
 announcement-admitted registry can emit `ResolverUpdated` and match the
-resolver rule. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58) Removing the last direct emitter narrows only the
+resolver rule.
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@ccaeb58)
+Removing the last direct emitter narrows only the
 declaration-backed part of such a rule. Registry-announcement widening instead
 stamps a required Ingest redo for the ENSv2 registry family from the earlier of
 that declaration start and the earliest retained canonical announcement
@@ -262,10 +267,17 @@ selected by its [all-emitter watch plan](#watch-plan--watched-tuple); intake
 then discovers each registry and fetches its remaining events in the same
 window. Other families reject the historical transition. Narrowing introduces
 no missing historical discovery input.
-For ENSv2, adding the canonical `RegistryCreated()` or
-`ResolverUpdated(uint256,address,address)` producer to the compiled ABI is also
-discovery widening even without a manifest-version change; other event-set
-growth is ordinary watch-plan widening.
+For ENSv2, a canonical discovery producer is effective only when its ABI event
+is present, Interpret selection admits its emitter role (or the announcement path
+bypasses roles), and it declares Interpret's required normalized output. Newly
+enabling `RegistryCreated()`/`RegistryCreated` or
+`ResolverUpdated(uint256,address,address)`/`ResolverChanged` through any of those
+fields is discovery widening even without a manifest-version change; other
+event-set growth is ordinary watch-plan widening. Removing a producer topic
+from a declaration-backed candidate is conservatively rejected as widening
+until synchronization has a directional proof that Interpret retracts its
+retained edges. The announcement-only/emitterless removal shape is not yet
+classified and remains explicitly unproven.
 
 **Migration edge** (`migration`) — the fifth discovery edge kind. It is
 [reserved surface](#reserved-surface): the schema-v2 baseline accepts the

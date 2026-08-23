@@ -288,7 +288,7 @@ it a migration.
 
 Upstream events map to normalized adapter output: `TokenResource` → `TokenResourceLinked`, `TokenRegenerated` → `TokenRegenerated`, each positive-value item in `TransferSingle` or `TransferBatch` with nonzero `from` and `to` → `TokenControlTransferred`, `SubregistryUpdated` → `SubregistryChanged`, `ParentUpdated` → `ParentChanged`, `AliasChanged` → `AliasChanged`, `EACRolesChanged` → resource- or resolver-scoped permission events.[^v2-iperm-l34][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iperm-resolver-l14][^v2-eac-l19] The deployed `ETHRegistry` and `UserRegistryImpl` ABIs both contain the transfer events, and upstream changes the stored owner only for a positive value; mint and burn use a zero endpoint and therefore do not become token-control transfers. (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L194 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L201 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L208 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L210 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L318 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L333 @ ens_v2@ccaeb58) These are adapter semantics, not manifest schema fields. Role changes remain permission events and are not ownership evidence.
 
-ENSv2 terminal lifecycle events also close interpreter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the ENSv2 interpreter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L208 @ ens_v2@ccaeb58) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L459 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58)
+ENSv2 terminal lifecycle events also close interpreter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the ENSv2 interpreter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L208 @ ens_v2@ccaeb58) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L459 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@ccaeb58)
 
 `RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] Operator approval is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@ccaeb58) `PublicResolverV2` is not directly declared by a manifest and is not an admitted resolver profile.[^v2-deploy-public-resolver] Its configured normalized observations may remain stored, but its projection support status stays unsupported unless canonical upgrade history later matches an explicitly declared resolver implementation. Current record visibility remains limited to the current resolver emitter.[^v2-public-resolver-discovery][^v2-public-resolver-version]
 
@@ -863,7 +863,12 @@ narrowing](glossary.md#discovery-rule-widening-and-narrowing) comparison is
 scoped within one chain by
 `(namespace, source_family, edge_kind, from_role, admission)` and preserves the
 normalized address and inclusive start block of each declaration for its
-`from_role`. Manifest synchronization loudly rejects either transition
+`from_role`. A producer is enabled only when its canonical ABI event is present,
+Interpret can select it for that declaration role (or through the
+registry-announcement role bypass), and the event declares the normalized
+output required by Interpret. Enabling any part of that complete predicate is
+also widening; changes to non-discovery-producing events remain ordinary
+manifest authority changes. Manifest synchronization loudly rejects either transition
 instead of mis-certifying a one-pass redo. The operator cannot perform that
 ordering with the current in-place phase workflow, because Interpret reads
 discovery rules only after admission. These transitions are therefore
@@ -893,27 +898,44 @@ retained history: manifest snapshots cannot prove that Interpret has
 already materialized every resolver discovery edge, so one Ingest redo could
 otherwise fetch an incomplete address set and clear the obligation before
 Interpret adds the missing edges. The boundary is the earliest candidate among
-the desired declarations that emit the rule. A rule with no matching
+the desired declarations that emit the rule, floored by the preceding
+manifest-specific admitted interval (the later of that preceding declaration
+start and the persisted address-admission start). Re-admission retains the
+earlier address interval, so
+moving a declaration start beyond the published head does not make a
+historically admitted emitter future-only. A rule with no matching
 declaration contributes block zero as a conservative historical input. An
 `ens_v2_registry_l1` manifest that also has a `registry_announcement` rule
 contributes a distinct block-zero candidate even when the emitterless candidate
 or direct declarations already exist. Adding that role-free path is resolver
 discovery-rule widening: a registry admitted by `RegistryCreated` has no
 declaration role, but its `ResolverUpdated` event can still match the active
-rule. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58) A matching-epoch transition whose earliest candidate starts
-after the latest published head is future-only and remains admissible, as does
+rule.
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@ccaeb58)
+A matching-epoch transition whose earliest effective candidate and persisted
+admission floor both start after the latest published head is future-only and
+remains admissible, as does
 a source-manifest rotation before any Ingest range is retained. Changing from
 matching to nonmatching removes resolver intervals and is admissible narrowing.
 A family with no active `resolver` rule admits no discovered resolver address,
 so an epoch match alone is also admissible.
 
 Each ENSv2 discovery candidate records whether its canonical discovery-producing
-event is present in the compiled ABI: `RegistryCreated()` for registry
-announcements and `ResolverUpdated(uint256,address,address)` for resolver edges.
-Adding either producer changes discovery coverage even when `manifest_version`
-is unchanged; ordinary ABI watch widening is insufficient because Interpret,
-not Ingest, materializes the newly discovered address intervals. Other ABI
-events continue through the ordinary watch-plan widening path.
+event is effectively enabled: `RegistryCreated()` with normalized
+`RegistryCreated` for registry announcements, or
+`ResolverUpdated(uint256,address,address)` with normalized `ResolverChanged`
+for resolver edges, subject to the Interpret role selection described above.
+Adding either producer or enabling it through `emitter_roles` or
+`normalized_events` changes discovery coverage even when `manifest_version` is
+unchanged; ordinary ABI watch widening is insufficient because Interpret, not
+Ingest, materializes the newly discovered address intervals. Producer-topic
+removal from a declaration-backed candidate remains conservatively fail-closed:
+synchronization diagnoses it as historical discovery widening until a
+directional Interpret-retraction proof exists, rather than assuming that
+retained edges have already narrowed. The announcement-only removal gap is
+disclosed below. Other ABI events continue through the ordinary watch-plan
+widening path.
 
 `registry_announcement` rules use the same namespace-scoped comparison. In the
 `ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest
@@ -940,6 +962,22 @@ narrowing](glossary.md#discovery-rule-widening-and-narrowing) remain admissible.
 Topology-only `subregistry` rules and the reserved
 [`migration` edge kind](glossary.md#migration-edge-migration) are excluded from
 this comparison because neither admits an address for historical intake.
+
+This is a scoped completeness claim for the current address-admitting discovery
+paths, not for every manifest field. The classifier covers resolver and registry
+announcement rule identity, additions, removals, and declaration starts;
+matching root/contract addresses and roles; source-manifest version and
+deployment-epoch replacement; announcement-backed admission; canonical producer
+ABI presence, `emitter_roles`, and required `normalized_events`; and the active
+persisted admission floor. The compiled-watch comparison separately covers
+ordinary ABI topics, declared addresses, and start ranges. Capability flags,
+correlation metadata, resolver implementation metadata, and proxy metadata do
+not feed these discovery intervals. Unproven shapes are: removing a producer
+from an announcement-only/emitterless resolver path, because the desired-key
+comparison does not visit the removed announcement-backed key; and binary
+changes that add a new address-admitting discovery edge kind or change
+catalog/discovery behavior without a manifest-field transition. Those shapes
+require a new proof and classifier arm before activation.
 
 If a newly watched tuple intersects an already-ingested range, synchronization
 records the ordinary [manifest-authority
@@ -1162,7 +1200,7 @@ above does not change that provenance rule.
 [^v2-pres-uups]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L22 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L89 @ ens_v2@ccaeb58)
 [^v2-pres-upgraded]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L627 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L637 @ ens_v2@ccaeb58)
 [^v2-deploy-public-resolver]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2@ccaeb58)
-[^v2-public-resolver-discovery]: `PublicResolverV2` composes the standard resolver profiles and authorizes writes through registry ownership or approvals; locked-name migration can replace a recognized ENSv1 resolver with that public resolver before a nonzero registered resolver emits `ResolverUpdated`: (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L4 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L139 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58)
+[^v2-public-resolver-discovery]: `PublicResolverV2` composes the standard resolver profiles and authorizes writes through registry ownership or approvals; locked-name migration can replace a recognized ENSv1 resolver with that public resolver before a nonzero registered resolver emits `ResolverUpdated`: (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L4 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L139 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@ccaeb58)
 [^v2-public-resolver-version]: The deployed resolver ABI includes `VersionChanged` and `clearRecords`: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L429 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L598 @ ens_v2@ccaeb58)
 
 [^v2-userreg-l15]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@ccaeb58)

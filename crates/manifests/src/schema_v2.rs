@@ -88,6 +88,7 @@ pub async fn sync_schema_v2_repository(
         .context("failed to take schema-v2 manifest sync advisory lock")?;
     sync_state::lock_phase_writers(&mut transaction, repository).await?;
     let previous_authority = sync_state::active_authority(&mut transaction).await?;
+    let previous_admission_floors = sync_state::active_admission_floors(&mut transaction).await?;
     let desired_authority = sync_state::repository_authority(repository)?;
     let existing = load_manifest_states(&mut transaction).await?;
 
@@ -131,6 +132,7 @@ pub async fn sync_schema_v2_repository(
         &mut transaction,
         &previous_authority,
         &desired_authority,
+        &previous_admission_floors,
     )
     .await?;
     transaction

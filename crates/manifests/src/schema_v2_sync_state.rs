@@ -137,6 +137,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
     transaction: &mut Transaction<'_, Postgres>,
     previous: &AuthoritySnapshot,
     desired: &AuthoritySnapshot,
+    previous_admission_floors: &BTreeMap<String, super::watch::AdmissionFloors>,
 ) -> Result<()> {
     let chains = previous
         .manifests_by_chain
@@ -158,20 +159,31 @@ pub(super) async fn invalidate_changed_derived_epochs(
         if previous_manifests == desired_manifests {
             continue;
         }
-        if let Some(widening) =
-            super::watch::resolver_deployment_widening(&previous.watch, &desired.watch, &chain_id)
-        {
+        let admission_floors = previous_admission_floors
+            .get(&chain_id)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(widening) = super::watch::resolver_deployment_widening(
+            &previous.watch,
+            &desired.watch,
+            &chain_id,
+            &admission_floors,
+        ) {
             reject_covered_discovery_widening(transaction, &chain_id, widening, false).await?;
         }
-        if let Some(widening) =
-            super::watch::discovery_widening_start(&previous.watch, &desired.watch, &chain_id)
-        {
+        if let Some(widening) = super::watch::discovery_widening_start(
+            &previous.watch,
+            &desired.watch,
+            &chain_id,
+            &admission_floors,
+        ) {
             reject_covered_discovery_widening(transaction, &chain_id, widening, false).await?;
         }
         if let Some(widening) = super::watch::unsupported_registry_announcement_widening(
             &previous.watch,
             &desired.watch,
             &chain_id,
+            &admission_floors,
         ) {
             reject_covered_discovery_widening(transaction, &chain_id, widening, true).await?;
         }
@@ -179,6 +191,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
             &previous.watch,
             &desired.watch,
             &chain_id,
+            &admission_floors,
         ) {
             let widened_from =
                 earliest_retained_registry_announcement(transaction, &chain_id, widened_from)
@@ -239,6 +252,45 @@ pub(super) async fn invalidate_changed_derived_epochs(
         .context("failed to invalidate Base project epoch for Basenames execution authority")?;
     }
     Ok(())
+}
+
+pub(super) async fn active_admission_floors(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<BTreeMap<String, super::watch::AdmissionFloors>> {
+    // Mirror Interpret's manifest-specific declared admission interval. This snapshot must precede
+    // desired persistence: resolve_contract's LEAST update would otherwise rewrite the evidence
+    // used to decide whether the desired start newly intersects retained history.
+    let rows: Vec<(String, String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT manifest.chain_id, manifest.namespace, manifest.source_family, \
+                COALESCE(declaration.role, declaration.declaration_name), \
+                lower(address.address), \
+                min(GREATEST(COALESCE(declaration.start_block_number, 0), \
+                             COALESCE(address.active_from_block_number, 0))) \
+         FROM manifest_versions manifest \
+         JOIN manifest_contract_instances declaration \
+           ON declaration.manifest_id = manifest.manifest_id \
+          AND declaration.chain_id = manifest.chain_id \
+         JOIN contract_instance_addresses address \
+           ON address.contract_instance_id = declaration.contract_instance_id \
+          AND address.chain_id = declaration.chain_id \
+         WHERE manifest.rollout_status = 'active' \
+           AND (address.deactivated_at IS NULL \
+                OR address.active_to_block_number IS NOT NULL) \
+         GROUP BY manifest.chain_id, manifest.namespace, manifest.source_family, \
+                  COALESCE(declaration.role, declaration.declaration_name), \
+                  lower(address.address)",
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .context("failed to load active address admission floors")?;
+    let mut by_chain = BTreeMap::<String, super::watch::AdmissionFloors>::new();
+    for (chain_id, namespace, family, role, address, start) in rows {
+        by_chain.entry(chain_id).or_default().insert(
+            (namespace, family, role, address),
+            u64::try_from(start).context("active address admission floor is negative")?,
+        );
+    }
+    Ok(by_chain)
 }
 
 async fn invalidation_marker(
