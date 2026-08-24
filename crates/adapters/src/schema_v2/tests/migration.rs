@@ -910,6 +910,51 @@ fn two_names_in_one_transaction_keep_separate_authority_boundaries() -> anyhow::
 }
 
 #[test]
+fn activated_transitions_sort_by_chain_position_before_correlation_id() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let unwrapped = &fixture["scenarios"]["U-01"];
+    let wrapped = &fixture["scenarios"]["W-01"];
+    let block = unwrapped["migration_block"].as_i64().unwrap();
+    let mut logs = unlocked_name_logs(unwrapped, addresses, block, 1, false)?;
+    logs.extend(unlocked_name_logs(wrapped, addresses, block, 5, true)?);
+
+    let output = interpret_test_batch(batch(logs, &fixture, true))?;
+    let transitions = &output.migration_authority_transitions;
+    assert_eq!(transitions.len(), 2);
+    assert_eq!(
+        transitions
+            .iter()
+            .map(|transition| (
+                transition.logical_name_id.clone(),
+                transition.block_number,
+                transition.transaction_index,
+                transition.log_index,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                format!("ens:{}", unwrapped["namehash"].as_str().unwrap()),
+                block,
+                0,
+                2,
+            ),
+            (
+                format!("ens:{}", wrapped["namehash"].as_str().unwrap()),
+                block,
+                0,
+                7,
+            ),
+        ]
+    );
+    assert!(
+        transitions[0].migration_correlation_id > transitions[1].migration_correlation_id,
+        "fixture correlation IDs must sort opposite to their chain positions"
+    );
+    Ok(())
+}
+
+#[test]
 fn shared_event_waits_until_every_referenced_group_is_complete() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let addresses = &fixture["addresses"];
