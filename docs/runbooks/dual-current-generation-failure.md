@@ -198,8 +198,9 @@ is outside this runbook and must be escalated to the Project owner
 Keep the affected chain's long-running phase runner stopped. Before any redo,
 restart, deploy, or code change, attach all of the following to the incident:
 
-- the complete normal-execution terminal log entry or redo CLI aggregate,
-  including `chain_id`, `error_kind`, and exact error text;
+- the complete structured `chain supervisor stopped after a terminal error` log
+  entry—from normal execution or a supervisor-driven required redo—or the redo
+  CLI aggregate, including `chain_id`, `error_kind`, and exact error text;
 - the phase-runner startup metadata log containing the build SHA and
   [interpreter content hash](../glossary.md#interpreter-content-hash), plus the
   immutable container image ID. The startup log emits those fields at
