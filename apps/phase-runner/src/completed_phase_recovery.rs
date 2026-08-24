@@ -35,13 +35,8 @@ impl CompletedRecoveryState {
         }
     }
 
-    fn is_retained_completed_validation(&self, phase: PhaseName) -> bool {
-        if self.phase_status != PhaseStatus::Failed.as_str()
-            || !self
-                .last_error
-                .as_deref()
-                .is_some_and(|error| error.starts_with(COMPLETED_VALIDATION_FAILURE_PREFIX))
-        {
+    fn is_retained_completion(&self, phase: PhaseName) -> bool {
+        if self.phase_status != PhaseStatus::Failed.as_str() {
             return false;
         }
         let completed_extent = self.current_block_number.is_some()
@@ -50,7 +45,10 @@ impl CompletedRecoveryState {
             && self.current_block_hash == self.target_block_hash;
         match phase {
             PhaseName::Ingest => {
-                completed_extent
+                self.last_error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with(COMPLETED_VALIDATION_FAILURE_PREFIX))
+                    && completed_extent
                     && self.live_handoff_block_number == self.target_block_number
                     && self.live_handoff_block_hash == self.target_block_hash
             }
@@ -142,7 +140,7 @@ impl PhaseStore {
         let row = row_for(&rows, phase)?;
         let current = row.status()?;
         let retained_completion = current == PhaseStatus::Failed
-            && CompletedRecoveryState::from_locked(row).is_retained_completed_validation(phase);
+            && CompletedRecoveryState::from_locked(row).is_retained_completion(phase);
         if !retained_completion {
             return Err(RunnerError::data_integrity(format!(
                 "cannot complete revalidated phase {phase} for chain {chain_id} without its \
@@ -220,10 +218,10 @@ impl PhaseStore {
                 error,
             )
         })?;
-        Ok(row.is_some_and(|row| row.is_retained_completed_validation(phase)))
+        Ok(row.is_some_and(|row| row.is_retained_completion(phase)))
     }
 }
 
-pub(crate) fn locked_completed_validation_recovery(row: &PhaseStateRow, phase: PhaseName) -> bool {
-    CompletedRecoveryState::from_locked(row).is_retained_completed_validation(phase)
+pub(crate) fn locked_completion_recovery(row: &PhaseStateRow, phase: PhaseName) -> bool {
+    CompletedRecoveryState::from_locked(row).is_retained_completion(phase)
 }

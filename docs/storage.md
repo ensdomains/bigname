@@ -175,14 +175,16 @@ cannot fire again; a current finite declaration keeps its finite watch bound.
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing
 the retained range markers, source provenance, verification level, or content
-hash. A retained row may be restored without replay only from structural
-evidence: Ingest requires matching current, target, and live-handoff markers;
-Verify requires matching current and target markers plus a verification level.
-The next accepted start repeats the checks for the retained completion and
-moves that row through `failed` to `completed`. Error text alone never
-authorizes that transition. This preserved evidence is diagnostic state, not
-permission to publish: provider-trusted Sepolia readiness requires both Ingest
-and Verify to remain completed.
+hash. Verify can also retain its final completion evidence without ever becoming
+`completed` when an ordinary, non-validation failure is recorded after its final
+checkpoint but before phase completion. A retained row may be restored without
+replay only from structural evidence: Ingest requires matching current, target,
+and live-handoff markers; Verify requires matching current and target markers
+plus a verification level. The next accepted start repeats the checks for the
+retained completion and moves that row through `failed` to `completed`. Error
+text alone never authorizes that transition. This preserved evidence is
+diagnostic state, not permission to publish: provider-trusted Sepolia readiness
+requires both Ingest and Verify to remain completed.
 
 At runner startup, a `running` or `paused` Interpret, Project, or Verify row with no
 explicit redo is resolved only while its advisory lock remains held. A required Ingest
