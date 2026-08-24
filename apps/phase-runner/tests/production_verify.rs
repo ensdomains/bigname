@@ -54,6 +54,7 @@ const SEPOLIA: &str = "ethereum-sepolia";
 const CONTRACT: &str = "0x00000000000000000000000000000000000000aa";
 const MULTI_BATCH_VERIFY_TARGET: i64 = 131_073;
 const FIRST_VERIFY_BATCH_END: i64 = 131_071;
+type FailedVerifyState = (String, Option<i64>, Option<i64>, Option<String>);
 
 #[tokio::test]
 async fn verifier_rejects_a_database_role_with_write_privileges() -> Result<()> {
@@ -618,6 +619,150 @@ async fn stopped_verify_at_its_final_checkpoint_completes_on_restart() -> Result
     );
 
     drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn ordinary_failure_after_verify_final_checkpoint_completes_on_restart() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_failed_at_final_checkpoint").await?;
+    seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
+    install_final_checkpoint_heartbeat_failure(scratch.pool()).await?;
+    let reference = Arc::new(FixtureReferences::new([reference_log(BASE, 1)]));
+    let phases = PhaseSet::new([
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(DelayedVerifyPhase {
+            inner: VerifyPhase::with_reference_provider(
+                scratch.verification_database(2).await?,
+                reference.clone(),
+            ),
+        }),
+        Arc::new(CompleteLivePhase),
+    ])?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verify-final-checkpoint-failure",
+        TimingConfig {
+            initial_backoff: Duration::from_secs(10),
+            maximum_backoff: Duration::from_secs(10),
+            live_poll_interval: Duration::from_millis(2),
+        },
+    )?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let chain = base_chain(true)?;
+    let run = tokio::spawn(async move { runner.run_chain(&chain, run_cancellation).await });
+
+    let failed_state = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state: Option<FailedVerifyState> = sqlx::query_as(
+                "SELECT phase_status, current_block_number, target_block_number, last_error
+                 FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'verify'",
+            )
+            .bind(BASE)
+            .fetch_optional(scratch.pool())
+            .await?;
+            if state
+                .as_ref()
+                .is_some_and(|state| state.0 == "failed" && state.3.is_some())
+            {
+                return Ok::<_, sqlx::Error>(state.expect("failed state was present"));
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    assert_eq!(failed_state.1, Some(5));
+    assert_eq!(failed_state.2, Some(5));
+    assert!(
+        failed_state
+            .3
+            .as_deref()
+            .is_some_and(|error| error.contains("injected ordinary failure after final checkpoint"))
+    );
+    cancellation.cancel();
+    run.await??;
+    remove_final_checkpoint_heartbeat_failure(scratch.pool()).await?;
+
+    let mut refusals = Vec::new();
+    for _ in 0..2 {
+        let restart =
+            verifier_runner(&scratch, reference.clone(), Arc::new(CompleteLivePhase)).await?;
+        match restart
+            .run_chain(&base_chain(true)?, CancellationToken::new())
+            .await
+        {
+            Ok(()) => break,
+            Err(error) => {
+                assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("verification cursor 6 for chain base-mainnet is above target 5"),
+                    "{error}"
+                );
+                refusals.push(error.to_string());
+            }
+        }
+    }
+    if !refusals.is_empty() {
+        anyhow::bail!(
+            "Verify did not recover; consecutive restart refusals: first={:?}; second={:?}",
+            refusals.first(),
+            refusals.get(1)
+        );
+    }
+    let state: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT phase_status, verification_level, current_block_number, target_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        ("completed".to_owned(), "cross_checked".to_owned(), 5, 5)
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn failed_verify_final_checkpoint_without_matching_evidence_still_refuses() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_corrupt_final_checkpoint").await?;
+    seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
+    let reference = Arc::new(FixtureReferences::new([reference_log(BASE, 1)]));
+    verifier_runner(&scratch, reference.clone(), Arc::new(CompleteLivePhase))
+        .await?
+        .run_chain(&base_chain(true)?, CancellationToken::new())
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed', current_block_hash = 'corrupt-final-checkpoint',
+             last_error = 'ordinary failure after final checkpoint'
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .execute(scratch.pool())
+    .await?;
+
+    let error = verifier_runner(&scratch, reference, Arc::new(CompleteLivePhase))
+        .await?
+        .run_chain(&base_chain(true)?, CancellationToken::new())
+        .await
+        .expect_err("mismatched retained markers must not authorize Verify completion");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("verification cursor 6 for chain base-mainnet is above target 5"),
+        "{error}"
+    );
+
     scratch.cleanup().await
 }
 
@@ -3095,6 +3240,34 @@ impl Phase for CompleteLivePhase {
     }
 }
 
+struct DelayedVerifyPhase {
+    inner: VerifyPhase,
+}
+
+impl Phase for DelayedVerifyPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn preflight(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+        mode: &phase_runner::phase::RunMode,
+    ) -> RunnerResult<()> {
+        self.inner.preflight(chain_id, sources, mode)
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let batch = self.inner.run_batch(context);
+        Box::pin(async move {
+            let outcome = batch.await?;
+            tokio::time::sleep(Duration::from_millis(5_100)).await;
+            Ok(outcome)
+        })
+    }
+}
+
 struct UnexpectedPhase {
     name: PhaseName,
 }
@@ -3661,6 +3834,39 @@ async fn seed_ingest_cursor(
     through: i64,
 ) -> Result<()> {
     seed_ingest_cursor_with_kind(pool, chain_id, source_key, "drpc", through).await
+}
+
+async fn install_final_checkpoint_heartbeat_failure(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::query(
+        "CREATE FUNCTION bigname_phase.fail_verify_final_checkpoint_heartbeat()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected ordinary failure after final checkpoint';
+         END
+         $$",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER fail_verify_final_checkpoint_heartbeat
+         BEFORE UPDATE ON service_heartbeats
+         FOR EACH ROW
+         WHEN (OLD.chain_id = 'base-mainnet' AND OLD.phase_name = 'verify')
+         EXECUTE FUNCTION bigname_phase.fail_verify_final_checkpoint_heartbeat()",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn remove_final_checkpoint_heartbeat_failure(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::query("DROP TRIGGER fail_verify_final_checkpoint_heartbeat ON service_heartbeats")
+        .execute(pool)
+        .await?;
+    sqlx::query("DROP FUNCTION bigname_phase.fail_verify_final_checkpoint_heartbeat()")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 async fn seed_ingest_cursor_with_kind(

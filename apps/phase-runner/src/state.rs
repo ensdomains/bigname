@@ -137,7 +137,7 @@ impl PhaseStore {
         let row = row_for(&rows, phase)?;
         let status = row.status()?;
         let recovering_completed = status == PhaseStatus::Failed
-            && crate::completed_phase_recovery::locked_completed_validation_recovery(row, phase);
+            && crate::completed_phase_recovery::locked_completion_recovery(row, phase);
         let restarts_completed = match (status, phase) {
             (_, PhaseName::Live) => true,
             (PhaseStatus::Completed, PhaseName::Ingest) => row.ingest_completion_is_incomplete(),
