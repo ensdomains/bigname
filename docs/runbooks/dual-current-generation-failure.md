@@ -534,7 +534,7 @@ recovery by guesswork.
 | --- | --- | --- |
 | Missed or mis-applied ENSv1→ENSv2 migration interpretation | The activated `MigrationApplied` row does not match the raw transaction, correlation group, exact predecessor cleanup, or successor binding; or it matches but the current interpreter did not close the one selected ENSv1 predecessor and no approved re-derivation is pending. | Indexing defect. Interpret validates a one-to-one activated boundary/transition pair ([`crates/interpret/src/write/identity/transition.rs:11-45`](../../crates/interpret/src/write/identity/transition.rs#L11-L45)) and updates exactly one selected predecessor binding ([`crates/interpret/src/write/identity/transition.rs:141-270`](../../crates/interpret/src/write/identity/transition.rs#L141-L270)). A mismatch means the stored interpretation or that logic is wrong. |
 | Invariant is wrong for genuine on-chain behavior | The raw transaction, activated boundary, exact cleanup, successor, both bindings, and current lineage are all internally consistent, and the ENS protocol owner confirms that both bindings are legitimately current after that boundary. | On-chain assumption defect. Do not relabel it as stale data just because a redo would be convenient. The assertion deliberately treats two open arms after this proof as unpublishable ([`crates/project/src/integrity.rs:33-38`](../../crates/project/src/integrity.rs#L33-L38), [`crates/project/src/integrity.rs:127-135`](../../crates/project/src/integrity.rs#L127-L135)). |
-| Stale derived state awaiting re-derivation | The current deployed interpreter is already known to produce the correct arm-scoped close, and the Interpret row shows the exact approved redo still pending or interrupted, or the deployment record already requires the affected full [re-derivation boundary](../glossary.md#re-derivation-boundary). | Operationally incomplete re-derivation, not a new protocol claim. A bounded Interpret redo deletes and re-derives its selected event range from [readable](../glossary.md#readable--read-safe) [raw facts](../glossary.md#raw-facts) ([`docs/glossary.md:1165-1171`](../glossary.md#L1165-L1171)). |
+| Stale derived state awaiting re-derivation | The current deployed interpreter is already known to produce the correct arm-scoped close, and the Interpret row shows the exact approved redo still pending or interrupted, or the deployment record already requires the affected full [re-derivation boundary](../glossary.md#re-derivation-boundary). | Operationally incomplete re-derivation, not a new protocol claim. A bounded Interpret redo deletes and re-derives its selected event range from [readable](../glossary.md#readable--read-safe) [raw facts](../glossary.md#raw-facts) ([`docs/glossary.md:1165-1171`](../glossary.md#glossary)). |
 
 The ENSv1→ENSv2 migration transition writer is intentionally arm-scoped: it
 selects the predecessor by `logical_name_id` and the recorded predecessor arm,
@@ -551,8 +551,8 @@ This is why recovery re-derives evidence instead of editing the open interval.
    traffic, record the exact Compose file set, capture the immutable running
    image as `<recovery-image>`, and stop the long-running phase runner. A missing
    deployment-specific drain procedure is a stop condition
-   ([`docs/runbooks/production-docker.md:396-411`](production-docker.md#L396-L411),
-   [`docs/runbooks/production-docker.md:419-434`](production-docker.md#L419-L434)).
+   ([`docs/runbooks/production-docker.md:396-411`](production-docker.md#recovery-plays),
+   [`docs/runbooks/production-docker.md:419-434`](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 2. If an Interpret redo is already recorded, resume **that exact chain and
    persisted range**. Do not create a new range. If the evidence query returns
    an `active_redo_invalidation_token`, require the already-reviewed historical
@@ -581,7 +581,7 @@ This is why recovery re-derives evidence instead of editing the open interval.
    ```
 
    Project redo syntax is documented at
-   [`docs/storage.md:431-439`](../storage.md#L431-L439). Interpret completion
+   [`docs/storage.md:431-439`](../storage.md#rainbow-table-preimage-import). Interpret completion
    stamps that Project range atomically, but the runner invokes Project in a
    separate call
    ([`apps/phase-runner/src/redo_state.rs:571-579`](../../apps/phase-runner/src/redo_state.rs#L571-L579),
@@ -616,14 +616,26 @@ This is why recovery re-derives evidence instead of editing the open interval.
    `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` value, or its exact
    `--hydration-rpc` equivalent, because the automatic Project cascade may need
    it. The canonical command and descriptor format are documented at
-   [`docs/runbooks/production-docker.md:477-496`](production-docker.md#L477-L496).
-   If a newly started unflagged redo instead stops at a
-   [manifest-authority marker](../glossary.md#manifest-authority-marker), do not
-   immediately add the printed token. Complete the mandatory historical fetch
-   for any widened watch plan, or the required review proving no widening, then
-   rerun the same chain and range with that printed token. The production rule
-   and its no-invention/no-reuse constraints are at
-   [`docs/runbooks/production-docker.md:272-282`](production-docker.md#L272-L282).
+   [`docs/runbooks/production-docker.md:477-496`](production-docker.md#stop-and-escalate-an-interpreter-mismatch).
+   If a newly started scoped, unflagged redo is fenced by a
+   [manifest-authority marker](../glossary.md#manifest-authority-marker), its
+   first error is `ContentHashMismatch`: it demands the full range
+   `0..=<redo-to>`, does not name the marker, and prints no token
+   ([`apps/phase-runner/src/redo_state.rs:377-386`](../../apps/phase-runner/src/redo_state.rs#L377-L386)).
+   That runner error-text gap is tracked in
+   [issue #545](https://github.com/ensdomains/bigname/issues/545). The
+   invalidation token is already visible in the captured Interpret phase row's
+   `input_content_hash` marker value as
+   `manifest-authority:<authority-fingerprint>:<invalidation-token>`. Do not use
+   it to retry the scoped range. Instead, run the Interpret redo unflagged over
+   the demanded full range `0..=<redo-to>`. That full-range attempt reaches the
+   manifest-authority fence, stops, and prints the invalidation token
+   ([`apps/phase-runner/src/redo_manifest_attestation.rs:70-85`](../../apps/phase-runner/src/redo_manifest_attestation.rs#L70-L85)).
+   Complete the mandatory historical fetch for any widened watch plan, or the
+   required review proving no widening, then rerun that same full range with
+   `--attest-watch-set-coverage <token>`. The production rule and its
+   no-invention/no-reuse constraints are at
+   [`docs/runbooks/production-docker.md:272-282`](production-docker.md#planned-migration-and-fingerprint-boundary).
    There is no `--arm` option. The redo uses each closing event's recorded arm
    and refuses to guess one when evidence is missing
    ([`crates/adapters/src/schema_v2/seam.rs:71-99`](../../crates/adapters/src/schema_v2/seam.rs#L71-L99)).
@@ -644,7 +656,7 @@ This is why recovery re-derives evidence instead of editing the open interval.
 
 If the same fingerprint reproduces, stop. Do not widen or repeat the scoped redo.
 Escalate to the boundary play, matching the existing runner instruction
-([`docs/runbooks/production-docker.md:498-516`](production-docker.md#L498-L516)).
+([`docs/runbooks/production-docker.md:498-516`](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 
 ### Indexing defect: file, fix, then re-derive
 
@@ -682,7 +694,7 @@ cannot be proved, an interpreter content hash changed, source admission or the
 reproduces the failure. This
 runbook does not authorize an improvised reset. Hand the evidence to the release,
 Interpret, manifest, and storage owners and follow
-[`docs/runbooks/production-docker.md:31-304`](production-docker.md#L31-L304),
+[`docs/runbooks/production-docker.md:31-304`](production-docker.md#planned-migration-and-fingerprint-boundary),
 including its fixed image, backup, historical fetch, full Interpret/Project walk,
 Verify, and readiness gates.
 
@@ -704,10 +716,10 @@ Never:
 The audit table is operator diagnostics rather than a product projection
 ([`schema-v2/baseline/12_project_generation_failures.sql:28-32`](../../schema-v2/baseline/12_project_generation_failures.sql#L28-L32)),
 and Project is the sole projection writer
-([`docs/glossary.md:1183-1189`](../glossary.md#L1183-L1189)). The existing
+([`docs/glossary.md:1183-1189`](../glossary.md#glossary)). The existing
 production recovery rules also prohibit hand-editing identity and normalized
 event rows
-([`docs/runbooks/production-docker.md:524-525`](production-docker.md#L524-L525)).
+([`docs/runbooks/production-docker.md:524-525`](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 
 ## Sepolia carve-out
 
