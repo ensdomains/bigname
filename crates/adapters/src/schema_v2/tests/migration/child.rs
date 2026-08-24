@@ -236,7 +236,7 @@ fn assert_child_shape(
     addresses: &Value,
 ) {
     let resource = &boundary.after_state["predecessor_binding"]["resource"];
-    assert_eq!(boundary.consumer_visibility, "candidate");
+    assert_eq!(boundary.consumer_visibility, "activated");
     assert_eq!(
         boundary.after_state["migration_path"],
         child["migration_path"]
@@ -316,10 +316,7 @@ fn locked_child_correlates_through_the_parent_migration_registry() -> anyhow::Re
                 .eq_ignore_ascii_case(scenario["child"]["registry"].as_str().unwrap())),
         "the child's nested registry is admitted as migration-created"
     );
-    assert!(
-        output.migration_authority_transitions.is_empty(),
-        "candidate interpretation must not schedule a binding write"
-    );
+    assert_eq!(output.migration_authority_transitions.len(), 2);
     assert!(
         output
             .migration_candidate_identity_effects
@@ -501,14 +498,12 @@ fn the_activation_matrix_covers_the_child_catalog() -> anyhow::Result<()> {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert!(
-            boundaries(&output)
-                .iter()
-                .all(|boundary| boundary.consumer_visibility == "candidate"),
-            "{scenario} must begin as candidate interpretation"
-        );
-
+        let production = output.clone();
         super::super::super::migration::inject_activated_transition_for_test(&mut output)?;
+        assert_eq!(
+            output, production,
+            "{scenario} test-seam activation differs byte-for-byte from production"
+        );
         let children = child_boundaries(&output);
         assert_eq!(
             children.len(),

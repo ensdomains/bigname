@@ -103,7 +103,7 @@ async fn migration_registry_restart_retains_later_facts_in_replay_and_live_follo
         replay.candidate_association.0,
         "migration_registry_creation"
     );
-    assert_eq!(replay.candidate_association.1, "candidate");
+    assert_eq!(replay.candidate_association.1, "activated");
     assert_eq!(replay.candidate_factory_event_count, 1);
     assert_eq!(replay.discovery_association_count, 1);
     Ok(())
@@ -488,7 +488,7 @@ async fn run_lane(lane: RestartLane) -> Result<LaneSnapshot> {
         "SELECT count(*) FROM normalized_events
          WHERE chain_id = $1 AND block_number = $2
            AND event_kind = 'ContractDiscovered'
-           AND consumer_visibility = 'candidate'",
+           AND consumer_visibility = 'activated'",
     )
     .bind(CHAIN)
     .bind(ANNOUNCEMENT_BLOCK)
@@ -503,7 +503,7 @@ async fn run_lane(lane: RestartLane) -> Result<LaneSnapshot> {
           AND lineage.block_number = association.block_number
          WHERE association.chain_id = $1 AND association.block_number = $2
            AND lower(association.registry_address) = lower($3)
-           AND association.consumer_visibility = 'candidate'
+           AND association.consumer_visibility = 'activated'
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .bind(CHAIN)

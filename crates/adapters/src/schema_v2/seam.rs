@@ -67,7 +67,27 @@ pub const REDO_BINDING_CLOSE_CLAMP_SQL: &str =
 pub const REDO_ARM_WIDE_CLOSE_SQL: &str = "event.event_kind = 'PreimageObserved'
                            AND event.after_state ->> 'arm_wide_binding_close' = 'true'
                            AND event.after_state ->> 'surface_binding_id' IS NOT NULL
-                           AND event.after_state ->> 'closed_authority_arm' IS NOT NULL";
+                           AND event.after_state ->> 'closed_authority_arm' IS NOT NULL
+                           AND EXISTS (
+                               SELECT 1
+                               FROM surface_bindings replacement
+                               WHERE replacement.surface_binding_id::text
+                                   = event.after_state ->> 'surface_binding_id'
+                                 AND replacement.chain_id = event.chain_id
+                                 AND replacement.logical_name_id = event.logical_name_id
+                                 AND replacement.authority_arm
+                                   = event.after_state ->> 'closed_authority_arm'
+                                 AND replacement.block_number = event.block_number
+                                 AND replacement.block_hash = event.block_hash
+                                 AND COALESCE(
+                                     (replacement.provenance ->> 'transaction_index')::bigint,
+                                     -1
+                                 ) = COALESCE(event.transaction_index, -1)
+                                 AND COALESCE(
+                                     (replacement.provenance ->> 'log_index')::bigint,
+                                     -1
+                                 ) = COALESCE(event.log_index, -1)
+                           )";
 /// The authority arm a closing event's own evidence names, which is the arm a redo reopen may
 /// undo a close on. An ordinary open or unbind closes only its own arm, so that arm is the one the
 /// event identifies: the binding it opened, or failing that its resource. A migration boundary is

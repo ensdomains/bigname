@@ -1,7 +1,7 @@
 use super::*;
 
 /// Exercises an unlocked-wrapped migration through production raw-fact loading, ordinary ENSv1
-/// interpretation, test-only activation, and the real transition writer.
+/// interpretation, production activation, and the real transition writer.
 #[tokio::test]
 async fn complete_unlocked_wrapped_migration_closes_the_reactivated_registrar_at_cleanup()
 -> TestResult {
@@ -14,7 +14,7 @@ async fn unlocked_wrapped_migration_closes_a_registrar_materialized_at_cleanup()
 }
 
 async fn run_unlocked_wrapped_migration(prior_registrar_materialized: bool) -> TestResult {
-    let database = database().await?;
+    let database = database("interpret_unlocked_wrapped_activation").await?;
     let pool = database.pool();
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

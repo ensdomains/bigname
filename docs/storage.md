@@ -259,10 +259,12 @@ Independent admission takes precedence over correlation visibility. If an
 existing manifest and discovery path already produces a normalized event without
 the ENSv1→ENSv2 correlation, Interpret reproduces that ordinary event
 byte-for-byte: its event identity, payload, provenance, and `activated`
-visibility do not change. Interpret records the candidate relationship in a
+visibility do not change. Interpret records the correlation relationship in a
 separate `migration_event_associations` row keyed to the ordinary event identity,
 with the sorted correlation ID set, `correlation_kind`, evidence references,
-chain positions, canonicality, and `consumer_visibility=candidate`. Correlation
+chain positions, canonicality, and `consumer_visibility`: candidate while its
+group is incomplete or refused and activated when its [complete
+group](glossary.md#complete-group) is admitted. Correlation
 never duplicates, suppresses, or reclassifies the independently admitted event.
 The event identity is a plain value rather than a foreign key. A redo deletes
 normalized events in its range before replay, but retains association rows whose
@@ -276,17 +278,19 @@ Slice 1 applies the same precedence to identity and discovery, with one explicit
 intake carveout. A migration-created registry's independently admitted
 `registry_announcement` edge remains an ordinary discovery row, active from the
 announcement position, because it records indexability only and the watch plan
-traverses it. Interpret attaches the `migration_registry_creation` candidate
-relationship in `migration_discovery_associations`, keyed to that ordinary edge;
+traverses it. Interpret attaches the `migration_registry_creation` relationship
+in `migration_discovery_associations`, keyed to that ordinary edge;
 the association does not change the edge's columns or active range. Slice 2C's
 authority selector is the sole Project exception: after an activated transition
 has proved the parent migrated, it may use the readable canonical
 `migration_registry_creation` association to classify the independently
-admitted registry that emitted a positive child registration. The association's
-candidate visibility remains diagnostic; it neither establishes child authority
-by itself nor activates any correlation-dependent effect. Correlation-dependent parent, topology, identity, role,
-registration, renewal, and normalized-event effects from the watched registry
-remain candidate until activation. Association with the migration group is not
+admitted registry that emitted a positive child registration. The association
+remains diagnostic whether its [complete group](glossary.md#complete-group) is candidate or activated; it
+neither establishes child authority by itself nor activates any
+correlation-dependent effect. Correlation-dependent parent, topology, identity,
+role, registration, renewal, and normalized-event rows from the watched registry
+activate only when every group they reference is complete. Refused and incomplete
+rows remain candidate. Association with the migration group is not
 sufficient to reclassify an effect that the ordinary edge and raw event produce
 without that association; independently derivable existing-family output remains
 ordinary.
@@ -324,9 +328,10 @@ ENSv1→ENSv2 migration-driven predecessor close or successor open to
 `surface_bindings`.
 
 Consumer activation is a re-derivation semantic, not an in-place serving flag.
-Slice 2A rotates the interpreter content hash for arm-scoped ordinary writes and
-adds an explicit transition value, but the production interpreter continues to
-produce candidate groups only. The test-only activated seam carries the exact
+Slice 2A rotated the interpreter content hash for arm-scoped ordinary writes and
+added an explicit transition value. The final activation slice now runs the
+shared production/test activation function after all batch correlation paths finish;
+there is no second test-only transition implementation. Its transition carries the exact
 logical name, full chain position, expected `ens_v1` arm, predecessor selector,
 expected `ens_v2` arm, and concrete successor binding/resource. The writer
 selects current matching predecessors under `FOR UPDATE` and performs the

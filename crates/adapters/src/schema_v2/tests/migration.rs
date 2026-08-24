@@ -52,7 +52,7 @@ fn catalog_fixture_records_reproducible_provenance_and_corrections() -> anyhow::
 }
 
 #[test]
-fn cross_family_registrar_transfer_emits_one_unwrapped_candidate_boundary() -> anyhow::Result<()> {
+fn cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["U-01"];
     let unrelated_cleanup = &fixture["scenarios"]["G-02"];
@@ -168,7 +168,12 @@ fn cross_family_registrar_transfer_emits_one_unwrapped_candidate_boundary() -> a
         .collect::<Vec<_>>();
     assert_eq!(boundaries.len(), 1);
     let boundary = boundaries[0];
-    assert_eq!(boundary.consumer_visibility, "candidate");
+    assert_eq!(boundary.consumer_visibility, "activated");
+    assert_eq!(boundary.after_state["consumer_visibility"], "activated");
+    assert_eq!(
+        boundary.after_state["candidate_authority_transition"],
+        false
+    );
     assert_eq!(boundary.migration_correlation_ids.len(), 1);
     assert_eq!(boundary.after_state["migration_path"], "unwrapped");
     assert_eq!(
@@ -238,7 +243,7 @@ fn cross_family_registrar_transfer_emits_one_unwrapped_candidate_boundary() -> a
         "slice 1 must not invent a predecessor row identity"
     );
     assert!(output.normalized_events.iter().all(|event| {
-        event.source_family != "ens_v2_migration_l1" || event.consumer_visibility == "candidate"
+        event.source_family != "ens_v2_migration_l1" || event.consumer_visibility == "activated"
     }));
     let unrelated_expiry = output
         .normalized_events
@@ -900,6 +905,64 @@ fn two_names_in_one_transaction_keep_separate_authority_boundaries() -> anyhow::
     assert_eq!(
         output.migration_authority_transitions,
         restored.migration_authority_transitions
+    );
+    Ok(())
+}
+
+#[test]
+fn shared_event_waits_until_every_referenced_group_is_complete() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let first = &fixture["scenarios"]["U-01"];
+    let second = &fixture["scenarios"]["W-01"];
+    let block = first["migration_block"].as_i64().unwrap();
+    let mut logs = unlocked_name_logs(first, addresses, block, 1, false)?;
+    logs.extend(unlocked_name_logs(second, addresses, block, 5, true)?);
+    let mut output = interpret_test_batch(batch(logs, &fixture, true))?;
+    let boundary_ids = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "MigrationApplied")
+        .map(|event| event.migration_correlation_ids[0].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(boundary_ids.len(), 2);
+
+    let shared = output
+        .normalized_events
+        .iter_mut()
+        .find(|event| event.event_kind != "MigrationApplied")
+        .expect("the first complete group has dependent event evidence");
+    let complete_id = boundary_ids[0].clone();
+    let incomplete_id = boundary_ids[1].clone();
+    shared.migration_correlation_ids = vec![complete_id, incomplete_id.clone()];
+    shared.consumer_visibility = "candidate".to_owned();
+    if shared.after_state.get("consumer_visibility").is_some() {
+        shared.after_state["consumer_visibility"] = json!("candidate");
+    }
+    let shared_identity = shared.event_identity.clone();
+    output.migration_authority_transitions.clear();
+    output.normalized_events.retain(|event| {
+        event.event_kind != "MigrationApplied"
+            || event.migration_correlation_ids != [incomplete_id.clone()]
+    });
+    output
+        .migration_candidate_identity_effects
+        .retain(|effect| {
+            effect.correlation_kind != "authority_transition"
+                || effect.migration_correlation_ids != [incomplete_id.clone()]
+        });
+
+    super::super::migration::inject_activated_transition_for_test(&mut output)?;
+    assert_eq!(output.migration_authority_transitions.len(), 1);
+    assert_eq!(
+        output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_identity == shared_identity)
+            .expect("shared evidence survives")
+            .consumer_visibility,
+        "candidate",
+        "one incomplete referenced group must keep shared evidence candidate"
     );
     Ok(())
 }
@@ -1668,7 +1731,7 @@ fn reserved_facts_survive_claim_and_incremental_rebuild_boundaries() -> anyhow::
 }
 
 #[test]
-fn premigration_reservation_flood_is_ownerless_and_linear() -> anyhow::Result<()> {
+fn reservation_without_claim_boundary() -> anyhow::Result<()> {
     const RESERVATIONS: usize = 256;
     let fixture = fixture()?;
     let addresses = &fixture["addresses"];
@@ -1694,6 +1757,7 @@ fn premigration_reservation_flood_is_ownerless_and_linear() -> anyhow::Result<()
         ));
     }
     crate::schema_v2::state::reset_v2_refresh_visits();
+    let partitioned_logs = logs.clone();
     let (output, _) = interpret_test_batch_incremental(batch(logs, &fixture, true), None)?;
     assert_eq!(
         output
@@ -1719,6 +1783,31 @@ fn premigration_reservation_flood_is_ownerless_and_linear() -> anyhow::Result<()
     assert!(
         crate::schema_v2::state::v2_refresh_visits() <= RESERVATIONS * 3,
         "reservation refresh must remain linear"
+    );
+    let mut session = None;
+    let mut partitioned_event_ids = Vec::new();
+    for partition in partitioned_logs.chunks(37) {
+        let (partitioned, next) =
+            interpret_test_batch_incremental(batch(partition.to_vec(), &fixture, true), session)?;
+        assert!(partitioned.migration_authority_transitions.is_empty());
+        partitioned_event_ids.extend(
+            partitioned
+                .normalized_events
+                .into_iter()
+                .map(|event| event.event_identity),
+        );
+        session = Some(next);
+    }
+    let mut full_event_ids = output
+        .normalized_events
+        .iter()
+        .map(|event| event.event_identity.clone())
+        .collect::<Vec<_>>();
+    full_event_ids.sort();
+    partitioned_event_ids.sort();
+    assert_eq!(
+        partitioned_event_ids, full_event_ids,
+        "reservation absorption must be deterministic across input partitions"
     );
 
     let label = "versioned-reservation";
@@ -2949,7 +3038,7 @@ fn cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes() -> 
     assert!(
         output.normalized_events.iter().any(|event| {
             event.event_kind == "RegistrationReleased"
-                && event.consumer_visibility == "candidate"
+                && event.consumer_visibility == "activated"
                 && event.after_state["owner"] == addresses["graveyard"]
                 && event.after_state["lifecycle_classification"] == "graveyard_cleanup"
                 && event.after_state["authority_effect"] == "none"
@@ -3187,7 +3276,7 @@ fn migration_registry_association_preserves_the_ordinary_announcement_edge() -> 
     assert!(registry_event.migration_correlation_ids.is_empty());
     assert_eq!(output.migration_discovery_associations.len(), 1);
     let association = &output.migration_discovery_associations[0];
-    assert_eq!(association.consumer_visibility, "candidate");
+    assert_eq!(association.consumer_visibility, "activated");
     assert!(association.logical_edge_identity.starts_with("0x"));
     assert_eq!(association.logical_edge_identity.len(), 66);
     assert!(output.migration_event_associations.iter().any(|candidate| {
@@ -3213,7 +3302,7 @@ fn migration_registry_association_preserves_the_ordinary_announcement_edge() -> 
         scenario["stored_expiry"]
     );
     assert!(output.normalized_events.iter().any(|event| {
-        event.event_kind == "ContractDiscovered" && event.consumer_visibility == "candidate"
+        event.event_kind == "ContractDiscovered" && event.consumer_visibility == "activated"
     }));
 
     let later = raw_at_transaction(
@@ -3380,7 +3469,7 @@ fn migration_registry_association_preserves_the_ordinary_announcement_edge() -> 
         vec![registry_created, registration, token_resource, later],
         &fixture,
     ))?;
-    assert_eq!(activated_events(&full), control.normalized_events);
+    assert_eq!(ordinary_activated_events(&full), control.normalized_events);
     assert_eq!(full.name_surfaces, control.name_surfaces);
     assert_eq!(full.resources, control.resources);
     assert_eq!(full.surface_bindings, control.surface_bindings);
@@ -3390,21 +3479,24 @@ fn migration_registry_association_preserves_the_ordinary_announcement_edge() -> 
     Ok(())
 }
 
-fn activated_events(output: &BatchOutput) -> Vec<NormalizedEvent> {
+fn ordinary_activated_events(output: &BatchOutput) -> Vec<NormalizedEvent> {
     output
         .normalized_events
         .iter()
-        .filter(|event| event.consumer_visibility == "activated")
+        .filter(|event| {
+            event.consumer_visibility == "activated" && event.source_family != "ens_v2_migration_l1"
+        })
         .cloned()
         .collect()
 }
 
 fn assert_activated_transition(output: &mut BatchOutput, path: &str) -> anyhow::Result<()> {
-    assert!(
-        output.migration_authority_transitions.is_empty(),
-        "candidate interpretation must not schedule a binding write"
-    );
+    let production = output.clone();
     super::super::migration::inject_activated_transition_for_test(output)?;
+    assert_eq!(
+        *output, production,
+        "the test seam must be byte-for-byte idempotent with production activation"
+    );
     let transition = output
         .migration_authority_transitions
         .iter()
@@ -3444,6 +3536,72 @@ fn assert_activated_transition(output: &mut BatchOutput, path: &str) -> anyhow::
             .as_i64()
             .is_some_and(|log| log >= transition.log_index)
     );
+    Ok(())
+}
+
+#[test]
+fn unresolved_registry_registration_refuses_only_its_correlation() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let scenario = &fixture["scenarios"]["U-01"];
+    let unresolved = &fixture["scenarios"]["W-01"];
+    let block = scenario["migration_block"].as_i64().unwrap();
+    let unresolved_registry = "0x00000000000000000000000000000000000000f1";
+    let unresolved_label = unresolved["label"].as_str().unwrap();
+    let unresolved_token = decimal_u256(&unresolved["v2_token_id"])?;
+    let mut logs = vec![
+        raw_at_transaction(
+            super::v2_registry::LabelRegistered {
+                tokenId: unresolved_token,
+                labelHash: keccak256(unresolved_label.as_bytes()),
+                label: unresolved_label.to_owned(),
+                owner: Address::from([0x31; 20]),
+                expiry: scenario["stored_expiry"].as_u64().unwrap(),
+                sender: address(addresses, "unlocked_controller")?,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            1,
+            unresolved_registry,
+        ),
+        raw_at_transaction(
+            super::v2_registry::TokenResource {
+                tokenId: unresolved_token,
+                resource: unresolved_token,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            2,
+            unresolved_registry,
+        ),
+    ];
+    logs.extend(unlocked_name_logs(scenario, addresses, block, 4, false)?);
+    let mut input = batch(logs, &fixture, true);
+    input.admissions.push(AddressAdmissionInput {
+        address: unresolved_registry.to_owned(),
+        contract_instance_id: Uuid::from_u128(0xf1),
+        source_manifest_id: Some(REGISTRY_MANIFEST_ID),
+        role: None,
+        discovery_edge_kind: Some("registry_announcement".to_owned()),
+        discovery_from_contract_instance_id: Some(Uuid::from_u128(101)),
+        discovery_observation_key: Some("unresolved-registry".to_owned()),
+        active_from_block: Some(0),
+        active_to_block: None,
+    });
+
+    let output = interpret_test_batch(input)?;
+    assert_eq!(
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "MigrationApplied")
+            .count(),
+        1,
+        "the unresolvable registration is refused without hiding the complete sibling group"
+    );
+    assert_eq!(output.migration_authority_transitions.len(), 1);
     Ok(())
 }
 

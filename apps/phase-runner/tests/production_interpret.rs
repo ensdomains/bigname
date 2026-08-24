@@ -4478,22 +4478,25 @@ async fn assert_loser_departure_reorg_reopens_the_survivor(boundary_expiry: bool
 
 #[tokio::test]
 async fn redo_arm_wide_reopen_requires_the_planted_preimage_marker() -> Result<()> {
-    for plant_marker in [false, true] {
-        let fixture = if plant_marker {
-            "production_interpret_planted_arm_wide_marker"
-        } else {
-            "production_interpret_migration_boundary_control"
-        };
-        let chain = if plant_marker {
-            "interpret-planted-arm-wide-marker"
-        } else {
-            "interpret-migration-boundary-control"
-        };
-        let scratch = ScratchDatabase::create(fixture).await?;
+    for marker in [
+        ReplayMarker::Absent,
+        ReplayMarker::Valid,
+        ReplayMarker::NullBinding,
+        ReplayMarker::Malformed,
+        ReplayMarker::WrongArm,
+        ReplayMarker::WrongRange,
+        ReplayMarker::WrongName,
+        ReplayMarker::UnknownBinding,
+        ReplayMarker::WrongBinding,
+        ReplayMarker::WrongLineage,
+    ] {
+        let fixture = format!("production_interpret_replay_marker_{}", marker.label());
+        let chain = format!("interpret-replay-marker-{}", marker.label());
+        let scratch = ScratchDatabase::create(&fixture).await?;
         let (arm_wide_predecessor, migration_predecessor) =
-            seed_planted_marker_redo_fixture(scratch.pool(), chain, plant_marker).await?;
+            seed_planted_marker_redo_fixture(scratch.pool(), &chain, marker).await?;
 
-        run_engine(scratch.pool(), chain, 2, 2, InterpretRunMode::Redo).await?;
+        run_engine(scratch.pool(), &chain, 2, 2, InterpretRunMode::Redo).await?;
 
         let arm_wide_reopened: bool = sqlx::query_scalar(
             "SELECT active_to IS NULL FROM surface_bindings WHERE surface_binding_id = $1",
@@ -4502,7 +4505,8 @@ async fn redo_arm_wide_reopen_requires_the_planted_preimage_marker() -> Result<(
         .fetch_one(scratch.pool())
         .await?;
         assert_eq!(
-            arm_wide_reopened, plant_marker,
+            arm_wide_reopened,
+            marker == ReplayMarker::Valid,
             "the activated MigrationApplied boundary must not perform the arm-wide reopen; only \
              the planted PreimageObserved marker may do so"
         );
@@ -4522,15 +4526,47 @@ async fn redo_arm_wide_reopen_requires_the_planted_preimage_marker() -> Result<(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplayMarker {
+    Absent,
+    Valid,
+    NullBinding,
+    Malformed,
+    WrongArm,
+    WrongRange,
+    WrongName,
+    UnknownBinding,
+    WrongBinding,
+    WrongLineage,
+}
+
+impl ReplayMarker {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Valid => "valid",
+            Self::NullBinding => "null-binding",
+            Self::Malformed => "malformed",
+            Self::WrongArm => "wrong-arm",
+            Self::WrongRange => "wrong-range",
+            Self::WrongName => "wrong-name",
+            Self::UnknownBinding => "unknown-binding",
+            Self::WrongBinding => "wrong-binding",
+            Self::WrongLineage => "wrong-lineage",
+        }
+    }
+}
+
 async fn seed_planted_marker_redo_fixture(
     pool: &PgPool,
     chain: &str,
-    plant_marker: bool,
+    marker: ReplayMarker,
 ) -> Result<(Uuid, Uuid)> {
     let logical_name_id = "ens:0xplanted-marker";
     let arm_wide_predecessor = Uuid::parse_str("00000000-0000-0000-0000-000000000101")?;
     let migration_predecessor = Uuid::parse_str("00000000-0000-0000-0000-000000000102")?;
     let replacement = Uuid::parse_str("00000000-0000-0000-0000-000000000103")?;
+    let wrong_lineage_replacement = Uuid::parse_str("00000000-0000-0000-0000-000000000104")?;
     let arm_wide_resource = Uuid::parse_str("00000000-0000-0000-0000-000000000201")?;
     let migration_resource = Uuid::parse_str("00000000-0000-0000-0000-000000000202")?;
     let replacement_resource = Uuid::parse_str("00000000-0000-0000-0000-000000000203")?;
@@ -4562,11 +4598,13 @@ async fn seed_planted_marker_redo_fixture(
              block_timestamp, canonicality_state
          ) VALUES
              ($1, $2, NULL, 1, to_timestamp(1), 'canonical'),
-             ($1, $3, $2, 2, to_timestamp(2), 'canonical')",
+             ($1, $3, $2, 2, to_timestamp(2), 'canonical'),
+             ($1, $4, $2, 2, to_timestamp(2), 'orphaned')",
     )
     .bind(chain)
     .bind(block_hash(chain, 1))
     .bind(block_hash(chain, 2))
+    .bind(block_hash(chain, 20))
     .execute(pool)
     .await?;
     sqlx::query(
@@ -4577,6 +4615,10 @@ async fn seed_planted_marker_redo_fixture(
          ) VALUES (
              $1, 'ens', 'planted-marker.eth', ARRAY['planted-marker','eth'],
              decode('00', 'hex'), '0xplanted-marker', ARRAY['0xplanted-marker','0xeth'],
+             $2, 'active', $3, $4, 1, 'canonical'
+         ), (
+             'ens:0xwrong-marker', 'ens', 'wrong-marker.eth', ARRAY['wrong-marker','eth'],
+             decode('01', 'hex'), '0xwrong-marker', ARRAY['0xwrong-marker','0xeth'],
              $2, 'active', $3, $4, 1, 'canonical'
          )",
     )
@@ -4625,6 +4667,24 @@ async fn seed_planted_marker_redo_fixture(
     .execute(pool)
     .await?;
     sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, active_to, chain_id, block_hash,
+             block_number, provenance, canonicality_state
+         ) VALUES (
+             $1, $2, $3, 'declared_registry_path', 'ens_v2', to_timestamp(2),
+             NULL, $4, $5, 2,
+             '{\"transaction_index\":0,\"log_index\":0}'::jsonb, 'orphaned'
+         )",
+    )
+    .bind(wrong_lineage_replacement)
+    .bind(logical_name_id)
+    .bind(replacement_resource)
+    .bind(chain)
+    .bind(block_hash(chain, 20))
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, logical_name_id, event_kind, source_family,
              manifest_version, chain_id, block_number, block_hash, transaction_hash,
@@ -4651,7 +4711,31 @@ async fn seed_planted_marker_redo_fixture(
     .bind(replacement)
     .execute(pool)
     .await?;
-    if plant_marker {
+    if marker != ReplayMarker::Absent {
+        let marker_name = if marker == ReplayMarker::WrongName {
+            "ens:0xwrong-marker"
+        } else {
+            logical_name_id
+        };
+        let marker_block = if marker == ReplayMarker::WrongRange {
+            1
+        } else {
+            2
+        };
+        let marker_hash = block_hash(chain, marker_block);
+        let closed_arm = if marker == ReplayMarker::WrongArm {
+            "ens_v1"
+        } else {
+            "ens_v2"
+        };
+        let opened_binding = match marker {
+            ReplayMarker::NullBinding => None,
+            ReplayMarker::Malformed => Some("not-a-uuid".to_owned()),
+            ReplayMarker::UnknownBinding => Some("00000000-0000-0000-0000-000000000199".to_owned()),
+            ReplayMarker::WrongBinding => Some(migration_predecessor.to_string()),
+            ReplayMarker::WrongLineage => Some(wrong_lineage_replacement.to_string()),
+            _ => Some(replacement.to_string()),
+        };
         sqlx::query(
             "INSERT INTO normalized_events (
                  event_identity, namespace, logical_name_id, event_kind, source_family,
@@ -4660,22 +4744,24 @@ async fn seed_planted_marker_redo_fixture(
                  canonicality_state, before_state, after_state, consumer_visibility
              ) VALUES (
                  $1, 'ens', $2, 'PreimageObserved', 'ens_v2_registry_l1', 1,
-                 $3, 2, $4, $5, 0, 0, '{}'::jsonb, 'raw_log_preimage_observation',
+                 $3, $4, $5, $6, 0, 0, '{}'::jsonb, 'raw_log_preimage_observation',
                  'canonical', '{}'::jsonb,
                  jsonb_build_object(
                      'arm_wide_binding_close', true,
-                     'closed_authority_arm', 'ens_v2',
-                     'surface_binding_id', $6::text
+                     'closed_authority_arm', $7::text,
+                     'surface_binding_id', $8::text
                  ),
                  'activated'
              )",
         )
         .bind(format!("{chain}:planted-arm-wide-marker"))
-        .bind(logical_name_id)
+        .bind(marker_name)
         .bind(chain)
-        .bind(block_hash(chain, 2))
+        .bind(marker_block)
+        .bind(marker_hash)
         .bind(format!("{chain}:marker-transaction"))
-        .bind(replacement)
+        .bind(closed_arm)
+        .bind(opened_binding)
         .execute(pool)
         .await?;
     }
