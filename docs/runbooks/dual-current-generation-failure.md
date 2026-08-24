@@ -129,6 +129,20 @@ Project cascade after an Interpret redo, use all of these signatures:
    [`apps/phase-runner/src/redo_failure.rs:21-49`](../../apps/phase-runner/src/redo_failure.rs#L21-L49)).
    Therefore, do not search only for `phase_status = 'failed'` or require
    `last_error` to begin with the primary text.
+
+   Exception: if the runner cannot persist the failed redo state, the returned
+   aggregate error keeps the primary assertion and appends
+   `; additionally failed to record phase state after redo: [database error]`.
+   For an automatically stamped downstream redo, the phase row can then retain
+   `required downstream redo active: [reason]` without a
+   `last attempt failed:` suffix. The aggregate error in item 1 still identifies
+   the halt, and the complete audit key in item 3 still routes it unless the
+   separately documented audit-insert exception also occurred. Capture those
+   diagnostics and file-and-hold; do not treat the active prefix as proof of an
+   unattempted handoff
+   ([`apps/phase-runner/src/redo_state.rs:191-215`](../../apps/phase-runner/src/redo_state.rs#L191-L215),
+   [`apps/phase-runner/src/runner.rs:371-389`](../../apps/phase-runner/src/runner.rs#L371-L389),
+   [`apps/phase-runner/src/error.rs:60-69`](../../apps/phase-runner/src/error.rs#L60-L69)).
 3. The audit row still has the exact-name failure kind and complete audit key
    described above. If its independent insert fails, use the same
    evidence-preserving file-and-hold exception; the phase row alone does not
@@ -220,7 +234,7 @@ SELECT chain_id,
        last_error,
        COALESCE(
            last_error LIKE
-               '%holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block % is not publishable',
+               '%holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block % is not publishable%',
            false
        ) AS has_dual_current_failure_signature,
        started_at,
