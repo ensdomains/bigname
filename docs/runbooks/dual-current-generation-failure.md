@@ -22,9 +22,11 @@ steps below are complete.
 
 ## Failure signature
 
-Condition 1 identifies this exact halt. Conditions 2 and 3 are the normal
-durable corroboration; each has a separately handled write-failure exception.
-Condition 4 describes the normal API symptom.
+The command and durable phase-row signature depend on whether Project was in
+normal execution or an operator redo. The audit signature is the same in both
+modes.
+
+### Normal Project execution
 
 1. The phase-runner log has the terminal message
    `chain supervisor stopped after a terminal error`, with the affected
@@ -87,9 +89,65 @@ Condition 4 describes the normal API symptom.
    payload; its response shape contains only aggregate and per-chain readiness
    fields ([`apps/api/src/v2/status.rs:18-42`](../../apps/api/src/v2/status.rs#L18-L42)).
 
-Distinguish this halt from other Project failures by the exact primary message
-and, normally, the failed Project row and an audit row with the exact-name
-failure kind. Either documented secondary write failure stops at
+### Project redo execution
+
+When the assertion fires during an explicit Project redo or the automatic
+Project cascade after an Interpret redo, use all of these signatures:
+
+1. The one-shot command exits nonzero with an aggregate error containing the
+   affected chain, `(DataIntegrity)`, and the exact primary assertion text
+   above. For one affected chain its shape is:
+
+   ```text
+   Error: 1 chain supervisor(s) stopped on terminal errors: [chain-id] (DataIntegrity): chain [chain-id] name [logical-name-id] holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block [target-block] is not publishable
+   ```
+
+   `redo_chains` returns each terminal error in `SupervisorReport`; it does not
+   call the normal supervisor's structured-log helper
+   ([`apps/phase-runner/src/runner_operator_redo.rs:384-425`](../../apps/phase-runner/src/runner_operator_redo.rs#L384-L425)).
+   The CLI turns that report into the aggregate error after the redo returns
+   ([`apps/phase-runner/src/main.rs:175-178`](../../apps/phase-runner/src/main.rs#L175-L178),
+   [`apps/phase-runner/src/main.rs:259-272`](../../apps/phase-runner/src/main.rs#L259-L272)).
+   Do not require a `chain supervisor stopped after a terminal error` log entry
+   for this mode; that message belongs to normal supervised execution
+   ([`apps/phase-runner/src/supervisor.rs:58-69`](../../apps/phase-runner/src/supervisor.rs#L58-L69)).
+2. The Project phase row remains `phase_status = 'running'` with
+   `redo_in_progress = true`, `redo_mode = 'redo'`, and the active
+   `redo_from_block_number`/`redo_to_block_number`. Redo start writes that shape,
+   and failed redo completion records `last_error` without clearing the resumable
+   marker or changing the lifecycle status
+   ([`apps/phase-runner/src/redo_state.rs:155-198`](../../apps/phase-runner/src/redo_state.rs#L155-L198),
+   [`apps/phase-runner/src/redo_state.rs:390-402`](../../apps/phase-runner/src/redo_state.rs#L390-L402),
+   [`apps/phase-runner/src/redo_failure.rs:14-38`](../../apps/phase-runner/src/redo_failure.rs#L14-L38)).
+   A directly started redo normally has the primary assertion text in
+   `last_error`. An automatically stamped downstream redo can instead retain
+   `required downstream redo: [reason]; last attempt failed: [primary assertion
+   text]`: redo start changes the required-redo marker to its active form, then
+   failed completion restores the required-redo prefix and appends the attempt
+   failure
+   ([`apps/phase-runner/src/redo_state.rs:191-215`](../../apps/phase-runner/src/redo_state.rs#L191-L215),
+   [`apps/phase-runner/src/redo_failure.rs:21-49`](../../apps/phase-runner/src/redo_failure.rs#L21-L49)).
+   Therefore, do not search only for `phase_status = 'failed'` or require
+   `last_error` to begin with the primary text.
+3. The audit row still has the exact-name failure kind and complete audit key
+   described above. If its independent insert fails, use the same
+   evidence-preserving file-and-hold exception; the phase row alone does not
+   authorize recovery.
+4. With a fresh phase-runner heartbeat and no other stale condition,
+   `GET /v2/status` reports the chain as `degraded`, because an active Project
+   redo is an explicit degraded condition. After the one-shot runner exits and
+   its heartbeat exceeds the configured maximum age, the chain becomes `stale`;
+   another stronger stale condition can also make it stale sooner. This API
+   symptom is timing-dependent: heartbeat staleness is checked before the
+   active-redo condition
+   ([`apps/api/src/v2/status.rs:175-225`](../../apps/api/src/v2/status.rs#L175-L225)).
+   The status route still does not expose the underlying error or audit key.
+
+Distinguish this halt from other Project failures by the exact primary message,
+whether it is the whole `last_error` or the `last attempt failed:` suffix, and
+an audit row with the exact-name failure kind. Normal execution has a failed
+Project row; redo execution has the active running redo row described above.
+Either documented secondary write failure stops at
 evidence-preserving escalation. Other Project errors carry no
 projection-generation evidence, so the runner does not call the audit writer for them
 ([`apps/phase-runner/src/project_phase.rs:143-156`](../../apps/phase-runner/src/project_phase.rs#L143-L156)).
@@ -102,8 +160,8 @@ is outside this runbook and must be escalated to the Project owner
 Keep the affected chain's long-running phase runner stopped. Before any redo,
 restart, deploy, or code change, attach all of the following to the incident:
 
-- the complete terminal log entry, including `chain_id`, `error_kind`, and exact
-  error text;
+- the complete normal-execution terminal log entry or redo CLI aggregate,
+  including `chain_id`, `error_kind`, and exact error text;
 - the phase-runner startup metadata log containing the build SHA and
   [interpreter content hash](../glossary.md#interpreter-content-hash), plus the
   immutable container image ID. The startup log emits those fields at
@@ -127,7 +185,11 @@ Only one conflict is returned by one failed projection generation: the assertion
 orders logical names and takes the first one
 ([`crates/project/src/integrity.rs:192-194`](../../crates/project/src/integrity.rs#L192-L194)).
 After that name is repaired, another conflicting name can therefore be the next
-failure at the same target. Do not declare the chain clean from one repaired row.
+failure at the same target. Route every Project failure during a redo or cascade
+by the newly captured complete audit key: chain, target block number, target
+block hash, interpreter content hash, failure kind, and failure fingerprint. Do
+not declare the chain clean from one repaired row or identify a recurrence from
+the fingerprint alone.
 
 Run the following in a read-only `psql` session against `bigname_phase`. Replace
 the sample values; never paste credentials into the incident.
@@ -146,10 +208,21 @@ SELECT chain_id,
        target_block_hash,
        input_content_hash,
        redo_in_progress,
+       redo_attempt_generation,
        redo_mode,
+       redo_previous_phase_status,
        redo_from_block_number,
        redo_to_block_number,
+       redo_current_block_number,
+       redo_current_block_hash,
+       redo_target_block_number,
+       redo_target_block_hash,
        last_error,
+       COALESCE(
+           last_error LIKE
+               '%holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block % is not publishable',
+           false
+       ) AS has_dual_current_failure_signature,
        started_at,
        finished_at,
        updated_at
@@ -587,11 +660,24 @@ This is why recovery re-derives evidence instead of editing the open interval.
    ([`apps/phase-runner/src/redo_manifest_audit.rs:10-26`](../../apps/phase-runner/src/redo_manifest_audit.rs#L10-L26),
    [`apps/phase-runner/src/redo_manifest_audit.rs:116-145`](../../apps/phase-runner/src/redo_manifest_audit.rs#L116-L145)).
 
-   If Interpret has no marker, Project alone has a persisted redo marker, and
-   the captured before/after phase rows and one-shot record prove it is the
-   downstream marker from the approved Interpret redo, the process was
-   interrupted during the durable Interpret-to-Project handoff.
-   Resume only the exact persisted Project range, then continue at step 6:
+   Reserve the Project-only continuation below for a durable
+   Interpret-to-Project handoff interruption in which no Project attempt failed.
+   Prove that case from the Project row: Interpret has no marker; Project has
+   `phase_status = 'running'`, `redo_in_progress = true`, `redo_mode = 'redo'`,
+   the exact approved downstream range, and
+   `last_error = 'required downstream redo: interpret redo completed'`, with
+   neither `required downstream redo active:` nor `last attempt failed:`. The
+   downstream stamp writes the first form and clears redo progress; starting
+   Project changes it to the active form before phase execution
+   ([`apps/phase-runner/src/redo_stamp.rs:166-203`](../../apps/phase-runner/src/redo_stamp.rs#L166-L203),
+   [`apps/phase-runner/src/redo_state.rs:155-198`](../../apps/phase-runner/src/redo_state.rs#L155-L198)).
+   Require the captured before/after rows and one-shot record to corroborate that
+   origin. An assertion-bearing `last_error` or a `last attempt failed:` suffix
+   proves a Project attempt failed and forbids this continuation. A new audit key
+   first detected after the stamp is corroboration, but an absent audit row alone
+   proves nothing because its insert has a documented failure exception. If the
+   unconsumed handoff stamp is proved, resume only the exact persisted Project
+   range, then continue at step 6:
 
    ```sh
    BIGNAME_IMAGE=<recovery-image> \
@@ -609,7 +695,8 @@ This is why recovery re-derives evidence instead of editing the open interval.
    ([`apps/phase-runner/src/redo_state.rs:571-579`](../../apps/phase-runner/src/redo_state.rs#L571-L579),
    [`apps/phase-runner/src/runner_operator_redo.rs:350-363`](../../apps/phase-runner/src/runner_operator_redo.rs#L350-L363)).
    This exact-marker continuation is not a new Project-only repair. If the
-   marker's origin or persisted range cannot be proved, file-and-hold.
+   marker's origin, persisted range, or unconsumed state cannot be proved,
+   file-and-hold.
 3. If neither Interpret nor Project has a redo marker, require the incident
    owner to identify the earliest
    affected stored block and approve the range through the recorded Interpret
@@ -667,6 +754,8 @@ This is why recovery re-derives evidence instead of editing the open interval.
 5. Let the command's automatic Project cascade run. A successful Interpret redo
    executes the Project redo stamped for the required range
    ([`apps/phase-runner/src/runner_operator_redo.rs:343-363`](../../apps/phase-runner/src/runner_operator_redo.rs#L343-L363)).
+   If Project fails, stop this play and use the recurrence route immediately
+   below; do not continue to step 6.
 6. Require the one-shot command to succeed and both redo markers to be clear,
    then restart the long-running runner under the production procedure with the
    same image and exact Compose file set. Do **not** require Project to be
@@ -679,8 +768,32 @@ This is why recovery re-derives evidence instead of editing the open interval.
    longer stale for this cause. Restore traffic only after the production health
    gates pass.
 
-If the same fingerprint reproduces, stop. Do not widen or repeat the scoped redo.
-Escalate to the boundary play, matching the existing runner instruction
+If any explicit Project redo or automatic Project cascade fails, stop the
+one-shot command and capture the CLI error, active redo row, and corresponding
+audit row before another action. The row can already exist when the same
+complete key recurs. Select it by its complete key—chain, target
+block number, target block hash, interpreter content hash, failure kind, and
+failure fingerprint—not by `detected_at`, name, or fingerprint alone. Those six
+fields are the audit primary key
+([`schema-v2/baseline/12_project_generation_failures.sql:1-14`](../../schema-v2/baseline/12_project_generation_failures.sql#L1-L14)).
+Then compare it with the complete key of the conflict the redo was meant to
+repair:
+
+- If the fingerprint is the same, stop. Do not widen or repeat the scoped redo;
+  escalate to the boundary play, even if the target coordinates differ. This is
+  the same semantic conflict recurring.
+- If the fingerprint differs, treat the row as a fresh conflict: return to
+  [Stop and capture evidence](#stop-and-capture-evidence), run the complete
+  read-only queries for that new key, and perform cause discrimination again.
+  Do not send a different conflict directly to the same-fingerprint boundary
+  escalation; Project deliberately reports only the first logical name in one
+  failed generation
+  ([`crates/project/src/integrity.rs:192-194`](../../crates/project/src/integrity.rs#L192-L194)).
+
+If the audit insert failed or the complete new key cannot be established,
+file-and-hold under the audit-write exception. Never use the Project-only
+handoff continuation after an observed Project failure. The same-fingerprint
+boundary route matches the existing runner instruction
 ([`docs/runbooks/production-docker.md:498-516`](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 
 ### Indexing defect: file, fix, then re-derive
@@ -699,8 +812,9 @@ manifest owner confirms one of these reviewed outcomes:
   [admission](../glossary.md#admission), or the required historical
   fetch: use its approved re-derivation-boundary plan.
 
-If the scoped redo reproduces the conflict, attach the new log and audit result
-to the issue and escalate to the boundary plan. Do not keep retrying.
+If the scoped redo reaches another Project failure, attach the new log and audit
+result to the issue and follow the complete-key recurrence route above. Do not
+keep retrying.
 
 ### Wrong invariant: file and hold for a code fix
 
