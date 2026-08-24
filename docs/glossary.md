@@ -262,9 +262,11 @@ admission, and omitting a previously finite start backdates that active epoch to
 zero. Retained omitted-start manifest history contributes zero even when
 Interpret's discovery refresh rewrites the address row from `NULL` to its
 first-observed block or an older binary left the same finite state
-([issue #547](https://github.com/ensdomains/bigname/issues/547)). When the active
-declaration still omits that start, synchronization restores zero and stamps
-Ingest and derived phases to redo the restored interval. The repair is one-shot:
+([issue #547](https://github.com/ensdomains/bigname/issues/547)). When a desired
+active declaration identifies that omitted start, synchronization restores zero
+on the earliest address epoch even if retired; later re-admitted epochs keep
+their bounded starts. It stamps Ingest and derived phases to redo the restored
+interval. The repair is one-shot:
 the stored row is then zero and its positive-floor predicate cannot fire again;
 a current finite declaration keeps its finite watch bound. Reusing a retired
 address under another declaration identity remains conservative when the new

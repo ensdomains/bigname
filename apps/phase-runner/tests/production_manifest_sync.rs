@@ -2078,6 +2078,157 @@ async fn unchanged_omitted_manifest_repairs_legacy_floor_with_redo() -> Result<(
 }
 
 #[tokio::test]
+async fn retired_omitted_initial_epoch_repairs_legacy_floor_on_readmission() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_retired_legacy_null_floor").await?;
+    let pool = scratch.pool();
+    let chain_id = "manifest-retired-legacy-null-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let omitted_manifest = fs::read_to_string(&path)?
+        .replacen("start_block = 0\n", "", 1)
+        .replacen("roots = []", "roots = []\ndiscovery_rules = []", 1)
+        .replacen(
+            "[[discovery_rules]]\nedge_kind = \"resolver\"\nfrom_role = \"registry\"\nadmission = \"reachable_from_root\"",
+            "",
+            1,
+        );
+    fs::write(&path, &omitted_manifest)?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses SET active_from_block_number = 1 \
+         WHERE chain_id = $1 AND lower(address) = $2 AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .execute(pool)
+    .await?;
+
+    fs::remove_file(&path)?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    let retired_floor: Option<i64> = sqlx::query_scalar(
+        "SELECT active_from_block_number FROM contract_instance_addresses \
+         WHERE chain_id = $1 AND lower(address) = $2 AND deactivated_at IS NOT NULL \
+         ORDER BY contract_instance_address_id LIMIT 1",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(retired_floor, Some(1));
+    fs::write(&path, omitted_manifest)?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $2 \
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+
+    let epochs: Vec<(Option<i64>, Option<i64>, bool)> = sqlx::query_as(
+        "SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL \
+         FROM contract_instance_addresses WHERE chain_id = $1 AND lower(address) = $2 \
+         ORDER BY contract_instance_address_id",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        epochs,
+        vec![(Some(0), Some(1), false), (Some(2), None, true)]
+    );
+
+    let filter = load_persisted_watch_filter(pool, chain_id, 0, 1).await?;
+    let resolver_updated = format!(
+        "{:#x}",
+        keccak256(b"ResolverUpdated(uint256,address,address)")
+    );
+    assert!(
+        filter.includes(
+            "0x0000000000000000000000000000000000000004",
+            &resolver_updated,
+            0,
+        ),
+        "the block-zero redo must include the repaired retired initial epoch"
+    );
+    assert_eq!(required_ingest_redo(pool, chain_id).await?, Some((0, 1)));
+    let derived_invalidated: bool = sqlx::query_scalar(
+        "SELECT bool_and(input_content_hash LIKE 'manifest-authority:%') \
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?;
+    assert!(derived_invalidated);
+    let phase_markers: Vec<(String, Option<String>, Option<String>, String)> = sqlx::query_as(
+        "SELECT phase_name, input_content_hash, last_error, updated_at::text \
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project') \
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    let repeated_phase_markers: Vec<(String, Option<String>, Option<String>, String)> =
+        sqlx::query_as(
+            "SELECT phase_name, input_content_hash, last_error, updated_at::text \
+             FROM chain_phase_state WHERE chain_id = $1 AND phase_name IN ('ingest', 'interpret', 'project') \
+             ORDER BY phase_name",
+        )
+        .bind(chain_id)
+        .fetch_all(pool)
+        .await?;
+    assert_eq!(repeated_phase_markers, phase_markers);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn retired_finite_initial_epoch_is_not_repaired_as_omitted() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_retired_finite_floor").await?;
+    let pool = scratch.pool();
+    let chain_id = "manifest-retired-finite-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let finite_manifest = fs::read_to_string(&path)?
+        .replacen("start_block = 0", "start_block = 1", 1)
+        .replacen("roots = []", "roots = []\ndiscovery_rules = []", 1)
+        .replacen(
+            "[[discovery_rules]]\nedge_kind = \"resolver\"\nfrom_role = \"registry\"\nadmission = \"reachable_from_root\"",
+            "",
+            1,
+        );
+    fs::write(&path, &finite_manifest)?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fs::remove_file(&path)?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    fs::write(&path, finite_manifest)?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    let epochs: Vec<(Option<i64>, Option<i64>, bool)> = sqlx::query_as(
+        "SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL \
+         FROM contract_instance_addresses WHERE chain_id = $1 AND lower(address) = $2 \
+         ORDER BY contract_instance_address_id",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        epochs,
+        vec![(Some(1), Some(1), false), (Some(2), None, true)]
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn retired_admission_epoch_remains_a_discovery_floor() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_retired_epoch_floor").await?;
     let chain_id = "manifest-retired-epoch-floor";
@@ -2807,6 +2958,126 @@ async fn schema_v2_manifest_sync_refuses_a_running_chain_phase() -> Result<()> {
         .fetch_one(scratch.pool())
         .await?;
     assert_eq!(manifests, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn historical_floor_repair_waits_for_executable_readmission() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_historical_floor_lock").await?;
+    let retired_chain = "manifest-historical-floor-lock-retired";
+    let retired = WatchManifestFixture::new(retired_chain)?;
+    retired.write(false, false)?;
+    let retired_path = retired.root.join("test/test_events/v1.toml");
+    let omitted_manifest = fs::read_to_string(&retired_path)?.replacen("start_block = 0\n", "", 1);
+    fs::write(&retired_path, &omitted_manifest)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&retired.root)?).await?;
+    seed_completed_ingest_range(&scratch, retired_chain).await?;
+
+    let active_chain = "manifest-historical-floor-lock-active";
+    let active = WatchManifestFixture::new(active_chain)?;
+    active.write_namespace_emitter("active", 0, "resolver", false)?;
+    let active_repository = load_repository(&active.root)?;
+    sync_schema_v2_repository(scratch.pool(), &active_repository).await?;
+    seed_chain_head(scratch.pool(), active_chain, 1).await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses SET active_from_block_number = 1 \
+         WHERE chain_id = $1 AND lower(address) = $2 AND deactivated_at IS NOT NULL",
+    )
+    .bind(retired_chain)
+    .bind("0x0000000000000000000000000000000000000004")
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $2 \
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(retired_chain)
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+    let marker_before = interpret_input_hash(scratch.pool(), retired_chain).await?;
+    let ingest_updated_before: String = sqlx::query_scalar(
+        "SELECT updated_at::text FROM chain_phase_state \
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(retired_chain)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    let mut lock_connection = scratch.pool().acquire().await?;
+    let lock_name = format!("phase-runner:{retired_chain}:interpret");
+    let acquired: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1::text, 0::bigint))")
+            .bind(&lock_name)
+            .fetch_one(&mut *lock_connection)
+            .await?;
+    assert!(acquired);
+    sync_schema_v2_repository(scratch.pool(), &active_repository).await?;
+    let retained_floor: Option<i64> = sqlx::query_scalar(
+        "SELECT active_from_block_number FROM contract_instance_addresses \
+         WHERE chain_id = $1 AND lower(address) = $2 AND deactivated_at IS NOT NULL",
+    )
+    .bind(retired_chain)
+    .bind("0x0000000000000000000000000000000000000004")
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(retained_floor, Some(1));
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), retired_chain).await?,
+        None
+    );
+    assert_eq!(
+        interpret_input_hash(scratch.pool(), retired_chain).await?,
+        marker_before
+    );
+    let ingest_updated_while_retired: String = sqlx::query_scalar(
+        "SELECT updated_at::text FROM chain_phase_state \
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(retired_chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(ingest_updated_while_retired, ingest_updated_before);
+    let released: bool =
+        sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1::text, 0::bigint))")
+            .bind(&lock_name)
+            .fetch_one(&mut *lock_connection)
+            .await?;
+    assert!(released);
+    drop(lock_connection);
+
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&retired.root)?).await?;
+    let epochs: Vec<(Option<i64>, Option<i64>, bool)> = sqlx::query_as(
+        "SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL \
+         FROM contract_instance_addresses WHERE chain_id = $1 AND lower(address) = $2 \
+         ORDER BY contract_instance_address_id",
+    )
+    .bind(retired_chain)
+    .bind("0x0000000000000000000000000000000000000004")
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        epochs,
+        vec![(Some(0), Some(1), false), (Some(2), None, true)]
+    );
+    let filter = load_persisted_watch_filter(scratch.pool(), retired_chain, 0, 1).await?;
+    let transfer = format!("{:#x}", keccak256(b"Transfer(address,address,uint256)"));
+    assert!(filter.includes("0x0000000000000000000000000000000000000004", &transfer, 0,));
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), retired_chain).await?,
+        Some((0, 1))
+    );
+    let ingest_updated_after: String = sqlx::query_scalar(
+        "SELECT updated_at::text FROM chain_phase_state \
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(retired_chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_ne!(ingest_updated_after, ingest_updated_before);
+    let marker_after = interpret_input_hash(scratch.pool(), retired_chain).await?;
+    assert_ne!(marker_after, marker_before);
+    assert!(marker_after.starts_with("manifest-authority:"));
     scratch.cleanup().await
 }
 

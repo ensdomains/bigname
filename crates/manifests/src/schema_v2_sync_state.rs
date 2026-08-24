@@ -252,19 +252,7 @@ pub(super) async fn active_admission_floors(
 ) -> Result<BTreeMap<String, super::watch::AdmissionFloors>> {
     // Retained manifest facts preserve role-specific starts across child replacement and retirement;
     // combine them with persisted address ranges exactly as Interpret does.
-    let payloads: Vec<Value> = sqlx::query_scalar(
-        "SELECT manifest_payload FROM manifest_versions WHERE rollout_status = 'active' UNION ALL SELECT before_state -> 'manifest_payload' FROM normalized_events WHERE event_kind = 'SourceManifestUpdated' AND derivation_kind = 'manifest_sync' AND before_state ->> 'rollout_status' = 'active' AND before_state ? 'manifest_payload' UNION ALL SELECT after_state -> 'manifest_payload' FROM normalized_events WHERE event_kind = 'SourceManifestUpdated' AND derivation_kind = 'manifest_sync' AND after_state ->> 'rollout_status' = 'active' AND after_state ? 'manifest_payload'",
-    )
-    .fetch_all(&mut **transaction)
-    .await
-    .context("failed to load retained manifest admission history")?;
-    let manifests = payloads
-        .into_iter()
-        .map(|payload| {
-            serde_json::from_value::<SourceManifest>(payload)
-                .context("failed to decode retained manifest admission history")
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let manifests = super::persistence::retained_admission_manifests(transaction).await?;
     let address_keys = manifests
         .iter()
         .flat_map(|manifest| {
@@ -332,6 +320,7 @@ pub(super) async fn active_admission_floors(
     }
     Ok(by_chain)
 }
+
 async fn invalidation_marker(
     transaction: &mut Transaction<'_, Postgres>,
     encoded_authority: Vec<u8>,

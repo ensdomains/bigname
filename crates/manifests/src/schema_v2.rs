@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use alloy_primitives::keccak256;
 use anyhow::{Context, Result, bail};
@@ -16,7 +16,8 @@ mod watch;
 
 use persistence::{
     deactivate_retired_manifest_addresses, insert_declaration, normalize_address,
-    reopen_proxy_edge, resolve_contract, validate_proxy_shape,
+    reopen_proxy_edge, repair_retired_omitted_admission_floors, resolve_contract,
+    validate_proxy_shape,
 };
 
 const SCHEMA_V2_MANIFEST_SYNC_LOCK: i64 = 0x4249_474e_414d_4532;
@@ -86,6 +87,33 @@ pub async fn sync_schema_v2_repository(
         .execute(&mut *transaction)
         .await
         .context("failed to take schema-v2 manifest sync advisory lock")?;
+    let mut omitted_admission_addresses = BTreeSet::new();
+    for loaded in repository
+        .manifests()
+        .iter()
+        .filter(|loaded| loaded.manifest.rollout_status.is_active())
+    {
+        let manifest = &loaded.manifest;
+        omitted_admission_addresses.extend(
+            manifest
+                .roots
+                .iter()
+                .filter(|root| root.start_block.is_none())
+                .map(|root| (manifest.chain.clone(), normalize_address(&root.address))),
+        );
+        for contract in manifest
+            .contracts
+            .iter()
+            .filter(|contract| contract.start_block.is_none())
+        {
+            omitted_admission_addresses
+                .insert((manifest.chain.clone(), normalize_address(&contract.address)));
+            if let Some(implementation) = contract.implementation.as_deref() {
+                omitted_admission_addresses
+                    .insert((manifest.chain.clone(), normalize_address(implementation)));
+            }
+        }
+    }
     sync_state::lock_phase_writers(&mut transaction, repository).await?;
     let previous_authority = sync_state::active_authority(&mut transaction).await?;
     let previous_admission_floors = sync_state::active_admission_floors(&mut transaction).await?;
@@ -135,6 +163,12 @@ pub async fn sync_schema_v2_repository(
         write_manifest_event(&mut transaction, Some(before), &after).await?;
     }
     deactivate_retired_manifest_addresses(&mut transaction).await?;
+    repair_retired_omitted_admission_floors(
+        &mut transaction,
+        &omitted_admission_addresses,
+        &mut repaired_floor_chains,
+    )
+    .await?;
     sync_state::invalidate_changed_derived_epochs(
         &mut transaction,
         &previous_authority,

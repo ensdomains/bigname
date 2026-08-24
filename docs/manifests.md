@@ -915,9 +915,11 @@ Retained omitted-start manifest history also contributes zero during widening
 classification. Interpret's discovery refresh can replace an initial epoch's
 stored `NULL` with the first-observed block before the next manifest sync, and
 older binaries may leave the same finite state
-([issue #547](https://github.com/ensdomains/bigname/issues/547)). While the current
-declaration still omits its start, synchronization restores zero and stamps
-Ingest plus the derived phases to redo the restored interval. That repair
+([issue #547](https://github.com/ensdomains/bigname/issues/547)). When a desired
+active declaration identifies that omitted start, synchronization restores zero
+on the earliest address epoch even if it has retired, while any re-admitted
+epoch remains bounded after it, and stamps Ingest plus the derived phases to
+redo the restored interval. That repair
 converges in one sync: the stored row is then zero and its positive-floor
 predicate cannot fire again. A current finite declaration keeps the persisted
 finite watch bound; retained omitted-start history still supplies zero only to

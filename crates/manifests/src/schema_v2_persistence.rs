@@ -1,10 +1,11 @@
 use alloy_primitives::keccak256;
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
+use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
 
-use crate::{LoadedManifest, ManifestContract};
+use crate::{LoadedManifest, ManifestContract, SourceManifest};
 
 #[derive(sqlx::FromRow)]
 struct RetiredManifestAddress {
@@ -383,6 +384,66 @@ pub(super) async fn deactivate_retired_manifest_addresses(
         })?;
     }
     Ok(())
+}
+
+pub(super) async fn repair_retired_omitted_admission_floors(
+    transaction: &mut Transaction<'_, Postgres>,
+    omitted_addresses: &BTreeSet<(String, String)>,
+    repaired_floor_chains: &mut HashSet<String>,
+) -> Result<()> {
+    if omitted_addresses.is_empty() {
+        return Ok(());
+    }
+    let (chains, addresses): (Vec<_>, Vec<_>) = omitted_addresses.iter().cloned().unzip();
+    let repaired: Vec<String> = sqlx::query_scalar(
+        "WITH target AS ( \
+             SELECT chain_id, address FROM unnest($1::text[], $2::text[]) target(chain_id, address) \
+         ), earliest AS ( \
+             SELECT DISTINCT ON (admission.chain_id, lower(admission.address)) \
+                    admission.contract_instance_address_id \
+             FROM contract_instance_addresses admission \
+             JOIN target ON target.chain_id = admission.chain_id \
+                        AND target.address = lower(admission.address) \
+             WHERE admission.deactivated_at IS NOT NULL \
+               AND admission.active_to_block_number IS NOT NULL \
+             ORDER BY admission.chain_id, lower(admission.address), \
+                      admission.contract_instance_address_id \
+         ) \
+         UPDATE contract_instance_addresses admission \
+         SET active_from_block_number = 0, active_from_block_hash = NULL \
+         FROM earliest \
+         WHERE admission.contract_instance_address_id = earliest.contract_instance_address_id \
+           AND admission.active_from_block_number > 0 \
+         RETURNING admission.chain_id",
+    )
+    .bind(chains)
+    .bind(addresses)
+    .fetch_all(&mut **transaction)
+    .await
+    .context("failed to repair retired omitted-start admission floors")?;
+    for chain_id in repaired.into_iter().collect::<BTreeSet<_>>() {
+        super::sync_state::stamp_required_ingest(transaction, &chain_id, 0).await?;
+        repaired_floor_chains.insert(chain_id);
+    }
+    Ok(())
+}
+
+pub(super) async fn retained_admission_manifests(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<Vec<SourceManifest>> {
+    let payloads: Vec<Value> = sqlx::query_scalar(
+        "SELECT manifest_payload FROM manifest_versions WHERE rollout_status = 'active' UNION ALL SELECT before_state -> 'manifest_payload' FROM normalized_events WHERE event_kind = 'SourceManifestUpdated' AND derivation_kind = 'manifest_sync' AND before_state ->> 'rollout_status' = 'active' AND before_state ? 'manifest_payload' UNION ALL SELECT after_state -> 'manifest_payload' FROM normalized_events WHERE event_kind = 'SourceManifestUpdated' AND derivation_kind = 'manifest_sync' AND after_state ->> 'rollout_status' = 'active' AND after_state ? 'manifest_payload'",
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .context("failed to load retained manifest admission history")?;
+    payloads
+        .into_iter()
+        .map(|payload| {
+            serde_json::from_value::<SourceManifest>(payload)
+                .context("failed to decode retained manifest admission history")
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

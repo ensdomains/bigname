@@ -166,9 +166,11 @@ fresh admission still stores its declared finite start. For compatibility,
 retained omitted-start manifest history supplies the zero widening floor even
 if Interpret's discovery refresh replaces the stored `NULL` with the
 first-observed block before the next manifest sync or an older binary left the
-same finite state ([issue #547](https://github.com/ensdomains/bigname/issues/547)). If the active
-declaration still omits its start, synchronization restores zero and stamps
-Ingest plus the derived phases to redo the restored interval. The repair is
+same finite state ([issue #547](https://github.com/ensdomains/bigname/issues/547)). When a desired
+active declaration identifies that omitted start, synchronization restores zero
+on the earliest address epoch even if retired; later re-admitted epochs keep
+their bounded starts. It stamps Ingest plus the derived phases to redo the
+restored interval. The repair is
 one-shot because the stored row is then zero and its positive-floor predicate
 cannot fire again; a current finite declaration keeps its finite watch bound.
 
