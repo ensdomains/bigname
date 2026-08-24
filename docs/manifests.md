@@ -912,12 +912,16 @@ effective-zero floor. Conversely, omitting a previously finite start backdates
 that active epoch to zero, so the required redo can select the newly widened
 interval. Re-admitting a retired address still begins after its prior epoch.
 Retained omitted-start manifest history also contributes zero during widening
-classification. If an older binary already replaced an initial epoch's stored
-`NULL` with a finite start while the current declaration still omits its start,
-synchronization restores zero and stamps Ingest plus the derived phases to redo
-the restored interval. A current finite declaration keeps the persisted finite
-watch bound; retained omitted-start history still supplies zero only to later
-widening classification. Thus
+classification. Interpret's discovery refresh can replace an initial epoch's
+stored `NULL` with the first-observed block before the next manifest sync, and
+older binaries may leave the same finite state
+([issue #547](https://github.com/ensdomains/bigname/issues/547)). While the current
+declaration still omits its start, synchronization restores zero and stamps
+Ingest plus the derived phases to redo the restored interval. That repair
+converges in one sync: the stored row is then zero and its positive-floor
+predicate cannot fire again. A current finite declaration keeps the persisted
+finite watch bound; retained omitted-start history still supplies zero only to
+later widening classification. Thus
 splitting a declaration-start raise and a discovery-enabling change across two
 synchronizations cannot make a historically admitted emitter future-only. A
 rule with no matching declaration contributes block zero as a conservative

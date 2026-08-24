@@ -259,11 +259,14 @@ later Interpret provenance writes do not recap or erase it. An omitted start is
 an effective block-zero bound; refreshing its initial-epoch active address row
 materializes zero so a later finite declaration cannot recap that retained
 admission, and omitting a previously finite start backdates that active epoch to
-zero. Retained omitted-start manifest history contributes zero even when an
-older binary already rewrote the address row to a finite start. When the active
+zero. Retained omitted-start manifest history contributes zero even when
+Interpret's discovery refresh rewrites the address row from `NULL` to its
+first-observed block or an older binary left the same finite state
+([issue #547](https://github.com/ensdomains/bigname/issues/547)). When the active
 declaration still omits that start, synchronization restores zero and stamps
-Ingest and derived phases to redo the restored interval; a current finite
-declaration keeps its finite watch bound. Reusing a retired
+Ingest and derived phases to redo the restored interval. The repair is one-shot:
+the stored row is then zero and its positive-floor predicate cannot fire again;
+a current finite declaration keeps its finite watch bound. Reusing a retired
 address under another declaration identity remains conservative when the new
 declared start precedes the bounded new active range: the older shared address
 floor can still cause rejection. If a full Interpret redo deletes the last

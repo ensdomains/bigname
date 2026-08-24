@@ -164,10 +164,13 @@ that active epoch to zero so the widened watch range is reproducible. A
 readmission after retirement remains bounded after the preceding epoch, and a
 fresh admission still stores its declared finite start. For compatibility,
 retained omitted-start manifest history supplies the zero widening floor even
-if an older binary already replaced the stored `NULL` with a finite value. If
-the active declaration still omits its start, synchronization restores zero and
-stamps Ingest plus the derived phases to redo the restored interval; a current
-finite declaration keeps its finite watch bound.
+if Interpret's discovery refresh replaces the stored `NULL` with the
+first-observed block before the next manifest sync or an older binary left the
+same finite state ([issue #547](https://github.com/ensdomains/bigname/issues/547)). If the active
+declaration still omits its start, synchronization restores zero and stamps
+Ingest plus the derived phases to redo the restored interval. The repair is
+one-shot because the stored row is then zero and its positive-floor predicate
+cannot fire again; a current finite declaration keeps its finite watch bound.
 
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing
