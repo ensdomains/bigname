@@ -103,6 +103,7 @@ pub async fn sync_schema_v2_repository(
     let mut discovery_rule_count = 0usize;
     let mut proxy_edge_count = 0usize;
     let mut desired_keys = HashSet::new();
+    let mut repaired_floor_chains = HashSet::new();
     for loaded in repository.manifests() {
         let file_path = loaded.relative_path.to_string_lossy().into_owned();
         let manifest_id = upsert_manifest(&mut transaction, loaded, &file_path).await?;
@@ -114,7 +115,13 @@ pub async fn sync_schema_v2_repository(
         {
             write_manifest_event(&mut transaction, existing.get(&state.key), &state).await?;
         }
-        let counts = replace_manifest_children(&mut transaction, manifest_id, loaded).await?;
+        let counts = replace_manifest_children(
+            &mut transaction,
+            manifest_id,
+            loaded,
+            &mut repaired_floor_chains,
+        )
+        .await?;
         declaration_count += counts.0;
         discovery_rule_count += counts.1;
         proxy_edge_count += counts.2;
@@ -133,6 +140,7 @@ pub async fn sync_schema_v2_repository(
         &previous_authority,
         &desired_authority,
         &previous_admission_floors,
+        &repaired_floor_chains,
     )
     .await?;
     transaction
@@ -353,6 +361,7 @@ async fn replace_manifest_children(
     transaction: &mut Transaction<'_, Postgres>,
     manifest_id: i64,
     loaded: &LoadedManifest,
+    repaired_floor_chains: &mut HashSet<String>,
 ) -> Result<(usize, usize, usize)> {
     sqlx::query("DELETE FROM manifest_contract_instances WHERE manifest_id = $1")
         .bind(manifest_id)
@@ -397,6 +406,7 @@ async fn replace_manifest_children(
                 "declaration_name": root.name,
                 "declared_address": address,
             }),
+            repaired_floor_chains,
         )
         .await?;
         insert_declaration(
@@ -437,6 +447,7 @@ async fn replace_manifest_children(
                 "declaration_name": contract.role,
                 "declared_address": address,
             }),
+            repaired_floor_chains,
         )
         .await?;
         let implementation = if let Some(implementation) = contract.implementation.as_deref() {
@@ -456,6 +467,7 @@ async fn replace_manifest_children(
                     "proxy_address": address,
                     "declared_address": implementation,
                 }),
+                repaired_floor_chains,
             )
             .await?;
             Some((implementation_id, implementation))

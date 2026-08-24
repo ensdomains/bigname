@@ -155,6 +155,20 @@ Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
 
+For a manifest-declared address, an omitted `start_block` is initially stored
+as `contract_instance_addresses.active_from_block_number = NULL`; interval
+readers treat it as an effective block-zero lower bound. Refreshing that same
+initial-epoch active row materializes zero instead of replacing it with a later
+finite declaration start. Omitting a previously finite start also backdates
+that active epoch to zero so the widened watch range is reproducible. A
+readmission after retirement remains bounded after the preceding epoch, and a
+fresh admission still stores its declared finite start. For compatibility,
+retained omitted-start manifest history supplies the zero widening floor even
+if an older binary already replaced the stored `NULL` with a finite value. If
+the active declaration still omits its start, synchronization restores zero and
+stamps Ingest plus the derived phases to redo the restored interval; a current
+finite declaration keeps its finite watch bound.
+
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing
 the retained range markers, source provenance, verification level, or content

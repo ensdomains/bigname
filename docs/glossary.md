@@ -255,7 +255,15 @@ shared by chain and address. Synchronization reconstructs the floor from current
 declarations and active manifest states retained by `SourceManifestUpdated`,
 combined with current and finitely retired contract-address active ranges named by those
 manifests. A declaration start rewritten by an earlier synchronization and
-later Interpret provenance writes do not recap or erase it. Reusing a retired
+later Interpret provenance writes do not recap or erase it. An omitted start is
+an effective block-zero bound; refreshing its initial-epoch active address row
+materializes zero so a later finite declaration cannot recap that retained
+admission, and omitting a previously finite start backdates that active epoch to
+zero. Retained omitted-start manifest history contributes zero even when an
+older binary already rewrote the address row to a finite start. When the active
+declaration still omits that start, synchronization restores zero and stamps
+Ingest and derived phases to redo the restored interval; a current finite
+declaration keeps its finite watch bound. Reusing a retired
 address under another declaration identity remains conservative when the new
 declared start precedes the bounded new active range: the older shared address
 floor can still cause rejection. If a full Interpret redo deletes the last
@@ -1187,11 +1195,13 @@ transfer powers before the later wrapper expiry.
 **Manifest-authority marker** — a
 `manifest-authority:<authority-fingerprint>:<invalidation-token>` value that
 manifest synchronization records in a derived phase's input-hash field when
-the active manifest authority changes. The fingerprint identifies the desired
-manifest set. The database mints a new invalidation token for every transition,
+the active manifest authority changes or a persisted admission-floor repair
+invalidates derived results. The fingerprint identifies the desired manifest
+set. The database mints a new invalidation token for every invalidation,
 including a later return to the same desired set. The marker poisons ordinary
-hash adoption until the required full redo begins. It proves that authority
-changed; it does not prove that facts required by a widened watch plan were
+hash adoption until the required full redo begins. It proves that derived
+results must be redone under the named authority; it does not itself prove the
+manifest set changed or that facts required by a widened watch plan were
 fetched. When manifest synchronization detects that the desired watch plan
 widens over retained Ingest coverage, it also stamps a required Ingest redo for
 the affected range. That marker blocks ordinary derivation until the operator

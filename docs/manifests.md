@@ -62,11 +62,10 @@ The loader also rejects two active manifest versions on the same chain when both
 
 Each `[[roots]]` and `[[contracts]]` entry may declare an optional `start_block`.
 `start_block` is the inclusive first historical block for that target. Omitted
-means unknown, and manifest storage preserves it as null. The stabilized Stage B
-ingest and interpret loaders currently use zero as the effective range-filter
-fallback for an omitted value. That fallback is a documented port gap, not
-historical provenance or authority to run an unbounded ingest; the phase range
-must still be admitted explicitly.
+means deployment provenance is unknown, and manifest storage preserves it as
+null. Runtime watch and Interpret selection use block zero as its conservative
+lower bound within an admitted phase range. That authorizes intake from zero;
+it does not claim that the contract was deployed at genesis.
 
 For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits
 `implementation`. Any non-`none` `proxy_kind` includes `implementation` as the
@@ -905,7 +904,20 @@ reconstructs the floor from current active declarations and the active manifest
 states retained by `SourceManifestUpdated`, combined with current and finitely
 retired contract-address active ranges named by those manifests. It is not recapped by
 declaration text rewritten in an earlier synchronization or erased by later
-Interpret provenance writes. Thus
+Interpret provenance writes. An omitted declaration start is stored as `NULL`
+on its first admission and read as an effective block-zero lower bound. Within
+that initial address epoch, refreshing the active row materializes the bound as
+zero; a later finite declaration therefore cannot replace the retained
+effective-zero floor. Conversely, omitting a previously finite start backdates
+that active epoch to zero, so the required redo can select the newly widened
+interval. Re-admitting a retired address still begins after its prior epoch.
+Retained omitted-start manifest history also contributes zero during widening
+classification. If an older binary already replaced an initial epoch's stored
+`NULL` with a finite start while the current declaration still omits its start,
+synchronization restores zero and stamps Ingest plus the derived phases to redo
+the restored interval. A current finite declaration keeps the persisted finite
+watch bound; retained omitted-start history still supplies zero only to later
+widening classification. Thus
 splitting a declaration-start raise and a discovery-enabling change across two
 synchronizations cannot make a historically admitted emitter future-only. A
 rule with no matching declaration contributes block zero as a conservative
@@ -1116,10 +1128,13 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
 
 - The chain-intake watch target is the address range attached to each active contract instance at the requested time.
 - If a manifest target carries `start_block`, the materialized watch range starts at that inclusive block unless a later active-range boundary narrows it.
-- If `start_block` is omitted, the historical start is unknown and a finite
-  historical ingest must obtain an explicit admitted bound. The current Stage B
-  loaders nevertheless use zero as their effective range-filter fallback; that
-  implementation gap does not make zero authoritative.
+- If `start_block` is omitted, runtime watch and Interpret selection use block
+  zero as the effective lower bound; this is a conservative intake boundary,
+  not a claim that the upstream contract was deployed at genesis. Refreshing an
+  existing initial-epoch address row materializes that effective-zero bound so
+  a later finite declaration cannot erase retained-history evidence; omitting a
+  previously finite start likewise backdates that active epoch to zero. A
+  readmission after retirement remains bounded after the preceding epoch.
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 

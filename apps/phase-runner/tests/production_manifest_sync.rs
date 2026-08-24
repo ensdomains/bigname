@@ -814,7 +814,6 @@ async fn rewind_preserves_a_required_ingest_obligation_above_the_new_head() -> R
     fixture.write(false, false)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
     seed_completed_ingest_range(&scratch, chain_id).await?;
-
     fixture.write(true, false)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
     assert_eq!(
@@ -1390,6 +1389,10 @@ async fn future_only_resolver_epoch_match_is_admissible() -> Result<()> {
     fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
     fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        test_registry_active_from(scratch.pool(), chain_id).await?,
+        Some(2)
+    );
     seed_completed_ingest_range(&scratch, chain_id).await?;
 
     fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
@@ -1918,6 +1921,158 @@ async fn persisted_admission_floor_survives_prior_start_raise() -> Result<()> {
             .to_string()
             .contains("newly matching deployment epoch"),
         "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn omitted_admission_floor_survives_prior_start_raise() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_split_null_epoch_floor").await?;
+    let pool = scratch.pool();
+    let chain_id = "manifest-split-null-epoch-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen("start_block = 0\n", "", 1),
+    )?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    assert_eq!(test_registry_active_from(pool, chain_id).await?, None);
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen(
+            "proxy_kind = \"none\"\n\n[[discovery_rules]]",
+            "proxy_kind = \"none\"\nstart_block = 2\n\n[[discovery_rules]]",
+            1,
+        ),
+    )?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    assert_eq!(test_registry_active_from(pool, chain_id).await?, Some(0));
+    assert_eq!(required_ingest_redo(pool, chain_id).await?, None);
+    sqlx::query(
+        "UPDATE contract_instance_addresses SET active_from_block_number = 2 \
+         WHERE chain_id = $1 AND lower(address) = $2 AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .execute(pool)
+    .await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
+    let result = sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("split epoch match was accepted with retained floor=2 and redo=None"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("newly matching deployment epoch"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+#[tokio::test]
+async fn omitted_start_raise_without_discovery_widening_is_admissible() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_null_start_narrowing").await?;
+    let pool = scratch.pool();
+    let chain_id = "manifest-null-start-narrowing";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    let path = fixture.root.join("test/test_events/v1.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen("start_block = 0\n", "", 1),
+    )?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen(
+            "proxy_kind = \"none\"\n\n[[abi.events]]",
+            "proxy_kind = \"none\"\nstart_block = 2\n\n[[abi.events]]",
+            1,
+        ),
+    )?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    assert_eq!(test_registry_active_from(pool, chain_id).await?, Some(0));
+    assert_eq!(required_ingest_redo(pool, chain_id).await?, None);
+    scratch.cleanup().await
+}
+#[tokio::test]
+async fn omitting_a_finite_start_backdates_the_persisted_watch() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_finite_start_omission").await?;
+    let pool = scratch.pool();
+    let chain_id = "manifest-finite-start-omission";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_with_start(false, true, 2)?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    let path = fixture.root.join("test/test_events/v1.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen("start_block = 2\n", "", 1),
+    )?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    assert_eq!(required_ingest_redo(pool, chain_id).await?, Some((0, 1)));
+    let filter = load_persisted_watch_filter(pool, chain_id, 0, 1).await?;
+    let transfer = format!("{:#x}", keccak256(b"Transfer(address,address,uint256)"));
+    assert!(
+        filter.includes("0x0000000000000000000000000000000000000004", &transfer, 0),
+        "the redo watch must include the formerly finite address from effective block zero"
+    );
+    scratch.cleanup().await
+}
+#[tokio::test]
+async fn unchanged_omitted_manifest_repairs_legacy_floor_with_redo() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_legacy_null_floor").await?;
+    let pool = scratch.pool();
+    let chain_id = "manifest-legacy-null-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen("start_block = 0\n", "", 1),
+    )?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $2 \
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses SET active_from_block_number = 2 \
+         WHERE chain_id = $1 AND lower(address) = $2 AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .execute(pool)
+    .await?;
+    sync_schema_v2_repository(pool, &load_repository(&fixture.root)?).await?;
+    assert_eq!(test_registry_active_from(pool, chain_id).await?, Some(0));
+    assert_eq!(required_ingest_redo(pool, chain_id).await?, Some((0, 1)));
+    let derived_invalidated: bool = sqlx::query_scalar(
+        "SELECT bool_and(input_content_hash LIKE 'manifest-authority:%') \
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?;
+    assert!(derived_invalidated);
+    let marker = interpret_input_hash(pool, chain_id).await?;
+    assert_eq!(
+        manifest_marker_parts(&marker)?.0,
+        "8b98b34fc8ec239072fed32619da4746a5a4ec842b775117864fa1ef9047300c"
     );
     scratch.cleanup().await
 }

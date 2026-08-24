@@ -1,23 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use crate::{ManifestRepository, SourceManifest, normalize_address};
 use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
-
-use crate::{ManifestRepository, SourceManifest, normalize_address};
-
 const REQUIRED_REDO_PREFIX: &str = "required downstream redo: ";
 const MANIFEST_WIDENING_REASON: &str = "manifest watch plan widened over an already-ingested range";
 type IngestRedoRow = (Option<i64>, bool, Option<i64>, Option<i64>);
-
 #[derive(Default)]
 pub(super) struct AuthoritySnapshot {
     manifests_by_chain: BTreeMap<String, Vec<String>>,
     basenames_execution: Vec<String>,
     watch: super::watch::Snapshot,
 }
-
 const PHASE_NAMES: &[&str] = &["ingest", "interpret", "project", "verify", "live"];
 const BASENAMES_EXECUTION_CHAIN: &str = "ethereum-mainnet";
 const BASENAMES_PROJECT_CHAIN: &str = "base-mainnet";
@@ -61,7 +57,6 @@ pub(super) async fn lock_phase_writers(
     if has_basenames_execution {
         chains.insert(BASENAMES_PROJECT_CHAIN.to_owned());
     }
-
     for chain_id in chains {
         for phase in PHASE_NAMES {
             let lock_name = format!("phase-runner:{chain_id}:{phase}");
@@ -84,7 +79,6 @@ pub(super) async fn lock_phase_writers(
     }
     Ok(())
 }
-
 pub(super) async fn active_authority(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<AuthoritySnapshot> {
@@ -111,7 +105,6 @@ pub(super) async fn active_authority(
     sort_snapshot(&mut snapshot);
     Ok(snapshot)
 }
-
 pub(super) fn repository_authority(repository: &ManifestRepository) -> Result<AuthoritySnapshot> {
     let mut snapshot = AuthoritySnapshot::default();
     for loaded in repository
@@ -132,19 +125,20 @@ pub(super) fn repository_authority(repository: &ManifestRepository) -> Result<Au
     sort_snapshot(&mut snapshot);
     Ok(snapshot)
 }
-
 pub(super) async fn invalidate_changed_derived_epochs(
     transaction: &mut Transaction<'_, Postgres>,
     previous: &AuthoritySnapshot,
     desired: &AuthoritySnapshot,
     previous_admission_floors: &BTreeMap<String, super::watch::AdmissionFloors>,
+    repaired_floor_chains: &HashSet<String>,
 ) -> Result<()> {
-    let chains = previous
+    let mut chains = previous
         .manifests_by_chain
         .keys()
         .chain(desired.manifests_by_chain.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
+    chains.extend(repaired_floor_chains.iter().cloned());
     for chain_id in chains {
         let previous_manifests = previous
             .manifests_by_chain
@@ -156,7 +150,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
             .get(&chain_id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        if previous_manifests == desired_manifests {
+        if previous_manifests == desired_manifests && !repaired_floor_chains.contains(&chain_id) {
             continue;
         }
         let admission_floors = previous_admission_floors
@@ -253,7 +247,6 @@ pub(super) async fn invalidate_changed_derived_epochs(
     }
     Ok(())
 }
-
 pub(super) async fn active_admission_floors(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<BTreeMap<String, super::watch::AdmissionFloors>> {
@@ -308,18 +301,12 @@ pub(super) async fn active_admission_floors(
         for (role, address, declared_start) in manifest
             .roots
             .iter()
-            .map(|root| {
-                (
-                    root.name.as_str(),
-                    &root.address,
-                    root.start_block.unwrap_or(0),
-                )
-            })
+            .map(|root| (root.name.as_str(), &root.address, root.start_block))
             .chain(manifest.contracts.iter().map(|contract| {
                 (
                     contract.role.as_str(),
                     &contract.address,
-                    contract.start_block.unwrap_or(0),
+                    contract.start_block,
                 )
             }))
         {
@@ -329,7 +316,7 @@ pub(super) async fn active_admission_floors(
             else {
                 continue;
             };
-            let start = declared_start.max(*address_start);
+            let start = declared_start.map_or(0, |declared| declared.max(*address_start));
             by_chain
                 .entry(manifest.chain.clone())
                 .or_default()
@@ -345,7 +332,6 @@ pub(super) async fn active_admission_floors(
     }
     Ok(by_chain)
 }
-
 async fn invalidation_marker(
     transaction: &mut Transaction<'_, Postgres>,
     encoded_authority: Vec<u8>,
@@ -362,7 +348,6 @@ async fn invalidation_marker(
         hex::encode(keccak256(encoded_authority))
     ))
 }
-
 fn record_authority(
     snapshot: &mut AuthoritySnapshot,
     chain_id: &str,
@@ -387,7 +372,6 @@ fn record_authority(
     }
     Ok(())
 }
-
 async fn reject_covered_discovery_widening(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -445,8 +429,7 @@ async fn reject_covered_discovery_widening(
     }
     Ok(())
 }
-
-async fn stamp_required_ingest(
+pub(super) async fn stamp_required_ingest(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     widened_from: u64,
@@ -544,7 +527,6 @@ async fn stamp_required_ingest(
     }
     Ok(())
 }
-
 async fn earliest_retained_registry_announcement(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
