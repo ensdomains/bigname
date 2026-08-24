@@ -49,13 +49,16 @@ only canonical identity and normalized-event input.
 When a non-retryable check of an already-completed Ingest or Verify phase
 fails, the runner changes that phase from `completed` to `failed` and keeps its
 completed range, source provenance, and verification evidence for diagnosis.
-Only Ingest rows that still hold equal current, target, and live-handoff
-markers, and Verify rows that still hold equal current and target markers plus
-a verification level, may be restored without replay. After the operator
-restores the accepted source configuration or evidence, the next start repeats
-the checks for the retained completion and records the phase `completed` again
-without replaying its completed range. Other failed rows resume their ordinary
-phase work and cannot take this path based only on matching error text.
+A Verify phase can reach the same failed state without ever becoming
+`completed` when an ordinary, non-validation failure is recorded after its
+final progress write but before phase completion. Only Ingest rows marked as a
+completed-phase validation failure that still hold equal current, target, and
+live-handoff block numbers and hashes, and Verify rows that still hold equal
+current and target block numbers and hashes plus a retained verification level,
+may be restored without replay. On the next start, the runner repeats the checks
+for the retained completion and records the phase `completed` without replaying
+its completed range. Rows without that structural proof resume their ordinary
+phase work; error text alone never authorizes restoration.
 At startup, the runner also probes the advisory locks for Interpret, Project,
 and Verify. A `running` or `paused` row with no explicit redo is resolved only
 while its advisory lock remains held. For such a row, a saved Interpret or
