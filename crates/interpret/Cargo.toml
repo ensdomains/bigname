@@ -17,6 +17,8 @@ time = { version = "0.3.47", features = ["serde"] }
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 bigname-adapters = { workspace = true, features = ["test-activation"] }
+bigname-content-hash.workspace = true
 bigname-manifests.workspace = true
+bigname-project.workspace = true
 bigname-test-support.workspace = true
 tokio.workspace = true

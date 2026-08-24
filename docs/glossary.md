@@ -329,8 +329,9 @@ reachability or attach the registry to a name. `SubregistryUpdated` supplies
 that separate relationship. For a registry created through the
 [ENSv1→ENSv2 migration source family](manifests.md#ensv2-migration-family-admission-plan), the
 edge remains ordinary and the watch plan traverses it while a separate
-`migration_registry_creation` candidate association carries consumer-visibility
-provenance. The association never turns indexability itself into name authority.
+`migration_registry_creation` association carries candidate-or-activated
+consumer-visibility provenance. The association never turns indexability itself
+into name authority.
 (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
 
 **Event-silent** — a contract that changes relevant state without emitting a
@@ -439,17 +440,16 @@ allowed to cross those `authority_arm` values. The transition and its activated
 already-validated successor, position, and correlation ID without correlating
 raw ENSv1→ENSv2 migration evidence again.
 
-**Migration boundary** (ENSv1→ENSv2 authority boundary) — the candidate
+**Migration boundary** (ENSv1→ENSv2 authority boundary) — the
 `MigrationApplied` normalized event records the position at which one logical
 name can stop taking current registration and control from ENSv1 and start
-taking them from its ENSv2 resource. Slice 1 records that position as a
-candidate with `consumer_visibility=candidate`; it does not close the current
-ENSv1 `SurfaceBinding` or make the ENSv2 binding eligible for current
-selection. Slice 2A defines the explicit activated transition operation and
-tests it through a code-only injection seam, but production still emits only
-candidates. A future activation re-derives the candidate with
-`consumer_visibility=activated` and performs that deferred binding transition
-without deleting ENSv1 history. The child, registrar-token `unwrapped`, and
+taking them from its ENSv2 resource. The correlator first derives it as a
+candidate inside a [complete group](#complete-group); the shared production and
+test-seam activation function changes it to `consumer_visibility=activated` and emits
+the one matching [migration authority transition](#migration-authority-transition)
+without deleting ENSv1 history. Incomplete or refused groups stay candidate or
+derive no boundary, according to the path's existing refusal behavior. The
+child, registrar-token `unwrapped`, and
 `unlocked_wrapped` second-level forms close their predecessor at a recorded
 earlier cleanup in the same transaction; the `locked_wrapped` second-level form
 closes it at the boundary position. The transition carries
@@ -503,6 +503,12 @@ separate predecessor rule under
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L835 @ ens_v1@91c966f)
 
+**Migration expiry jump** — the change in current `expires_at` at an activated
+[migration boundary](#migration-boundary). Interpretation uses the expiry
+emitted by the successful ENSv2 registration directly; it does not infer a
+duration, grace period, or ENSv1-to-ENSv2 delta. Correlated renewal rows retain
+their separately emitted ENSv1, bridge, and ENSv2 expiry values.
+
 **Migration correlation group** — a deterministic set of raw evidence and
 derived effects for one operation admitted through the ENSv1→ENSv2 migration
 family. Per-name `correlation_kind` values are `authority_transition`,
@@ -510,7 +516,7 @@ family. Per-name `correlation_kind` values are `authority_transition`,
 `migration_registry_creation`; the name-independent
 `controller_configuration` kind covers a launch-bounded registrar controller
 change that cannot be assigned to a name. Only an `authority_transition` group
-with the complete ENSv1→ENSv2 migration shape can produce a candidate
+with the complete ENSv1→ENSv2 migration shape can produce a
 [migration boundary](#migration-boundary); a renewal or cleanup group never
 does. An `authority_transition` group covers both the controller-mediated
 `.eth` second-level shape and the direct-child shape that a
@@ -536,21 +542,37 @@ referenced group is activated. A name-independent controller event has one
 `controller_configuration` ID. No event is duplicated or arbitrarily assigned
 to one name. Unrelated facts in the same transaction do not join the set.
 
+**Complete group** — a [migration correlation
+group](#migration-correlation-group) whose path-specific evidence and derived
+rows are fully assembled before visibility is decided. An authority-boundary
+group has exactly one self-sufficient `MigrationApplied`, one
+`surface_binding_transition` effect, one shared correlation ID, and one
+existing successor binding. A non-boundary group is complete when its existing
+correlator has emitted the dependent rows for the matched renewal, cleanup,
+controller, historical, or registry-creation envelope; it emits no transition.
+A row carrying several correlation IDs is complete only when every referenced
+group is complete. Completeness never reconstructs evidence, widens a selector,
+or turns ordinary factory, reservation, or registration evidence into a
+migration boundary.
+
 Independent admission has precedence: an ordinary normalized event that the
 existing manifest and discovery rules produce without this correlation remains
 byte-for-byte `activated` and product-visible. Slice 1 records its candidate
 relationship separately in `migration_event_associations`; correlation never
 duplicates, suppresses, or reclassifies the ordinary event. The same precedence
 keeps an independently admitted `registry_announcement` edge ordinary and makes
-it a watch-plan input; `migration_discovery_associations` attaches the candidate
-relationship without changing that edge. Correlation-dependent downstream
-normalized, identity, topology, permission, registration, and renewal effects
-remain candidate and are invisible to Project and product history but available
-to diagnostics. The association alone cannot reclassify output that the existing
+it a watch-plan input; `migration_discovery_associations` attaches the
+diagnostic relationship without changing that edge. Correlation-dependent
+downstream normalized, identity, topology, permission, registration, and renewal
+normalized effects take their complete group's visibility; refused and
+incomplete candidates remain invisible to Project and product history but
+available to diagnostics. The candidate-effect tables remain candidate-only
+diagnostic source records and are never Project input. The association alone
+cannot reclassify output that the existing
 registry family derives from the ordinary edge and raw event without migration
-correlation; that output remains ordinary. A future activation re-derives the same groups with
-`consumer_visibility=activated`; independently admitted event and announcement
-rows remain unchanged. Slice 2A leaves those production rows candidate. Replay under a fixed manifest set and [interpreter
+correlation; that output remains ordinary. Production re-derives complete groups
+with `consumer_visibility=activated`; independently admitted event and
+announcement rows remain unchanged. Replay under a fixed manifest set and [interpreter
 content hash](#interpreter-content-hash) produces the same group IDs, event
 identities, and payloads.
 
@@ -743,18 +765,19 @@ NameWrapper token and registers the child into itself
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58),
 which is why the emitted-by-and-sent-by-the-same-registry shape described above
 is the discriminator. Its `correlation_kind` is the ordinary
-`authority_transition`; there is no child-specific correlation kind. The
-candidate `MigrationApplied` it produces is inert exactly like every other
-candidate: excluded from [Project](#projection) staging, scheduling no binding
-write, and changing no current child state.
+`authority_transition`; there is no child-specific correlation kind. An
+incomplete or refused child group remains candidate or derives no boundary. A
+[complete group](#complete-group) instead activates its `MigrationApplied`,
+schedules the exact child predecessor transition, and becomes Project authority
+evidence.
 
 Inert output is not the same as inert cost. Admitting a child registry writes a
 `migration_registry_creation` discovery association, and Project's rebuild scope
 reads that table without a visibility filter, so names registered into a
 newly-admitted child registry enter delete-and-rebuild candidacy. What those
-rebuilds publish is unchanged, because the child-registration authority proof
-additionally requires an activated parent boundary, and nothing activates one
-before slice 3B.
+rebuilds publish still depends on proof: the child-registration authority rule
+requires an activated parent boundary, while the child's own arm changes only
+when its complete child group activates.
 
 The child's ENSv1 predecessor uses its own anchor kind,
 `wrapper_backed_child_control`. That anchor points at the child's position in
@@ -817,12 +840,10 @@ using it yields the same log sequence as sending those transfers directly
 (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2@ccaeb58),
 and there is nothing for correlation to key on in the first place.
 
-Consumer slice 3B part 2 admits `wrapper_backed_child_control` through
-Interpret's explicit activated test seam and resolves it only against the
-child's recorded cleanup; it never falls back to the second-level predecessor
-rule. Production adapters still leave complete groups candidate-only, so
-production activation and publication remain a separate follow-on on issue
-#318.
+Production and Interpret's explicit test seam admit
+`wrapper_backed_child_control` through the same activation function and
+resolve it only against the child's recorded cleanup; neither path falls back
+to the second-level predecessor rule.
 
 **Migratable child** — a child of an already-migrated name whose label its
 parent's [migration registry](#migration-registry-wrapperregistry) will not let
@@ -961,6 +982,12 @@ to the Graveyard during unwrap, then enters ENSv2 without a registrar ERC-721
 The locked path transfers the wrapper ERC-1155 while NameWrapper remains the
 registry owner
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+
+**Wrapper terminal state** — the retained historical NameWrapper state after a
+complete `locked_wrapped` or `locked_child` migration. The selected ENSv1
+predecessor closes once, while the wrapper token remains parked in the Graveyard
+with its fuses and historical holder facts retained. It is neither a current
+binding nor permission to reopen another ENSv1 predecessor.
 
 **Graveyard** — the ENSv2 contract that holds the [ENSv1 husk](#ensv1-husk) of
 every migrated name. **What it receives, and what is left behind, differs by
@@ -1263,6 +1290,18 @@ required redo starts; redo then deletes and re-derives its selected range from
 readable raw facts. Durable raw facts and competing chain lineage preserve the
 audit trail instead of accumulating stale normalized derivations across
 interpreter versions.
+
+**Redo-marker scope** — a phase redo marker authorizes one exact chain, phase,
+and block range. It carries no logical-name or authority-arm selector. Separately,
+Interpret's normalized `PreimageObserved` replay evidence records the exact
+logical name and authority arm plus the replacement binding that stays closed
+to replay reopening. That binding must exist at the same chain, name, arm, and
+close position. Interpret redo, not activation, consumes that evidence and
+reopens only the other matching bindings. An activated migration boundary
+independently reopens only its recorded ENSv1 predecessor. Activation creates
+or changes neither input. The phase runner owns validation of the durable phase
+marker and its range. Interpret validates only the normalized replay evidence
+and rejects malformed, wrong-arm, wrong-name, or wrong-binding evidence.
 
 **Preimage observation / label preimage** — learning the human-readable string
 behind a name or label hash, from an event, a retained name surface, or a

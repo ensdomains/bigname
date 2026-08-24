@@ -577,6 +577,22 @@ project generation is published. This includes indexed reads because snapshot
 selection itself requires the matching project publication before any
 projection row is admitted.
 
+The [complete-group](glossary.md#complete-group) ENSv1→ENSv2 activation is such a walk gate. Its manifest
+profiles and generated watch plans do not change, so no historical fetch or
+manifest-authority attestation is introduced. Deploy the new phase runner,
+complete the retained-range Interpret redo under the new interpreter content
+hash, run the stamped Project range, and evaluate Mainnet's proof-scoped
+integrity assertions before `publish::swap`. Only after that Project generation
+publishes may the matching API be deployed. Sepolia consumes proven migration
+boundaries but its independent unproven ENSv1/ENSv2 overlap remains non-blocking.
+An interrupted walk resumes only from its existing exact phase
+[redo-marker scope](glossary.md#redo-marker-scope). Interpret separately
+validates the normalized arm-wide replay preimage, keeps its named replacement
+binding closed, and reopens only the other matching bindings in that authority
+arm. An activated boundary reopens only its recorded ENSv1 predecessor.
+Activation does not create, infer, widen, or relax the phase marker or that
+replay evidence.
+
 Configure
 `BIGNAME_API_CHAIN_RPC_URLS` for status and verified lookup as described in the
 API docs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together

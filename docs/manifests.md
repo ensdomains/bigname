@@ -308,8 +308,11 @@ every correlation-dependent effect in the per-name
 ordinary activated output and receives a separate candidate association. Every
 consumer staging or direct-history read excludes correlation-dependent candidate
 normalized events and candidate identity/discovery effects until the later
-consumer-activation slice activates the group. Slice 2A adds no capability,
-runtime, or manifest flag: production correlations remain candidate.
+consumer-activation slice activates the group. Slice 2A added no capability,
+runtime, or manifest flag and left production correlations candidate. The final
+activation slice now activates [complete groups](glossary.md#complete-group) in production without changing
+that capability table, runtime configuration, or manifest authority; incomplete
+and refused correlations remain candidate.
 `migration_event_associations` remains diagnostics-only before and after
 activation.
 
@@ -345,7 +348,7 @@ The following fixed contracts become direct declarations under
 
 The existing Sepolia ENSv1 BaseRegistrar at
 `0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85` is named by `correlation_addresses.ens_v1_base_registrar`; it is not a migration-family contract declaration or watch-plan input.
-`ens_v1_registrar_l1` admits that address from its historical start block, while the ENSv1→ENSv2 migration correlator accepts its observations only from the Graveyard deployment block `11163400` onward. This preserves the former launch-bounded scope: registrar rows that exist only because of migration correlation remain `consumer_visibility=candidate`, retain `ens_v2_migration_l1` normalized-row provenance, and do not become ordinary consumer-visible registrar history merely because `ens_v1_registrar_l1` now attributes the raw log.
+`ens_v1_registrar_l1` admits that address from its historical start block, while the ENSv1→ENSv2 migration correlator accepts its observations only from the Graveyard deployment block `11163400` onward. This preserves the former launch-bounded scope: registrar rows that exist only because of migration correlation retain `ens_v2_migration_l1` normalized-row provenance and remain `consumer_visibility=candidate` unless every group they reference is complete; attribution of the raw log by `ens_v1_registrar_l1` alone does not make them ordinary consumer-visible registrar history.
 The address-keyed contract instance remains the same identity across the two uses. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/deployments/sepolia/Graveyard.json:L438 @ ens_v2@ccaeb58)
 Correlation is per name, never per transaction alone. Interpretation hashes the decoded bridge label bytes exactly as emitted; it does not normalize or rewrite them. That labelhash, interpreted as `uint256`, must equal the BaseRegistrar token ID. Interpretation then derives the `.eth` namehash from `ETH_NODE` and that labelhash and requires it to equal the v2 logical name/namehash. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L8 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L108 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L113 @ ens_v2@ccaeb58) A direct child under an already-migrated parent uses the same check without `ETH_NODE`: interpretation derives the child namehash from the parent [migration registry](glossary.md#migration-registry-wrapperregistry)'s own migration evidence — the CREATE2 salt of the factory log that created that registry, which is the parent's namehash — together with the registered labelhash, and requires the result to equal the ENSv2 logical name/namehash the registry topology resolves for that label. A mismatch means the evidence chain is incomplete and no boundary is derived. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58) The participating logs must have a valid path-specific order and come from the declared emitters and controller path; decoded expiry or duration values must agree for that path without reconstructing an expiry. A transaction-hash-only join is forbidden because one transaction can contain several labels through `syncWrapper` or a multi-item wrapper transfer. (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L132 @ ens_v2@ccaeb58) Each name produces an independent correlation group, and unrelated co-located logs remain outside every group.
 
@@ -461,13 +464,20 @@ a resource anchor.
 
 BaseRegistrar `NameRenewed` observations that participate in a bridge or
 NameWrapper synchronization use `correlation_kind=synchronized_renewal`.
-Another launch-bounded BaseRegistrar renewal remains candidate historical
-evidence under `after_state.lifecycle_classification=historical_renewal`; it
+Another launch-bounded BaseRegistrar renewal is activated historical evidence
+once its non-boundary correlation group is complete, under
+`after_state.lifecycle_classification=historical_renewal`; it
 does not materialize an ENSv1 resource, token lineage, authority transition, or
 surface binding. This
 retains post-boundary ENSv1 residue without allowing it to overwrite ENSv2
 authority. Controller additions and removals remain name-independent permission
-history. Every BaseRegistrar row materialized through the ENSv1→ENSv2 migration family's launch-bounded correlation remains candidate in slice 1 even though `ens_v1_registrar_l1` is now the sole source family that owns those raw logs. The ENSv1→ENSv2 migration family declares no contract at that address, so the attribution guard and runtime adapter selection remain unambiguous.
+history. Slice 1 kept every BaseRegistrar row materialized through the
+ENSv1→ENSv2 migration family's launch-bounded correlation candidate; the final
+activation slice now activates completed non-boundary groups while refused or
+incomplete groups remain candidate. `ens_v1_registrar_l1` remains the sole
+source family that owns those raw logs. The ENSv1→ENSv2 migration family
+declares no contract at that address, so the attribution guard and runtime
+adapter selection remain unambiguous.
 Without an `ens_v2_migration_l1` manifest, these four mappings extend raw-log ownership but produce no ordinary registrar rows.
 The deployment profile admits the ENSv1 registry, registrar, and NameWrapper families (`ens_v1_registry_l1`, `ens_v1_registrar_l1`, and `ens_v1_wrapper_l1`). The ENSv1→ENSv2 migration manifest's `correlation_addresses.ens_v1_name_wrapper` and `correlation_addresses.ens_v1_base_registrar` values are non-emitting correlation metadata: within the ENSv1→ENSv2 migration family they are not contract declarations, discovery edges, or watch-plan inputs. The contracts they name are separately declared and watched by their ENSv1 families. The ENSv1→ENSv2 migration family reads that cross-family evidence; it does not own or duplicate its raw log attribution.
 (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L894 @ ens_v2@ccaeb58)
@@ -479,7 +489,7 @@ until all referenced groups activate. A controller event outside such a batch
 uses the name-independent `controller_configuration` derivation group above.
 (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106-L111 @ ens_v2@ccaeb58) Wrapper-expiry correlation requires the complete controller-addition, renewal, and matching controller-removal envelope in one transaction. An incomplete envelope remains historical evidence, and candidate correlation never advances the independently admitted NameWrapper state; an unmatched addition therefore cannot affect later ordinary output whether the blocks are interpreted in one batch or several.
 The proven wrapper expiry is retained separately and may refine only the registrar expiry when a later ordered `NameUnwrapped` then BaseRegistrar `Transfer` first materializes a missing registrar identity; full replay, incremental replay, and cold restore make the same choice. When more than one completed correlation group exists for a name, bigname retains the monotone maximum correlated wrapper expiry. This remains correct across full lapse and re-registration: BaseRegistrar makes a lease available only after its stored expiry plus grace is earlier than `block.timestamp`, and a successful re-registration writes `block.timestamp + duration` with a strictly positive duration, so a legitimate successor lease expiry — and the corresponding wrapper expiry — is strictly greater than its predecessor. `syncWrapper` performs a zero-duration renewal, which reads that current registrar expiry without reducing it. A lower later-correlated value therefore cannot be the successor lease expiry that should govern this unwrap fallback. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows; no transaction-level synthetic renewal is created. A resource-bearing registry observation retains its resource, and the bridge observation uses that already-materialized ENSv2 `resource_id`. When the reserved registry resource cannot be derived, both observations remain resource-less rather than inventing an anchor. A launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it does not materialize an ordinary ENSv1 resource or token lineage before later consumer activation. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
+(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows; no transaction-level synthetic renewal is created. A resource-bearing registry observation retains its resource, and the bridge observation uses that already-materialized ENSv2 `resource_id`. When the reserved registry resource cannot be derived, both observations remain resource-less rather than inventing an anchor. A launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it materializes no ordinary ENSv1 resource or token lineage unless its complete correlation group activates, and incomplete or refused groups leave it candidate. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
 
 The production migration driver revokes the superseded public ENSv1
 registration controllers and enables the Graveyard and `ETHRenewerV1` handoff
@@ -523,18 +533,20 @@ intake, and consumer visibility are separate axes. Rule ownership remains with
 `registry_announcement`. Its independently admitted normalized
 `RegistryCreated` event and indexability edge remain ordinary and unchanged; the
 watch plan traverses the edge from the announcement position, and the
-`migration_registry_creation` candidate association attaches separately to the
+`migration_registry_creation` association attaches separately to the
 event and edge. That association does not make the edge candidate. The edge
 records only indexability: it creates no suffix, parent relation, name binding,
 or current authority. Correlation-dependent identity, parent, role,
 registration, renewal, topology, and normalized-event effects from the registry
-inherit `consumer_visibility=candidate` until later consumer activation, including
-effects in later transactions or blocks. The association alone cannot
+remain candidate while their group is incomplete or refused and activate only
+after every group they reference is complete, including effects in later
+transactions or blocks. The association alone cannot
 reclassify an effect: a `ParentUpdated`, role, registration, renewal, topology,
 or normalized-event output that `ens_v2_registry_l1` derives from the ordinary
 edge and raw event without ENSv1→ENSv2 migration correlation remains ordinary and
 byte-for-byte unchanged. Only the additional meaning that depends on the
-correlation is candidate. Consumer slice 2C adds one narrow Project read: after
+correlation follows candidate-to-activated complete-group visibility. The
+exact-name Project read has one narrow exception: after
 an activated parent boundary, the exact-name authority selector may require the
 readable ordinary edge and its canonical `migration_registry_creation`
 association to classify the emitter of a positive child registration. Neither
@@ -590,7 +602,7 @@ correlation ID and evidence chain. The parent registry's creation must precede
 the child's registration in full block, transaction-index, and log-index order,
 including within one transaction. `correlation_kind` is unchanged — a child
 group is an ordinary `authority_transition` group — and every child boundary and
-dependent effect carries `consumer_visibility=candidate`.
+dependent effect is candidate until the complete-group activation function admits it.
 
 Five shapes derive no child boundary, each as explicit non-support rather than a
 fallback, and a sixth never arises at all:
@@ -621,13 +633,14 @@ batch it sends and the same transfers sent directly produce the same logs
 (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2@ccaeb58),
 and there is nothing for correlation to key on.
 
-Candidate output does not mean zero effect on Project. Admitting a child
+Diagnostic correlation output does not mean zero effect on Project. Admitting a child
 registry writes a `migration_registry_creation` discovery association, and
 Project's rebuild scope reads that table without a `consumer_visibility` filter,
 so names registered into a newly-admitted child registry enter delete-and-rebuild
 candidacy. What those rebuilds publish is unchanged: the child-registration
-authority proof also requires an activated parent boundary, and nothing outside
-the code-only activation seam writes one before slice 3B.
+authority proof also requires an activated parent boundary. Complete parent and
+child groups now receive that visibility through the shared production
+activation function after correlation is complete.
 
 Source-family ownership does not break the visibility barrier. The ordinary
 `RegistryCreated` event and `registry_announcement` indexability edge retain
@@ -647,14 +660,14 @@ that the active manifest and discovery rules already produce without the
 correlation remains byte-for-byte activated and product-visible. Slice 1 records
 its candidate relationship in a separate `migration_event_associations` row; it
 does not duplicate, suppress, or reclassify the ordinary event. Project staging
-and product event/history readers exclude correlation-dependent candidate rows
+and product event/history readers exclude refused or incomplete candidate rows
 and never consume `migration_event_associations` or the diagnostic identity and
 discovery effect tables. Unrelated existing-family facts in the same transaction
-remain normally eligible. Slice 2A only establishes arm-scoped ordinary binding
-behavior and the explicit activated transition write exercised by tests;
-candidate-only normalized, identity, and discovery effects remain diagnostic.
-When a later slice activates them, event associations may become activated
-diagnostics but never become consumer input.
+remain normally eligible. Slice 2A established arm-scoped ordinary binding
+behavior and the explicit transition write. The final production path activates
+complete correlation-dependent normalized rows through that same implementation;
+candidate-effect tables retain their candidate-only diagnostic contract, and
+event associations may become activated diagnostics but never become consumer input.
 
 Slice 1 requires a restart boundary fixture, not only a same-transaction ordering
 test. At block N, a migration-created proxy emits `RegistryCreated`; after an
@@ -662,7 +675,7 @@ Ingest and Interpret restart, a later transaction or block emits at least one
 registry, role, registration, renewal, or topology event from that proxy. Both a
 full historical replay lane and a live-follow lane must prove that the ordinary
 announcement admission keeps the proxy watched, the later raw fact is retained,
-its correlation-dependent augmentation remains candidate, and any output the
+its correlation-dependent augmentation has the completed group's visibility, and any output the
 existing registry family derives independently remains ordinary and matches the
 control test run. After restart, the generated watch plan must contain the
 proxy through its persisted ordinary edge before either the retained-raw-log
@@ -688,20 +701,17 @@ the slice-1 acceptance publication has no consumer-visible semantic delta
 from that re-walk; the comparison in the consumer contract is a release gate,
 not an optional fixture check.
 
-The separately reviewed and separately merged slice-1, slice-2A, slice-2B, and
-slice-2C implementation PRs deploy together at this same planned [re-derivation
-boundary](glossary.md#re-derivation-boundary), which also
-carries [PR #391](https://github.com/ensdomains/bigname/pull/391). They use one
-[interpreter content hash](glossary.md#interpreter-content-hash), one full
-source re-walk, and one Project publication
-decision for `ethereum-sepolia`. Other chains retain
-independent publication decisions. That Project publication remains unready and
-traffic-drained until the production Verify phase's reviewed
-`ethereum-sepolia` provider-trusted verification path passes. There is no
-production interval serving candidate-only data:
-candidate-versus-activated behavior is exercised in the test environment against
-the boundary fixture corpus. The ordinary announcement edge above remains a
-watch-plan input and ensures this one-boundary plan creates no ingest gap.
+The final production activation changes interpretation output without changing
+source authority: fixed contracts, `manifests/mainnet/`, `manifests/sepolia/`,
+and the generated watch plans remain byte-for-byte unchanged. The new
+[interpreter content hash](glossary.md#interpreter-content-hash) therefore
+requires one complete retained-range Interpret re-walk followed by Project,
+with publication blocked until the completed generation is coherent. Mainnet
+integrity assertions apply to activated proofs in that completed generation;
+Sepolia selects a proven arm but independent unproven ENSv1/ENSv2 overlap never
+blocks its publication. There is no production interval serving candidate-only
+data. The ordinary announcement edge above remains a watch-plan input and this
+activation creates no ingest gap.
 
 Other current Sepolia artifacts — including universal/reverse resolution,
 other wrapper surfaces, oracle, resolver-set administration, and mock-payment

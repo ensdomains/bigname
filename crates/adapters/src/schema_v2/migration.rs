@@ -10,17 +10,18 @@ use super::{
     protocol::MigrationObservation,
 };
 
+mod activation;
 mod child;
 mod registry;
 mod support;
-use registry::correlate_registry_creation;
+use activation::activate_complete_groups;
 #[cfg(any(test, feature = "test-activation"))]
-pub use support::inject_activated_transition_for_test;
+pub use activation::inject_activated_transition_for_test;
+use registry::correlate_registry_creation;
 use support::*;
 
 const MIGRATION_FAMILY: &str = "ens_v2_migration_l1";
 const V1_REGISTRAR_FAMILY: &str = "ens_v1_registrar_l1";
-const V1_REGISTRAR_ROLE: &str = "registrar";
 const CANDIDATE: &str = "candidate";
 const TRANSITION_KIND: &str = "authority_transition";
 
@@ -30,7 +31,7 @@ pub(super) fn correlated_registrar_source(
     raw: &super::RawLogInput,
 ) -> anyhow::Result<Option<ManifestSource>> {
     if selected.source.source_family != V1_REGISTRAR_FAMILY
-        || selected.emitter_role.as_deref() != Some(V1_REGISTRAR_ROLE)
+        || selected.emitter_role.as_deref() != Some("registrar")
     {
         return Ok(None);
     }
@@ -56,7 +57,7 @@ pub(super) fn correlated_registrar_source(
 
 fn is_v1_registrar_observation(observation: &MigrationObservation) -> bool {
     observation.source_family == V1_REGISTRAR_FAMILY
-        && observation.emitter_role.as_deref() == Some(V1_REGISTRAR_ROLE)
+        && observation.emitter_role.as_deref() == Some("registrar")
 }
 
 pub(super) fn correlate(
@@ -134,6 +135,7 @@ pub(super) fn correlate(
         event.source_family != MIGRATION_FAMILY || event.consumer_visibility == CANDIDATE
     });
     insert_boundaries(output, boundaries);
+    activate_complete_groups(output);
     sort_and_deduplicate(output);
     Ok(())
 }
@@ -350,10 +352,9 @@ fn correlate_authority_transitions(
         .collect::<Vec<_>>();
     for registration in registrations {
         let sender = value_str(&registration.after_state, "sender")?;
-        let logical_name_id = registration
-            .logical_name_id
-            .clone()
-            .context("migration registration has no logical name")?;
+        let Some(logical_name_id) = registration.logical_name_id.clone() else {
+            continue;
+        };
         let labelhash = value_str(&registration.after_state, "labelhash")?;
         let registration_log = registration
             .log_index

@@ -75,23 +75,20 @@ summaries. A superseded ENSv1 registration is therefore never selected, while a
 current registration queried by resource can still contribute in a separate
 name-scoped view.
 
-Slice 1 admits the facts and records `MigrationApplied` as a candidate
-interpreter-owned authority boundary. It deliberately defers the ENSv1→ENSv2
-`SurfaceBinding` close/open to an activated transition. Every effect whose existence depends on
-the per-name
+The final activation re-derives a [complete
+group](glossary.md#complete-group) through
+the production interpreter and records `MigrationApplied` as an activated
+authority boundary. Every normalized effect whose existence depends on the per-name
 [migration correlation group](glossary.md#migration-correlation-group) carries
-`consumer_visibility=candidate` and is excluded from Project staging and all
-product event/history reads, even when the effect uses an existing source
-family. An independently admitted existing-family event remains byte-for-byte
-activated and product-visible; only its correlation association is candidate
-and diagnostics-only. Diagnostics may expose both forms. Slice 2A makes
-ordinary binding changes arm-scoped and adds the exact-name activated transition
-writer, but production continues to emit candidate transitions only. Until the
-planned re-derivation boundary, product row membership and DTO fields remain unchanged and exact-name
-reads over a corpus containing both families retain the existing
-`mixed_exact_name_corpus` public reason. That boundary re-derives the group as
-activated, performs the deferred binding transition, and enables the
-correlation-dependent event/history rows. Slice 2C consumes the validated
+the completed group's visibility. The `migration_candidate_*_effects` tables
+remain candidate-only diagnostic source records and are never Project input.
+Refused and incomplete groups remain
+candidate and are excluded from Project staging and product event/history reads.
+An independently admitted existing-family event remains byte-for-byte activated
+and product-visible; only its diagnostic correlation association changes
+visibility. The shared production activation function performs the arm-scoped binding
+transition already enforced by Interpret and enables the completed group's
+dependent rows. Project consumes the validated
 transition through its activated
 `MigrationApplied` artifact without re-correlating raw ENSv1→ENSv2 migration
 evidence. It
@@ -116,8 +113,8 @@ parent, follows the same per-name or per-child selection rule. Sepolia overlap
 without either proof is instead an expected property of independent test
 deployments and remains unsupported under its own reason until a caller or
 [deployment profile](glossary.md#deployment-profile) selects one system. This
-selection is in force; until an ENSv1→ENSv2 migration boundary is activated, its
-activated-boundary branch has no production input and a child reaches ENSv2
+selection is in force. Complete direct-child groups now supply production input
+to the activated-boundary branch; a refused or unmigrated child reaches ENSv2
 authority only through a current positive ENSv2 registration.
 
 The Mainnet assertions run only after transaction- and block-level
@@ -144,7 +141,9 @@ Sepolia distinction above is unchanged.
 
 Each slice includes its behavior tests and fixture provenance. Counts are
 estimated hand-written production files; test fixtures, test-only harness
-files, and docs are not included.
+files, and docs are not included. Rows before “Final activation” describe the
+contract at each historical delivery boundary; that final row supersedes their
+statements that complete migration groups remain candidate-only.
 
 | Slice | Coherent capability | Estimated production files |
 | --- | --- | ---: |
@@ -156,6 +155,7 @@ files, and docs are not included.
 | 2E. Post-rollback generation-failure audit | Enforce the reconciled Mainnet dual-current invariant and persist the rolled-back generation failure in a separate append-only diagnostic transaction. | To be scoped |
 | 3A. Direct-child correlation | Derive the deferred child-migration shapes that reach no migration controller, where the already-migrated parent's own [migration registry](glossary.md#migration-registry-wrapperregistry) registers the child into itself through the self-call that definition cites; admit the registry a locked child receives from its parent registry so admitted depth is unbounded; derive the child's ENSv1 predecessor from the parent registry's own migration evidence and the registered labelhash rather than inheriting the `.eth` second-level rule, under the separate `wrapper_backed_child_control` anchor defined at [child migration boundary](glossary.md#child-migration-boundary), selected against the child's ENSv1 cleanup rather than the registration; admit both cleanup shapes that definition cites — the `locked_child` path, whose wrapper token is parked in the Graveyard, and the `emancipated_child` path, whose node is unwrapped into it — each only with that ENSv1 predecessor cleanup present, earlier in the registration's own transaction; and reject the clobbered registration, the unmigrated child, factory-only evidence, incomplete parent discovery, and any self-claim lacking ENSv1 predecessor cleanup as non-boundaries, `MigrationHelper` participation being unobservable for the reason cited there and so never a correlation key at all. Correlation reuses `authority_transition`; every child boundary and effect is candidate-only, so no child state, projection, or product row changes — though an admitted child registry does widen Project's delete-and-rebuild scope — and activating a child transition remains an explicit refusal until slice 3B. | 4 |
 | 3B. Children publication invariant | Stage the parent-child relation each authority arm states into `project_child_candidates` and publish the arm the child's own staged authority selects, so recency orders only the current relation inside that one arm and never picks the arm: an unmigrated ENSv1 child keeps its ENSv1 relation below a migrated parent, a child with an activated ENSv1→ENSv2 migration boundary or a current positive ENSv2 registration publishes its ENSv2 relation over retained ENSv1 residue, a released ENSv2 child publishes nothing and does not fall back, and a pair whose arms disagree with no authority proof is omitted as unsupported rather than ranked. Add the ordered child assertion that fails a Mainnet [projection generation](glossary.md#projection-generation) with failure kind `dual_current_child_authority` only when a child holding `migration_authority_transition` or `positive_v2_child_registration` authority has an ENSv1 parent-child relation asserted after its authority epoch started, write the child transition relative to the ENSv1 cleanup, and scope the redo reopen to the authority arm. Activating a complete ENSv1→ENSv2 migration group remains the separate follow-on. | 4 (children projection builder, Project integrity assertion, child transition writer, redo reopen) plus one reviewed schema-migration file for the failure-kind vocabulary |
+| Final activation. Production [complete groups](glossary.md#complete-group) | Run the already-proven activation function after all batch correlation paths finish; activate all five authority paths and complete non-boundary normalized rows while retaining candidate-only diagnostic effect records; preserve named refusals, ordinary events, exact predecessor selection, and Sepolia's non-blocking overlap rule; rotate the [interpreter content hash](glossary.md#interpreter-content-hash) and require the full Interpret→Project walk before publication. Coverage is enumerated in [`migration-activation-coverage.md`](migration-activation-coverage.md). | 4 adapter production files, one of which deletes the superseded helper; no schema, manifest, API, or Project vocabulary change |
 
 Issue [#348](https://github.com/ensdomains/bigname/issues/348) ships at its own
 [interpreter content hash](glossary.md#interpreter-content-hash)
