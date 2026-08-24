@@ -767,6 +767,126 @@ async fn failed_verify_final_checkpoint_without_matching_evidence_still_refuses(
 }
 
 #[tokio::test]
+async fn failed_verify_with_target_hash_but_number_before_target_still_refuses() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_mismatched_retained_number").await?;
+    let current = BASE_COINBASE_SEAM_BLOCK;
+    let target = current + 1;
+    seed_ingest_identities(scratch.pool(), BASE).await?;
+    for number in [current, target] {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'finalized')",
+        )
+        .bind(BASE)
+        .bind(block_hash(BASE, number))
+        .bind(block_hash(BASE, number - 1))
+        .bind(number)
+        .execute(scratch.pool())
+        .await?;
+    }
+    seed_completed_spine_prerequisites(scratch.pool(), BASE, target).await?;
+    let target_hash = block_hash(BASE, target);
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed', verification_level = 'cross_checked',
+             current_block_number = $2, current_block_hash = $4,
+             target_block_number = $3, target_block_hash = $4,
+             last_error = 'ordinary failure with mismatched retained number',
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .bind(current)
+    .bind(target)
+    .bind(target_hash)
+    .execute(scratch.pool())
+    .await?;
+    let runner = verifier_runner(
+        &scratch,
+        Arc::new(FixtureReferences::new([])),
+        Arc::new(CompleteLivePhase),
+    )
+    .await?;
+
+    let result = runner
+        .run_chain(&base_chain(true)?, CancellationToken::new())
+        .await;
+    let state: (String, i64, i64) = sqlx::query_as(
+        "SELECT phase_status, current_block_number, target_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    drop(runner);
+    scratch.cleanup().await?;
+
+    let error = result.expect_err("a mismatched retained number must not authorize recovery");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains(&format!(
+            "verification cursor {target} for chain {BASE} is above target {current}"
+        )),
+        "{error}"
+    );
+    assert_eq!(state, ("failed".to_owned(), current, target));
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_verify_without_retained_level_still_refuses() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_missing_retained_level").await?;
+    seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), BASE, 5).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed', verification_level = NULL,
+             current_block_number = 5, current_block_hash = $2,
+             target_block_number = 5, target_block_hash = $2,
+             last_error = 'ordinary failure without a retained verification level',
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .bind(block_hash(BASE, 5))
+    .execute(scratch.pool())
+    .await?;
+    let runner = verifier_runner(
+        &scratch,
+        Arc::new(FixtureReferences::new([])),
+        Arc::new(CompleteLivePhase),
+    )
+    .await?;
+
+    // The retained-level conjunct is defense in depth ahead of validate_reported_level.
+    let result = runner
+        .run_chain(&base_chain(true)?, CancellationToken::new())
+        .await;
+    let state: (String, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, verification_level
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    drop(runner);
+    scratch.cleanup().await?;
+
+    let error = result.expect_err("a missing retained level must not authorize recovery");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("verification cursor 6 for chain base-mainnet is above target 5"),
+        "{error}"
+    );
+    assert_eq!(state, ("failed".to_owned(), None));
+    Ok(())
+}
+
+#[tokio::test]
 async fn stopped_verify_checkpoint_stays_failed_until_current_config_is_revalidated() -> Result<()>
 {
     let scratch =
