@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 
-use crate::{ManifestRepository, SourceManifest};
+use crate::{ManifestRepository, SourceManifest, normalize_address};
 
 const REQUIRED_REDO_PREFIX: &str = "required downstream redo: ";
 const MANIFEST_WIDENING_REASON: &str = "manifest watch plan widened over an already-ingested range";
@@ -257,38 +257,91 @@ pub(super) async fn invalidate_changed_derived_epochs(
 pub(super) async fn active_admission_floors(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<BTreeMap<String, super::watch::AdmissionFloors>> {
-    // Mirror Interpret's manifest-specific declared admission interval. This snapshot must precede
-    // desired persistence: resolve_contract's LEAST update would otherwise rewrite the evidence
-    // used to decide whether the desired start newly intersects retained history.
-    let rows: Vec<(String, String, String, String, String, i64)> = sqlx::query_as(
-        "SELECT manifest.chain_id, manifest.namespace, manifest.source_family, \
-                COALESCE(declaration.role, declaration.declaration_name), \
-                lower(address.address), \
-                min(GREATEST(COALESCE(declaration.start_block_number, 0), \
-                             COALESCE(address.active_from_block_number, 0))) \
-         FROM manifest_versions manifest \
-         JOIN manifest_contract_instances declaration \
-           ON declaration.manifest_id = manifest.manifest_id \
-          AND declaration.chain_id = manifest.chain_id \
-         JOIN contract_instance_addresses address \
-           ON address.contract_instance_id = declaration.contract_instance_id \
-          AND address.chain_id = declaration.chain_id \
-         WHERE manifest.rollout_status = 'active' \
-           AND (address.deactivated_at IS NULL \
-                OR address.active_to_block_number IS NOT NULL) \
-         GROUP BY manifest.chain_id, manifest.namespace, manifest.source_family, \
-                  COALESCE(declaration.role, declaration.declaration_name), \
-                  lower(address.address)",
+    // Retained manifest facts preserve role-specific starts across child replacement and retirement;
+    // combine them with persisted address ranges exactly as Interpret does.
+    let payloads: Vec<Value> = sqlx::query_scalar(
+        "SELECT manifest_payload FROM manifest_versions WHERE rollout_status = 'active' UNION ALL SELECT before_state -> 'manifest_payload' FROM normalized_events WHERE event_kind = 'SourceManifestUpdated' AND derivation_kind = 'manifest_sync' AND before_state ->> 'rollout_status' = 'active' AND before_state ? 'manifest_payload' UNION ALL SELECT after_state -> 'manifest_payload' FROM normalized_events WHERE event_kind = 'SourceManifestUpdated' AND derivation_kind = 'manifest_sync' AND after_state ->> 'rollout_status' = 'active' AND after_state ? 'manifest_payload'",
     )
     .fetch_all(&mut **transaction)
     .await
-    .context("failed to load active address admission floors")?;
+    .context("failed to load retained manifest admission history")?;
+    let manifests = payloads
+        .into_iter()
+        .map(|payload| {
+            serde_json::from_value::<SourceManifest>(payload)
+                .context("failed to decode retained manifest admission history")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let address_keys = manifests
+        .iter()
+        .flat_map(|manifest| {
+            manifest
+                .roots
+                .iter()
+                .map(|root| &root.address)
+                .chain(manifest.contracts.iter().map(|contract| &contract.address))
+                .map(|address| (manifest.chain.clone(), normalize_address(address)))
+        })
+        .collect::<BTreeSet<_>>();
+    let (chains, addresses): (Vec<_>, Vec<_>) = address_keys.into_iter().unzip();
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT target.chain_id, target.address, min(COALESCE(admission.active_from_block_number, 0)) FROM unnest($1::text[], $2::text[]) AS target(chain_id, address) \
+         JOIN contract_instance_addresses admission ON admission.chain_id = target.chain_id AND lower(admission.address) = target.address WHERE admission.deactivated_at IS NULL OR admission.active_to_block_number IS NOT NULL \
+         GROUP BY target.chain_id, target.address",
+    )
+    .bind(chains)
+    .bind(addresses)
+    .fetch_all(&mut **transaction)
+    .await
+    .context("failed to load retained address admission floors")?;
+    let address_floors = rows
+        .into_iter()
+        .map(|(chain_id, address, start)| {
+            Ok((
+                (chain_id, address),
+                u64::try_from(start).context("address floor is negative")?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let mut by_chain = BTreeMap::<String, super::watch::AdmissionFloors>::new();
-    for (chain_id, namespace, family, role, address, start) in rows {
-        by_chain.entry(chain_id).or_default().insert(
-            (namespace, family, role, address),
-            u64::try_from(start).context("active address admission floor is negative")?,
-        );
+    for manifest in manifests {
+        for (role, address, declared_start) in manifest
+            .roots
+            .iter()
+            .map(|root| {
+                (
+                    root.name.as_str(),
+                    &root.address,
+                    root.start_block.unwrap_or(0),
+                )
+            })
+            .chain(manifest.contracts.iter().map(|contract| {
+                (
+                    contract.role.as_str(),
+                    &contract.address,
+                    contract.start_block.unwrap_or(0),
+                )
+            }))
+        {
+            let address = normalize_address(address);
+            let Some(address_start) =
+                address_floors.get(&(manifest.chain.clone(), address.clone()))
+            else {
+                continue;
+            };
+            let start = declared_start.max(*address_start);
+            by_chain
+                .entry(manifest.chain.clone())
+                .or_default()
+                .entry((
+                    manifest.namespace.clone(),
+                    manifest.source_family.clone(),
+                    role.to_owned(),
+                    address,
+                ))
+                .and_modify(|floor| *floor = (*floor).min(start))
+                .or_insert(start);
+        }
     }
     Ok(by_chain)
 }

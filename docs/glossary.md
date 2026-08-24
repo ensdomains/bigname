@@ -249,9 +249,19 @@ to nonmatching is narrowing. Resolver widening or source replacement whose
 earliest desired emitter candidate intersects retained history is rejected
 because the admitted addresses are not known until Interpret materializes their
 discovery edges. Direct declarations contribute their inclusive starts floored
-by the preceding manifest-specific admitted interval, which combines the
-persisted address admission with that preceding declaration start. A rule
-with no matching declaration contributes block zero, and an ENSv2 registry
+by the earliest persisted address admission. Declaration history is scoped by
+namespace, family, role, and address, while contract-address active ranges are
+shared by chain and address. Synchronization reconstructs the floor from current active
+declarations and active manifest states retained by `SourceManifestUpdated`,
+combined with current and finitely retired contract-address active ranges named by those
+manifests. A declaration start rewritten by an earlier synchronization and
+later Interpret provenance writes do not recap or erase it. Reusing a retired
+address under another declaration identity remains conservative when the new
+declared start precedes the bounded new active range: the older shared address
+floor can still cause rejection. If a full Interpret redo deletes the last
+retired contract-address range, however, a later re-add can lack a persisted
+floor even though its old declaration text survives; that transition is not
+proved safe. A rule with no matching declaration contributes block zero, and an ENSv2 registry
 manifest with an active `registry_announcement` rule contributes a distinct
 block-zero, role-free emitter path even when an emitterless candidate or direct
 declarations already exist. Adding that path is widening because an
@@ -273,11 +283,20 @@ bypasses roles), and it declares Interpret's required normalized output. Newly
 enabling `RegistryCreated()`/`RegistryCreated` or
 `ResolverUpdated(uint256,address,address)`/`ResolverChanged` through any of those
 fields is discovery widening even without a manifest-version change; other
-event-set growth is ordinary watch-plan widening. Removing a producer topic
-from a declaration-backed candidate is conservatively rejected as widening
-until synchronization has a directional proof that Interpret retracts its
-retained edges. The announcement-only/emitterless removal shape is not yet
-classified and remains explicitly unproven.
+event-set growth is ordinary watch-plan widening. Removing a resolver producer
+from a direct declaration is conservatively rejected over retained history.
+Dropping `RegistryCreated` from `normalized_events` for a declaration-backed
+`registry_announcement` rule is instead accepted with a required Ingest redo;
+Interpret then halts loudly on the selected undeclared event, and the
+[manifest-authority marker](#manifest-authority-marker) guarantees the initial
+invalidation. It is
+not a permanent manifest-validity guard: an empty redo can clear before a later
+`RegistryCreated` halts normal Interpret. Resolver-producer removal from an
+announcement-only/emitterless path is unclassified: ABI removal can leave
+retained coverage without a reproducible desired rule, while a
+`normalized_events` drop with the ABI topic still present makes Interpret halt
+loudly and recoverably on `ResolverUpdated`; an empty rebuild can likewise
+clear the preceding invalidation first.
 
 **Migration edge** (`migration`) — the fifth discovery edge kind. It is
 [reserved surface](#reserved-surface): the schema-v2 baseline accepts the

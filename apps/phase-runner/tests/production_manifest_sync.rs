@@ -1874,6 +1874,84 @@ async fn persisted_admission_floors_future_resolver_epoch_candidate() -> Result<
 }
 
 #[tokio::test]
+async fn persisted_admission_floor_survives_prior_start_raise() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_split_epoch_floor").await?;
+    let chain_id = "manifest-split-epoch-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.set_contract_start("test", "ens_v2_registry_l1", 0, 2)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        test_registry_active_from(scratch.pool(), chain_id).await?,
+        Some(0)
+    );
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    sqlx::query(
+        "UPDATE contract_instance_addresses SET provenance = jsonb_build_object( \
+             'source', 'registry_announcement') WHERE chain_id = $1 AND lower(address) = $2",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .execute(scratch.pool())
+    .await?;
+
+    fixture.replace_deployment_epoch("test", "ens_v2_resolver_l1", "resolver-old", "matched")?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(
+                test_registry_active_from(scratch.pool(), chain_id).await?,
+                Some(0)
+            );
+            assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+            panic!("split epoch match was accepted with retained active_from=0 and redo=None");
+        }
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("newly matching deployment epoch"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn retired_admission_epoch_remains_a_discovery_floor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_retired_epoch_floor").await?;
+    let chain_id = "manifest-retired-epoch-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.set_deployment_epoch("test", "ens_v2_registry_l1", "fixture", "matched")?;
+    fixture.set_deployment_epoch("test", "ens_v2_resolver_l1", "fixture", "resolver-old")?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let manifest = fs::read_to_string(&path)?;
+    fs::remove_file(&path)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    fs::write(
+        path,
+        manifest.replacen("start_block = 0", "start_block = 2", 1),
+    )?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("the retired block-zero admission floors rule re-admission at block two");
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn persisted_admission_floors_direct_rule_widening() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_rule_admission_floor").await?;
     let chain_id = "manifest-rule-admission-floor";
@@ -1897,6 +1975,54 @@ async fn persisted_admission_floors_direct_rule_widening() -> Result<()> {
     let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
         .await
         .expect_err("the persisted block-zero admission makes this historical widening");
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn persisted_admission_floor_survives_prior_start_raise_for_direct_rule() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_split_rule_floor").await?;
+    let chain_id = "manifest-split-rule-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let rule = "[[discovery_rules]]\nedge_kind = \"resolver\"\nfrom_role = \"registry\"\nadmission = \"reachable_from_root\"";
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?
+            .replacen("roots = []", "roots = []\ndiscovery_rules = []", 1)
+            .replacen(rule, "", 1),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    fixture.set_contract_start("test", "ens_v2_registry_l1", 0, 2)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        test_registry_active_from(scratch.pool(), chain_id).await?,
+        Some(0)
+    );
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen("discovery_rules = []", rule, 1),
+    )?;
+    let result = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => {
+            assert_eq!(
+                test_registry_active_from(scratch.pool(), chain_id).await?,
+                Some(0)
+            );
+            assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+            panic!("split rule addition was accepted with retained active_from=0 and redo=None");
+        }
+    };
     assert!(
         error.to_string().contains("discovery rule widening"),
         "{error}"
@@ -1959,6 +2085,31 @@ async fn removing_discovery_producer_topic_is_rejected_conservatively() -> Resul
     assert!(
         error.to_string().contains("discovery rule widening"),
         "{error}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn registry_announcement_normalized_drop_stamps_instead_of_rejecting() -> Result<()> {
+    let scratch = ScratchDatabase::create("manifest-announcement-normalized-drop").await?;
+    let chain_id = "manifest-announcement-normalized-drop";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fixture.add_test_registry_announcement_rule()?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+
+    let path = fixture.root.join("test/ens_v2_registry_l1/v2.toml");
+    let manifest = fs::read_to_string(&path)?.replacen(
+        "normalized_events = [\"RegistryCreated\"]",
+        "normalized_events = []",
+        1,
+    );
+    fs::write(path, manifest)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
     );
     scratch.cleanup().await
 }
@@ -2749,6 +2900,17 @@ async fn seed_completed_ingest_range(
     chain_id: &str,
 ) -> Result<ChainConfig> {
     seed_completed_ingest_range_through(scratch, chain_id, 1).await
+}
+
+async fn test_registry_active_from(pool: &sqlx::PgPool, chain_id: &str) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT active_from_block_number FROM contract_instance_addresses \
+         WHERE chain_id = $1 AND lower(address) = $2 AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn interpret_input_hash(pool: &sqlx::PgPool, chain_id: &str) -> Result<String> {

@@ -898,14 +898,19 @@ retained history: manifest snapshots cannot prove that Interpret has
 already materialized every resolver discovery edge, so one Ingest redo could
 otherwise fetch an incomplete address set and clear the obligation before
 Interpret adds the missing edges. The boundary is the earliest candidate among
-the desired declarations that emit the rule, floored by the preceding
-manifest-specific admitted interval (the later of that preceding declaration
-start and the persisted address-admission start). Re-admission retains the
-earlier address interval, so
-moving a declaration start beyond the published head does not make a
-historically admitted emitter future-only. A rule with no matching
-declaration contributes block zero as a conservative historical input. An
-`ens_v2_registry_l1` manifest that also has a `registry_announcement` rule
+the desired declarations that emit the rule, floored by the earliest persisted
+address admission. Declaration history is scoped by namespace, family, role,
+and address; contract-address active ranges are shared by chain and address. Synchronization
+reconstructs the floor from current active declarations and the active manifest
+states retained by `SourceManifestUpdated`, combined with current and finitely
+retired contract-address active ranges named by those manifests. It is not recapped by
+declaration text rewritten in an earlier synchronization or erased by later
+Interpret provenance writes. Thus
+splitting a declaration-start raise and a discovery-enabling change across two
+synchronizations cannot make a historically admitted emitter future-only. A
+rule with no matching declaration contributes block zero as a conservative
+historical input. An `ens_v2_registry_l1` manifest that also has a
+`registry_announcement` rule
 contributes a distinct block-zero candidate even when the emitterless candidate
 or direct declarations already exist. Adding that role-free path is resolver
 discovery-rule widening: a registry admitted by `RegistryCreated` has no
@@ -929,13 +934,23 @@ for resolver edges, subject to the Interpret role selection described above.
 Adding either producer or enabling it through `emitter_roles` or
 `normalized_events` changes discovery coverage even when `manifest_version` is
 unchanged; ordinary ABI watch widening is insufficient because Interpret, not
-Ingest, materializes the newly discovered address intervals. Producer-topic
-removal from a declaration-backed candidate remains conservatively fail-closed:
-synchronization diagnoses it as historical discovery widening until a
-directional Interpret-retraction proof exists, rather than assuming that
-retained edges have already narrowed. The announcement-only removal gap is
-disclosed below. Other ABI events continue through the ordinary watch-plan
-widening path.
+Ingest, materializes the newly discovered address intervals. Removing a
+resolver producer from a direct declaration is conservatively rejected over
+retained history rather than assuming that Interpret has retracted every
+retained edge. A `registry_announcement` normalized-output removal has
+different behavior: synchronization accepts it with a stamped required Ingest
+redo, but Interpret halts on the next selected `RegistryCreated` because the
+required normalized event is undeclared. The [manifest-authority
+marker](glossary.md#manifest-authority-marker) guarantees the invalidation at
+synchronization, but it is not a permanent manifest-validity guard: a redo with
+no matching event can clear, and a later `RegistryCreated` then halts normal
+Interpret without an outstanding redo. Removing the resolver producer from an
+announcement-only/emitterless path remains unclassified. ABI removal can
+therefore leave retained coverage without a reproducible desired rule; dropping
+only `ResolverChanged` from `normalized_events` instead causes a loud,
+recoverable Interpret halt on the next selected `ResolverUpdated`, but an empty
+rebuild can likewise clear the preceding invalidation. Other ABI events
+continue through the ordinary watch-plan widening path.
 
 `registry_announcement` rules use the same namespace-scoped comparison. In the
 `ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest
@@ -968,16 +983,27 @@ paths, not for every manifest field. The classifier covers resolver and registry
 announcement rule identity, additions, removals, and declaration starts;
 matching root/contract addresses and roles; source-manifest version and
 deployment-epoch replacement; announcement-backed admission; canonical producer
-ABI presence, `emitter_roles`, and required `normalized_events`; and the active
-persisted admission floor. The compiled-watch comparison separately covers
-ordinary ABI topics, declared addresses, and start ranges. Capability flags,
+ABI presence, `emitter_roles`, and required `normalized_events`; and persisted
+address-admission floors, including finitely retired active ranges. The compiled-watch
+comparison separately covers ordinary ABI topics, declared addresses, and
+start ranges. Capability flags,
 correlation metadata, resolver implementation metadata, and proxy metadata do
-not feed these discovery intervals. Unproven shapes are: removing a producer
-from an announcement-only/emitterless resolver path, because the desired-key
-comparison does not visit the removed announcement-backed key; and binary
-changes that add a new address-admitting discovery edge kind or change
-catalog/discovery behavior without a manifest-field transition. Those shapes
-require a new proof and classifier arm before activation.
+not feed these discovery intervals. The following are outside the supported
+transition set and this completeness claim. Synchronization currently accepts
+removal of the resolver producer from an announcement-only/emitterless path,
+with the two consequence classes described above, and normalized-output removal
+can be followed by an empty rebuild that clears before the next producer event.
+Reuse of a retired address under a different namespace, family, or role whose
+declared start precedes its bounded new contract-address active range can
+conservatively inherit the older address floor. Conversely, a full Interpret
+redo after declaration retirement can delete the last retired contract-address
+range; a later future-dated re-add then has retained declaration text but no
+persisted address floor and can evade historical resolver classification. A
+binary change can also add a new address-admitting discovery edge kind or change
+Interpret selection or discovery behavior without a manifest-field transition.
+The accepted fail-loud configurations are unsupported operator transitions,
+not proof of safe narrowing; supporting any listed shape requires a new proof
+and, where needed, a classifier arm.
 
 If a newly watched tuple intersects an already-ingested range, synchronization
 records the ordinary [manifest-authority
