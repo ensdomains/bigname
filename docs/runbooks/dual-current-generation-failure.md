@@ -114,11 +114,14 @@ and API signatures in items 2–4. Determine item 1 from how the redo was invoke
    for this mode; that message belongs to normal supervised execution
    ([`apps/phase-runner/src/supervisor.rs:58-69`](../../apps/phase-runner/src/supervisor.rs#L58-L69)).
 
-   **Supervisor-driven required redo:** after the long-running runner is
-   restarted, `run_spine_phase` detects a persisted required-redo marker and
-   invokes Project with `RunMode::Redo` before normal Project execution
+   **Supervisor-driven required redo:** after a restart or on the next
+   live-follow iteration, the long-running runner's `run_spine_phase` detects a
+   persisted required-redo marker and invokes Project with `RunMode::Redo`
+   before normal Project execution
    ([`apps/phase-runner/src/runner_required_redo.rs:50-71`](../../apps/phase-runner/src/runner_required_redo.rs#L50-L71),
-   [`apps/phase-runner/src/runner_chain.rs:72-87`](../../apps/phase-runner/src/runner_chain.rs#L72-L87)).
+   [`apps/phase-runner/src/runner_chain.rs:72-87`](../../apps/phase-runner/src/runner_chain.rs#L72-L87),
+   [`apps/phase-runner/src/runner_live_follow.rs:39-42`](../../apps/phase-runner/src/runner_live_follow.rs#L39-L42),
+   [`apps/phase-runner/src/runner_live_follow.rs:180-183`](../../apps/phase-runner/src/runner_live_follow.rs#L180-L183)).
    A terminal assertion on that path emits the normal structured
    `chain supervisor stopped after a terminal error` entry with the primary
    assertion text. The Project row nevertheless has the resumable running-redo
