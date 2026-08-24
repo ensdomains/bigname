@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use alloy_primitives::keccak256;
 use anyhow::{Context, Result, bail};
@@ -11,10 +11,13 @@ use crate::{LoadedManifest, ManifestLoadStatus, ManifestRepository};
 mod persistence;
 #[path = "schema_v2_sync_state.rs"]
 mod sync_state;
+#[path = "schema_v2_watch.rs"]
+mod watch;
 
 use persistence::{
     deactivate_retired_manifest_addresses, insert_declaration, normalize_address,
-    reopen_proxy_edge, resolve_contract, validate_proxy_shape,
+    reopen_proxy_edge, repair_retired_omitted_admission_floors, resolve_contract,
+    validate_proxy_shape,
 };
 
 const SCHEMA_V2_MANIFEST_SYNC_LOCK: i64 = 0x4249_474e_414d_4532;
@@ -84,8 +87,36 @@ pub async fn sync_schema_v2_repository(
         .execute(&mut *transaction)
         .await
         .context("failed to take schema-v2 manifest sync advisory lock")?;
+    let mut omitted_admission_addresses = BTreeSet::new();
+    for loaded in repository
+        .manifests()
+        .iter()
+        .filter(|loaded| loaded.manifest.rollout_status.is_active())
+    {
+        let manifest = &loaded.manifest;
+        omitted_admission_addresses.extend(
+            manifest
+                .roots
+                .iter()
+                .filter(|root| root.start_block.is_none())
+                .map(|root| (manifest.chain.clone(), normalize_address(&root.address))),
+        );
+        for contract in manifest
+            .contracts
+            .iter()
+            .filter(|contract| contract.start_block.is_none())
+        {
+            omitted_admission_addresses
+                .insert((manifest.chain.clone(), normalize_address(&contract.address)));
+            if let Some(implementation) = contract.implementation.as_deref() {
+                omitted_admission_addresses
+                    .insert((manifest.chain.clone(), normalize_address(implementation)));
+            }
+        }
+    }
     sync_state::lock_phase_writers(&mut transaction, repository).await?;
     let previous_authority = sync_state::active_authority(&mut transaction).await?;
+    let previous_admission_floors = sync_state::active_admission_floors(&mut transaction).await?;
     let desired_authority = sync_state::repository_authority(repository)?;
     let existing = load_manifest_states(&mut transaction).await?;
 
@@ -100,6 +131,7 @@ pub async fn sync_schema_v2_repository(
     let mut discovery_rule_count = 0usize;
     let mut proxy_edge_count = 0usize;
     let mut desired_keys = HashSet::new();
+    let mut repaired_floor_chains = HashSet::new();
     for loaded in repository.manifests() {
         let file_path = loaded.relative_path.to_string_lossy().into_owned();
         let manifest_id = upsert_manifest(&mut transaction, loaded, &file_path).await?;
@@ -111,7 +143,13 @@ pub async fn sync_schema_v2_repository(
         {
             write_manifest_event(&mut transaction, existing.get(&state.key), &state).await?;
         }
-        let counts = replace_manifest_children(&mut transaction, manifest_id, loaded).await?;
+        let counts = replace_manifest_children(
+            &mut transaction,
+            manifest_id,
+            loaded,
+            &mut repaired_floor_chains,
+        )
+        .await?;
         declaration_count += counts.0;
         discovery_rule_count += counts.1;
         proxy_edge_count += counts.2;
@@ -125,10 +163,18 @@ pub async fn sync_schema_v2_repository(
         write_manifest_event(&mut transaction, Some(before), &after).await?;
     }
     deactivate_retired_manifest_addresses(&mut transaction).await?;
+    repair_retired_omitted_admission_floors(
+        &mut transaction,
+        &omitted_admission_addresses,
+        &mut repaired_floor_chains,
+    )
+    .await?;
     sync_state::invalidate_changed_derived_epochs(
         &mut transaction,
         &previous_authority,
         &desired_authority,
+        &previous_admission_floors,
+        &repaired_floor_chains,
     )
     .await?;
     transaction
@@ -198,8 +244,8 @@ fn manifest_state(manifest_id: i64, loaded: &LoadedManifest) -> Result<StoredMan
         },
         rollout_status: manifest.rollout_status.as_db_value().to_owned(),
         normalizer_version: manifest.normalizer_version.clone(),
-        manifest_payload: serde_json::to_value(manifest)
-            .with_context(|| format!("failed to serialize {}", loaded.path.display()))?,
+        manifest_payload: watch::manifest_payload(manifest)
+            .with_context(|| format!("failed to compile {}", loaded.path.display()))?,
     })
 }
 
@@ -310,8 +356,8 @@ async fn upsert_manifest(
             loaded.path.display()
         )
     })?;
-    let payload = serde_json::to_value(manifest)
-        .with_context(|| format!("failed to serialize {}", loaded.path.display()))?;
+    let payload = watch::manifest_payload(manifest)
+        .with_context(|| format!("failed to compile {}", loaded.path.display()))?;
     sqlx::query_scalar(
         "
         INSERT INTO manifest_versions (
@@ -349,6 +395,7 @@ async fn replace_manifest_children(
     transaction: &mut Transaction<'_, Postgres>,
     manifest_id: i64,
     loaded: &LoadedManifest,
+    repaired_floor_chains: &mut HashSet<String>,
 ) -> Result<(usize, usize, usize)> {
     sqlx::query("DELETE FROM manifest_contract_instances WHERE manifest_id = $1")
         .bind(manifest_id)
@@ -393,6 +440,7 @@ async fn replace_manifest_children(
                 "declaration_name": root.name,
                 "declared_address": address,
             }),
+            repaired_floor_chains,
         )
         .await?;
         insert_declaration(
@@ -433,6 +481,7 @@ async fn replace_manifest_children(
                 "declaration_name": contract.role,
                 "declared_address": address,
             }),
+            repaired_floor_chains,
         )
         .await?;
         let implementation = if let Some(implementation) = contract.implementation.as_deref() {
@@ -452,6 +501,7 @@ async fn replace_manifest_children(
                     "proxy_address": address,
                     "declared_address": implementation,
                 }),
+                repaired_floor_chains,
             )
             .await?;
             Some((implementation_id, implementation))

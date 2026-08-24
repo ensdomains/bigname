@@ -117,6 +117,7 @@ pub(crate) fn require_start(
     mode: &RunMode,
 ) -> RunnerResult<()> {
     require_no_interrupted_redo(rows, chain_id, phase, mode)?;
+    require_completed_ingest_redo(rows, chain_id, phase, mode)?;
     require_compatible_active_phase(rows, chain_id, phase, mode)?;
     require_prerequisite(rows, chain_id, phase)?;
     if phase.writes_derived_data() {
@@ -155,6 +156,43 @@ fn require_no_interrupted_redo(
     ))
 }
 
+fn require_completed_ingest_redo(
+    rows: &[PhaseStateRow],
+    chain_id: &str,
+    phase: PhaseName,
+    mode: &RunMode,
+) -> RunnerResult<()> {
+    if !matches!(mode, RunMode::Redo(_) | RunMode::RecomputeFlags(_))
+        || !matches!(phase, PhaseName::Interpret | PhaseName::Project)
+    {
+        return Ok(());
+    }
+    let ingest = row_for(rows, PhaseName::Ingest)?;
+    if !is_required_downstream_redo(ingest) {
+        return Ok(());
+    }
+    let range = ingest
+        .redo_from_block_number
+        .zip(ingest.redo_to_block_number)
+        .ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "required Ingest redo for chain {chain_id} is missing its persisted range"
+            ))
+        })
+        .and_then(|(from, to)| BlockRange::new(from, to))?;
+    Err(required_ingest_redo_error(chain_id, range))
+}
+
+pub(crate) fn required_ingest_redo_error(chain_id: &str, range: BlockRange) -> RunnerError {
+    RunnerError::data_integrity(format!(
+        "manifest watch plan widened over already-ingested blocks for chain {chain_id}; \
+         automatic re-ingest is disabled because historical fetch cost is an operator decision; \
+         rerun `phase-runner redo --chain {chain_id} --phase ingest --from-block {} \
+         --to-block {}` with the configured sources before derivation",
+        range.from, range.to
+    ))
+}
+
 pub(crate) fn redo_rerun_instruction(
     chain_id: &str,
     phase: PhaseName,
@@ -178,6 +216,8 @@ fn require_compatible_active_phase(
     phase: PhaseName,
     mode: &RunMode,
 ) -> RunnerResult<()> {
+    let required_ingest_recovery = matches!(phase, PhaseName::Ingest | PhaseName::Live)
+        && is_required_downstream_redo(row_for(rows, PhaseName::Ingest)?);
     for row in rows {
         let other: PhaseName = row.phase_name.parse()?;
         if other == phase {
@@ -187,6 +227,11 @@ fn require_compatible_active_phase(
         if matches!(status, PhaseStatus::Running | PhaseStatus::Paused)
             && !verify_live_work_pair(phase, other)
             && !is_pending_required_downstream_redo(row)
+            && !required_ingest_recovery_can_precede_interrupted_derived(
+                required_ingest_recovery,
+                other,
+                row,
+            )
             && !recompute_can_queue_behind_project_redo(phase, other, mode, row)
         {
             return Err(RunnerError::new(
@@ -198,6 +243,19 @@ fn require_compatible_active_phase(
         }
     }
     Ok(())
+}
+
+fn required_ingest_recovery_can_precede_interrupted_derived(
+    required_ingest_recovery: bool,
+    other: PhaseName,
+    row: &PhaseStateRow,
+) -> bool {
+    // Manifest sync may widen Ingest while preserving an interrupted downstream redo. The
+    // prerequisite repair, including raw Live catch-up after a rewind, must run first; the
+    // advisory locks proved neither retained redo still has a writer.
+    required_ingest_recovery
+        && row.redo_in_progress
+        && matches!(other, PhaseName::Interpret | PhaseName::Project)
 }
 
 fn recompute_can_queue_behind_project_redo(
@@ -236,8 +294,9 @@ fn require_prerequisite(
     };
     let status = row_for(rows, prerequisite)?.status()?;
     if phase == PhaseName::Live
-        && status == PhaseStatus::Running
-        && is_pending_required_downstream_redo(row_for(rows, prerequisite)?)
+        && ((status == PhaseStatus::Running
+            && is_pending_required_downstream_redo(row_for(rows, prerequisite)?))
+            || is_required_downstream_redo(row_for(rows, PhaseName::Ingest)?))
     {
         return Ok(());
     }
@@ -259,6 +318,14 @@ fn is_pending_required_downstream_redo(row: &PhaseStateRow) -> bool {
             .last_error
             .as_deref()
             .is_some_and(|reason| reason.starts_with(crate::redo_stamp::REQUIRED_REDO_PREFIX))
+}
+
+fn is_required_downstream_redo(row: &PhaseStateRow) -> bool {
+    row.redo_in_progress
+        && row
+            .last_error
+            .as_deref()
+            .is_some_and(crate::redo_stamp::owns_required_redo)
 }
 
 fn require_content_hash(
@@ -283,11 +350,23 @@ fn require_content_hash(
             require_current_hash(rows, chain_id, phase, PhaseName::Interpret)?;
             reject_different_hash(rows, chain_id, phase, PhaseName::Project)
         }
+        RunMode::Normal if phase == PhaseName::Live && live_can_fill_required_redo(rows)? => Ok(()),
         RunMode::Normal if phase == PhaseName::Live => {
             require_current_interpret_and_project(rows, chain_id, phase)
         }
         _ => Ok(()),
     }
+}
+
+fn live_can_fill_required_redo(rows: &[PhaseStateRow]) -> RunnerResult<bool> {
+    // A rewind can leave a required raw or interpreted range above the published head. Live must
+    // be able to fetch and publish that raw suffix before the required Ingest command or Interpret
+    // replay can run. Required work fences existing derived state; a chain that has not derived
+    // anything yet has no serving state to expose.
+    Ok(
+        is_required_downstream_redo(row_for(rows, PhaseName::Interpret)?)
+            || is_required_downstream_redo(row_for(rows, PhaseName::Ingest)?),
+    )
 }
 
 fn require_current_interpret_and_project(

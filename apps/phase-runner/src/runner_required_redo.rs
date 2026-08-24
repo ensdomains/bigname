@@ -11,6 +11,19 @@ use crate::{
 use super::PhaseRunner;
 
 impl PhaseRunner {
+    pub(super) async fn reject_pending_required_ingest(&self, chain_id: &str) -> RunnerResult<()> {
+        if let Some(range) = self
+            .store
+            .required_redo_range(chain_id, PhaseName::Ingest)
+            .await?
+        {
+            return Err(crate::transitions::required_ingest_redo_error(
+                chain_id, range,
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn catch_up_for_required_redo(
         &self,
         chain: &ChainConfig,
@@ -24,16 +37,8 @@ impl PhaseRunner {
             else {
                 return Ok(());
             };
-            if required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
-                return Ok(());
-            }
-            self.run_phase_with_restart(
-                chain,
-                PhaseName::Live,
-                RunMode::Normal,
-                cancellation.clone(),
-            )
-            .await?;
+            self.catch_up_required_range(chain, range, cancellation.clone())
+                .await?;
             if cancellation.is_cancelled() {
                 return Ok(());
             }
@@ -45,6 +50,33 @@ impl PhaseRunner {
                 () = tokio::time::sleep(self.timing.live_poll_interval) => {}
             }
         }
+    }
+
+    pub(super) async fn catch_up_required_range(
+        &self,
+        chain: &ChainConfig,
+        range: BlockRange,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        while !required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
+            self.run_phase_with_restart(
+                chain,
+                PhaseName::Live,
+                RunMode::Normal,
+                cancellation.clone(),
+            )
+            .await?;
+            if cancellation.is_cancelled() {
+                return Ok(());
+            }
+            if !required_range_is_readable(self.store.pool(), &chain.chain_id, range).await? {
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(self.timing.live_poll_interval) => {}
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn run_spine_phase(
@@ -61,6 +93,37 @@ impl PhaseRunner {
             .required_redo_range(&chain.chain_id, phase)
             .await?
         {
+            if phase == PhaseName::Ingest {
+                let mut current = range;
+                loop {
+                    self.catch_up_required_range(chain, current, cancellation.clone())
+                        .await?;
+                    if cancellation.is_cancelled() {
+                        return Ok(());
+                    }
+                    let Some(updated) = self
+                        .store
+                        .required_redo_range(&chain.chain_id, PhaseName::Ingest)
+                        .await?
+                    else {
+                        return self
+                            .run_phase_with_restart(
+                                chain,
+                                PhaseName::Ingest,
+                                RunMode::Normal,
+                                cancellation,
+                            )
+                            .await;
+                    };
+                    if updated == current {
+                        return Err(crate::transitions::required_ingest_redo_error(
+                            &chain.chain_id,
+                            current,
+                        ));
+                    }
+                    current = updated;
+                }
+            }
             if phase == PhaseName::Interpret {
                 self.recover_stopped_live(chain).await?;
             }
@@ -93,7 +156,12 @@ impl PhaseRunner {
     }
 
     pub(super) async fn recover_stopped_phases(&self, chain: &ChainConfig) -> RunnerResult<()> {
-        for phase in [PhaseName::Interpret, PhaseName::Project, PhaseName::Verify] {
+        for phase in [
+            PhaseName::Ingest,
+            PhaseName::Interpret,
+            PhaseName::Project,
+            PhaseName::Verify,
+        ] {
             let mut phase_lock =
                 PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase).await?;
             let result =
@@ -119,6 +187,33 @@ async fn resolve_stopped_phase(
     chain_id: &str,
     phase: PhaseName,
 ) -> RunnerResult<()> {
+    if phase == PhaseName::Ingest {
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET last_error = $3 || substring(last_error FROM char_length($4) + 1),
+                 updated_at = now()
+             WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress
+               AND last_error LIKE $5",
+        )
+        .bind(chain_id)
+        .bind(phase.as_str())
+        .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
+        .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
+        .bind(format!(
+            "{}%",
+            crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX
+        ))
+        .execute(lock_connection)
+        .await
+        .map_err(|error| {
+            RunnerError::lock_connection_lost(format!(
+                "advisory-lock connection was lost while settling a stopped required Ingest redo \
+                 for chain {chain_id}; stopping so the next runner can recheck durable phase \
+                 state: {error}"
+            ))
+        })?;
+        return Ok(());
+    }
     sqlx::query(
         "UPDATE chain_phase_state
          SET phase_status = CASE

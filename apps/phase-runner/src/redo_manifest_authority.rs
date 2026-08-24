@@ -5,10 +5,9 @@ use crate::{
     phase::{BlockRange, PhaseName},
 };
 
-// This matches manifest synchronization's watch-plan comparison: active payloads
-// are ordered deterministically, and only the interpretation-only normalizer is
-// excluded. Roots, contracts, addresses, discovery rules, and block ranges stay
-// in the fingerprint.
+// This matches manifest synchronization's compiled event/emitter comparison:
+// active payloads are ordered deterministically, their persisted compiled watch
+// entries are retained, and only the interpretation-only normalizer is excluded.
 pub(crate) const FINGERPRINT_SQL: &str = "(
     SELECT encode(
         public.digest(

@@ -143,17 +143,37 @@ mandatory full Interpret and Project redos.
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | Interpret | Stable identity anchors. |
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
-| `normalized_events` | Interpret | Protocol events normalized transactionally with identity output. |
+| `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
-| `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
+| `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen only a required Ingest redo recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker) while holding every phase writer lock | Phase progress, repair work, and runtime liveness. Manifest synchronization preserves the phase runner's lifecycle backup fields, clears resumable evidence when it changes the required range or [compiled watch plan](glossary.md#compiled-watch-plan), and never executes the redo. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions | Active live/indexed resolver disagreements; diagnostic only. |
 
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
+
+For a manifest-declared address, an omitted `start_block` is initially stored
+as `contract_instance_addresses.active_from_block_number = NULL`; interval
+readers treat it as an effective block-zero lower bound. Refreshing that same
+initial-epoch active row materializes zero instead of replacing it with a later
+finite declaration start. Omitting a previously finite start also backdates
+that active epoch to zero so the widened watch range is reproducible. A
+readmission after retirement remains bounded after the preceding epoch, and a
+fresh admission still stores its declared finite start. For compatibility,
+retained omitted-start manifest history supplies the zero widening floor even
+if Interpret's discovery refresh replaces the stored `NULL` with the
+first-observed block before the next manifest sync or an older binary left the
+same finite state ([issue #547](https://github.com/ensdomains/bigname/issues/547)). When a desired
+active declaration omits its start, synchronization restores zero on the
+earliest address epoch even if retired; later re-admitted epochs keep their
+bounded starts. It stamps the required Ingest redo from block zero (clamped to
+the earliest configured source start) and invalidates the derived phases for the
+restored interval. The repair is
+one-shot because the stored row is then zero and its positive-floor predicate
+cannot fire again; a current finite declaration keeps its finite watch bound.
 
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing
@@ -169,8 +189,16 @@ text alone never authorizes that transition. This preserved evidence is
 diagnostic state, not permission to publish: provider-trusted Sepolia readiness
 requires both Ingest and Verify to remain completed.
 
-At runner startup, a `running` or `paused` Interpret, Project, or Verify row
-with no explicit redo is resolved only while its advisory lock remains held.
+At runner startup, a `running` or `paused` Interpret, Project, or Verify row with no
+explicit redo is resolved only while its advisory lock remains held. A required Ingest
+redo whose `last_error` begins with `required downstream redo active:` and outlived its
+advisory-lock session is changed back to `required downstream redo:` while the next
+runner holds that lock. Its `redo_from_block_number`, `redo_to_block_number`,
+`redo_current_block_number`, `redo_current_block_hash`, `redo_target_block_number`,
+`redo_target_block_hash`, `redo_source_boundary_markers`, and
+`redo_manifest_authority_fingerprint` remain unchanged for the exact-range retry.
+Pool-backed progress for a required Ingest redo also requires the active `last_error`
+prefix, so a delayed write from the abandoned attempt cannot change those fields.
 A saved Interpret or Project final checkpoint is recorded as `completed`; an
 earlier checkpoint is recorded as `failed` so ordinary phase execution can
 resume it. A saved Verify final checkpoint stays `failed` until current
@@ -543,9 +571,20 @@ lineage, the equal-height evidence requirement still applies: the phase summary
 cannot adopt the fresh resolution without a matching per-source marker returned
 by a load during that redo.
 Together with the per-chain manifest/watch-plan fingerprint, this closes the
-last-boundary case when active inputs change between attempts. Binding
-watch-plan evidence to facts at interior range heights remains tracked by
-issue #376.
+last-boundary case when active inputs change between attempts. At manifest
+synchronization, a semantic comparison of previous and desired watched event,
+emitter scope, and start block now covers interior retained heights: any
+widening that intersects stored Ingest coverage stamps a required Ingest redo
+through the latest published ingested head. That redo reloads the whole
+affected range under one current manifest/watch-plan fingerprint. Every redo
+checkpoint uses the boundary returned by the load itself. Loaded headers must
+form one parent-linked window, and each resumed window must descend from the
+durable prior-batch checkpoint; a fork switch restarts the redo from its range
+beginning instead of combining coverage from sibling forks. Completion of a
+manifest-required redo also requires its loaded range-end hash to equal the
+readable hash at that height. Ordinary repair redos retain their existing
+ability to reconcile a source cursor to another retained fork before normal
+head publication.
 
 ## Interpretation replay
 
@@ -602,12 +641,14 @@ association while the redo cursor is cleared. Interpret walks the audited range
 again from its beginning under the new hash; later interruptions under that
 hash resume normally.
 
-The system cannot verify the fetch or the no-widening review; the attestation is
-the operator's responsibility. The guard cannot distinguish widening from
-another manifest-authority change, so every such change is fenced regardless of
-finite-cursor or Live-lineage coverage until issue #376 binds watch-plan
-evidence to loaded facts. An interpreter content hash rotation with neither a
-current manifest-authority marker nor an active audited redo remains flagless.
+Manifest synchronization distinguishes manifest-authored watch-plan widening
+from narrowing and unrelated authority changes. A widening over retained
+coverage stamps the required Ingest redo; successful completion supplies the
+current-watch-plan fetch before Interpret can run. The attestation remains the
+operator's durable acknowledgement of every manifest-authority change,
+including changes that stamp no Ingest work. An interpreter content hash
+rotation with neither a current manifest-authority marker nor an active audited
+redo remains flagless.
 A missing lineage height, an ambiguous readable height, or an uncovered part of
 a source's finite target remains a fatal presence failure.
 

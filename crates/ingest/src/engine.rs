@@ -23,6 +23,8 @@ mod query;
 mod redo;
 mod source_floor;
 
+use redo::LoadedWindow;
+
 const BLOCKS_PER_BATCH: i64 = 256;
 const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
 
@@ -262,6 +264,7 @@ impl Engine {
             from.saturating_add(BLOCKS_PER_BATCH - 1).min(range_to)
         });
         let complete = to >= range_to;
+        self.require_independent_base_source_seam(&request).await?;
         let mut written_bytes = 0u64;
         let mut progress = Vec::with_capacity(request.sources.len());
 
@@ -286,6 +289,14 @@ impl Engine {
                         window_to,
                     )
                     .await?;
+                redo::require_resumed_window_parent(
+                    &request.chain_id,
+                    &source.key,
+                    request.resume_current.as_ref(),
+                    window_from,
+                    loaded.first_parent_hash.as_deref(),
+                )?;
+                redo::require_source_seam(&request, source, &progress, &loaded.first)?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
                 let at_boundary = window_to == source_target_number;
                 let marker = if at_boundary {
@@ -379,6 +390,10 @@ impl Engine {
         };
         let primary = primary_source(&request.sources)?;
         let (current, target) = if let Some(summary) = guarded_summary {
+            summary
+        } else if let Some(summary) =
+            redo::running_summary_from_loaded_source(&progress, &primary.key, to)
+        {
             summary
         } else {
             let provider = self.provider(&request.chain_id, primary).await?;
@@ -480,11 +495,20 @@ impl Engine {
         let last = resolved
             .last()
             .ok_or_else(|| IngestError::data_integrity("ingest window resolved no blocks"))?;
+        let first = &resolved[0];
         Ok(LoadedWindow {
+            first: Marker {
+                number: first.number,
+                hash: first.hash.clone(),
+            },
             marker: Marker {
                 number: last.number,
                 hash: last.hash.clone(),
             },
+            first_parent_hash: facts
+                .blocks
+                .first()
+                .and_then(|block| block.parent_hash.clone()),
             estimated_write_bytes,
         })
     }
@@ -559,11 +583,6 @@ struct NormalSourceState<'a> {
     next: i64,
     current: Option<Marker>,
     target: Marker,
-}
-
-pub(super) struct LoadedWindow {
-    pub(super) marker: Marker,
-    pub(super) estimated_write_bytes: u64,
 }
 
 async fn resolve_marker(provider: &ChainProvider, number: i64) -> Result<Marker> {

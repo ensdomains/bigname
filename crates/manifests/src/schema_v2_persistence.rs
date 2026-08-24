@@ -1,10 +1,11 @@
 use alloy_primitives::keccak256;
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
+use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
 
-use crate::{LoadedManifest, ManifestContract};
+use crate::{LoadedManifest, ManifestContract, SourceManifest};
 
 #[derive(sqlx::FromRow)]
 struct RetiredManifestAddress {
@@ -23,6 +24,7 @@ struct ExistingContractAddress {
     row_id: i64,
     instance_id: Uuid,
     is_active: bool,
+    active_from: Option<i64>,
     active_to: Option<i64>,
     prior_epoch_end: Option<i64>,
 }
@@ -37,12 +39,14 @@ pub(super) async fn resolve_contract(
     start_block: Option<u64>,
     admit_address: bool,
     provenance: serde_json::Value,
+    repaired_floor_chains: &mut std::collections::HashSet<String>,
 ) -> Result<Uuid> {
     let existing = sqlx::query_as::<_, ExistingContractAddress>(
         "
         SELECT current.contract_instance_address_id AS row_id,
                current.contract_instance_id AS instance_id,
                current.deactivated_at IS NULL AS is_active,
+               current.active_from_block_number AS active_from,
                current.active_to_block_number AS active_to,
                (
                    SELECT max(history.active_to_block_number)
@@ -110,11 +114,15 @@ pub(super) async fn resolve_contract(
     if !admit_address {
         return Ok(instance);
     }
+    let omitted_start = start_block.is_none();
     let start_block = start_block
         .map(i64::try_from)
         .transpose()
         .with_context(|| format!("start block for {chain_id}:{address} exceeds BIGINT"))?;
     if let Some(existing) = existing.as_ref().filter(|existing| existing.is_active) {
+        let repairs_legacy_floor = omitted_start
+            && existing.active_from.is_some_and(|start| start > 0)
+            && existing.prior_epoch_end.is_none();
         let start_block =
             bounded_epoch_start(start_block, existing.prior_epoch_end).with_context(|| {
                 format!("failed to bound declared contract epoch {chain_id}:{address}")
@@ -123,8 +131,9 @@ pub(super) async fn resolve_contract(
             "
             UPDATE contract_instance_addresses
             SET active_from_block_number = CASE
-                    WHEN active_from_block_number IS NULL THEN $2
-                    WHEN $2::bigint IS NULL THEN active_from_block_number
+                    -- Runtime interval readers treat either omitted bound as block zero. Persist
+                    -- that floor so refresh order cannot leave a narrower finite address range.
+                    WHEN active_from_block_number IS NULL OR $2::bigint IS NULL THEN 0
                     ELSE LEAST(active_from_block_number, $2)
                 END,
                 active_from_block_hash = NULL,
@@ -143,6 +152,10 @@ pub(super) async fn resolve_contract(
         .execute(&mut **transaction)
         .await
         .with_context(|| format!("failed to refresh declared contract {chain_id}:{address}"))?;
+        if repairs_legacy_floor {
+            super::sync_state::stamp_required_ingest(transaction, chain_id, 0).await?;
+            repaired_floor_chains.insert(chain_id.to_owned());
+        }
     } else if let Some(previous_to) = existing.as_ref().and_then(|existing| existing.active_to) {
         let next_from = previous_to.checked_add(1).ok_or_else(|| {
             anyhow::anyhow!(
@@ -371,6 +384,66 @@ pub(super) async fn deactivate_retired_manifest_addresses(
         })?;
     }
     Ok(())
+}
+
+pub(super) async fn repair_retired_omitted_admission_floors(
+    transaction: &mut Transaction<'_, Postgres>,
+    omitted_addresses: &BTreeSet<(String, String)>,
+    repaired_floor_chains: &mut HashSet<String>,
+) -> Result<()> {
+    if omitted_addresses.is_empty() {
+        return Ok(());
+    }
+    let (chains, addresses): (Vec<_>, Vec<_>) = omitted_addresses.iter().cloned().unzip();
+    let repaired: Vec<String> = sqlx::query_scalar(
+        "WITH target AS ( \
+             SELECT chain_id, address FROM unnest($1::text[], $2::text[]) target(chain_id, address) \
+         ), earliest AS ( \
+             SELECT DISTINCT ON (admission.chain_id, lower(admission.address)) \
+                    admission.contract_instance_address_id \
+             FROM contract_instance_addresses admission \
+             JOIN target ON target.chain_id = admission.chain_id \
+                        AND target.address = lower(admission.address) \
+             WHERE admission.deactivated_at IS NOT NULL \
+               AND admission.active_to_block_number IS NOT NULL \
+             ORDER BY admission.chain_id, lower(admission.address), \
+                      admission.contract_instance_address_id \
+         ) \
+         UPDATE contract_instance_addresses admission \
+         SET active_from_block_number = 0, active_from_block_hash = NULL \
+         FROM earliest \
+         WHERE admission.contract_instance_address_id = earliest.contract_instance_address_id \
+           AND admission.active_from_block_number > 0 \
+         RETURNING admission.chain_id",
+    )
+    .bind(chains)
+    .bind(addresses)
+    .fetch_all(&mut **transaction)
+    .await
+    .context("failed to repair retired omitted-start admission floors")?;
+    for chain_id in repaired.into_iter().collect::<BTreeSet<_>>() {
+        super::sync_state::stamp_required_ingest(transaction, &chain_id, 0).await?;
+        repaired_floor_chains.insert(chain_id);
+    }
+    Ok(())
+}
+
+pub(super) async fn retained_admission_manifests(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<Vec<SourceManifest>> {
+    let payloads: Vec<Value> = sqlx::query_scalar(
+        "SELECT manifest_payload FROM manifest_versions WHERE rollout_status = 'active' UNION ALL SELECT before_state -> 'manifest_payload' FROM normalized_events WHERE event_kind = 'SourceManifestUpdated' AND derivation_kind = 'manifest_sync' AND before_state ->> 'rollout_status' = 'active' AND before_state ? 'manifest_payload' UNION ALL SELECT after_state -> 'manifest_payload' FROM normalized_events WHERE event_kind = 'SourceManifestUpdated' AND derivation_kind = 'manifest_sync' AND after_state ->> 'rollout_status' = 'active' AND after_state ? 'manifest_payload'",
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .context("failed to load retained manifest admission history")?;
+    payloads
+        .into_iter()
+        .map(|payload| {
+            serde_json::from_value::<SourceManifest>(payload)
+                .context("failed to decode retained manifest admission history")
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

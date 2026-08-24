@@ -323,11 +323,20 @@ locked begin keeps the audit association but discards progress written under
 the prior hash, so Interpret restarts the range from its beginning under the
 new hash. Later interruptions under the new hash resume normally. The locked
 begin rejects a stale token, including one from an earlier transition to the
-same authority. The system cannot verify that the fetch or no-widening review
-happened; the attestation is the operator's responsibility. Do not edit cursors.
-The same conservative gate applies to
-non-widening changes and to ranges fully covered by finite cursors until issue
-#376 binds watch-plan evidence to loaded facts. An interpreter content hash
+same authority. Manifest synchronization detects manifest-authored watch-plan
+widening over retained Ingest coverage and stamps the exact required Ingest
+range. Normal phase execution stops and prints the explicit `ingest` redo
+command; it never performs the potentially expensive historical fetch
+automatically. Complete that command before the attested Interpret redo.
+Until it completes, the runner also refuses the start of any explicit
+Interpret, Project, or recompute-flags redo and repeats the exact required
+Ingest command. Supplying
+`--attest-watch-set-coverage` does not override this refusal: the attestation
+describes retained-fact coverage, while the durable Ingest stamp records an
+uncompleted historical-fetch obligation.
+Narrowing, a same-set sync, and a newly admitted chain with no Ingest coverage
+do not stamp Ingest. The attestation remains the operator's responsibility for
+the whole authority transition. Do not edit cursors. An interpreter content hash
 rotation with neither a current manifest-authority marker nor an active audited
 redo remains flagless. When a full-history Interpret redo for an interpreter
 content hash rotation starts at the finite ingest bounds after Live has
@@ -342,6 +351,25 @@ belongs to an attested Interpret redo from the prior interpreter content hash,
 restart the same audited range with its token; the range restarts from its
 beginning rather than resuming the cursor written under the prior interpreter
 content hash.
+
+The first manifest sync under the binary that adds `_bigname_compiled_watch`
+rewrites every stored active payload. For every chain with existing derived
+output, that rewrite mints a manifest-authority marker. Schedule the resulting
+mandatory full attested Interpret redo across the already-derived fleet at the
+planned walk-from-zero re-derivation boundary. A fresh or partially initialized
+chain with no derived output receives no marker and derives normally; do not
+supply an attestation for it. This rollout does not cause a spurious Ingest
+refetch: when the prior payload lacks the compiled field, watch comparison
+compiles that side from the same TOML under this binary. Once that snapshot
+exists, a later binary-policy widening is detectable.
+
+The binary that adds the manifest namespace to stored family-emitter entries
+likewise enriches legacy `_bigname_compiled_watch` payloads from their enclosing
+manifest. On chains with derived output, that payload rewrite mints a
+manifest-authority marker and requires the same full attested Interpret redo
+and downstream Project redo even when the TOML is unchanged. It stamps no
+Ingest redo when namespace enrichment reveals no actual watch-plan widening.
+
 `recompute-flags` recalculates label and name-surface normalization metadata
 under the current normalizer and refreshes the scoped primary-name projection.
 Names that remain active or remain shadow complete without replay. Names that
@@ -382,7 +410,11 @@ retraction rather than a direct flag write. Project redo,
 supervised project phase. `phase-runner rewind` moves the
 published latest marker to an exact stored readable ancestor and uses normal
 head publication to orphan the suffix, clear affected divergence observations,
-and stamp downstream redo.
+and stamp downstream redo. If the rewind makes the end of an uncompleted
+required Ingest redo unreadable, the next supervised run first uses Live intake
+to publish the winning suffix and then repeats the exact pending command. When
+finite Ingest was interrupted before it recorded a handoff, that recovery-only
+Live pass anchors at the published readable ancestor.
 
 `phase-runner inspect block-canonicality`, `stored-lineage`, and `raw-events`
 provide the three read-only bounded schema-v2 operator windows. They do not

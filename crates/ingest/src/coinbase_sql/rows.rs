@@ -5,6 +5,24 @@ use serde_json::Value;
 use crate::provider::Log;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CoinbaseBlockRow {
+    pub block_number: i64,
+    pub block_hash: String,
+}
+
+impl CoinbaseBlockRow {
+    pub(super) fn from_value(value: Value) -> Result<Self> {
+        let object = value
+            .as_object()
+            .context("Coinbase SQL block row must be an object")?;
+        Ok(Self {
+            block_number: required_i64(object, "block_number")?,
+            block_hash: normalize_hash(&required_string(object, "block_hash")?)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CoinbaseLogRow {
     pub block_number: i64,
     pub block_hash: String,

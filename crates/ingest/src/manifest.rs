@@ -12,10 +12,12 @@ use crate::{
     ErrorKind, IngestError, Result,
     event_signatures::{
         BASENAMES_BASE_RESOLVER_SOURCE_FAMILY, ENS_V1_RESOLVER_SOURCE_FAMILY,
-        ENS_V2_REGISTRY_SOURCE_FAMILY, ENS_V2_RESOLVER_SOURCE_FAMILY,
-        ens_v2_unique_resolver_topic0s, generic_resolver_topic0s, registry_announcement_topic0,
+        ENS_V2_REGISTRY_SOURCE_FAMILY, ENS_V2_RESOLVER_SOURCE_FAMILY, registry_announcement_topic0,
     },
 };
+
+#[cfg(test)]
+use crate::event_signatures::generic_resolver_topic0s;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WatchFilter {
@@ -243,7 +245,8 @@ pub async fn load_persisted_watch_filter(
                 | ENS_V2_RESOLVER_SOURCE_FAMILY
                 | ENS_V2_REGISTRY_SOURCE_FAMILY
         ) {
-            let all_emitter_topics = all_emitter_topics(&manifest.source_family, &manifest_topics);
+            let all_emitter_topics =
+                bigname_manifests::all_emitter_topic0s(&manifest.source_family, &manifest_topics);
             all_emitter_topics_by_manifest.insert(
                 manifest_id,
                 all_emitter_topics.iter().cloned().collect::<BTreeSet<_>>(),
@@ -444,18 +447,7 @@ pub async fn load_persisted_watch_filter(
     Ok(filter)
 }
 
+#[cfg(test)]
 fn all_emitter_topics(source_family: &str, manifest_topics: &[String]) -> Vec<String> {
-    let manifest_topics = manifest_topics.iter().cloned().collect::<BTreeSet<_>>();
-    let candidates = match source_family {
-        ENS_V1_RESOLVER_SOURCE_FAMILY | BASENAMES_BASE_RESOLVER_SOURCE_FAMILY => {
-            generic_resolver_topic0s()
-        }
-        ENS_V2_REGISTRY_SOURCE_FAMILY => vec![registry_announcement_topic0()],
-        ENS_V2_RESOLVER_SOURCE_FAMILY => ens_v2_unique_resolver_topic0s(),
-        _ => Vec::new(),
-    };
-    candidates
-        .into_iter()
-        .filter(|topic| manifest_topics.contains(topic))
-        .collect()
+    bigname_manifests::all_emitter_topic0s(source_family, manifest_topics)
 }

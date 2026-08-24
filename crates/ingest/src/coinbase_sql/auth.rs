@@ -24,6 +24,17 @@ pub(super) struct CoinbaseSqlAuth {
 }
 
 impl CoinbaseSqlAuth {
+    #[cfg(test)]
+    pub(super) fn scripted() -> Self {
+        Self::new(
+            "scripted-key".to_owned(),
+            STANDARD.encode([7u8; 64]),
+            "scripted.invalid".to_owned(),
+            "/query".to_owned(),
+        )
+        .expect("static scripted Coinbase SQL auth must be valid")
+    }
+
     pub(super) fn from_env(
         api_key_id_env: &str,
         api_key_secret_env: &str,

@@ -72,11 +72,11 @@ impl ManifestAuthorityAttestation {
                 "raw-data presence check failed for interpret redo on chain {chain_id}: the \
                  manifest authority changed since blocks {}..={} were loaded; \
                  invalidation token {}; \
-                 complete the documented mandatory historical fetch for any widened range \
-                 (docs/manifests.md § mandatory historical fetch after watch-plan widening), or \
-                 confirm that the change widened nothing; then re-run with \
+                 complete any required Ingest redo stamped for this authority transition \
+                 (docs/manifests.md § mandatory historical fetch after watch-plan widening), \
+                 then re-run with \
                  --attest-watch-set-coverage {} (or --attest-watch-set-coverage {chain_id}={} in \
-                 a multi-chain redo); see issue #376",
+                 a multi-chain redo)",
                 range.from,
                 range.to,
                 marker.generation_token,
@@ -214,8 +214,8 @@ pub(crate) fn generation_mismatch_error(
         ErrorKind::Configuration,
         format!(
             "--attest-watch-set-coverage supplied invalidation token {supplied} for chain \
-             {chain_id}, but phase state records token {}; repeat the historical-fetch or \
-             no-widening review for the current token before retrying; see issue #376",
+             {chain_id}, but phase state records token {}; complete any required Ingest redo and \
+             review the current authority transition before retrying",
             recorded.unwrap_or("<none>")
         ),
     )
