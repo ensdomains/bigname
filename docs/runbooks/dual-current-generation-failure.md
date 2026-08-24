@@ -196,7 +196,12 @@ ROLLBACK;
 
 Select the row being investigated by its complete audit key for the remaining
 queries. The same semantic conflict can have the same fingerprint at more than
-one target, so the fingerprint alone is not a row selector.
+one target, so the fingerprint alone is not a row selector. The next query
+resolves the target and boundary lineage directly from the block coordinates in
+the audit. The normalized-event join is only a secondary signal that the current
+Interpret derivation still contains that exact boundary; a covering Interpret
+redo may remove the old normalized event without removing lineage or raw facts
+([`crates/interpret/src/write.rs:118-143`](../../crates/interpret/src/write.rs#L118-L143)).
 
 ```sql
 BEGIN TRANSACTION READ ONLY;
@@ -237,18 +242,27 @@ SELECT failure.chain_id,
        failure.evidence #>> '{target,canonicality_state}'
            AS target_canonicality_at_failure,
        target_lineage.canonicality_state AS target_canonicality_now,
-       boundary.event_identity AS boundary_event_identity,
-       boundary.event_kind AS boundary_event_kind,
-       boundary.consumer_visibility AS boundary_visibility,
-       boundary.migration_correlation_ids,
-       boundary.block_number AS boundary_block_number,
-       boundary.block_hash AS boundary_block_hash,
-       boundary.transaction_hash AS boundary_transaction_hash,
-       boundary.transaction_index AS boundary_transaction_index,
-       boundary.log_index AS boundary_log_index,
-       boundary.canonicality_state AS boundary_row_canonicality,
+       failure.evidence #>> '{boundary,event_identity}'
+           AS boundary_event_identity,
+       (failure.evidence #>> '{boundary,block_number}')::bigint
+           AS boundary_block_number,
+       failure.evidence #>> '{boundary,block_hash}' AS boundary_block_hash,
+       (failure.evidence #>> '{boundary,transaction_index}')::bigint
+           AS boundary_transaction_index,
+       (failure.evidence #>> '{boundary,log_index}')::bigint
+           AS boundary_log_index,
+       failure.evidence #>> '{boundary,canonicality_state}'
+           AS boundary_canonicality_at_failure,
        boundary_lineage.canonicality_state AS boundary_lineage_now,
-       jsonb_pretty(boundary.after_state) AS boundary_after_state
+       boundary.event_identity IS NOT NULL
+           AS boundary_present_in_current_derivation,
+       boundary.event_kind AS current_boundary_event_kind,
+       boundary.consumer_visibility AS current_boundary_visibility,
+       boundary.migration_correlation_ids
+           AS current_boundary_migration_correlation_ids,
+       boundary.transaction_hash AS current_boundary_transaction_hash,
+       boundary.canonicality_state AS current_boundary_row_canonicality,
+       jsonb_pretty(boundary.after_state) AS current_boundary_after_state
 FROM failure
 LEFT JOIN bigname_phase.chain_lineage target_lineage
   ON target_lineage.chain_id = failure.chain_id
@@ -256,9 +270,11 @@ LEFT JOIN bigname_phase.chain_lineage target_lineage
  AND target_lineage.block_hash = failure.target_block_hash
 LEFT JOIN boundary ON TRUE
 LEFT JOIN bigname_phase.chain_lineage boundary_lineage
-  ON boundary_lineage.chain_id = boundary.chain_id
- AND boundary_lineage.block_number = boundary.block_number
- AND boundary_lineage.block_hash = boundary.block_hash;
+  ON boundary_lineage.chain_id = failure.chain_id
+ AND boundary_lineage.block_number =
+     (failure.evidence #>> '{boundary,block_number}')::bigint
+ AND boundary_lineage.block_hash =
+     failure.evidence #>> '{boundary,block_hash}';
 
 ROLLBACK;
 ```
@@ -371,11 +387,13 @@ ROLLBACK;
 Finally, capture the complete normalized-event, raw-transaction, receipt, and
 raw-log evidence for every implicated transaction. This includes the whole
 boundary transaction, not just the boundary position: predecessor cleanup can
-occur earlier in that transaction. The boundary is pinned to the block hash in
-the audit. Because each binding witness lacks a recorded block hash, the query
-intentionally enumerates every raw-log candidate at its recorded block,
-transaction, and log position across all retained forks. From those candidates
-onward, every transaction, event, receipt, and log join includes `block_hash`.
+occur earlier in that transaction. The boundary raw-fact lookup is pinned
+directly to the block, transaction, and log coordinates in the audit rather
+than to a normalized event that a redo may have replaced. Because each binding
+witness lacks a recorded block hash, the query intentionally enumerates every
+raw-log candidate at its recorded block, transaction, and log position across
+all retained forks. From those candidates onward, every transaction, event,
+receipt, and log join includes `block_hash`.
 If one witness has candidates on multiple block hashes, or none, preserve that
 result as ambiguity and file-and-hold; do not select a fork by current binding
 state.
@@ -418,23 +436,21 @@ WITH failure AS (
     ) AS sides(side, payload)
 ), evidence_transactions AS (
     SELECT 'boundary'::text AS evidence_source,
-           event.chain_id,
-           event.block_number,
-           event.block_hash,
-           event.transaction_hash,
-           event.transaction_index
+           raw_log.chain_id,
+           raw_log.block_number,
+           raw_log.block_hash,
+           raw_log.transaction_hash,
+           raw_log.transaction_index
     FROM failure
-    JOIN bigname_phase.normalized_events event
-      ON event.chain_id = failure.chain_id
-     AND event.event_identity = failure.evidence #>> '{boundary,event_identity}'
-     AND event.block_number =
+    JOIN bigname_phase.raw_logs raw_log
+      ON raw_log.chain_id = failure.chain_id
+     AND raw_log.block_number =
          (failure.evidence #>> '{boundary,block_number}')::bigint
-     AND event.block_hash = failure.evidence #>> '{boundary,block_hash}'
-     AND COALESCE(event.transaction_index, -1) =
+     AND raw_log.block_hash = failure.evidence #>> '{boundary,block_hash}'
+     AND raw_log.transaction_index =
          (failure.evidence #>> '{boundary,transaction_index}')::bigint
-     AND COALESCE(event.log_index, -1) =
+     AND raw_log.log_index =
          (failure.evidence #>> '{boundary,log_index}')::bigint
-    WHERE event.transaction_hash IS NOT NULL
 
     UNION ALL
 
@@ -521,6 +537,12 @@ is now `orphaned`, or Project has since completed beyond that target without the
 same `last_error`, retain the row as incident history but do not recover from it.
 Audit rows intentionally survive reorgs and later success
 ([`apps/phase-runner/src/project_failure_audit.rs:6-10`](../../apps/phase-runner/src/project_failure_audit.rs#L6-L10)).
+Use `boundary_lineage_now`, which is resolved from the audit coordinates, for
+that decision. Do not classify the audit as historical merely because
+`boundary_present_in_current_derivation` is false: a covering Interpret redo
+can remove the old normalized event while the recorded boundary block remains
+readable. In that state, use the retained raw transaction and phase redo state
+to distinguish an incomplete re-derivation from an indexing defect.
 If a reorg or redo already occurred and either binding's current non-fork fields
 do not match the audit, or its raw position has zero or multiple fork candidates,
 the historical audit is insufficient to reconstruct that binding's old fork.
@@ -619,16 +641,19 @@ This is why recovery re-derives evidence instead of editing the open interval.
    [`docs/runbooks/production-docker.md:477-496`](production-docker.md#stop-and-escalate-an-interpreter-mismatch).
    If a newly started scoped, unflagged redo is fenced by a
    [manifest-authority marker](../glossary.md#manifest-authority-marker), its
-   first error is `ContentHashMismatch`: it demands the full range
-   `0..=<redo-to>`, does not name the marker, and prints no token
-   ([`apps/phase-runner/src/redo_state.rs:377-386`](../../apps/phase-runner/src/redo_state.rs#L377-L386)).
+   first error is `ContentHashMismatch`: it prints the exact demanded full range
+   `<full-redo-from>..=<redo-to>`, does not name the marker, and prints no token.
+   `<full-redo-from>` is the deployment's earliest ingest cursor start, not
+   necessarily block zero
+   ([`apps/phase-runner/src/redo_state.rs:338-383`](../../apps/phase-runner/src/redo_state.rs#L338-L383)).
    That runner error-text gap is tracked in
    [issue #545](https://github.com/ensdomains/bigname/issues/545). The
    invalidation token is already visible in the captured Interpret phase row's
    `input_content_hash` marker value as
    `manifest-authority:<authority-fingerprint>:<invalidation-token>`. Do not use
    it to retry the scoped range. Instead, run the Interpret redo unflagged over
-   the demanded full range `0..=<redo-to>`. That full-range attempt reaches the
+   the exact full range `<full-redo-from>..=<redo-to>` printed by that first
+   error. That full-range attempt reaches the
    manifest-authority fence, stops, and prints the invalidation token
    ([`apps/phase-runner/src/redo_manifest_attestation.rs:70-85`](../../apps/phase-runner/src/redo_manifest_attestation.rs#L70-L85)).
    Complete the mandatory historical fetch for any widened watch plan, or the
