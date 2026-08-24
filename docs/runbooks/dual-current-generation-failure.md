@@ -23,8 +23,8 @@ steps below are complete.
 ## Failure signature
 
 The command and durable phase-row signature depend on whether Project was in
-normal execution or an operator redo. The audit signature is the same in both
-modes.
+normal execution, a CLI-driven redo, or a required redo consumed by the
+long-running supervisor. The audit signature is the same in all three cases.
 
 ### Normal Project execution
 
@@ -91,12 +91,14 @@ modes.
 
 ### Project redo execution
 
-When the assertion fires during an explicit Project redo or the automatic
-Project cascade after an Interpret redo, use all of these signatures:
+When the assertion fires in Project `RunMode::Redo`, use the shared row, audit,
+and API signatures in items 2–4. Determine item 1 from how the redo was invoked.
 
-1. The one-shot command exits nonzero with an aggregate error containing the
-   affected chain, `(DataIntegrity)`, and the exact primary assertion text
-   above. For one affected chain its shape is:
+1. **CLI-driven redo:** an explicit Project redo and the automatic Project
+   cascade inside `phase-runner redo` are one-shot work. The command exits
+   nonzero with an aggregate error containing the affected chain,
+   `(DataIntegrity)`, and the exact primary assertion text above. For one
+   affected chain its shape is:
 
    ```text
    Error: 1 chain supervisor(s) stopped on terminal errors: [chain-id] (DataIntegrity): chain [chain-id] name [logical-name-id] holds current bindings on both authority arms after its activated ENSv1→ENSv2 migration boundary; projection generation for block [target-block] is not publishable
@@ -111,6 +113,25 @@ Project cascade after an Interpret redo, use all of these signatures:
    Do not require a `chain supervisor stopped after a terminal error` log entry
    for this mode; that message belongs to normal supervised execution
    ([`apps/phase-runner/src/supervisor.rs:58-69`](../../apps/phase-runner/src/supervisor.rs#L58-L69)).
+
+   **Supervisor-driven required redo:** after the long-running runner is
+   restarted, `run_spine_phase` detects a persisted required-redo marker and
+   invokes Project with `RunMode::Redo` before normal Project execution
+   ([`apps/phase-runner/src/runner_required_redo.rs:50-71`](../../apps/phase-runner/src/runner_required_redo.rs#L50-L71),
+   [`apps/phase-runner/src/runner_chain.rs:72-87`](../../apps/phase-runner/src/runner_chain.rs#L72-L87)).
+   A terminal assertion on that path emits the normal structured
+   `chain supervisor stopped after a terminal error` entry with the primary
+   assertion text. The Project row nevertheless has the resumable running-redo
+   shape in item 2, not the failed normal-execution shape. The final aggregate
+   CLI error is timing-dependent: the supervisor records the stopped chain
+   immediately, but returns its `SupervisorReport` only after every configured
+   chain task has returned; the CLI builds the aggregate only after that return.
+   Another chain that remains live can therefore delay the aggregate
+   indefinitely
+   ([`apps/phase-runner/src/supervisor.rs:13-49`](../../apps/phase-runner/src/supervisor.rs#L13-L49),
+   [`apps/phase-runner/src/supervisor.rs:58-69`](../../apps/phase-runner/src/supervisor.rs#L58-L69),
+   [`apps/phase-runner/src/main.rs:103-114`](../../apps/phase-runner/src/main.rs#L103-L114),
+   [`apps/phase-runner/src/main.rs:259-272`](../../apps/phase-runner/src/main.rs#L259-L272)).
 2. The Project phase row remains `phase_status = 'running'` with
    `redo_in_progress = true`, `redo_mode = 'redo'`, and the active
    `redo_from_block_number`/`redo_to_block_number`. Redo start writes that shape,
@@ -711,6 +732,29 @@ This is why recovery re-derives evidence instead of editing the open interval.
    This exact-marker continuation is not a new Project-only repair. If the
    marker's origin, persisted range, or unconsumed state cannot be proved,
    file-and-hold.
+
+   A retained **failed** Project cascade is a separate permitted entry for a
+   newly diagnosed, different-fingerprint conflict. Use it only when Interpret
+   has no redo marker, the Project row is a resumable redo whose `last_error`
+   starts with the non-active `required downstream redo: ` prefix and contains
+   `last attempt failed:`, and evidence capture and cause discrimination have
+   approved a new bounded Interpret redo. Do not run the Project-only command.
+   The runner permits Interpret to start behind that non-active downstream
+   marker; `required downstream redo active: ` does not satisfy this exemption
+   ([`apps/phase-runner/src/transitions.rs:175-201`](../../apps/phase-runner/src/transitions.rs#L175-L201),
+   [`apps/phase-runner/src/transitions.rs:256-262`](../../apps/phase-runner/src/transitions.rs#L256-L262),
+   [`apps/phase-runner/src/redo_stamp.rs:8-17`](../../apps/phase-runner/src/redo_stamp.rs#L8-L17)).
+   Run the new approved Interpret range with the step-4 command. On successful
+   Interpret completion, the downstream stamp extends the retained Project
+   marker to the union of its old range and the new effective Interpret range:
+   `from = min(old_from, new_from)` and
+   `to = max(old_to, min(Project current, new_to))`. It clears prior Project
+   redo progress
+   before the automatic Project cascade retries that reconciled range, while
+   retaining the marker's diagnostic history
+   ([`apps/phase-runner/src/redo_state.rs:571-579`](../../apps/phase-runner/src/redo_state.rs#L571-L579),
+   [`apps/phase-runner/src/redo_stamp.rs:95-113`](../../apps/phase-runner/src/redo_stamp.rs#L95-L113),
+   [`apps/phase-runner/src/redo_stamp.rs:126-163`](../../apps/phase-runner/src/redo_stamp.rs#L126-L163)).
 3. If neither Interpret nor Project has a redo marker, require the incident
    owner to identify the earliest
    affected stored block and approve the range through the recorded Interpret
@@ -799,6 +843,10 @@ repair:
 - If the fingerprint differs, treat the row as a fresh conflict: return to
   [Stop and capture evidence](#stop-and-capture-evidence), run the complete
   read-only queries for that new key, and perform cause discrimination again.
+  If that fresh diagnosis approves an Interpret redo while the failed Project
+  cascade marker is retained, enter through the retained-failed-marker case in
+  recovery step 2; do not wait for the "neither marker" condition in step 3 and
+  do not use the Project-only continuation.
   Do not send a different conflict directly to the same-fingerprint boundary
   escalation; Project deliberately reports only the first logical name in one
   failed generation
