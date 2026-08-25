@@ -448,6 +448,8 @@ impl PhaseRunner {
                 .preflight(&chain.chain_id, &chain.sources, &mode)?;
         }
         self.store.initialize_chain(&chain.chain_id).await?;
+        self.require_no_pending_redo_for_all(&chain.chain_id, None, None)
+            .await?;
         let verify_to = self
             .store
             .phase_resume(&chain.chain_id, PhaseName::Verify, &RunMode::Normal)
@@ -462,8 +464,6 @@ impl PhaseRunner {
             )));
         }
         self.require_readable_redo_end(&chain.chain_id, range)
-            .await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, None, None)
             .await?;
         self.run_all_redo_phase(chain, PhaseName::Ingest, range, cancellation.clone())
             .await?;
