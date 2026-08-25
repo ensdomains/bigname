@@ -324,7 +324,7 @@ COMMENT ON COLUMN chain_phase_state.input_content_hash IS
 COMMENT ON COLUMN chain_phase_state.redo_in_progress IS
     'This value records an unfinished explicit redo.';
 COMMENT ON COLUMN chain_phase_state.redo_attempt_generation IS
-    'This nonnegative counter increments whenever an explicit redo begins and fences its progress writes to that attempt.';
+    'This nonnegative, row-local counter increments when an explicit redo begins and when the phase runner installs or extends a required redo stamp for a downstream phase (Interpret/Project). Manifest-synchronization Ingest stamps do not advance it; their superseded progress writes are fenced by the cleared manifest-authority fingerprint and stamped last_error instead.';
 COMMENT ON COLUMN chain_phase_state.redo_mode IS
     'This value identifies the explicit redo operation.';
 COMMENT ON COLUMN chain_phase_state.redo_previous_phase_status IS

@@ -140,7 +140,8 @@ async fn extend_active(
         .max(through);
     sqlx::query(
         "UPDATE chain_phase_state
-         SET redo_from_block_number = $3, redo_to_block_number = $4,
+         SET redo_attempt_generation = redo_attempt_generation + 1,
+             redo_from_block_number = $3, redo_to_block_number = $4,
              redo_current_block_number = NULL, redo_current_block_hash = NULL,
              redo_target_block_number = NULL, redo_target_block_hash = NULL,
              redo_source_boundary_markers = NULL,
@@ -173,7 +174,8 @@ async fn create_stamp(
 ) -> RunnerResult<bool> {
     let result = sqlx::query(
         "UPDATE chain_phase_state
-         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+         SET redo_attempt_generation = redo_attempt_generation + 1,
+             phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
              redo_previous_phase_status = phase_status,
              redo_previous_last_error = last_error,
              redo_previous_started_at = started_at,
