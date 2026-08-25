@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 use crate::{
     config::{SeedBasis, SourceConfig, normalized_source_kind},
@@ -88,7 +91,7 @@ fn valid_sepolia_drpc_shape(sources: &[&SourceConfig]) -> bool {
         && sources[0].start_block_number == 0
 }
 
-pub(super) fn same_endpoint_identity(
+pub(super) fn same_source_identity(
     left: &SourceConfig,
     right: &SourceConfig,
 ) -> RunnerResult<bool> {
@@ -100,9 +103,47 @@ pub(super) fn same_endpoint_identity(
     if matches!(left_kind.as_str(), "reth" | "reth_db")
         && matches!(right_kind.as_str(), "reth" | "reth_db")
     {
-        return Ok(Path::new(left.endpoint()) == Path::new(right.endpoint()));
+        return Ok(reth_path_identity(left)? == reth_path_identity(right)?);
     }
     Ok(left.endpoint() == right.endpoint())
+}
+
+fn reth_path_identity(source: &SourceConfig) -> RunnerResult<PathBuf> {
+    let configured = Path::new(source.endpoint());
+    let absolute = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| unresolved_reth_path(source))?
+            .join(configured)
+    };
+    Ok(fs::canonicalize(&absolute).unwrap_or_else(|_| lexical_path_identity(&absolute)))
+}
+
+fn lexical_path_identity(absolute: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn unresolved_reth_path(source: &SourceConfig) -> RunnerError {
+    RunnerError::new(
+        ErrorKind::Configuration,
+        format!(
+            "source descriptor {}:{} has a reth path that cannot be resolved",
+            source.chain_id, source.source_key
+        ),
+    )
 }
 
 #[derive(Eq, PartialEq)]

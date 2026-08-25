@@ -31,7 +31,7 @@ mod source_roles;
 pub(crate) use completed::provider_trusted_verify_required;
 pub(crate) use source_roles::production_verify_chain;
 use source_roles::{
-    provider_configuration_error, provider_trusted_source, same_endpoint_identity,
+    provider_configuration_error, provider_trusted_source, same_source_identity,
     validate_intake_shape, validate_sepolia_verification_shape,
 };
 
@@ -395,7 +395,7 @@ fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<V
         }
         let mut conflict = None;
         for intake_source in &intake {
-            if same_endpoint_identity(intake_source, source)? {
+            if same_source_identity(intake_source, source)? {
                 conflict = Some(*intake_source);
                 break;
             }
@@ -404,8 +404,8 @@ fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<V
             return Err(RunnerError::new(
                 ErrorKind::Configuration,
                 format!(
-                    "verification-only source {} resolves to the same endpoint as intake source {}",
-                    source.source_key, conflict.source_key
+                    "verification-only source {chain_id}:{} resolves to the same provider location as intake source {chain_id}:{}",
+                    source.source_key, conflict.source_key,
                 ),
             ));
         }

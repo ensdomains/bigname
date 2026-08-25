@@ -3556,6 +3556,119 @@ async fn assert_endpoint_alias_rejected(
 }
 
 #[tokio::test]
+async fn verification_reth_dot_segment_alias_is_rejected() -> Result<()> {
+    assert_reth_path_alias_rejected(
+        "production_verify_reth_dot_segment_alias",
+        "/data/reth",
+        "/data/./reth",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_reth_trailing_separator_alias_is_rejected() -> Result<()> {
+    assert_reth_path_alias_rejected(
+        "production_verify_reth_trailing_separator_alias",
+        "/data/reth",
+        "/data/reth/",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_reth_parent_segment_alias_is_rejected() -> Result<()> {
+    assert_reth_path_alias_rejected(
+        "production_verify_reth_parent_segment_alias",
+        "/data/reth",
+        "/data/unused/../reth",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_reth_relative_alias_is_rejected() -> Result<()> {
+    let relative = "target/reth-alias-fixture";
+    let absolute = std::env::current_dir()?.join(relative);
+    assert_reth_path_alias_rejected(
+        "production_verify_reth_relative_alias",
+        absolute.to_string_lossy().as_ref(),
+        relative,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verification_reth_symlink_alias_is_rejected() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("bigname-reth-alias-{}", Uuid::new_v4()));
+    let datadir = root.join("reth");
+    let alias = root.join("reth-link");
+    std::fs::create_dir_all(&datadir)?;
+    std::os::unix::fs::symlink(&datadir, &alias)?;
+    let result = assert_reth_path_alias_rejected(
+        "production_verify_reth_symlink_alias",
+        datadir.to_string_lossy().as_ref(),
+        alias.to_string_lossy().as_ref(),
+    )
+    .await;
+    std::fs::remove_dir_all(root)?;
+    result
+}
+
+async fn assert_reth_path_alias_rejected(
+    database_name: &str,
+    intake_path: &str,
+    verification_path: &str,
+) -> Result<()> {
+    let scratch = ScratchDatabase::create(database_name).await?;
+    let reference = Arc::new(FixtureReferences::new([]));
+    let phase = VerifyPhase::with_reference_provider(
+        scratch.verification_database(2).await?,
+        reference.clone(),
+    );
+    let chain = ChainConfig::new(
+        ETHEREUM,
+        vec![
+            SourceConfig::new_with_role(
+                ETHEREUM,
+                "reth-intake",
+                "reth_db",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::Intake,
+                intake_path,
+            )?,
+            SourceConfig::new_with_role(
+                ETHEREUM,
+                "reth-reference",
+                "reth_db",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                verification_path,
+            )?,
+        ],
+        false,
+    )?;
+
+    let error = phase
+        .preflight(&chain.chain_id, &chain.sources, &RunMode::Normal)
+        .expect_err("filesystem aliases of one reth datadir must fail independence validation");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "verification-only source ethereum-mainnet:reth-reference resolves to the same provider \
+         location as intake source ethereum-mainnet:reth-intake"
+    );
+    assert!(!error.to_string().contains(intake_path));
+    assert!(!error.to_string().contains(verification_path));
+    assert_eq!(reference.preflights(), 0);
+    drop(phase);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn verify_stays_at_finality_while_live_advances_to_head() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_live_pair").await?;
     seed_chain(scratch.pool(), BASE, 10, 7, 5, 1).await?;
