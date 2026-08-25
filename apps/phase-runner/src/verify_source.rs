@@ -103,21 +103,57 @@ pub(super) fn same_source_identity(
     if matches!(left_kind.as_str(), "reth" | "reth_db")
         && matches!(right_kind.as_str(), "reth" | "reth_db")
     {
-        return Ok(reth_path_identity(left)? == reth_path_identity(right)?);
+        return same_reth_path_identity(left, right);
     }
     Ok(left.endpoint() == right.endpoint())
 }
 
-fn reth_path_identity(source: &SourceConfig) -> RunnerResult<PathBuf> {
+fn same_reth_path_identity(left: &SourceConfig, right: &SourceConfig) -> RunnerResult<bool> {
+    let left = absolute_reth_path(left)?;
+    let right = absolute_reth_path(right)?;
+    Ok(same_reth_paths_with_fallback(
+        &left,
+        &right,
+        reth_path_spelling_identity,
+    ))
+}
+
+fn absolute_reth_path(source: &SourceConfig) -> RunnerResult<PathBuf> {
     let configured = Path::new(source.endpoint());
-    let absolute = if configured.is_absolute() {
-        configured.to_path_buf()
+    if configured.is_absolute() {
+        Ok(configured.to_path_buf())
     } else {
         std::env::current_dir()
-            .map_err(|_| unresolved_reth_path(source))?
-            .join(configured)
-    };
-    Ok(fs::canonicalize(&absolute).unwrap_or_else(|_| lexical_path_identity(&absolute)))
+            .map(|current| current.join(configured))
+            .map_err(|_| unresolved_reth_path(source))
+    }
+}
+
+fn same_reth_paths_with_fallback(
+    left: &Path,
+    right: &Path,
+    fallback: impl Fn(&Path) -> PathBuf,
+) -> bool {
+    same_existing_filesystem_object(left, right)
+        .unwrap_or_else(|| fallback(left) == fallback(right))
+}
+
+#[cfg(unix)]
+fn same_existing_filesystem_object(left: &Path, right: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let left = fs::metadata(left).ok()?;
+    let right = fs::metadata(right).ok()?;
+    Some(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+#[cfg(not(unix))]
+fn same_existing_filesystem_object(_left: &Path, _right: &Path) -> Option<bool> {
+    None
+}
+
+fn reth_path_spelling_identity(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| lexical_path_identity(path))
 }
 
 fn lexical_path_identity(absolute: &Path) -> PathBuf {
@@ -315,5 +351,50 @@ mod tests {
         )?);
         assert!(crate::runner::PhaseRunner::verify_before_live(&chain)?);
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_filesystem_identity_does_not_depend_on_canonical_spelling() -> RunnerResult<()> {
+        let root =
+            std::env::temp_dir().join(format!("bigname-reth-identity-{}", uuid::Uuid::new_v4()));
+        let datadir = root.join("reth");
+        let alias = root.join("reth-link");
+        fs::create_dir_all(&datadir).map_err(|error| {
+            RunnerError::data_integrity(format!("create reth identity fixture: {error}"))
+        })?;
+        std::os::unix::fs::symlink(&datadir, &alias).map_err(|error| {
+            RunnerError::data_integrity(format!("create reth identity alias: {error}"))
+        })?;
+
+        let same = same_reth_paths_with_fallback(&datadir, &alias, lexical_path_identity);
+        fs::remove_dir_all(root).map_err(|error| {
+            RunnerError::data_integrity(format!("remove reth identity fixture: {error}"))
+        })?;
+        assert!(
+            same,
+            "filesystem identity must catch aliases without canonical spelling"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nonexistent_reth_paths_use_spelling_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("bigname-reth-missing-{}", uuid::Uuid::new_v4()));
+        let path = root.join("reth");
+        let parent_alias = root.join("unused/../reth");
+        let distinct = root.join("other");
+
+        assert!(same_reth_paths_with_fallback(
+            &path,
+            &parent_alias,
+            lexical_path_identity,
+        ));
+        assert!(!same_reth_paths_with_fallback(
+            &path,
+            &distinct,
+            lexical_path_identity,
+        ));
     }
 }
