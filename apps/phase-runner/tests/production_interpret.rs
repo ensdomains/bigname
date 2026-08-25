@@ -2714,6 +2714,116 @@ async fn recompute_preserves_a_pending_system_project_redo() -> Result<()> {
 }
 
 #[tokio::test]
+async fn recompute_transition_reinstall_advances_pending_project_redo_generation() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_interpret_flags_transition_generation").await?;
+    let chain = "interpret-flags-transition-generation";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = false,
+             normalization_error = 'stale flag'
+         WHERE decoded_label = 'alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE name_surfaces
+         SET normalizer_version = 'stale-version',
+             visibility_state = 'shadow',
+             normalization_errors = '[{\"error\":\"stale flag\"}]'::jsonb,
+             deactivation_reason = 'normalization_gate',
+             deactivated_at = now()
+         WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running',
+             redo_in_progress = true,
+             redo_mode = 'redo',
+             redo_previous_phase_status = 'completed',
+             redo_previous_last_error = NULL,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 1,
+             redo_to_block_number = 1,
+             last_error = 'operator project redo interrupted',
+             started_at = now(),
+             finished_at = NULL,
+             updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let generation_before: i64 = sqlx::query_scalar(
+        "SELECT redo_attempt_generation
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    let interpret_generation_before: i64 = sqlx::query_scalar(
+        "SELECT redo_attempt_generation
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    recompute_runner(
+        &scratch,
+        chain,
+        "interpret-flags-transition-generation-runner",
+    )?
+    .redo(
+        &chain_config(chain)?,
+        RedoPhase::RecomputeFlags,
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    let project: (i64, i64, i64, Option<i64>) = sqlx::query_as(
+        "SELECT redo_attempt_generation, redo_from_block_number,
+                redo_to_block_number, redo_current_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        project,
+        (generation_before + 2, 0, 1, None),
+        "recompute preparation and its visibility-transition stamp must each supersede older progress"
+    );
+    let interpret: (i64, i64, i64, Option<i64>) = sqlx::query_as(
+        "SELECT redo_attempt_generation, redo_from_block_number,
+                redo_to_block_number, redo_current_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret' AND redo_in_progress",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        interpret,
+        (interpret_generation_before + 2, 1, 1, None),
+        "the recompute attempt and its fresh visibility-transition stamp must each advance the generation"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn recompute_resumes_its_own_queued_project_refresh() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_flags_queued_refresh").await?;
     let chain = "interpret-flags-queued-refresh";

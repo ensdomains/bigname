@@ -699,6 +699,175 @@ async fn boundary_divergence_clears_resumable_redo_progress_and_source_markers()
 }
 
 #[tokio::test]
+async fn redo_stamp_reinstall_supersedes_parked_progress_and_forces_full_recovery() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_stamp_generation").await?;
+    let chain_id = "redo-stamp-generation-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 200).await?;
+    for phase in [PhaseName::Interpret, PhaseName::Project] {
+        mark_phase_with_extent(
+            scratch.pool(),
+            chain_id,
+            phase,
+            200,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        )
+        .await?;
+    }
+
+    let project_phase = Arc::new(ParkedProgressProjectPhase {
+        calls: AtomicUsize::new(0),
+        first_progress: progress_at(150, 200, "redo-stamp-generation"),
+        parked_progress: progress_at(160, 200, "redo-stamp-generation"),
+    });
+    let parked_write_entered = Arc::new(Notify::new());
+    let release_parked_write = Arc::new(Notify::new());
+    let progress_writes = Arc::new(AtomicUsize::new(0));
+    let crashed_runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Project, project_phase)?,
+        "redo-stamp-generation-crashed-runner",
+    )?
+    .with_before_redo_progress_write({
+        let entered = Arc::clone(&parked_write_entered);
+        let release = Arc::clone(&release_parked_write);
+        let writes = Arc::clone(&progress_writes);
+        move || {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let writes = Arc::clone(&writes);
+            async move {
+                if writes.fetch_add(1, Ordering::SeqCst) == 1 {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+            }
+        }
+    });
+    let crashed_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    let mut crashed_attempt = tokio::spawn(async move {
+        crashed_runner
+            .redo(
+                &crashed_chain,
+                RedoPhase::Phase(PhaseName::Project),
+                BlockRange::new(100, 200).expect("fixed crashed redo range"),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), parked_write_entered.notified())
+        .await
+        .context("the crashed redo did not park its second progress write")?;
+
+    let terminated: Option<bool> = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid)
+         FROM pg_locks
+         WHERE locktype = 'advisory'
+           AND granted
+           AND database = (
+               SELECT oid FROM pg_database WHERE datname = current_database()
+           )
+           AND classid::bigint =
+               ((hashtextextended($1::text, 0::bigint) >> 32) & 4294967295)
+           AND objid::bigint =
+               (hashtextextended($1::text, 0::bigint) & 4294967295)
+           AND pid <> pg_backend_pid()
+         LIMIT 1",
+    )
+    .bind(format!("phase-runner:{chain_id}:project"))
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(terminated, Some(true));
+    wait_for_phase_advisory_lock_release(scratch.pool(), chain_id, PhaseName::Project).await?;
+
+    runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        "redo-stamp-generation-recompute-runner",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::RecomputeFlags,
+        BlockRange::new(100, 200)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    release_parked_write.notify_one();
+    let crashed_result =
+        match tokio::time::timeout(Duration::from_secs(1), &mut crashed_attempt).await {
+            Ok(joined) => Some(joined?),
+            Err(_) => {
+                crashed_attempt.abort();
+                let _ = crashed_attempt.await;
+                None
+            }
+        };
+    let marker_after_parked_write: Option<i64> = sqlx::query_scalar(
+        "SELECT redo_current_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    let recovery_resume = Arc::new(AtomicI64::new(i64::MIN));
+    let phase_recovery_resume = Arc::clone(&recovery_resume);
+    let recovery_phase = Arc::new(FunctionPhase {
+        name: PhaseName::Project,
+        handler: Arc::new(move |context| {
+            phase_recovery_resume.store(
+                context.resume.current.map_or(-1, |marker| marker.number),
+                Ordering::SeqCst,
+            );
+            Ok(PhaseBatchOutcome::Complete(progress_at(
+                200,
+                200,
+                "redo-stamp-generation-recovery",
+            )))
+        }),
+    });
+    runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Project, recovery_phase)?,
+        "redo-stamp-generation-recovery-runner",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Project),
+        BlockRange::new(100, 200)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    let parked_write_rejected = crashed_result.as_ref().is_some_and(|result| {
+        result.as_ref().is_err_and(|error| {
+            error
+                .to_string()
+                .contains("redo attempt superseded; progress not recorded")
+        })
+    });
+    let crashed_outcome = match crashed_result {
+        Some(Ok(())) => "completed successfully".to_owned(),
+        Some(Err(error)) => error.to_string(),
+        None => "still running one second after the parked write was released".to_owned(),
+    };
+    assert_eq!(
+        (
+            parked_write_rejected,
+            marker_after_parked_write,
+            recovery_resume.load(Ordering::SeqCst),
+        ),
+        (true, None, -1),
+        "the stamp must reject the parked write and force recovery from the demanded start; \
+         crashed outcome: {crashed_outcome}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn superseded_redo_attempt_cannot_transplant_progress_into_a_wider_range() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_redo_attempt_superseded").await?;
     let chain_id = "redo-attempt-superseded-chain";
@@ -3074,6 +3243,31 @@ impl Phase for CrashBetweenBatchesPhase {
             self.second_batch_entered.notify_one();
             future::pending::<()>().await;
             unreachable!("the simulated crash aborts this future")
+        })
+    }
+}
+
+struct ParkedProgressProjectPhase {
+    calls: AtomicUsize,
+    first_progress: PhaseProgress,
+    parked_progress: PhaseProgress,
+}
+
+impl Phase for ParkedProgressProjectPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(PhaseBatchOutcome::Continue(self.first_progress.clone())),
+                1 => Ok(PhaseBatchOutcome::Continue(self.parked_progress.clone())),
+                _ => {
+                    future::pending::<()>().await;
+                    unreachable!("the dead advisory-lock connection stops this redo")
+                }
+            }
         })
     }
 }
