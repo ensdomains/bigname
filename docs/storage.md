@@ -554,7 +554,8 @@ backfill, so their first post-upgrade resume fails closed and requires that
 full-range reload.
 
 `chain_phase_state.redo_attempt_generation` is a nonnegative, row-local counter
-that increments whenever an explicit redo begins. A batch carries that
+that increments whenever an explicit redo begins or a required redo stamp is installed or
+extended, including whenever resumable markers are invalidated. A batch carries that
 generation together with the persisted redo mode and the actual execution
 range chosen at begin time. Its pool-backed progress update, including the
 per-source boundary-marker map, succeeds only while all three values still
