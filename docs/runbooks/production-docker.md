@@ -232,15 +232,21 @@ indexes are additive; rollback may leave them in place.
 2. take and verify a database backup;
    For the destructive Issue #411 Sepolia
    [source-role rollout](../glossary.md#source-role), also require the part-2
-   release artifact, two distinct endpoint secrets, and the exact
-   owner-approved affected-chain reset runbook, including its exact
-   rollback/restoration procedure, before continuing. Stop if any prerequisite
-   is absent; never improvise a reset or rollback. Do not reset at this step.
-   The preservation and optional one-shot redo instructions below do not apply
-   to that affected chain and are not substitutes for its reset and full
-   [source re-walk](../glossary.md#re-derivation-boundary); execute the
-   [owner-ratified walk gate](../deployment.md#owner-ratified-sepolia-source-role-rollout)
-   at step 9, after schema-migrations and required one-shot work are complete;
+   release artifact, two distinct endpoint secrets, and an owner-approved
+   rollback/restoration procedure before continuing. No narrower per-chain
+   reset procedure is checked in. The
+   [whole-schema replacement](../deployment.md#replacing-an-initialized-phase-schema)
+   rebuilds every configured chain and is authorized only for a reviewed
+   schema-migration that cannot preserve an initialized namespace; it does not
+   authorize the Issue #411 source-role transition. Stop until part 2 supplies
+   the reviewed per-chain reset and lossless preservation procedure. Once it is
+   available, continue with steps 3–8 before that chain reset. Stop if any
+   prerequisite is absent; never improvise a reset, data transfer, or rollback.
+   Do not reset at this step. The optional one-shot redo instructions are not
+   substitutes for the reset and full [source
+   re-walk](../glossary.md#re-derivation-boundary). Execute the [owner-ratified
+   rollout section](../deployment.md#owner-ratified-sepolia-source-role-rollout)
+   at step 9;
 3. for the release containing Issue #400, apply and validate the concurrent
    baseline indexes above; otherwise skip this step;
    For the release containing
@@ -296,10 +302,14 @@ indexes are additive; rollback may leave them in place.
 8. complete the matching full-history Project redo while the supervisor remains
    stopped;
 9. start the long-running phase runner only after those one-shot redos succeed.
-   For the Issue #411 Sepolia rollout, do not start it yet: first deploy the
-   part-2 binary and distinct secrets, validate the role-bearing configuration,
-   and execute the exact owner-approved affected-chain reset. Then start it and
-   run Ingest through Verify before Live. Require `cross_checked`, confirm
+   When the release also carries a versioned schema-migration or required
+   replays, complete them before the Sepolia reset and full
+   Ingest-through-Verify walk. Use only the reviewed part-2 per-chain reset after
+   the preceding release work succeeds; stop if that procedure is unavailable.
+   Do not start the runner yet: deploy the part-2 binary and distinct secrets,
+   validate the role-bearing configuration, perform the applicable reviewed
+   reset, then run Sepolia through Verify before Live. Require
+   `cross_checked`, confirm
    exactly one intake dRPC uses `ethereum_head` and start block zero, confirm
    only its cursor exists and the finalized Verify target is covered, and use
    provider/operator request accounting to confirm the verification-only key
@@ -601,8 +611,8 @@ rollback needs deleted schema or data, restore the verified pre-migration
 backup under a separately reviewed database rollback plan.
 For the Issue #411 Sepolia rollout, a binary-only rollback also cannot parse
 the role-bearing source configuration or preserve its readiness semantics; use
-the exact restoration path required by the owner-approved external rollout
-runbook.
+the owner-approved rollback and restoration path required by the
+[rollout gate](../deployment.md#owner-ratified-sepolia-source-role-rollout).
 
 Keep the public edge on its maintainer-approved policy throughout rollback and
 re-run `scripts/public-edge-smoke` before restoring traffic.

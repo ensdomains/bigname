@@ -217,9 +217,11 @@ addition from replacement of the source that supplied it. The
 [verification-mismatch repair](#verification-mismatch-repair) section describes
 the state that a reviewed repair must cover, but it is not an executable reset
 authorization. For the Issue #411 source-role transition, only the
-[owner-ratified rollout gate](#owner-ratified-sepolia-source-role-rollout) and
-its exact owner-approved external reset runbook authorize the reset. An ordinary
-redo is not that reset. Capacity, retry, and polling controls use the
+[owner-ratified rollout gate](#owner-ratified-sepolia-source-role-rollout), its
+applicable reviewed reset and preservation procedure, and the owner-approved
+rollback and restoration plan authorize the reset. An ordinary redo is not that
+reset.
+Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
 For that rollout, [source roles](glossary.md#source-role) are `intake`, `verification-only`, and `both`; omission defaults to `both`. Only intake-capable keys will receive cursors or Ingest/Live requests, and only verification-only sources will earn `cross_checked` or `node_checked`; `both` will fall back to `quick_synced`. The enforcement binary will reject equal endpoints without exposure; intake-membership changes require reset. Stronger levels will be downgraded after provider-trusted revalidation, while `quick_synced` will not be auto-upgraded.
 Sepolia's from-zero sources for the Issue #411 rollout are `ethereum-sepolia:sepolia-intake:drpc:ethereum_head:0:intake=SEPOLIA_INTAKE_RPC_URL` and `ethereum-sepolia:sepolia-verify:drpc:ethereum_head:0:verification-only=SEPOLIA_VERIFY_RPC_URL`.
@@ -616,20 +618,29 @@ with the reserved readiness connection, one API process can open at most
 ## Owner-ratified Sepolia source-role rollout
 
 Do not begin this destructive rollout until the Issue #411 part-2 release
-artifact, two distinct endpoint secrets, and the exact owner-approved
-affected-chain reset runbook are available. That external runbook must also
-define the exact rollback/restoration procedure for the role-bearing
-configuration and rebuilt chain state; a binary-only rollback is insufficient.
-Stop if any prerequisite is absent; never improvise a reset or rollback. The
-owner-ratified from-zero Sepolia source-role
-rollout is part of this walk gate: stop old runners and redo processes; deploy
-the part-2 binary and distinct secrets; configure and validate
-`sepolia-intake` as intake and `sepolia-verify` as verification-only; perform
-the approved affected-chain reset; run Ingest through Verify before Live.
+artifact, two distinct endpoint secrets, and an owner-approved rollback and
+restoration procedure are available; a binary-only rollback is insufficient.
+No narrower per-chain reset procedure is checked in. The only checked-in reset
+broad enough to remove complete intake and source-identity state,
+[Replacing an initialized phase schema](#replacing-an-initialized-phase-schema),
+replaces the entire `bigname_phase` namespace and rebuilds every configured
+chain, not Sepolia alone. Its authorization is limited to a reviewed
+schema-migration that cannot preserve an initialized namespace; a source-role
+transition does not meet that condition. It therefore does not authorize this
+rollout, and using it would incorrectly give a nominally single-chain Sepolia
+transition whole-schema downtime, all-chain rebuild scope, and public-identity
+and audit-preservation obligations. The rollout must stop until part 2 supplies
+a reviewed per-chain reset and lossless preservation procedure. Never improvise
+a reset, data transfer, or rollback. Once that procedure exists, the
+owner-ratified from-zero Sepolia source-role rollout is: stop old runners and
+redo processes; deploy the part-2 binary and distinct secrets; configure and
+validate `sepolia-intake` as intake and `sepolia-verify` as verification-only;
+perform the reviewed per-chain reset; run Ingest through Verify before Live.
 Confirm only the intake cursor exists, Verify reaches its frozen target with
 `cross_checked`, match logs name `sepolia-verify`, and provider/operator request
-accounting shows zero Ingest/Live requests for that key. Use the approved reset;
-do not substitute an ordinary redo.
+accounting shows zero Ingest/Live requests for that key. Do not substitute an
+ordinary redo. The required per-chain reset and preservation procedure is
+part-2 work.
 
 ## Removed operational surfaces
 

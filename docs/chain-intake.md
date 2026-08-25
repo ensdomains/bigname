@@ -184,10 +184,10 @@ provider that supplied this retained output, so it requires the same reset
 before Ingest runs. Because retained output does not identify its provider, an
 explicitly reviewed reset and re-walk is required. For the Issue #411
 transition, only the
-[owner-ratified Sepolia source-role rollout](deployment.md#owner-ratified-sepolia-source-role-rollout)
-and its exact owner-approved external reset runbook authorize that reset; the
-generic verification-mismatch prose does not, and an ordinary redo is not a
-substitute.
+[owner-ratified Sepolia source-role rollout](deployment.md#owner-ratified-sepolia-source-role-rollout),
+its applicable reviewed reset and preservation procedure, and the owner-approved
+rollback and restoration plan authorize that reset; the generic
+verification-mismatch prose does not, and an ordinary redo is not a substitute.
 
 With the Issue #411 enforcement binary, production intake shape is exact:
 `ethereum-mainnet` has one local Reth DB
@@ -416,8 +416,7 @@ that widened range into Project. Project still owns canonical-head hydration;
 there is no standalone hydrate phase. Any already-pending redo must be
 completed before `--phase all`, so the all-phases shorthand cannot consume or
 clear unrelated operator work. A phase failure leaves its normal durable redo
-marker, reports the phase-specific recovery command prefix and required source
-instruction, and stops the
+marker, reports the phase-specific recovery command prefix, and stops the
 remaining phases for that chain. Complete that phase-specific redo, then rerun
 `--phase all`. Historical live redo remains invalid because live is a head
 follower. A multi-chain command continues with later chains and exits nonzero
