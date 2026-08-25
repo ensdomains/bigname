@@ -259,7 +259,11 @@ mod tests {
                 kind,
                 SeedBasis::BaseSeam,
                 start,
-                "unused",
+                if kind == "drpc" {
+                    "https://intake.invalid"
+                } else {
+                    "https://coinbase.invalid"
+                },
             )
         };
         let coinbase = source("coinbase-history", "coinbase_sql", 0)?;
@@ -270,8 +274,46 @@ mod tests {
         let plan =
             super::super::verification_plan("base-mainnet", &[coinbase.clone(), drpc.clone()])?;
         assert_eq!(plan.verification_level(), VerificationLevel::QuickSynced);
-        let chain = crate::config::ChainConfig::new("base-mainnet", vec![coinbase, drpc], false)?;
-        assert!(!crate::runner::PhaseRunner::verify_before_live(&chain)?);
+        let chain = crate::config::ChainConfig::new(
+            "base-mainnet",
+            vec![coinbase.clone(), drpc.clone()],
+            false,
+        )?;
+        assert!(crate::runner::PhaseRunner::verify_before_live(&chain)?);
+        let reference = SourceConfig::new_with_role(
+            "base-mainnet",
+            "drpc-reference",
+            "drpc",
+            SeedBasis::BaseSeam,
+            BASE_COINBASE_SEAM_BLOCK,
+            crate::config::SourceRole::VerificationOnly,
+            "https://reference.invalid",
+        )?;
+        let compared = crate::config::ChainConfig::new(
+            "base-mainnet",
+            vec![coinbase, drpc, reference],
+            false,
+        )?;
+        assert!(!crate::runner::PhaseRunner::verify_before_live(&compared)?);
+        Ok(())
+    }
+
+    #[test]
+    fn reference_less_mainnet_provider_trust_is_serialized() -> RunnerResult<()> {
+        let reth = SourceConfig::new(
+            "ethereum-mainnet",
+            "reth-intake",
+            "reth_db",
+            SeedBasis::EthereumHead,
+            0,
+            "/fixture/reth",
+        )?;
+        let chain = crate::config::ChainConfig::new("ethereum-mainnet", vec![reth], false)?;
+        assert!(super::super::provider_trusted_verify_required(
+            &chain.chain_id,
+            &chain.sources,
+        )?);
+        assert!(crate::runner::PhaseRunner::verify_before_live(&chain)?);
         Ok(())
     }
 }

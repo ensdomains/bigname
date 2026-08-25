@@ -444,6 +444,134 @@ async fn sepolia_provider_trusted_verify_finishes_before_live_when_serial_flag_i
 }
 
 #[tokio::test]
+async fn base_provider_trusted_verify_freezes_before_live_publishes_new_finality() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_base_provider_trusted_serial").await?;
+    let target = BASE_COINBASE_SEAM_BLOCK;
+    let chain = base_provider_trusted_race_chain()?;
+    seed_completed_spine_prerequisites(scratch.pool(), BASE, target).await?;
+    seed_single_finalized_head(scratch.pool(), BASE, target).await?;
+    for source in chain.intake_sources().iter() {
+        let covers_target = source.source_key == "drpc-intake";
+        sqlx::query(
+            "INSERT INTO ingest_cursors (
+                 chain_id, source_key, source_kind, seed_basis,
+                 start_block_number, next_block_number, target_block_number,
+                 last_processed_block_number, last_processed_block_hash
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)",
+        )
+        .bind(BASE)
+        .bind(&source.source_key)
+        .bind(&source.source_kind)
+        .bind(source.seed_basis.as_str())
+        .bind(source.start_block_number)
+        .bind(if covers_target {
+            target + 1
+        } else {
+            source.start_block_number
+        })
+        .bind(covers_target.then_some(target))
+        .bind(covers_target.then(|| block_hash(BASE, target)))
+        .execute(scratch.pool())
+        .await?;
+    }
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::new([
+        Arc::new(UnexpectedPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(UnexpectedPhase::new(PhaseName::Interpret)),
+        Arc::new(UnexpectedPhase::new(PhaseName::Project)),
+        Arc::new(VerifyPhase::with_reference_provider(
+            scratch.verification_database(2).await?,
+            Arc::new(UnexpectedReferences),
+        )),
+        Arc::new(PublishingFinalizedLivePhase {
+            pool: scratch.pool().clone(),
+            chain_id: BASE,
+            through: target + 1,
+            calls: Arc::clone(&live_calls),
+        }),
+    ])?;
+    let verify_gate = VerificationGate::default();
+    let verify_hook_calls = Arc::new(AtomicUsize::new(0));
+    let runner = Arc::new(
+        PhaseRunner::new(
+            scratch.runner(),
+            phases,
+            CapacityGuard::system(CapacityConfig::default()),
+            "production-verify-base-provider-trusted-serial",
+            test_timing(),
+        )?
+        .with_before_phase_context({
+            let gate = verify_gate.clone();
+            let calls = Arc::clone(&verify_hook_calls);
+            move |phase| {
+                let gate = gate.clone();
+                let calls = Arc::clone(&calls);
+                async move {
+                    if phase == PhaseName::Verify && calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                }
+            }
+        }),
+    );
+    let cancellation = CancellationToken::new();
+    let task = {
+        let runner = Arc::clone(&runner);
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move { runner.run_chain(&chain, cancellation).await })
+    };
+
+    tokio::time::timeout(Duration::from_secs(5), verify_gate.entered.notified()).await?;
+    let live_published_while_verify_was_blocked = tokio::time::timeout(
+        Duration::from_millis(250),
+        wait_for_finalized_head(scratch.pool(), BASE, target + 1),
+    )
+    .await
+    .is_ok();
+    verify_gate.release.notify_one();
+    if live_published_while_verify_was_blocked {
+        let error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await??
+            .expect_err("the paired provider-trusted race must reject the newer target");
+        assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+        assert!(error.to_string().contains("finalized block"), "{error}");
+        panic!(
+            "Live published newer finality before provider-trusted Verify froze its target: {error}"
+        );
+    }
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_finalized_head(scratch.pool(), BASE, target + 1),
+    )
+    .await??;
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task).await???;
+    assert!(live_calls.load(Ordering::SeqCst) > 0);
+    let verify: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT phase_status, verification_level, current_block_number, target_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        verify,
+        (
+            "completed".to_owned(),
+            "quick_synced".to_owned(),
+            target,
+            target
+        )
+    );
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn completed_sepolia_ingest_revalidates_source_binding_and_recovers() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_sepolia_restart").await?;
     seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
@@ -3689,10 +3817,11 @@ async fn verify_stays_at_finality_while_live_advances_to_head() -> Result<()> {
         .await?,
     );
     let cancellation = CancellationToken::new();
+    let chain = base_chain(false)?;
     let task = {
         let runner = Arc::clone(&runner);
         let cancellation = cancellation.clone();
-        tokio::spawn(async move { runner.run_chain(&base_chain(false)?, cancellation).await })
+        tokio::spawn(async move { runner.run_chain(&chain, cancellation).await })
     };
 
     tokio::time::timeout(Duration::from_secs(5), gate.entered.notified()).await?;
@@ -4081,6 +4210,54 @@ struct AdvancingLivePhase {
     calls: Arc<AtomicUsize>,
 }
 
+struct PublishingFinalizedLivePhase {
+    pool: sqlx::PgPool,
+    chain_id: &'static str,
+    through: i64,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Phase for PublishingFinalizedLivePhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Live
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            sqlx::query(
+                "INSERT INTO chain_lineage (
+                     chain_id, block_hash, parent_hash, block_number,
+                     block_timestamp, canonicality_state
+                 ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'observed')
+                 ON CONFLICT (chain_id, block_hash) DO NOTHING",
+            )
+            .bind(self.chain_id)
+            .bind(block_hash(self.chain_id, self.through))
+            .bind(block_hash(self.chain_id, self.through - 1))
+            .bind(self.through)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                RunnerError::data_integrity(format!(
+                    "live fixture failed to store finalized lineage: {error}"
+                ))
+            })?;
+            let marker = BlockMarker::new(self.through, block_hash(self.chain_id, self.through))?;
+            Ok(PhaseBatchOutcome::Idle(PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker.clone()),
+                heads: Some(HeadMarkers {
+                    latest: marker.clone(),
+                    safe: Some(marker.clone()),
+                    finalized: Some(marker),
+                }),
+                ..PhaseProgress::default()
+            }))
+        })
+    }
+}
+
 impl Phase for AdvancingLivePhase {
     fn name(&self) -> PhaseName {
         PhaseName::Live
@@ -4375,6 +4552,33 @@ fn test_timing() -> TimingConfig {
 
 fn base_chain(verify_before_live: bool) -> RunnerResult<ChainConfig> {
     base_chain_with_drpc_start(verify_before_live, BASE_COINBASE_SEAM_BLOCK)
+}
+
+fn base_provider_trusted_race_chain() -> RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        BASE,
+        vec![
+            SourceConfig::new_with_role(
+                BASE,
+                "coinbase-history",
+                "coinbase_sql",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
+                "https://coinbase.invalid",
+            )?,
+            SourceConfig::new_with_role(
+                BASE,
+                "drpc-intake",
+                "drpc",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
+                "https://drpc-intake.invalid",
+            )?,
+        ],
+        false,
+    )
 }
 
 fn base_chain_with_drpc_start(
@@ -4900,6 +5104,55 @@ async fn seed_lineage_and_heads(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn seed_single_finalized_head(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    number: i64,
+) -> Result<()> {
+    let hash = block_hash(chain_id, number);
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'finalized')",
+    )
+    .bind(chain_id)
+    .bind(&hash)
+    .bind(block_hash(chain_id, number - 1))
+    .bind(number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (
+             chain_id, latest_block_hash, latest_block_number,
+             safe_block_hash, safe_block_number,
+             finalized_block_hash, finalized_block_number
+         ) VALUES ($1, $2, $3, $2, $3, $2, $3)",
+    )
+    .bind(chain_id)
+    .bind(hash)
+    .bind(number)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn wait_for_finalized_head(pool: &sqlx::PgPool, chain_id: &str, expected: i64) -> Result<()> {
+    loop {
+        let finalized: Option<i64> = sqlx::query_scalar(
+            "SELECT finalized_block_number FROM chain_heads WHERE chain_id = $1",
+        )
+        .bind(chain_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+        if finalized.is_some_and(|number| number >= expected) {
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 async fn seed_watch_manifest(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {

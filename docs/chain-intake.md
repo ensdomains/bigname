@@ -109,9 +109,7 @@ mismatch remains a genuine lower-head reorg and follows the normal publication
 path.
 
 The `verify` reader may overlap the live loop. It freezes its target at the
-finalized marker while live continues toward the latest head. A chain
-configured with `verify-before-live` completes that finite scan before entering
-live follow. Sepolia's Ethereum-head intake shape always takes this serial path, even when the chain is omitted from that setting. That path supports either a distinct verification-only comparison or [provider-trusted verification](glossary.md#verification-level). A mismatch is non-retryable and stops
+finalized marker while live continues toward the latest head. Every [provider-trusted verification](glossary.md#verification-level) plan completes that finite scan before entering Live, including reference-less Base, Ethereum Mainnet, and Sepolia. A Compared Base plan remains paired unless the chain is configured with `verify-before-live`. Ethereum-head intake derives that setting, so Mainnet and Sepolia remain serial even with a distinct verification-only reference. A mismatch is non-retryable and stops
 only that chain.
 
 Manifest synchronization uses the schema-v2 repository and checks the selected

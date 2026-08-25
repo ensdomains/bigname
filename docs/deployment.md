@@ -245,8 +245,7 @@ run. A later reorg may orphan the retained cursor tip above that target, but
 the stored parent chain must still reach the exact frozen target hash; a fork
 at or below the target is rejected. The runner validates this exact Sepolia
 source shape before Ingest creates the source cursor or contacts the provider.
-The runner always completes Verify before starting Live even if Sepolia is
-omitted from `verify-before-live`. For a provider-trusted completed row, Verify
+The runner always completes a provider-trusted Verify plan before starting Live, including reference-less Base, Ethereum Mainnet, and Sepolia. A Compared Base plan remains paired unless Base is listed in `verify-before-live`; Ethereum-head intake keeps Mainnet and Sepolia serial for either plan shape. For a provider-trusted completed row, Verify
 checks the current configuration and target-covering intake cursor against the
 completion-time target without changing the recorded extent as Live finality
 moves. A generic RPC

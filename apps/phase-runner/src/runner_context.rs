@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
     config::ChainConfig,
@@ -12,14 +12,32 @@ use crate::{
 
 use super::PhaseRunner;
 
+pub(super) type BeforePhaseContext =
+    Arc<dyn Fn(PhaseName) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 impl PhaseRunner {
+    #[doc(hidden)]
+    pub fn with_before_phase_context<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn(PhaseName) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.before_phase_context = Some(Arc::new(move |phase| Box::pin(hook(phase))));
+        self
+    }
+
+    pub(super) async fn before_phase_context(&self, phase: PhaseName) {
+        if let Some(hook) = self.before_phase_context.as_deref() {
+            hook(phase).await;
+        }
+    }
+
     pub(crate) fn verify_before_live(chain: &ChainConfig) -> RunnerResult<bool> {
         Ok(chain.verify_before_live
-            || (chain.chain_id == "ethereum-sepolia"
-                && crate::verify_phase::provider_trusted_verify_required(
-                    &chain.chain_id,
-                    &chain.sources,
-                )?))
+            || crate::verify_phase::provider_trusted_verify_required(
+                &chain.chain_id,
+                &chain.sources,
+            )?)
     }
 
     pub(super) async fn check_ingest_identity(
@@ -284,6 +302,7 @@ impl PhaseRunner {
         mode: RunMode,
         redo_attempt: Option<RedoAttemptFence>,
     ) -> RunnerResult<PhaseContext> {
+        self.before_phase_context(phase).await;
         let available_heads = match mode.range() {
             Some(_) if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) => {
                 interpret_redo_heads(self.store.pool(), &chain.chain_id).await?
