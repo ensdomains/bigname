@@ -166,7 +166,8 @@ for migration_file in \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
-    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql"
+    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
+    "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -306,7 +307,9 @@ for migration_file in \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
     "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
-    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql"
+    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
+    "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
+    "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -679,6 +682,9 @@ for ignored in 1 2; do
     sed "s/bigname_phase/$scratch_schema/g" \
         "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
         | run_psql
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
+        | run_psql
 done
 redo_attempt_generation_upgrade_check="$({
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
@@ -709,7 +715,7 @@ SELECT CASE WHEN
          WHERE attrelid = 'chain_phase_state'::regclass
            AND attname = 'redo_attempt_generation'
            AND NOT attisdropped)
-    ) = 'This nonnegative counter increments whenever an explicit redo begins and fences its progress writes to that attempt.'
+    ) = 'This nonnegative, row-local counter increments when an explicit redo begins and when the phase runner installs or extends a required redo stamp for a downstream phase (Interpret/Project). Manifest-synchronization Ingest stamps do not advance it; their superseded progress writes are fenced by the cleared manifest-authority fingerprint and stamped last_error instead.'
 THEN 'redo_attempt_generation_upgrade_ok'
 ELSE 'redo_attempt_generation_upgrade_wrong' END;
 SQL
