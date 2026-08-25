@@ -928,7 +928,6 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
             BASE_COINBASE_SEAM_BLOCK,
         )
     );
-
     manifests.write_from(true, tip)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
     let required: (i64, i64) = sqlx::query_as(
@@ -940,7 +939,6 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(required, (tip, tip));
-
     runner
         .redo(
             &chain,
@@ -980,7 +978,6 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
         ),
         "changing an attested raw extent must stamp Verify before redo completion commits"
     );
-
     let mismatch = runner
         .run_chain(&chain, CancellationToken::new())
         .await
@@ -991,7 +988,6 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
         2,
         "normal restart must execute Verify against the changed raw-fact set"
     );
-
     drop(runner);
     scratch.cleanup().await
 }
@@ -3449,7 +3445,6 @@ impl VerificationReferenceProvider for UnexpectedReferences {
 struct AttestationReferences {
     calls: AtomicUsize,
 }
-
 impl VerificationReferenceProvider for AttestationReferences {
     fn preflight(&self, source: &VerificationSource) -> RunnerResult<()> {
         if source.provider_kind() == VerificationProviderKind::IndependentRpc
@@ -3488,11 +3483,9 @@ impl VerificationReferenceProvider for AttestationReferences {
         })
     }
 }
-
 struct RawFactChangeIngestPhase {
     pool: sqlx::PgPool,
 }
-
 impl Phase for RawFactChangeIngestPhase {
     fn name(&self) -> PhaseName {
         PhaseName::Ingest

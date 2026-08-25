@@ -1170,8 +1170,8 @@ coordination state during redo or later normal catch-up publication.
 
 The live phase uses the same head-publication transaction as ingest. That
 transaction orphans the displaced suffix, clears affected active resolution
-divergence observations, and stamps `interpret`, `project`, and overlapping completed `verify` evidence for bounded redo
-when the orphaned suffix
+divergence observations, and stamps `interpret`, `project`, and overlapping
+`verify` rows with a recorded cursor for bounded redo when the orphaned suffix
 starts at or below their recorded cursors. The live loop consumes those stamps
 in dependency order before advancing downstream work, so projections cannot
 silently retain output from the losing fork. Successful `interpret` redo also

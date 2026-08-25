@@ -2048,7 +2048,6 @@ async fn all_phase_redo_refuses_a_range_beyond_the_verify_extent() -> Result<()>
         mark_completed(scratch.pool(), chain_id, phase, hash).await?;
         set_phase_extent(scratch.pool(), chain_id, phase, through).await?;
     }
-
     let calls = Arc::new(Mutex::new(Vec::new()));
     let phases = PhaseName::ALL.map(|name| {
         Arc::new(RecordingRedoPhase {
@@ -2072,7 +2071,6 @@ async fn all_phase_redo_refuses_a_range_beyond_the_verify_extent() -> Result<()>
         )
         .await
         .expect_err("all-phase redo must not silently clip its Verify range");
-
     assert_eq!(error.kind(), ErrorKind::DataIntegrity);
     assert!(
         error
@@ -2643,31 +2641,11 @@ async fn head_publication_atomically_replaces_a_readable_fork() -> Result<()> {
     .bind(chain_id)
     .fetch_all(scratch.pool())
     .await?;
+    let expected = ["interpret", "project", "verify"]
+        .map(|phase| (phase.into(), "running".into(), true, Some(1), Some(2)))
+        .to_vec();
     assert_eq!(
-        stamped,
-        vec![
-            (
-                "interpret".to_owned(),
-                "running".to_owned(),
-                true,
-                Some(1),
-                Some(2)
-            ),
-            (
-                "project".to_owned(),
-                "running".to_owned(),
-                true,
-                Some(1),
-                Some(2)
-            ),
-            (
-                "verify".to_owned(),
-                "running".to_owned(),
-                true,
-                Some(1),
-                Some(2)
-            ),
-        ],
+        stamped, expected,
         "orphaning a completed Verify extent must demote its attestation with the derived phases"
     );
 

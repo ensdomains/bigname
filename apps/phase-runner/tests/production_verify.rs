@@ -1407,8 +1407,14 @@ async fn provider_trusted_restart_reverifies_a_demoted_raw_extent() -> Result<()
         .run_chain(&chain, CancellationToken::new())
         .await?;
     assert_eq!(first_live_calls.load(Ordering::SeqCst), 1);
+    let generation_before_demotion: i64 = sqlx::query_scalar(
+        "SELECT redo_attempt_generation FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
     drop(first_runner);
-
     let redo_runner = PhaseRunner::new(
         scratch.runner(),
         PhaseSet::loopback(),
@@ -1425,7 +1431,6 @@ async fn provider_trusted_restart_reverifies_a_demoted_raw_extent() -> Result<()
         )
         .await?;
     drop(redo_runner);
-
     let restarted_live_calls = Arc::new(AtomicUsize::new(0));
     let restarted = sepolia_verifier_runner(&scratch, Arc::clone(&restarted_live_calls)).await?;
     restarted
@@ -1440,18 +1445,14 @@ async fn provider_trusted_restart_reverifies_a_demoted_raw_extent() -> Result<()
     .bind(SEPOLIA)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(
-        verify,
-        (
-            "completed".to_owned(),
-            Some("quick_synced".to_owned()),
-            false,
-            1
-        ),
-        "restart must execute Verify redo instead of content-blind completed-state revalidation"
+    assert_eq!(verify.0, "completed");
+    assert_eq!(verify.1.as_deref(), Some("quick_synced"));
+    assert!(!verify.2);
+    assert!(
+        verify.3 > generation_before_demotion,
+        "restart must execute a newer Verify redo attempt instead of content-blind completed-state revalidation"
     );
     assert_eq!(restarted_live_calls.load(Ordering::SeqCst), 1);
-
     drop(restarted);
     scratch.cleanup().await
 }
