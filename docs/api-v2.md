@@ -642,8 +642,15 @@ evidence; issue #529 retains a surface observed only by resolver
 diagnostics and product history. A cursor issued before that change has no
 continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
-continue normally. If an ended resource still retains a resolver pointer to the
-emitter, its rebuildable record-inventory projection may change too. The
+continue normally. This boundary does not claim fresh/resumed parity for the
+known pre-existing exception: when a resolver-emitted resource equals
+`namehash(N)`, named-resource and alias preimages can share one retained
+[interpreter state key](glossary.md#interpreter-state-key), so resumed
+interpretation can lose the named-resource resolver hint and diverge from a
+fresh walk ([#560](https://github.com/ensdomains/bigname/issues/560); evidence
+is checked in as an ignored collision probe). If an ended resource still
+retains a resolver pointer to the emitter, its rebuildable record-inventory
+projection may change too. The
 resource-less late event does not restore `name_current.resource_id`, so name
 and record reads for the released or expired name continue to expose no current
 record inventory.

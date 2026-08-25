@@ -98,7 +98,13 @@ ENSv2 resolver attribution classes
 lifecycle state advances through each block's reconciled normalized events,
 and ENSv2 restore rebuilds lasting canonical [name surface](#surface-name-surface)
 observations from retained registry/root events and resolver `AliasChanged`
-preimage observations whose DNS names pass normalization; see [interpretation
+preimage observations whose DNS names pass normalization. One known
+pre-existing exception remains: when a resolver-emitted resource equals
+`namehash(N)`, named-resource and alias preimages can share one retained
+[interpreter state key](#interpreter-state-key), so resumed interpretation can
+lose the named-resource resolver hint and diverge from a fresh walk
+([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
+in as an ignored collision probe). See [interpretation
 replay](storage.md#interpretation-replay).
 
 **Stored-history verification** — the read-only phase that validates a chain's
@@ -1460,8 +1466,14 @@ resolver attribution classes
 lifecycle observations use reconciled state from the preceding block, and
 ENSv2 restore rebuilds lasting canonical [name surface](#surface-name-surface)
 observations from retained registry/root events and resolver `AliasChanged`
-preimage observations whose DNS names pass normalization in every run shape; see
-[interpretation replay](storage.md#interpretation-replay).
+preimage observations whose DNS names pass normalization in every run shape,
+except when a resolver-emitted resource equals `namehash(N)`: named-resource
+and alias preimages can share one retained [interpreter state
+key](#interpreter-state-key), so resumed interpretation can lose the
+named-resource resolver hint and diverge from a fresh walk
+([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
+in as an ignored collision probe). See [interpretation
+replay](storage.md#interpretation-replay).
 
 **Shadow** — (1) manifest rollout/capability value: facts may be interpreted
 but general public reads are not enabled; (2) *shadow comparison*:

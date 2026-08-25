@@ -170,7 +170,14 @@ changes with the attribution, and `before_state` may rethread onto the
 logical-name/resource-null state stream. Issue #348 retains the surface from
 registry/root evidence; issue #529 retains a surface observed only by resolver
 `AliasChanged` before a batch boundary. Those rows may newly enter
-name-filtered diagnostics and product history. An ended resource whose latest
+name-filtered diagnostics and product history. This boundary does not claim
+fresh/resumed parity for the known pre-existing exception: when a
+resolver-emitted resource equals `namehash(N)`, named-resource and alias
+preimages can share one retained [interpreter state
+key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
+named-resource resolver hint and diverge from a fresh walk
+([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
+in as an ignored collision probe). An ended resource whose latest
 retained `ResolverChanged` pointer names the emitting resolver may also receive
 a different rebuildable `record_inventory_current` row; the released or
 expired name must still have no current binding or resource, and its name and

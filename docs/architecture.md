@@ -762,9 +762,15 @@ identified on the ENSv2 resolver path; the permutation lane's pinned
 batch-artifact counts sit at zero. The structurally identified alias-only shape
 is covered by [#529](https://github.com/ensdomains/bigname/issues/529): a name
 link created only by a resolver `AliasChanged` preimage observation whose DNS
-name passes normalization is rebuilt during fresh, incremental, and resumed
-interpretation, and the generated ENSv2 corpus includes that alias-only name
-followed by a resolver record. Five rules keep
+name passes normalization is rebuilt across fresh, incremental, and resumed
+interpretation, subject to the known exception below, and the generated ENSv2
+corpus includes that alias-only name followed by a resolver record. When a
+resolver-emitted resource equals `namehash(N)`, named-resource and alias
+preimages can share one retained [interpreter state
+key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
+named-resource resolver hint and diverge from a fresh walk
+([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
+in as an ignored collision probe). Five rules keep
 the written rows batch-independent:
 
 - `before_state` chains over the emitted event stream: a retained event's
@@ -810,8 +816,10 @@ the written rows batch-independent:
   but does not erase the surface. A cold restore rebuilds the canonical surface
   observation from the retained event. Restoring alias evidence records only
   the known surface and never creates or restores a resource binding;
-  normalization-rejected name observations are not admitted to that state. A
-  later resolver `RecordChanged` or `RecordVersionChanged`
+  normalization-rejected name observations are not admitted to that state. The
+  retained preimage-key collision in issue #560 is the known exception to this
+  cross-run restore guarantee. A later resolver `RecordChanged` or
+  `RecordVersionChanged`
   remains attributed to the logical name while remaining resource-less when no
   current resource exists. If an ended resource's latest retained
   `ResolverChanged` pointer still names that resolver, Project can rebuild a
