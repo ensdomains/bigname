@@ -13,7 +13,7 @@ never write projection rows.
 
 For each chain, the phase runner publishes a provider head and advances or
 redoes Interpret and Project through that exact head. A displaced readable
-suffix stamps both downstream phases. Interpret redo also stamps Project for
+suffix stamps both derived phases and demotes overlapping completed Verify evidence. Interpret redo also stamps Project for
 the actual derived range, so a same-hash interpretation repair cannot leave an
 older projection generation published.
 

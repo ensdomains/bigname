@@ -1935,7 +1935,7 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
             ("ingest".into(), "completed".into(), false),
             ("interpret".into(), "running".into(), true),
             ("project".into(), "completed".into(), false),
-            ("verify".into(), "completed".into(), false),
+            ("verify".into(), "running".into(), true),
         ]
     );
 
@@ -1987,6 +1987,14 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
     recovery_runner
         .redo(
             &chain(failed_chain)?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    recovery_runner
+        .redo(
+            &chain(failed_chain)?,
             RedoPhase::All,
             BlockRange::new(0, 1)?,
             CancellationToken::new(),
@@ -1997,6 +2005,7 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         [
             (failed_chain.into(), PhaseName::Interpret),
             (failed_chain.into(), PhaseName::Project),
+            (failed_chain.into(), PhaseName::Verify),
             (failed_chain.into(), PhaseName::Ingest),
             (failed_chain.into(), PhaseName::Interpret),
             (failed_chain.into(), PhaseName::Project),
@@ -2012,6 +2021,65 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(remaining_active, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn all_phase_redo_refuses_a_range_beyond_the_verify_extent() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_all_verify_extent").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "redo-all-verify-extent-chain";
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    for (phase, hash, through) in [
+        (PhaseName::Ingest, None, 1),
+        (
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            1,
+        ),
+        (
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            1,
+        ),
+        (PhaseName::Verify, None, 0),
+    ] {
+        mark_completed(scratch.pool(), chain_id, phase, hash).await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, through).await?;
+    }
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseName::ALL.map(|name| {
+        Arc::new(RecordingRedoPhase {
+            name,
+            calls: Arc::clone(&calls),
+            fail_chain: None,
+        }) as Arc<dyn Phase>
+    });
+    let phase_runner = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "redo-all-verify-extent-runner",
+    )?;
+    let error = phase_runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::All,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("all-phase redo must not silently clip its Verify range");
+
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("beyond Verify's recorded extent")
+    );
+    assert!(calls.lock().expect("recorded calls lock").is_empty());
     scratch.cleanup().await
 }
 
@@ -2509,6 +2577,24 @@ async fn head_publication_atomically_replaces_a_readable_fork() -> Result<()> {
             .fetch_one(scratch.pool())
             .await?;
     assert_eq!(initial_orphaning_epoch, 0);
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', current_block_number = 2,
+             current_block_hash = $2, target_block_number = 2,
+             target_block_hash = $2,
+             verification_level = CASE
+                 WHEN phase_name = 'verify' THEN 'cross_checked'
+             END,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1
+           AND phase_name IN ('interpret', 'project', 'verify')",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-2"))
+    .execute(scratch.pool())
+    .await?;
     for (number, hash, parent) in [
         (1_i64, "head-fork-new-1", format!("{chain_id}-block-0")),
         (2_i64, "head-fork-new-2", "head-fork-new-1".to_owned()),
@@ -2544,6 +2630,46 @@ async fn head_publication_atomically_replaces_a_readable_fork() -> Result<()> {
         },
     )
     .await?;
+
+    type RedoStampState = (String, String, bool, Option<i64>, Option<i64>);
+    let stamped: Vec<RedoStampState> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress,
+                redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1
+           AND phase_name IN ('interpret', 'project', 'verify')
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        stamped,
+        vec![
+            (
+                "interpret".to_owned(),
+                "running".to_owned(),
+                true,
+                Some(1),
+                Some(2)
+            ),
+            (
+                "project".to_owned(),
+                "running".to_owned(),
+                true,
+                Some(1),
+                Some(2)
+            ),
+            (
+                "verify".to_owned(),
+                "running".to_owned(),
+                true,
+                Some(1),
+                Some(2)
+            ),
+        ],
+        "orphaning a completed Verify extent must demote its attestation with the derived phases"
+    );
 
     let orphaning_epoch: i64 =
         sqlx::query_scalar("SELECT lineage_orphaning_epoch FROM chain_heads WHERE chain_id = $1")

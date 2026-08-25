@@ -1393,6 +1393,70 @@ async fn completed_sepolia_verify_survives_a_reorg_of_the_frozen_ingest_tip() ->
 }
 
 #[tokio::test]
+async fn provider_trusted_restart_reverifies_a_demoted_raw_extent() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_demoted_restart").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    seed_watch_manifest(scratch.pool(), SEPOLIA).await?;
+    let chain = sepolia_chain()?;
+
+    let first_live_calls = Arc::new(AtomicUsize::new(0));
+    let first_runner = sepolia_verifier_runner(&scratch, Arc::clone(&first_live_calls)).await?;
+    first_runner
+        .run_chain(&chain, CancellationToken::new())
+        .await?;
+    assert_eq!(first_live_calls.load(Ordering::SeqCst), 1);
+    drop(first_runner);
+
+    let redo_runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verify-demoting-ingest-redo",
+        test_timing(),
+    )?;
+    redo_runner
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(2, 3)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    drop(redo_runner);
+
+    let restarted_live_calls = Arc::new(AtomicUsize::new(0));
+    let restarted = sepolia_verifier_runner(&scratch, Arc::clone(&restarted_live_calls)).await?;
+    restarted
+        .run_chain(&chain, CancellationToken::new())
+        .await?;
+    let verify: (String, Option<String>, bool, i64) = sqlx::query_as(
+        "SELECT phase_status, verification_level, redo_in_progress,
+                redo_attempt_generation
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        verify,
+        (
+            "completed".to_owned(),
+            Some("quick_synced".to_owned()),
+            false,
+            1
+        ),
+        "restart must execute Verify redo instead of content-blind completed-state revalidation"
+    );
+    assert_eq!(restarted_live_calls.load(Ordering::SeqCst), 1);
+
+    drop(restarted);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn failed_completed_sepolia_revalidation_records_failure_and_recovers() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_corrupt_completion_target").await?;
     seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;

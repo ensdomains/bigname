@@ -344,7 +344,6 @@ impl PhaseRunner {
             }
         }
     }
-
     async fn redo_phase(
         &self,
         chain: &ChainConfig,
@@ -367,7 +366,6 @@ impl PhaseRunner {
         }
         Ok(())
     }
-
     async fn redo_phase_only(
         &self,
         chain: &ChainConfig,
@@ -388,7 +386,6 @@ impl PhaseRunner {
         self.run_phase_with_restart(chain, phase, mode, cancellation)
             .await
     }
-
     pub async fn redo_chains(
         &self,
         chains: &[ChainConfig],
@@ -432,7 +429,6 @@ impl PhaseRunner {
         }
         Ok(report)
     }
-
     async fn redo_all_phases(
         &self,
         chain: &ChainConfig,
@@ -451,23 +447,33 @@ impl PhaseRunner {
                 .get(phase)
                 .preflight(&chain.chain_id, &chain.sources, &mode)?;
         }
-
         self.store.initialize_chain(&chain.chain_id).await?;
+        let verify_to = self
+            .store
+            .phase_resume(&chain.chain_id, PhaseName::Verify, &RunMode::Normal)
+            .await?
+            .current
+            .ok_or_else(|| RunnerError::data_integrity("Verify has no recorded extent"))?
+            .number;
+        if range.to > verify_to {
+            return Err(RunnerError::data_integrity(format!(
+                "all-phase redo range ends at {}, beyond Verify's recorded extent {verify_to}",
+                range.to
+            )));
+        }
         self.require_readable_redo_end(&chain.chain_id, range)
             .await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, None)
+        self.require_no_pending_redo_for_all(&chain.chain_id, None, None)
             .await?;
-
         self.run_all_redo_phase(chain, PhaseName::Ingest, range, cancellation.clone())
             .await?;
         self.run_all_redo_phase(chain, PhaseName::Interpret, range, cancellation.clone())
             .await?;
-
         let project_stamp = self
             .store
             .required_redo_range(&chain.chain_id, PhaseName::Project)
             .await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, project_stamp)
+        self.require_no_pending_redo_for_all(&chain.chain_id, project_stamp, Some(range))
             .await?;
         let project_range = project_stamp.unwrap_or(range);
         self.run_all_redo_phase(
@@ -477,13 +483,12 @@ impl PhaseRunner {
             cancellation.clone(),
         )
         .await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, None)
+        self.require_no_pending_redo_for_all(&chain.chain_id, None, Some(range))
             .await?;
         self.run_all_redo_phase(chain, PhaseName::Verify, range, cancellation)
             .await?;
         Ok(())
     }
-
     async fn run_all_redo_phase(
         &self,
         chain: &ChainConfig,
@@ -498,7 +503,7 @@ impl PhaseRunner {
             Ok(()) => Ok(()),
             Err(error) => {
                 match self
-                    .require_no_pending_redo_for_all(&chain.chain_id, None)
+                    .require_no_pending_redo_for_all(&chain.chain_id, None, None)
                     .await
                 {
                     Err(recovery) if recovery.kind() == ErrorKind::DataIntegrity => Err(
@@ -516,6 +521,7 @@ impl PhaseRunner {
         &self,
         chain_id: &str,
         allowed_project_stamp: Option<BlockRange>,
+        allowed_verify_stamp: Option<BlockRange>,
     ) -> RunnerResult<()> {
         let pending: Vec<PendingRedoRow> = sqlx::query_as(
             "SELECT phase_name, redo_mode, redo_from_block_number, redo_to_block_number, last_error
@@ -539,10 +545,13 @@ impl PhaseRunner {
             let persisted_range = from.zip(to).and_then(|(from, to)| {
                 (from >= 0 && to >= from).then_some(BlockRange { from, to })
             });
-            let allowed = allowed_project_stamp.is_some()
+            let allowed = ((allowed_project_stamp.is_some()
                 && phase == PhaseName::Project.as_str()
+                && persisted_range == allowed_project_stamp)
+                || (allowed_verify_stamp.is_some()
+                    && phase == PhaseName::Verify.as_str()
+                    && persisted_range == allowed_verify_stamp))
                 && mode.as_deref() == Some("redo")
-                && persisted_range == allowed_project_stamp
                 && last_error
                     .as_deref()
                     .is_some_and(crate::redo_stamp::owns_required_redo);

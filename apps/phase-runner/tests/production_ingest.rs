@@ -17,8 +17,8 @@ use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, routing::post};
 use bigname_ingest::{
-    BatchRequest, Engine, ErrorKind as IngestErrorKind, SourceDescriptor, VerificationBatch,
-    WatchFilter,
+    BASE_COINBASE_SEAM_BLOCK, BatchRequest, Engine, ErrorKind as IngestErrorKind, SourceDescriptor,
+    VerificationBatch, VerificationLog, VerificationMarker, VerificationProviderKind, WatchFilter,
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use phase_runner::{
@@ -32,7 +32,7 @@ use phase_runner::{
     interpret_phase::InterpretPhase,
     phase::{
         BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
-        PhaseProgress, PhaseSet,
+        PhaseProgress, PhaseSet, SourceProgress, VerificationLevel,
     },
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
@@ -76,6 +76,7 @@ const ANNOUNCED_REGISTRY: &str = "0x0000000000000000000000000000000000000045";
 const TRANSFER_TOPIC: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const SIBLING_TOPIC: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
+const BASE: &str = "base-mainnet";
 const SEPOLIA: &str = "ethereum-sepolia";
 
 sol! {
@@ -749,6 +750,249 @@ async fn resumed_ingest_redo_reloads_a_divergent_boundary_under_the_current_watc
         )
     );
     server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestation() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_demotes_verify").await?;
+    let manifests = IngestWatchManifestFixture::new(BASE)?;
+    let tip = BASE_COINBASE_SEAM_BLOCK;
+    manifests.write_from(false, tip)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let chain = ChainConfig::new(
+        BASE,
+        vec![
+            SourceConfig::new(
+                BASE,
+                "coinbase-history",
+                "coinbase_sql",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                "https://coinbase.invalid",
+            )?,
+            SourceConfig::new(
+                BASE,
+                "drpc-reference",
+                "drpc",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                "https://drpc.invalid",
+            )?,
+        ],
+        true,
+    )?;
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(BASE).await?;
+    store.ensure_ingest_sources(BASE, &chain.sources).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'finalized')",
+    )
+    .bind(BASE)
+    .bind(verify_attestation_hash(tip))
+    .bind(verify_attestation_hash(tip - 1))
+    .bind(tip)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (
+             chain_id, latest_block_hash, latest_block_number,
+             safe_block_hash, safe_block_number,
+             finalized_block_hash, finalized_block_number
+         ) VALUES ($1, $2, $3, $2, $3, $2, $3)",
+    )
+    .bind(BASE)
+    .bind(verify_attestation_hash(tip))
+    .bind(tip)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO raw_transactions (
+             chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, from_address
+         ) VALUES ($1, $2, $3, $4, 0, $5)",
+    )
+    .bind(BASE)
+    .bind(verify_attestation_hash(tip))
+    .bind(tip)
+    .bind(verify_attestation_transaction(false))
+    .bind(SENDER)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO raw_logs (
+             chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, log_index, emitting_address, topics, data
+         ) VALUES ($1, $2, $3, $4, 0, 0, $5, $6, $7)",
+    )
+    .bind(BASE)
+    .bind(verify_attestation_hash(tip))
+    .bind(tip)
+    .bind(verify_attestation_transaction(false))
+    .bind(CONTRACT)
+    .bind(vec![TRANSFER_TOPIC.to_owned()])
+    .bind(Vec::<u8>::new())
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = CASE
+                 WHEN source_key = 'coinbase-history' THEN $2 + 1
+                 ELSE $3 + 1
+             END,
+             target_block_number = CASE
+                 WHEN source_key = 'coinbase-history' THEN $2
+                 ELSE $3
+             END,
+             last_processed_block_number = CASE
+                 WHEN source_key = 'coinbase-history' THEN $2
+                 ELSE $3
+             END,
+             last_processed_block_hash = CASE
+                 WHEN source_key = 'coinbase-history' THEN $4
+                 ELSE $5
+             END
+         WHERE chain_id = $1",
+    )
+    .bind(BASE)
+    .bind(BASE_COINBASE_SEAM_BLOCK)
+    .bind(tip)
+    .bind(verify_attestation_hash(BASE_COINBASE_SEAM_BLOCK))
+    .bind(verify_attestation_hash(tip))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', current_block_number = $2,
+             current_block_hash = $3, target_block_number = $2,
+             target_block_hash = $3, input_content_hash = CASE
+                 WHEN phase_name IN ('interpret', 'project') THEN $4
+             END,
+             live_handoff_block_number = CASE
+                 WHEN phase_name = 'ingest' THEN $2
+             END,
+             live_handoff_block_hash = CASE
+                 WHEN phase_name = 'ingest' THEN $3
+             END,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1
+           AND phase_name IN ('ingest', 'interpret', 'project')",
+    )
+    .bind(BASE)
+    .bind(tip)
+    .bind(verify_attestation_hash(tip))
+    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+    let references = Arc::new(AttestationReferences::default());
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::new([
+        Arc::new(RawFactChangeIngestPhase {
+            pool: scratch.pool().clone(),
+        }) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(VerifyPhase::with_reference_provider(
+            scratch.verification_database(2).await?,
+            references.clone(),
+        )),
+        Arc::new(CountingLivePhase {
+            calls: Arc::clone(&live_calls),
+        }),
+    ])?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-ingest-verify-attestation",
+        test_timing(),
+    )?;
+    runner.run_chain(&chain, CancellationToken::new()).await?;
+    assert_eq!(references.calls.load(Ordering::SeqCst), 1);
+    let verified: (String, Option<String>, i64) = sqlx::query_as(
+        "SELECT phase_status, verification_level, current_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        verified,
+        (
+            "completed".to_owned(),
+            Some("cross_checked".to_owned()),
+            BASE_COINBASE_SEAM_BLOCK,
+        )
+    );
+
+    manifests.write_from(true, tip)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let required: (i64, i64) = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest' AND redo_in_progress",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(required, (tip, tip));
+
+    runner
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(required.0, required.1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            BASE,
+            &verify_attestation_hash(tip),
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        1,
+        "the required Ingest redo must load the widened raw extent"
+    );
+    let demoted: (String, Option<String>, bool, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT phase_status, verification_level, redo_in_progress,
+                redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        demoted,
+        (
+            "running".to_owned(),
+            Some("cross_checked".to_owned()),
+            true,
+            Some(tip),
+            Some(tip),
+        ),
+        "changing an attested raw extent must stamp Verify before redo completion commits"
+    );
+
+    let mismatch = runner
+        .run_chain(&chain, CancellationToken::new())
+        .await
+        .expect_err("Verify must reread the changed raw-fact extent");
+    assert_eq!(mismatch.kind(), ErrorKind::VerificationMismatch);
+    assert_eq!(
+        references.calls.load(Ordering::SeqCst),
+        2,
+        "normal restart must execute Verify against the changed raw-fact set"
+    );
+
+    drop(runner);
     scratch.cleanup().await
 }
 
@@ -1754,13 +1998,17 @@ impl IngestWatchManifestFixture {
     }
 
     fn write(&self, include_widened_address: bool) -> Result<()> {
+        self.write_from(include_widened_address, 0)
+    }
+
+    fn write_from(&self, include_widened_address: bool, start_block: i64) -> Result<()> {
         let widened_root = if include_widened_address {
             format!(
                 r#"
 [[roots]]
 name = "source_b"
 address = "{SIBLING_CONTRACT}"
-start_block = 0
+start_block = {start_block}
 "#,
             )
         } else {
@@ -1784,7 +2032,7 @@ discovery_rules = []
 role = "source_a"
 address = "{CONTRACT}"
 proxy_kind = "none"
-start_block = 0
+start_block = {start_block}
 
 [[abi.events]]
 name = "Transfer"
@@ -3197,6 +3445,130 @@ impl VerificationReferenceProvider for UnexpectedReferences {
     }
 }
 
+#[derive(Default)]
+struct AttestationReferences {
+    calls: AtomicUsize,
+}
+
+impl VerificationReferenceProvider for AttestationReferences {
+    fn preflight(&self, source: &VerificationSource) -> RunnerResult<()> {
+        if source.provider_kind() == VerificationProviderKind::IndependentRpc
+            && source.verification_level() == VerificationLevel::CrossChecked
+        {
+            return Ok(());
+        }
+        Err(RunnerError::data_integrity(
+            "attestation fixture requires independent cross-check verification",
+        ))
+    }
+
+    fn fetch<'a>(
+        &'a self,
+        _source: &'a VerificationSource,
+        _filter: WatchFilter,
+        from_block: i64,
+        to_block: i64,
+    ) -> VerificationReferenceFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let tip = BASE_COINBASE_SEAM_BLOCK;
+            let logs = (from_block..=to_block)
+                .contains(&tip)
+                .then(|| verify_attestation_log(false))
+                .into_iter()
+                .collect();
+            Ok(VerificationBatch {
+                end: VerificationMarker {
+                    number: to_block,
+                    hash: verify_attestation_hash(to_block),
+                },
+                logs,
+                rpc_request_count: 1,
+            })
+        })
+    }
+}
+
+struct RawFactChangeIngestPhase {
+    pool: sqlx::PgPool,
+}
+
+impl Phase for RawFactChangeIngestPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let marker = context
+                .available_heads
+                .as_ref()
+                .map(|heads| heads.latest.clone())
+                .ok_or_else(|| RunnerError::data_integrity("raw reload has no readable head"))?;
+            assert!(
+                sqlx::query_scalar::<_, bool>("SELECT redo_in_progress FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'")
+                    .bind(&context.chain_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .expect("Verify state must remain readable during Ingest redo"),
+                "Verify must be demoted before an Ingest redo can change raw facts"
+            );
+            sqlx::query(
+                "INSERT INTO raw_transactions (
+                     chain_id, block_hash, block_number, transaction_hash,
+                     transaction_index, from_address
+                 ) VALUES ($1, $2, $3, $4, 1, $5)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(&context.chain_id)
+            .bind(&marker.hash)
+            .bind(marker.number)
+            .bind(verify_attestation_transaction(true))
+            .bind(SENDER)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                RunnerError::data_integrity(format!("failed to load raw transaction: {error}"))
+            })?;
+            sqlx::query(
+                "INSERT INTO raw_logs (
+                     chain_id, block_hash, block_number, transaction_hash,
+                     transaction_index, log_index, emitting_address, topics, data
+                 ) VALUES ($1, $2, $3, $4, 1, 1, $5, $6, $7)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(&context.chain_id)
+            .bind(&marker.hash)
+            .bind(marker.number)
+            .bind(verify_attestation_transaction(true))
+            .bind(SIBLING_CONTRACT)
+            .bind(vec![TRANSFER_TOPIC.to_owned()])
+            .bind(vec![1_u8])
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                RunnerError::data_integrity(format!("failed to load raw log: {error}"))
+            })?;
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker.clone()),
+                live_handoff: Some(marker.clone()),
+                source_progress: context
+                    .sources
+                    .iter()
+                    .map(|source| SourceProgress {
+                        source_key: source.source_key.clone(),
+                        current: Some(marker.clone()),
+                        target: Some(marker.clone()),
+                        redo_loaded_boundary: Some(marker.clone()),
+                    })
+                    .collect(),
+                ..PhaseProgress::default()
+            }))
+        })
+    }
+}
+
 fn crash_window_runner(
     scratch: &ScratchDatabase,
     live_calls: Arc<AtomicUsize>,
@@ -4062,6 +4434,29 @@ async fn spawn_watch_plan_boundary_rpc() -> Result<(
         .expect("watch-plan boundary RPC server");
     });
     Ok((format!("http://{address}/"), state, server))
+}
+
+fn verify_attestation_hash(number: i64) -> String {
+    format!("0x{:064x}", number + 1)
+}
+
+fn verify_attestation_transaction(sibling: bool) -> String {
+    let offset = i64::from(sibling) + 100;
+    format!("0x{:064x}", BASE_COINBASE_SEAM_BLOCK + offset)
+}
+
+fn verify_attestation_log(sibling: bool) -> VerificationLog {
+    let tip = BASE_COINBASE_SEAM_BLOCK;
+    VerificationLog {
+        block_hash: verify_attestation_hash(tip),
+        block_number: tip,
+        transaction_hash: verify_attestation_transaction(sibling),
+        transaction_index: i64::from(sibling),
+        log_index: i64::from(sibling),
+        address: if sibling { SIBLING_CONTRACT } else { CONTRACT }.to_owned(),
+        topics: vec![TRANSFER_TOPIC.to_owned()],
+        data: Vec::new(),
+    }
 }
 
 async fn watch_plan_boundary_rpc(

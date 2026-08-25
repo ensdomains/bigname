@@ -47,6 +47,9 @@ never fetches missing provider data or calls an old adapter; its input is the
 raw-fact range already admitted by `ingest`. The project phase likewise reads
 only canonical identity and normalized-event input.
 
+Starting Ingest redo stamps overlapping completed Verify evidence as [required redo](glossary.md#redo-marker-scope).
+Sepolia status degrades; the prior level remains historical until the ordinary or continuous runner re-verifies.
+
 When a non-retryable check of an already-completed Ingest or Verify phase
 fails, the runner changes that phase from `completed` to `failed` and keeps its
 completed range, source provenance, and verification evidence for diagnosis.
@@ -59,7 +62,7 @@ current and target block numbers and hashes plus a retained verification level,
 may be restored without replay. On the next start, the runner repeats the checks
 for the retained completion and records the phase `completed` without replaying
 its completed range. Rows without that structural proof resume their ordinary
-phase work; error text alone never authorizes restoration.
+phase work; error text alone never authorizes restoration. A stamped Verify row is not eligible for this shortcut.
 At startup, the runner also probes the advisory locks for Interpret, Project,
 and Verify. A `running` or `paused` row with no explicit redo is resolved only
 while its advisory lock remains held. For such a row, a saved Interpret or
@@ -318,11 +321,11 @@ Coinbase SQL warehouse is not a block provider at all.
 ## Reorgs and required downstream redo
 
 Head publication marks a displaced readable suffix orphaned. If that suffix
-starts at or below the recorded `interpret` or `project` cursor, the same
+starts at or below the recorded `interpret`, `project`, or `verify` cursor, the same
 transaction stamps the affected phase's existing redo state from the first
 orphaned block through that cursor and clears affected resolution-divergence
 rows. The next live cycle runs the stamped `interpret` range and then the
-stamped `project` range before either phase advances normally. If a provider's
+stamped `project` and `verify` ranges before those phases advance normally. If a provider's
 latest marker temporarily falls below the old downstream cursor, live keeps
 polling and fills the winning path through the stamped upper bound before redo
 starts. On process restart, the live advisory lock also fences recovery of a
@@ -378,9 +381,11 @@ partial request through its recorded head, its downstream redo stamp carries
 that widened range into Project. Project still owns canonical-head hydration;
 there is no standalone hydrate phase. Any already-pending redo must be
 completed before `--phase all`, so the all-phases shorthand cannot consume or
-clear unrelated operator work. A phase failure leaves its normal durable redo
-marker, reports the phase-specific recovery command prefix, and stops the
-remaining phases for that chain. Complete that phase-specific redo, then rerun
+clear unrelated operator work. A Verify stamp created by Ingest must match the
+all-phase range; a clipped overlap is reported instead of shrinking Verify. A
+phase failure leaves its normal durable redo marker, reports the phase-specific
+recovery command prefix, and stops the remaining phases for that chain. Complete
+that phase-specific redo, then rerun
 `--phase all`. Historical live redo remains invalid because live is a head
 follower. A multi-chain command continues with later chains and exits nonzero
 with the collected chain failures; cancellation stops further chain dispatch.
@@ -419,7 +424,8 @@ from the earliest newly watched block through the latest published head. The
 ordinary runner reports the exact chain, phase, and range command prefix and
 instructs the operator to append configured sources. It refuses to run that
 potentially expensive fetch automatically; successful explicit completion clears the
-obligation. Narrowing, a same-set sync, and a chain with no retained Ingest
+obligation after its start demotes any completed Verify evidence over the range.
+Narrowing, a same-set sync, and a chain with no retained Ingest
 coverage stamp nothing. The attestation remains required for every
 manifest-authority change, including one with no Ingest stamp. Cursors and
 readable lineage prove only the facts selected by the watch plan active when
