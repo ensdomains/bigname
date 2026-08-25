@@ -30,7 +30,10 @@ mod completed;
 mod source_roles;
 pub(crate) use completed::provider_trusted_verify_required;
 pub(crate) use source_roles::production_verify_chain;
-use source_roles::{provider_configuration_error, provider_trusted_source, validate_intake_shape};
+use source_roles::{
+    provider_configuration_error, provider_trusted_source, same_endpoint_identity,
+    validate_intake_shape, validate_sepolia_verification_shape,
+};
 
 const VERIFICATION_BATCH_BLOCKS: i64 = 131_072;
 
@@ -388,12 +391,16 @@ fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<V
     }
     if let Some(source) = candidates.first() {
         if chain_id == "ethereum-sepolia" {
-            validate_intake_shape(chain_id, &[*source])?;
+            validate_sepolia_verification_shape(chain_id, &[*source])?;
         }
-        if let Some(conflict) = intake
-            .iter()
-            .find(|intake| intake.endpoint() == source.endpoint())
-        {
+        let mut conflict = None;
+        for intake_source in &intake {
+            if same_endpoint_identity(intake_source, source)? {
+                conflict = Some(*intake_source);
+                break;
+            }
+        }
+        if let Some(conflict) = conflict {
             return Err(RunnerError::new(
                 ErrorKind::Configuration,
                 format!(

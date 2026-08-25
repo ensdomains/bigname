@@ -16,6 +16,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+url.workspace = true
 
 bigname-content-hash.workspace = true
 bigname-ingest = { workspace = true, features = ["reth-db"] }

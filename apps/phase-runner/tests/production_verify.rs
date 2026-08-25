@@ -2143,6 +2143,37 @@ async fn sepolia_rejects_unreviewed_intake_source_shapes_before_verification() -
             .expect_err(label);
         assert_eq!(error.kind(), ErrorKind::Configuration, "{label}");
     }
+
+    let sources = vec![
+        SourceConfig::new_with_role(
+            SEPOLIA,
+            "drpc-intake",
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            SourceRole::Intake,
+            "https://intake.invalid",
+        )?,
+        SourceConfig::new_with_role(
+            SEPOLIA,
+            "drpc-verify",
+            "drpc",
+            SeedBasis::EthereumHead,
+            1,
+            SourceRole::VerificationOnly,
+            "https://verify.invalid",
+        )?,
+    ];
+    let error = phase
+        .preflight(SEPOLIA, &sources, &phase_runner::phase::RunMode::Normal)
+        .expect_err("invalid verification-only shape must be labeled as verification-only");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "chain ethereum-sepolia verification-only descriptors [ethereum-sepolia:drpc-verify] \
+         violate the required shape: exactly one dRPC verification-only source with \
+         ethereum_head seed basis and start block 0"
+    );
     drop(phase);
     scratch.cleanup().await
 }
@@ -3464,6 +3495,63 @@ async fn verification_only_endpoint_equal_to_intake_is_rejected() -> Result<()> 
             .await?;
     assert_eq!(state_rows, 0);
     drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verification_endpoint_trailing_slash_alias_is_rejected() -> Result<()> {
+    assert_endpoint_alias_rejected(
+        "production_verify_endpoint_trailing_slash_alias",
+        "https://rpc.example",
+        "https://rpc.example/",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_default_port_alias_is_rejected() -> Result<()> {
+    assert_endpoint_alias_rejected(
+        "production_verify_endpoint_default_port_alias",
+        "https://rpc.example:443/",
+        "https://rpc.example/",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_case_and_percent_encoding_alias_is_rejected() -> Result<()> {
+    assert_endpoint_alias_rejected(
+        "production_verify_endpoint_percent_alias",
+        "https://RPC.EXAMPLE/%7eservice",
+        "https://rpc.example/~service",
+    )
+    .await
+}
+
+async fn assert_endpoint_alias_rejected(
+    database_name: &str,
+    intake_endpoint: &str,
+    verification_endpoint: &str,
+) -> Result<()> {
+    let scratch = ScratchDatabase::create(database_name).await?;
+    let reference = Arc::new(FixtureReferences::new([]));
+    let phase = VerifyPhase::with_reference_provider(
+        scratch.verification_database(2).await?,
+        reference.clone(),
+    );
+    let chain = sepolia_role_chain(intake_endpoint, verification_endpoint)?;
+
+    let error = phase
+        .preflight(&chain.chain_id, &chain.sources, &RunMode::Normal)
+        .expect_err("parsed aliases of one RPC endpoint must fail independence validation");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("drpc-intake"));
+    assert!(error.to_string().contains("sepolia-verify"));
+    assert!(!error.to_string().contains(intake_endpoint));
+    assert!(!error.to_string().contains(verification_endpoint));
+    assert_eq!(reference.preflights(), 0);
+    drop(phase);
     scratch.cleanup().await
 }
 

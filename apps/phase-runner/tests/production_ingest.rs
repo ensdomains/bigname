@@ -2751,6 +2751,7 @@ async fn fresh_sepolia_rejects_equal_role_endpoints_before_cursor_or_raw_fact_wr
         ScratchDatabase::create("production_ingest_fresh_sepolia_equal_endpoints").await?;
     seed_watch_set(scratch.pool(), SEPOLIA).await?;
     let (endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    let endpoint_alias = endpoint.trim_end_matches('/').to_owned();
     let runner = crash_window_runner(&scratch, Arc::new(AtomicUsize::new(0)))?;
     let chain = ChainConfig::new(
         SEPOLIA,
@@ -2771,7 +2772,7 @@ async fn fresh_sepolia_rejects_equal_role_endpoints_before_cursor_or_raw_fact_wr
                 SeedBasis::EthereumHead,
                 0,
                 SourceRole::VerificationOnly,
-                endpoint,
+                endpoint_alias.clone(),
             )?,
         ],
         true,
@@ -2802,6 +2803,8 @@ async fn fresh_sepolia_rejects_equal_role_endpoints_before_cursor_or_raw_fact_wr
     assert_eq!(error.kind(), ErrorKind::Configuration);
     assert!(error.to_string().contains("sepolia-intake"), "{error}");
     assert!(error.to_string().contains("sepolia-verify"), "{error}");
+    assert!(!error.to_string().contains(&endpoint), "{error}");
+    assert!(!error.to_string().contains(&endpoint_alias), "{error}");
     assert_eq!(cursor_count, 0);
     assert_eq!(raw_fact_count, 0);
     assert_eq!(observed_rpc_requests, 0);
