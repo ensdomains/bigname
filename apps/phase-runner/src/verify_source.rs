@@ -41,7 +41,13 @@ pub(super) fn validate_intake_shape(chain_id: &str, sources: &[&SourceConfig]) -
         _ => true,
     };
     if !valid {
-        let message = format!("chain {chain_id} has an unsupported production intake shape");
+        let message = match chain_id {
+            "ethereum-sepolia" => format!(
+                "chain {chain_id} requires exactly one dRPC intake-capable source with \
+                 ethereum_head seed basis and start block 0"
+            ),
+            _ => format!("chain {chain_id} has an unsupported production intake shape"),
+        };
         return Err(RunnerError::new(ErrorKind::Configuration, message));
     }
     Ok(())

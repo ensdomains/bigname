@@ -2734,10 +2734,10 @@ async fn fresh_sepolia_rejects_invalid_intake_shape_before_raw_facts_are_written
     );
     let error = result.expect_err("invalid Sepolia intake must fail before Ingest");
     assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert!(
-        error
-            .to_string()
-            .contains("requires one dRPC intake source")
+    assert_eq!(
+        error.to_string(),
+        "chain ethereum-sepolia requires exactly one dRPC intake-capable source with \
+         ethereum_head seed basis and start block 0"
     );
     assert_eq!(observed_rpc_requests, 0);
     Ok(())

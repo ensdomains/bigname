@@ -1608,9 +1608,10 @@ async fn completed_sepolia_ingest_rejects_unreviewed_source_shape_before_interpr
     drop(runner);
     scratch.cleanup().await?;
     assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert!(
-        error.to_string().contains("one dRPC intake source"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "chain ethereum-sepolia requires exactly one dRPC intake-capable source with \
+         ethereum_head seed basis and start block 0"
     );
     assert_eq!(
         observed_calls,
