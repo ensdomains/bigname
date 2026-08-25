@@ -27,6 +27,9 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        if selection.requires_intake_sources() {
+            chain.require_intake_sources()?;
+        }
         let generation_token = self
             .preflight_watch_set_coverage_attestation(chain, selection)
             .await?;

@@ -82,19 +82,9 @@ writer has been removed.
 
 ## Stage B phase runner
 
-The current phase runner implements `ingest`, `interpret`, `project`, read-only
+The phase runner implements `ingest`, `interpret`, `project`, read-only
 `verify`, and continuous `live` follow. Verification operates only on finalized
-history. Today its five-field descriptors have no
-[source-role](glossary.md#source-role) field: every configured
-source participates in intake, and Verify selects a reference by source kind
-from that same set. Base can report `cross_checked` for dRPC and Ethereum
-Mainnet can report `node_checked` for reth, but the shared source list does not
-prove the reference was excluded from intake; Sepolia reports `quick_synced`.
-The ratified Issue #411 [source-role](glossary.md#source-role) contract,
-whose enforcement lands in part 2, will make a distinct verification-only Base
-dRPC record `cross_checked` through the Coinbase-to-dRPC ingest seam, make an
-explicit verification-only Ethereum Mainnet reth record `node_checked`, and
-make Ethereum Sepolia record `cross_checked` with a distinct verification-only
+history. A distinct [verification-only](glossary.md#source-role) Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest seam, an explicit verification-only Ethereum Mainnet reth records `node_checked`, and Ethereum Sepolia records `cross_checked` with a distinct verification-only
 dRPC or `quick_synced` without one.
 V2 verified name, record, and ENS/60 primary-name reads use the phase runner's
 schema-v2 lookup state. Other API reads use phase projections.
@@ -150,15 +140,7 @@ cargo phase redo \
 Verify redo cannot establish a chain's first verified extent; use the normal
 phase pipeline for initial verification.
 
-Today, Verify redo accepts the five-field descriptors the operator supplies; it
-does not enforce a complete Base source list. For each selected chain,
-operators must copy only that chain's complete deployed set: Base's Coinbase
-and dRPC descriptors, Mainnet's reth descriptor, or Sepolia's single dRPC
-descriptor. Base can report `cross_checked` and
-Mainnet `node_checked`, but those current labels do not prove that the selected
-reference was excluded from intake; Sepolia reports `quick_synced`.
-
-With the Issue #411 enforcement binary, use `--phase verify` with the intake
+Use `--phase verify` with the intake
 descriptors plus a distinct verification-only `reth_db` descriptor to earn
 `node_checked` for a finalized Ethereum range; without the independent
 descriptor it records `quick_synced`. Verify also requires
@@ -172,16 +154,11 @@ seam is rejected before writing the redo marker. A Base
 rationale and pinned reth evidence are in [deployment](deployment.md). A partial
 redo keeps the weaker of the retained full-extent level and the level available
 from the current source roles; a full-extent redo can establish the current plan's level.
-Under that enforcement, Sepolia Verify redo records `cross_checked` with a
-distinct verification-only dRPC and otherwise records `quick_synced` without
-selecting intake as a reference.
+Sepolia Verify redo records `cross_checked` with a distinct verification-only dRPC and otherwise records `quick_synced` without selecting intake as a reference.
 The reader URL must authenticate the dedicated role directly and resolve to the
 same PostgreSQL system/database identity as `BIGNAME_DATABASE_URL`.
 
-Interpret and Project redo perform no ingest-provider I/O. On the current
-binary, standalone Interpret redo still requires the selected chain's complete
-five-field source set for cursor identity; after Issue #411 enforcement it will
-require only the complete intake-capable set. Project redo is source-free.
+Interpret and Project redo perform no ingest-provider I/O and accept no source descriptors. In an `all` redo, Interpret receives only intake-capable descriptors after Ingest validates their exact cursor-key set.
 Project redo, including the automatic project cascade after
 interpret redo, performs the same canonical-head hydration as supervised
 project; configure `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` or pass

@@ -35,6 +35,19 @@ impl Phase for IngestPhase {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
+            if let Some(source) = context
+                .sources
+                .iter()
+                .find(|source| !source.role.serves_intake())
+            {
+                return Err(RunnerError::new(
+                    ErrorKind::Configuration,
+                    format!(
+                        "ingest context for chain {} contains non-intake source {}",
+                        context.chain_id, source.source_key
+                    ),
+                ));
+            }
             let request = BatchRequest {
                 chain_id: context.chain_id,
                 sources: context

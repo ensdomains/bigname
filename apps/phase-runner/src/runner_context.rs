@@ -13,12 +13,13 @@ use crate::{
 use super::PhaseRunner;
 
 impl PhaseRunner {
-    pub(super) fn verify_before_live(chain: &ChainConfig) -> RunnerResult<bool> {
+    pub(crate) fn verify_before_live(chain: &ChainConfig) -> RunnerResult<bool> {
         Ok(chain.verify_before_live
-            || crate::verify_phase::provider_trusted_verify_required(
-                &chain.chain_id,
-                &chain.sources,
-            )?)
+            || (chain.chain_id == "ethereum-sepolia"
+                && crate::verify_phase::provider_trusted_verify_required(
+                    &chain.chain_id,
+                    &chain.sources,
+                )?))
     }
 
     pub(super) async fn check_ingest_identity(
@@ -27,11 +28,11 @@ impl PhaseRunner {
         chain: &ChainConfig,
         mode: &RunMode,
     ) -> RunnerResult<()> {
-        if phase == PhaseName::Verify
-            && crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id)
-        {
+        let intake_sources = chain.intake_sources();
+        let production_verify = crate::verify_phase::production_verify_chain(&chain.chain_id);
+        if phase == PhaseName::Verify && production_verify {
             self.store
-                .validate_completed_ingest_sources(&chain.chain_id, &chain.sources)
+                .validate_completed_ingest_sources(&chain.chain_id, &intake_sources)
                 .await?;
         }
         if phase == PhaseName::Ingest {
@@ -49,18 +50,18 @@ impl PhaseRunner {
                         .await?);
             if validates_retained_completion {
                 self.store
-                    .validate_completed_ingest_sources(&chain.chain_id, &chain.sources)
+                    .validate_completed_ingest_sources(&chain.chain_id, &intake_sources)
                     .await?;
-                if crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id) {
+                if production_verify {
                     crate::verify_phase::provider_trusted_verify_required(
                         &chain.chain_id,
                         &chain.sources,
                     )?;
                 }
             } else {
-                if crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id) {
+                if production_verify {
                     self.store
-                        .validate_existing_ingest_sources(&chain.chain_id, &chain.sources)
+                        .validate_existing_ingest_sources(&chain.chain_id, &intake_sources)
                         .await?;
                     crate::verify_phase::provider_trusted_verify_required(
                         &chain.chain_id,
@@ -68,7 +69,7 @@ impl PhaseRunner {
                     )?;
                 }
                 self.store
-                    .ensure_ingest_sources(&chain.chain_id, &chain.sources)
+                    .ensure_ingest_sources(&chain.chain_id, &intake_sources)
                     .await?;
             }
         }
@@ -206,11 +207,18 @@ impl PhaseRunner {
                 .store
                 .phase_resume(&chain.chain_id, phase, &RunMode::Normal)
                 .await?;
-            crate::verify_phase::validate_reported_level(
-                &chain.chain_id,
-                &chain.sources,
-                resume.verification_level,
-            )?;
+            let provider_trusted_downgrade = resume.verification_level.is_some()
+                && crate::verify_phase::provider_trusted_verify_required(
+                    &chain.chain_id,
+                    &chain.sources,
+                )?;
+            if !provider_trusted_downgrade {
+                crate::verify_phase::validate_reported_level(
+                    &chain.chain_id,
+                    &chain.sources,
+                    resume.verification_level,
+                )?;
+            }
         }
         Ok(())
     }
@@ -314,7 +322,11 @@ impl PhaseRunner {
             phase,
             mode,
             redo_attempt,
-            sources: Arc::clone(&chain.sources),
+            sources: if phase == PhaseName::Verify {
+                Arc::clone(&chain.sources)
+            } else {
+                chain.intake_sources()
+            },
             available_heads,
             live_handoff,
             resume,

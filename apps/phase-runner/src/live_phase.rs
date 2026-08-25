@@ -40,6 +40,19 @@ impl Phase for LivePhase {
                     "live follows the canonical head and cannot run a historical redo",
                 ));
             }
+            if let Some(source) = context
+                .sources
+                .iter()
+                .find(|source| !source.role.serves_intake())
+            {
+                return Err(RunnerError::new(
+                    ErrorKind::Configuration,
+                    format!(
+                        "live context for chain {} contains non-intake source {}",
+                        context.chain_id, source.source_key
+                    ),
+                ));
+            }
             let handoff = context.live_handoff.as_ref().ok_or_else(|| {
                 RunnerError::data_integrity(format!(
                     "live phase for chain {} is missing its ingest handoff",

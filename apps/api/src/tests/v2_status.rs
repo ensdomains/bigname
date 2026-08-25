@@ -55,11 +55,7 @@ async fn v2_status_and_startup_chain_discovery_read_phase_state() -> Result<()> 
     );
 
     let response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v2/status")
-                .body(Body::empty())?,
-        )
+        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
@@ -73,7 +69,10 @@ async fn v2_status_and_startup_chain_discovery_read_phase_state() -> Result<()> 
     assert_eq!(payload["data"]["chains"]["1"]["latest_block"], json!(120));
     assert_eq!(payload["data"]["chains"]["1"]["indexed_block"], json!(115));
     assert_eq!(payload["data"]["chains"]["1"]["safe_block"], json!(110));
-    assert_eq!(payload["data"]["chains"]["1"]["finalized_block"], json!(100));
+    assert_eq!(
+        payload["data"]["chains"]["1"]["finalized_block"],
+        json!(100)
+    );
     assert_eq!(payload["data"]["chains"]["1"]["lag_blocks"], json!(5));
     assert_eq!(payload["data"]["chains"]["1"]["lag_seconds"], json!(5));
 
@@ -295,7 +294,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
 }
 
 #[tokio::test]
-async fn v2_status_keeps_sepolia_unready_until_provider_trusted_verify_completes() -> Result<()> {
+async fn v2_status_keeps_sepolia_unready_until_verification_floor_is_met() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     sqlx::raw_sql(
         r#"
@@ -527,7 +526,7 @@ async fn v2_status_keeps_sepolia_unready_until_provider_trusted_verify_completes
     sqlx::query(
         r#"
         UPDATE chain_phase_state
-        SET phase_status = 'completed', verification_level = 'quick_synced',
+        SET phase_status = 'completed', verification_level = 'cross_checked',
             current_block_number = 120, current_block_hash = '0xsepolia-published',
             target_block_number = 120, target_block_hash = '0xsepolia-published',
             last_error = NULL, finished_at = now()

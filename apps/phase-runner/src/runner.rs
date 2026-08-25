@@ -306,7 +306,7 @@ impl PhaseRunner {
                     &chain.chain_id,
                     phase_name,
                     &mode,
-                    chain.sources.as_ref(),
+                    chain.intake_sources().as_ref(),
                     supplied_manifest_authority_generation.as_deref(),
                     &self.instance_id,
                 )
@@ -490,7 +490,7 @@ impl PhaseRunner {
             }
             if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
                 ingest_progress::validate(
-                    &chain.sources,
+                    &chain.intake_sources(),
                     &progress,
                     matches!(&outcome, PhaseBatchOutcome::Complete(_)),
                 )?;
@@ -516,7 +516,7 @@ impl PhaseRunner {
             if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
                 phase_lock.check_alive().await?;
                 self.store
-                    .record_ingest_progress(&chain.chain_id, &chain.sources, &progress)
+                    .record_ingest_progress(&chain.chain_id, &chain.intake_sources(), &progress)
                     .await?;
             } else {
                 self.store

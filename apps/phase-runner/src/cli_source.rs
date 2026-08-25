@@ -1,5 +1,5 @@
 use crate::{
-    config::{SeedBasis, SourceConfig},
+    config::{SeedBasis, SourceConfig, SourceRole},
     error::{ErrorKind, RunnerError, RunnerResult},
 };
 
@@ -14,9 +14,9 @@ pub(super) fn parse_source(specification: &str) -> RunnerResult<SourceConfig> {
         ));
     }
     let fields = descriptor.split(':').collect::<Vec<_>>();
-    if fields.len() != 5 {
+    if !matches!(fields.len(), 5 | 6) {
         return Err(invalid_source(
-            "expected CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV",
+            "expected CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV",
             specification,
         ));
     }
@@ -32,12 +32,18 @@ pub(super) fn parse_source(specification: &str) -> RunnerResult<SourceConfig> {
     let start_block_number = fields[4]
         .parse::<i64>()
         .map_err(|_| invalid_source("START_BLOCK is not an integer", specification))?;
-    SourceConfig::new(
+    let role = fields
+        .get(5)
+        .map(|role| SourceRole::parse(role))
+        .transpose()?
+        .unwrap_or(SourceRole::Both);
+    SourceConfig::new_with_role(
         fields[0],
         fields[1],
         fields[2],
         SeedBasis::parse(fields[3])?,
         start_block_number,
+        role,
         endpoint,
     )
 }

@@ -8,6 +8,38 @@ use std::{
 
 use crate::error::{ErrorKind, RunnerError, RunnerResult};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceRole {
+    Intake,
+    VerificationOnly,
+    Both,
+}
+impl SourceRole {
+    pub fn parse(value: &str) -> RunnerResult<Self> {
+        match value {
+            "intake" => Ok(Self::Intake),
+            "verification-only" => Ok(Self::VerificationOnly),
+            "both" => Ok(Self::Both),
+            _ => Err(RunnerError::new(
+                ErrorKind::Configuration,
+                format!("unknown role {value:?}; expected intake, verification-only, or both"),
+            )),
+        }
+    }
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Intake => "intake",
+            Self::VerificationOnly => "verification-only",
+            Self::Both => "both",
+        }
+    }
+    pub const fn serves_intake(self) -> bool {
+        matches!(self, Self::Intake | Self::Both)
+    }
+    pub const fn serves_verification(self) -> bool {
+        matches!(self, Self::VerificationOnly | Self::Both)
+    }
+}
 #[derive(Clone)]
 pub struct SourceConfig {
     pub chain_id: String,
@@ -15,6 +47,7 @@ pub struct SourceConfig {
     pub source_kind: String,
     pub seed_basis: SeedBasis,
     pub start_block_number: i64,
+    pub role: SourceRole,
     endpoint: Arc<str>,
 }
 
@@ -27,18 +60,37 @@ impl SourceConfig {
         start_block_number: i64,
         endpoint: impl Into<String>,
     ) -> RunnerResult<Self> {
+        Self::new_with_role(
+            chain_id,
+            source_key,
+            source_kind,
+            seed_basis,
+            start_block_number,
+            SourceRole::Both,
+            endpoint,
+        )
+    }
+    pub fn new_with_role(
+        chain_id: impl Into<String>,
+        source_key: impl Into<String>,
+        source_kind: impl Into<String>,
+        seed_basis: SeedBasis,
+        start_block_number: i64,
+        role: SourceRole,
+        endpoint: impl Into<String>,
+    ) -> RunnerResult<Self> {
         let source = Self {
             chain_id: chain_id.into(),
             source_key: source_key.into(),
             source_kind: source_kind.into(),
             seed_basis,
             start_block_number,
+            role,
             endpoint: Arc::from(endpoint.into()),
         };
         source.validate()?;
         Ok(source)
     }
-
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -80,6 +132,7 @@ impl fmt::Debug for SourceConfig {
             .field("source_kind", &self.source_kind)
             .field("seed_basis", &self.seed_basis)
             .field("start_block_number", &self.start_block_number)
+            .field("role", &self.role)
             .field("endpoint", &"[redacted]")
             .finish()
     }
@@ -121,6 +174,7 @@ impl SeedBasis {
 pub struct ChainConfig {
     pub chain_id: String,
     pub sources: Arc<[SourceConfig]>,
+    intake_sources: Arc<[SourceConfig]>,
     pub verify_before_live: bool,
 }
 
@@ -155,15 +209,37 @@ impl ChainConfig {
                 ));
             }
         }
+        let intake_sources = sources
+            .iter()
+            .filter(|source| source.role.serves_intake())
+            .cloned()
+            .collect::<Vec<_>>();
         let verify_before_live = verify_before_live
-            || sources
+            || intake_sources
                 .iter()
                 .any(|source| source.seed_basis == SeedBasis::EthereumHead);
         Ok(Self {
             chain_id,
             sources: Arc::from(sources),
+            intake_sources: Arc::from(intake_sources),
             verify_before_live,
         })
+    }
+    pub fn intake_sources(&self) -> Arc<[SourceConfig]> {
+        Arc::clone(&self.intake_sources)
+    }
+    pub fn require_intake_sources(&self) -> RunnerResult<()> {
+        if self.intake_sources.is_empty() {
+            return Err(RunnerError::new(
+                ErrorKind::Configuration,
+                format!(
+                    "chain {:?} has zero intake-capable sources; normal run and ingest, verify, or \
+                     all-phase redo require intake",
+                    self.chain_id
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -264,6 +340,7 @@ impl RuntimeConfig {
         }
         let mut ids = BTreeSet::new();
         for chain in &chains {
+            chain.require_intake_sources()?;
             if !ids.insert(chain.chain_id.as_str()) {
                 return Err(RunnerError::new(
                     ErrorKind::Configuration,
@@ -310,17 +387,13 @@ pub fn group_sources(
         .iter()
         .map(|chain_id| {
             let sources = by_chain.remove(chain_id).unwrap_or_default();
-            if sources.is_empty() {
-                return Err(RunnerError::new(
-                    ErrorKind::Configuration,
-                    format!("chain {chain_id:?} has no configured source"),
-                ));
-            }
-            ChainConfig::new(
+            let chain = ChainConfig::new(
                 chain_id.clone(),
                 sources,
                 verify_before_live.contains(chain_id),
-            )
+            )?;
+            chain.require_intake_sources()?;
+            Ok(chain)
         })
         .collect()
 }

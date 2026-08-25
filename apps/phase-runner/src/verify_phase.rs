@@ -12,7 +12,7 @@ use bigname_ingest::{
 use tracing::info;
 
 use crate::{
-    config::{SourceConfig, normalized_source_kind},
+    config::{SourceConfig, SourceRole, normalized_source_kind},
     database::VerificationDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
@@ -26,7 +26,11 @@ use crate::{
 
 #[path = "verify_completed.rs"]
 mod completed;
-pub(crate) use completed::{provider_trusted_verify_chain, provider_trusted_verify_required};
+#[path = "verify_source.rs"]
+mod source_roles;
+pub(crate) use completed::provider_trusted_verify_required;
+pub(crate) use source_roles::production_verify_chain;
+use source_roles::{provider_configuration_error, provider_trusted_source, validate_intake_shape};
 
 const VERIFICATION_BATCH_BLOCKS: i64 = 131_072;
 
@@ -116,13 +120,8 @@ impl Phase for VerifyPhase {
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
             let verification = verification_plan(&context.chain_id, &context.sources)?;
-            let plan = BatchPlan::new(
-                &context,
-                verification.cross_check_through(),
-                verification.provider_trusted_source_key(),
-                &self.store,
-            )
-            .await?;
+            let plan =
+                BatchPlan::new(&context, verification.cross_check_through(), &self.store).await?;
             let reported_level = if let Some(range) = context.mode.range() {
                 self.store
                     .level_for_redo(&context.chain_id, range, verification.verification_level())
@@ -181,9 +180,10 @@ impl Phase for VerifyPhase {
                     stored.end
                 }
             };
-            if matches!(verification, VerificationPlan::ProviderTrusted { .. }) {
+            if let VerificationPlan::ProviderTrusted { source, .. } = &verification {
                 info!(
                     chain_id = context.chain_id,
+                    source_key = source.source_key,
                     reported_verification_level = reported_level.as_str(),
                     from_block = plan.from,
                     to_block = plan.to,
@@ -228,20 +228,12 @@ impl BatchPlan {
     async fn new(
         context: &PhaseContext,
         cross_check_through: Option<i64>,
-        provider_trusted_source_key: Option<&str>,
         store: &VerificationStore,
     ) -> RunnerResult<Self> {
         let range = context.mode.range();
         let start = match range {
             Some(range) => range.from,
-            None => match provider_trusted_source_key {
-                Some(source_key) => {
-                    store
-                        .ingest_start_for(&context.chain_id, source_key)
-                        .await?
-                }
-                None => store.ingest_start(&context.chain_id).await?,
-            },
+            None => store.ingest_start(&context.chain_id).await?,
         };
         let mut target = if let Some(target) = context.resume.target.clone() {
             target
@@ -328,7 +320,7 @@ fn normal_extent_level(
     }
 }
 
-const fn weakest_level(
+pub(crate) const fn weakest_level(
     retained: VerificationLevel,
     source: VerificationLevel,
 ) -> VerificationLevel {
@@ -386,37 +378,46 @@ impl VerificationPlan {
             Self::Compared(source) => source.cross_check_through,
         }
     }
-    fn provider_trusted_source_key(&self) -> Option<&str> {
-        match self {
-            Self::ProviderTrusted { source, .. } => Some(&source.source_key),
-            Self::Compared(_) => None,
-        }
-    }
 }
 
 fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<VerificationPlan> {
-    if chain_id == "ethereum-sepolia" {
-        validate_sepolia_intake_source(sources)?;
-        return Ok(VerificationPlan::ProviderTrusted {
-            level: VerificationLevel::QuickSynced,
-            source: sources[0].clone(),
-        });
+    let intake = sources
+        .iter()
+        .filter(|source| source.role.serves_intake())
+        .collect::<Vec<_>>();
+    validate_intake_shape(chain_id, &intake)?;
+    let candidates = sources
+        .iter()
+        .filter(|source| source.role == SourceRole::VerificationOnly)
+        .collect::<Vec<_>>();
+    if candidates.len() > 1 {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            format!("chain {chain_id} configures more than one verification-only source"),
+        ));
     }
-    select_source(chain_id, sources).map(VerificationPlan::Compared)
-}
-
-fn validate_sepolia_intake_source(sources: &[SourceConfig]) -> RunnerResult<()> {
-    let valid = sources.len() == 1
-        && normalized_source_kind(&sources[0].source_kind) == "drpc"
-        && sources[0].seed_basis == crate::config::SeedBasis::EthereumHead
-        && sources[0].start_block_number == 0;
-    if valid {
-        return Ok(());
+    if let Some(source) = candidates.first() {
+        if chain_id == "ethereum-sepolia" {
+            validate_intake_shape(chain_id, &[*source])?;
+        }
+        if let Some(conflict) = intake
+            .iter()
+            .find(|intake| intake.endpoint() == source.endpoint())
+        {
+            return Err(RunnerError::new(
+                ErrorKind::Configuration,
+                format!(
+                    "verification-only source {} resolves to the same endpoint as intake source {}",
+                    source.source_key, conflict.source_key
+                ),
+            ));
+        }
+        return select_source(chain_id, sources).map(VerificationPlan::Compared);
     }
-    Err(RunnerError::new(
-        ErrorKind::Configuration,
-        "ethereum-sepolia requires one dRPC intake source with ethereum_head seed basis and start block 0",
-    ))
+    Ok(VerificationPlan::ProviderTrusted {
+        level: VerificationLevel::QuickSynced,
+        source: provider_trusted_source(chain_id, &intake)?.clone(),
+    })
 }
 
 #[derive(Default)]
@@ -440,7 +441,7 @@ impl ProductionReferences {
         }
         let provider =
             VerificationProvider::new(source.chain_id(), source.source_kind(), &source.endpoint)
-                .map_err(map_ingest_error)?;
+                .map_err(|_| provider_configuration_error(source))?;
         if provider.kind() != source.provider_kind() {
             return Err(RunnerError::data_integrity(format!(
                 "verification provider kind for chain {} source {} changed during construction",
@@ -475,6 +476,7 @@ impl VerificationReferenceProvider for ProductionReferences {
 fn select_source(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<VerificationSource> {
     let candidates = sources
         .iter()
+        .filter(|source| source.role == SourceRole::VerificationOnly)
         .filter_map(|source| {
             let kind = normalized_source_kind(&source.source_kind);
             match kind.as_str() {
@@ -496,8 +498,8 @@ fn select_source(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<Verif
         return Err(RunnerError::new(
             ErrorKind::Configuration,
             format!(
-                "chain {chain_id} must configure exactly one verification reference of kind drpc \
-                 or reth_db; found {}",
+                "chain {chain_id} must configure exactly one verification-only reference of kind \
+                 drpc or reth_db; found {}",
                 candidates.len()
             ),
         ));
@@ -517,7 +519,7 @@ fn select_source(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<Verif
         ));
     }
     match (chain_id, provider_kind) {
-        ("base-mainnet", VerificationProviderKind::IndependentRpc)
+        ("base-mainnet" | "ethereum-sepolia", VerificationProviderKind::IndependentRpc)
         | ("ethereum-mainnet", VerificationProviderKind::LocalReth) => {}
         ("base-mainnet", VerificationProviderKind::LocalReth) => {
             return Err(RunnerError::new(
@@ -539,7 +541,7 @@ fn select_source(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<Verif
                 ErrorKind::Configuration,
                 format!(
                     "production stored verification is unsupported for chain {chain_id}; \
-                     expected base-mainnet or ethereum-mainnet"
+                     expected base-mainnet, ethereum-mainnet, or ethereum-sepolia"
                 ),
             ));
         }
@@ -562,13 +564,11 @@ pub(crate) fn validate_reported_level(
     sources: &[SourceConfig],
     reported: Option<VerificationLevel>,
 ) -> RunnerResult<()> {
-    let declared = match chain_id {
-        "base-mainnet" | "ethereum-mainnet" => {
-            verification_plan(chain_id, sources)?.verification_level()
-        }
-        "ethereum-sepolia" => VerificationLevel::QuickSynced,
+    let declared = if production_verify_chain(chain_id) {
+        verification_plan(chain_id, sources)?.verification_level()
+    } else {
         // Generic Phase implementations use this seam; production rejects other chains.
-        _ => return Ok(()),
+        return Ok(());
     };
     let reported = reported.ok_or_else(|| {
         RunnerError::data_integrity(format!("chain {chain_id} Verify has no verification level"))

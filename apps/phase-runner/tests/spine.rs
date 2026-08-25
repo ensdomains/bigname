@@ -1876,9 +1876,15 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         available_capacity(),
         "redo-all-phases-runner",
     )?;
+    let mut sources = chain(completed_chain)?.sources.to_vec();
+    let mut reference = sources[0].clone();
+    reference.source_key = "reference".into();
+    reference.role = phase_runner::config::SourceRole::VerificationOnly;
+    sources.push(reference);
+    let completed_config = ChainConfig::new(completed_chain, sources, false)?;
     let report = phase_runner
         .redo_chains(
-            &[chain(failed_chain)?, chain(completed_chain)?],
+            &[chain(failed_chain)?, completed_config],
             RedoPhase::All,
             BlockRange::new(0, 0)?,
             CancellationToken::new(),
@@ -3698,6 +3704,10 @@ impl Phase for RecordingRedoPhase {
                 .lock()
                 .expect("recorded calls lock")
                 .push((context.chain_id.clone(), self.name));
+            if context.chain_id == "redo-all-completed-chain" {
+                let count = context.sources.len();
+                assert_eq!(count, (self.name == PhaseName::Verify) as usize + 1);
+            }
             if self.fail_chain.as_deref() == Some(context.chain_id.as_str()) {
                 return Err(RunnerError::data_integrity(
                     "fixture failed during all-phase interpret redo",

@@ -238,7 +238,7 @@ indexes are additive; rollback may leave them in place.
    [whole-schema replacement](../deployment.md#replacing-an-initialized-phase-schema)
    rebuilds every configured chain and is authorized only for a reviewed
    schema-migration that cannot preserve an initialized namespace; it does not
-   authorize the Issue #411 source-role transition. Stop until part 2 supplies
+   authorize the Issue #411 source-role transition. Stop until part 3 supplies
    the reviewed per-chain reset and lossless preservation procedure. Once it is
    available, continue with steps 3–8 before that chain reset. Stop if any
    prerequisite is absent; never improvise a reset, data transfer, or rollback.
@@ -284,8 +284,7 @@ indexes are additive; rollback may leave them in place.
    requires the full argument set or it is rejected before fetching anything:
    `phase-runner redo --chain <chain-id> --phase ingest --from-block <from>
    --to-block <to> --source <source>`. Repeat `--source` for every configured
-   source key on the current binary, or for every intake-capable source after
-   Issue #411 enforcement lands; the exact persisted cursor-key set is required.
+   intake-capable source key; the exact persisted cursor-key set is required.
    The CLI refuses an ingest redo without a source, and every redo requires the
    explicit block range;
 7. after any required Ingest redo succeeds, resume an already-audited Interpret
@@ -304,7 +303,7 @@ indexes are additive; rollback may leave them in place.
 9. start the long-running phase runner only after those one-shot redos succeed.
    When the release also carries a versioned schema-migration or required
    replays, complete them before the Sepolia reset and full
-   Ingest-through-Verify walk. Use only the reviewed part-2 per-chain reset after
+   Ingest-through-Verify walk. Use only the reviewed part-3 per-chain reset after
    the preceding release work succeeds; stop if that procedure is unavailable.
    Do not start the runner yet: deploy the part-2 binary and distinct secrets,
    validate the role-bearing configuration, perform the applicable reviewed
@@ -315,7 +314,7 @@ indexes are additive; rollback may leave them in place.
    provider/operator request accounting to confirm the verification-only key
    received zero Ingest/Live requests. For every affected chain, require the
    reviewed verification path rather than omitting or bypassing Verify. Under
-   the Issue #411 enforcement binary, other configurations use `cross_checked`
+   the source-role contract, other configurations use `cross_checked`
    with a distinct [verification-only](../glossary.md#source-role) dRPC,
    `node_checked` with a distinct verification-only Ethereum Mainnet reth, or
    `quick_synced` from the target-covering intake cursor without one;
@@ -323,9 +322,7 @@ indexes are additive; rollback may leave them in place.
    stopped — the `project` row in `chain_phase_state` current with no pending
    redo, and Verify success from the `verify` row for each affected chain plus
    the supervisor's Verify completion output (`/v2/status` cannot be used here
-   because the API is stopped; after startup, the current API requires exact
-   `quick_synced` Sepolia evidence, and the Issue #411 enforcement binary will
-   accept every known level at or above that floor while rejecting unknown
+   because the API is stopped; after startup, the API accepts every known verification level at or above Sepolia's `quick_synced` floor and rejects unknown
    levels);
 11. start the API built from the same commit and confirm `/v2/status` reports
    current phase state and no pending redo; and
@@ -506,11 +503,7 @@ error while another chain continues running.
    Interpret head. Keep the long-running phase runner stopped. Interpret treats
    later rows as potentially dependent on earlier rows, so it replays from
    `<from>` through the recorded head and stamps the matching Project repair.
-   Pin the one-shot container to `<recovery-image>`. Copy every source
-   descriptor for the affected chain exactly from the deployed configuration
-   and repeat `--source` once for each descriptor. The current binary accepts
-   `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; after Issue #411 enforcement
-   lands, the descriptor may use the
+   Pin the one-shot container to `<recovery-image>`. Copy every intake-capable source descriptor for the affected chain exactly from the deployed configuration and repeat `--source` once for each descriptor. The descriptor uses the
    `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV` form. The explicit
    arguments override the multi-chain `BIGNAME_PHASE_RUNNER_SOURCES` value for
    this one-off redo:

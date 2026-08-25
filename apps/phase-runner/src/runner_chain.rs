@@ -10,8 +10,16 @@ use crate::{
     phase_lock::PhaseLock,
 };
 
-use super::{PhaseRunner, SupervisorReport};
+use super::{PhaseRunner, RedoPhase, SupervisorReport};
 
+impl RedoPhase {
+    pub const fn requires_intake_sources(self) -> bool {
+        matches!(
+            self,
+            Self::Phase(PhaseName::Ingest | PhaseName::Verify) | Self::All
+        )
+    }
+}
 impl PhaseRunner {
     pub async fn run(
         self: Arc<Self>,
@@ -74,6 +82,7 @@ impl PhaseRunner {
         chain: &ChainConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        chain.require_intake_sources()?;
         self.record_loop_progress(&chain.chain_id);
         self.store.initialize_chain(&chain.chain_id).await?;
         self.recover_stopped_phases(chain).await?;

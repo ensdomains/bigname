@@ -1053,15 +1053,12 @@ phase-runner redo \
   --phase ingest \
   --from-block <first-affected-block> \
   --to-block <last-affected-block> \
-  --source <CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV>
+  --source <CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV>
 ```
 
-That is the current binary's five-field form. After Issue #411 enforcement
-lands, copy each [intake-capable](glossary.md#source-role) descriptor with its configured role preserved
+Copy each [intake-capable](glossary.md#source-role) descriptor with its configured role preserved
 as `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK:ROLE=URL_ENV`; pass only `intake` or
-`both` sources to Ingest redo, never a `verification-only` source. In both
-versions, repeat `--source` once for every required source key: every configured
-key on the current binary, or every intake-capable key after enforcement.
+`both` sources to Ingest redo, never a `verification-only` source. Repeat `--source` once for every intake-capable source key.
 
 An ingest redo fetches and retains the newly selected facts, but intentionally
 does not advance the finite `ingest_cursors` used by the initial spine. Finite

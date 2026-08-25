@@ -190,7 +190,7 @@ and live-handoff markers; Verify requires matching current and target markers
 plus a verification level. The next accepted start repeats the checks for the
 retained completion and moves that row through `failed` to `completed`. Error
 text alone never authorizes that transition. This preserved evidence is
-diagnostic state, not permission to publish: provider-trusted Sepolia readiness
+diagnostic state, not permission to publish: policy-based Sepolia readiness
 requires both Ingest and Verify to remain completed.
 
 At runner startup, a `running` or `paused` Interpret, Project, or Verify row with no
@@ -508,7 +508,7 @@ row resumes unless its current block and live handoff match its target. A
 completed Verify row resumes unless it has a matching current/target block pair
 and a [verification level](glossary.md#verification-level). Ingest already
 persists its summary and every configured source cursor in one transaction.
-After Issue #411 enforcement lands, that atomic set will contain only
+That atomic set contains only
 [intake-capable sources](glossary.md#source-role), so those completion markers
 cannot survive without the matching source progress. Recovery also clears the
 live handoff when it changes an active Ingest row to `completed`; this makes a
@@ -618,7 +618,7 @@ reached from its configured start through its persisted target; Live does not
 advance those source cursors. Before checking range coverage, the redo guard
 already requires the complete configured source-key set and each source's
 normalized kind, seed basis, and start block to match the persisted cursor
-identities. After Issue #411 enforcement lands, that same check will apply to
+identities. That same check applies to
 the configured intake-capable source set. A runtime
 start above the redo range does not bypass that identity check. The guard also
 requires exactly one readable
