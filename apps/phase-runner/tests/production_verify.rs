@@ -32,7 +32,7 @@ use phase_runner::{
     },
     database::VerificationDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
-    heads::{BlockMarker, HeadMarkers},
+    heads::{BlockMarker, HeadMarkers, publish_heads},
     phase::{
         BlockRange, IngestCursor, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext,
         PhaseFuture, PhaseName, PhaseProgress, PhaseSet, RunMode, SourceProgress,
@@ -3991,6 +3991,132 @@ async fn verify_stays_at_finality_while_live_advances_to_head() -> Result<()> {
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn frozen_finality_fences_an_in_flight_verify_batch_from_reorg() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_in_flight_reorg_probe").await?;
+    seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
+    let compared = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let phases = PhaseSet::new([
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(PauseAfterComparedVerifyBatch {
+            inner: VerifyPhase::with_reference_provider(
+                scratch.verification_database(2).await?,
+                Arc::new(FixtureReferences::new([reference_log(BASE, 1)])),
+            ),
+            compared: Arc::clone(&compared),
+            release: Arc::clone(&release),
+        }),
+        Arc::new(CompleteLivePhase),
+    ])?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verify-in-flight-reorg-probe",
+        test_timing(),
+    )?;
+    let task = tokio::spawn(async move {
+        runner
+            .run_chain(&base_chain(true)?, CancellationToken::new())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), compared.notified()).await?;
+    let before_publication: (String, Option<i64>, bool) = sqlx::query_as(
+        "SELECT phase_status, current_block_number, redo_in_progress
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(before_publication, ("running".to_owned(), None, false));
+
+    for number in 2..=6 {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'observed')",
+        )
+        .bind(BASE)
+        .bind(format!("{BASE}-fork-{number}"))
+        .bind(if number == 2 {
+            block_hash(BASE, 1)
+        } else {
+            format!("{BASE}-fork-{}", number - 1)
+        })
+        .bind(number)
+        .execute(scratch.pool())
+        .await?;
+    }
+    let publication = publish_heads(
+        scratch.pool(),
+        BASE,
+        &HeadMarkers {
+            latest: BlockMarker::new(6, format!("{BASE}-fork-6"))?,
+            safe: Some(BlockMarker::new(6, format!("{BASE}-fork-6"))?),
+            finalized: Some(BlockMarker::new(6, format!("{BASE}-fork-6"))?),
+        },
+    )
+    .await;
+    let publication_error = publication.expect_err(
+        "head publication must not displace facts already compared under frozen finality",
+    );
+    assert_eq!(publication_error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        publication_error
+            .to_string()
+            .contains("before reaching required boundary block 5"),
+        "{publication_error}"
+    );
+    let fenced: (Option<i64>, bool, String, String) = sqlx::query_as(
+        "SELECT verify.current_block_number, verify.redo_in_progress,
+                old.canonicality_state::text, fork.canonicality_state::text
+         FROM chain_phase_state AS verify
+         JOIN chain_lineage AS old
+           ON old.chain_id = verify.chain_id
+          AND old.block_hash = $2
+         JOIN chain_lineage AS fork
+           ON fork.chain_id = verify.chain_id
+          AND fork.block_hash = $3
+         WHERE verify.chain_id = $1 AND verify.phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .bind(block_hash(BASE, 2))
+    .bind(format!("{BASE}-fork-2"))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        fenced,
+        (None, false, "finalized".to_owned(), "observed".to_owned()),
+        "the finality refusal must precede orphaning and redo stamping"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), task).await???;
+    let completed: (String, Option<String>, Option<i64>, bool) = sqlx::query_as(
+        "SELECT phase_status, verification_level, current_block_number, redo_in_progress
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        completed,
+        (
+            "completed".to_owned(),
+            Some("cross_checked".to_owned()),
+            Some(5),
+            false,
+        )
+    );
+    scratch.cleanup().await?;
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReferenceCall {
     chain_id: String,
@@ -4190,6 +4316,37 @@ impl Phase for DelayedVerifyPhase {
         Box::pin(async move {
             let outcome = batch.await?;
             tokio::time::sleep(Duration::from_millis(5_100)).await;
+            Ok(outcome)
+        })
+    }
+}
+
+struct PauseAfterComparedVerifyBatch {
+    inner: VerifyPhase,
+    compared: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl Phase for PauseAfterComparedVerifyBatch {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn preflight(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+        mode: &phase_runner::phase::RunMode,
+    ) -> RunnerResult<()> {
+        self.inner.preflight(chain_id, sources, mode)
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let batch = self.inner.run_batch(context);
+        Box::pin(async move {
+            let outcome = batch.await?;
+            self.compared.notify_one();
+            self.release.notified().await;
             Ok(outcome)
         })
     }

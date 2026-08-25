@@ -115,6 +115,10 @@ path.
 The `verify` reader may overlap the live loop. It freezes its target at the
 finalized marker while live continues toward the latest head. Every [provider-trusted verification](glossary.md#verification-level) plan completes that finite scan before entering Live, including reference-less Base, Ethereum Mainnet, and Sepolia. A Compared Base plan remains paired unless the chain is configured with `verify-before-live`. Ethereum-head intake derives that setting, so Mainnet and Sepolia remain serial even with a distinct verification-only reference. A mismatch is non-retryable and stops
 only that chain.
+The frozen target remains protected across resume: every source's head
+publication must retain the same durable finalized block, and operator rewind
+cannot go below the safe head, so neither path can orphan a block inside an
+in-flight normal Verify batch.
 
 Manifest synchronization uses the schema-v2 repository and checks the selected
 [deployment profile](glossary.md#deployment-profile) fingerprint against the
