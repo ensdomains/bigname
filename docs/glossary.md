@@ -107,6 +107,11 @@ lose the named-resource resolver hint and diverge from a fresh walk
 in as an ignored collision probe). See [interpretation
 replay](storage.md#interpretation-replay).
 
+Issue #411 note: the role-dependent verification statements below are the
+ratified contract whose enforcement lands in part 2; they do not describe the
+current binary, whose five-field descriptors have no role field.
+
+<a id="source-role"></a>
 **Source role** — whether a configured provider may serve `intake`, is
 `verification-only`, or may serve `both`. Intake-capable sources receive
 cursors and feed Ingest and Live; only verification-only sources can earn an
@@ -124,6 +129,7 @@ configured, and otherwise records provider trust without comparing intake with i
 only its block extent, trust level, and any fatal mismatch in phase state. It
 does not write coverage attestations or repair raw data.
 
+<a id="verification-level"></a>
 **Verification level** — the source-bounded trust label for a chain's stored
 history through its reported verification extent: `quick_synced` is
 provider-trusted bootstrap data, `cross_checked` matched an independent
@@ -1375,6 +1381,7 @@ and routes that additionally require supported rows say so. `POST /v2/lookup`
 reverse address results are one such route
 ([api-v2.md](api-v2.md#cursors-and-pagination)).
 
+<a id="re-derivation-boundary"></a>
 **Re-derivation boundary** — a planned point when the indexed dataset is rebuilt
 from raw chain data, starting at block zero or a documented lower bound, because
 interpretation semantics changed. The [interpreter content

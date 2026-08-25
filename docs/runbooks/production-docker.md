@@ -230,14 +230,17 @@ indexes are additive; rollback may leave them in place.
 
 1. stop the API and phase runner;
 2. take and verify a database backup;
-   For the Issue #411 Sepolia [source-role rollout](../glossary.md#source-role), follow the
-   [owner-ratified walk gate](../deployment.md#owner-ratified-sepolia-source-role-rollout):
-   perform the approved affected-chain reset after this backup, then complete a
-   full Ingest-through-Verify walk before Live. The preservation and optional
-   Ingest-redo instructions below do not apply to that affected chain; they are
-   not substitutes for its reset and full [source re-walk](../glossary.md#re-derivation-boundary). Require
-   `cross_checked`, and use provider/operator request accounting to confirm the
-   verification-only key received zero Ingest/Live requests;
+   For the destructive Issue #411 Sepolia
+   [source-role rollout](../glossary.md#source-role), also require the part-2
+   release artifact, two distinct endpoint secrets, and the exact
+   owner-approved affected-chain reset runbook, including its exact
+   rollback/restoration procedure, before continuing. Stop if any prerequisite
+   is absent; never improvise a reset or rollback. Do not reset at this step.
+   The preservation and optional one-shot redo instructions below do not apply
+   to that affected chain and are not substitutes for its reset and full
+   [source re-walk](../glossary.md#re-derivation-boundary); execute the
+   [owner-ratified walk gate](../deployment.md#owner-ratified-sepolia-source-role-rollout)
+   at step 9, after schema-migrations and required one-shot work are complete;
 3. for the release containing Issue #400, apply and validate the concurrent
    baseline indexes above; otherwise skip this step;
    For the release containing
@@ -274,9 +277,11 @@ indexes are additive; rollback may leave them in place.
    Ingest redo over every widened range; otherwise skip this step. The command
    requires the full argument set or it is rejected before fetching anything:
    `phase-runner redo --chain <chain-id> --phase ingest --from-block <from>
-   --to-block <to> --source <source>` (at least one `--source`; the CLI
-   refuses an ingest redo without one, and every redo requires the explicit
-   block range);
+   --to-block <to> --source <source>`. Repeat `--source` for every configured
+   source key on the current binary, or for every intake-capable source after
+   Issue #411 enforcement lands; the exact persisted cursor-key set is required.
+   The CLI refuses an ingest redo without a source, and every redo requires the
+   explicit block range;
 7. after any required Ingest redo succeeds, resume an already-audited Interpret
    redo with its existing token and exact active chain and range. Otherwise,
    invoke the exact required full-history Interpret redo without an attestation
@@ -290,17 +295,28 @@ indexes are additive; rollback may leave them in place.
    for another redo. Do not use the unattended `run` path for an attestation;
 8. complete the matching full-history Project redo while the supervisor remains
    stopped;
-9. start the long-running phase runner only after those one-shot redos succeed,
-   let the production Verify phase complete for every affected chain, and require
-   its reviewed verification path rather than omitting or bypassing Verify;
-   `ethereum-sepolia` must finish `cross_checked` for the Issue #411 rollout; other configurations use `cross_checked` when a distinct [verification-only](../glossary.md#source-role) dRPC is configured, or `quick_synced` from the target-covering intake cursor without one.
-   Confirm exactly one intake dRPC uses `ethereum_head` and start block zero, only its cursor exists, and the finalized Verify target is covered;
+9. start the long-running phase runner only after those one-shot redos succeed.
+   For the Issue #411 Sepolia rollout, do not start it yet: first deploy the
+   part-2 binary and distinct secrets, validate the role-bearing configuration,
+   and execute the exact owner-approved affected-chain reset. Then start it and
+   run Ingest through Verify before Live. Require `cross_checked`, confirm
+   exactly one intake dRPC uses `ethereum_head` and start block zero, confirm
+   only its cursor exists and the finalized Verify target is covered, and use
+   provider/operator request accounting to confirm the verification-only key
+   received zero Ingest/Live requests. For every affected chain, require the
+   reviewed verification path rather than omitting or bypassing Verify. Under
+   the Issue #411 enforcement binary, other configurations use `cross_checked`
+   with a distinct [verification-only](../glossary.md#source-role) dRPC,
+   `node_checked` with a distinct verification-only Ethereum Mainnet reth, or
+   `quick_synced` from the target-covering intake cursor without one;
 10. confirm the phase state directly in the database while the API is still
    stopped — the `project` row in `chain_phase_state` current with no pending
    redo, and Verify success from the `verify` row for each affected chain plus
    the supervisor's Verify completion output (`/v2/status` cannot be used here
-   because the API is stopped; after startup, it reads the required Sepolia
-   Verify status and evidence at or above `quick_synced` as part of publication readiness);
+   because the API is stopped; after startup, the current API requires exact
+   `quick_synced` Sepolia evidence, and the Issue #411 enforcement binary will
+   accept every known level at or above that floor while rejecting unknown
+   levels);
 11. start the API built from the same commit and confirm `/v2/status` reports
    current phase state and no pending redo; and
 12. run the release smoke and public-edge checks before undraining traffic.
@@ -482,10 +498,12 @@ error while another chain continues running.
    `<from>` through the recorded head and stamps the matching Project repair.
    Pin the one-shot container to `<recovery-image>`. Copy every source
    descriptor for the affected chain exactly from the deployed configuration
-   and repeat `--source` once for each descriptor. Each descriptor has the
-   `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV` form. The explicit arguments
-   override the multi-chain `BIGNAME_PHASE_RUNNER_SOURCES` value for this
-   one-off redo:
+   and repeat `--source` once for each descriptor. The current binary accepts
+   `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; after Issue #411 enforcement
+   lands, the descriptor may use the
+   `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV` form. The explicit
+   arguments override the multi-chain `BIGNAME_PHASE_RUNNER_SOURCES` value for
+   this one-off redo:
 
    ```sh
    BIGNAME_IMAGE=<recovery-image> \
@@ -581,6 +599,10 @@ Run `scripts/rollback-smoke` from the exact rollback checkout before changing
 binaries. A binary rollback does not recreate dropped legacy tables. If the
 rollback needs deleted schema or data, restore the verified pre-migration
 backup under a separately reviewed database rollback plan.
+For the Issue #411 Sepolia rollout, a binary-only rollback also cannot parse
+the role-bearing source configuration or preserve its readiness semantics; use
+the exact restoration path required by the owner-approved external rollout
+runbook.
 
 Keep the public edge on its maintainer-approved policy throughout rollback and
 re-run `scripts/public-edge-smoke` before restoring traffic.

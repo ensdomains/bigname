@@ -7,13 +7,25 @@ binaries. `./scripts/dev-up` starts the API and, when
 
 ## Bootstrap
 
-1. Copy `.env.example` to `.env` if local overrides are needed.
-2. Run `docker compose up -d`.
-3. Before the first configured phase-runner start, run
-   `cargo phase -- init-schema` once.
+1. Copy `.env.example` to `.env` and apply any local overrides.
+2. Run `docker compose up -d --wait` so PostgreSQL passes its healthcheck before
+   phase initialization.
+3. Before the first configured phase-runner start, export the checked-in
+   environment and initialize the phase schema once:
+
+   ```sh
+   set -a
+   . ./.env
+   set +a
+   cargo phase init-schema
+   ```
 4. Provision the separate SELECT-only verification login described in
    [`deployment.md`](deployment.md#phase-runner-configuration).
 5. Run `./scripts/dev-up`.
+
+This bootstrap assumes a disposable fresh local database volume. For a retained
+local volume, follow the production schema-migration order before phase-schema
+initialization instead of treating the current baseline as an in-place upgrade.
 
 The default compose stack provides PostgreSQL on `127.0.0.1:5432`. The phase
 runner puts its baseline in `bigname_phase` and connects with
@@ -72,8 +84,18 @@ writer has been removed.
 
 The current phase runner implements `ingest`, `interpret`, `project`, read-only
 `verify`, and continuous `live` follow. Verification operates only on finalized
-history. A distinct [verification-only](glossary.md#source-role) Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest
-seam, while an explicit verification-only Ethereum Mainnet reth records `node_checked`; Ethereum Sepolia records `cross_checked` with a distinct verification-only dRPC and otherwise `quick_synced`.
+history. Today its five-field descriptors have no
+[source-role](glossary.md#source-role) field: every configured
+source participates in intake, and Verify selects a reference by source kind
+from that same set. Base can report `cross_checked` for dRPC and Ethereum
+Mainnet can report `node_checked` for reth, but the shared source list does not
+prove the reference was excluded from intake; Sepolia reports `quick_synced`.
+The ratified Issue #411 [source-role](glossary.md#source-role) contract,
+whose enforcement lands in part 2, will make a distinct verification-only Base
+dRPC record `cross_checked` through the Coinbase-to-dRPC ingest seam, make an
+explicit verification-only Ethereum Mainnet reth record `node_checked`, and
+make Ethereum Sepolia record `cross_checked` with a distinct verification-only
+dRPC or `quick_synced` without one.
 V2 verified name, record, and ENS/60 primary-name reads use the phase runner's
 schema-v2 lookup state. Other API reads use phase projections.
 
@@ -85,7 +107,7 @@ export BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=manifests/mainnet
 export BIGNAME_PHASE_RUNNER_CHAINS=ethereum-mainnet
 export BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL=postgresql://bigname_verify:<secret>@127.0.0.1:5432/bigname
 export RETH_DATA_DIR=/var/lib/reth/mainnet
-export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:reth:reth_db:ethereum_head:0:both=RETH_DATA_DIR
+export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
 export BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545
 ```
 
@@ -98,14 +120,14 @@ Initialize the phase schema once before the first bounded or supervised
 invocation:
 
 ```sh
-cargo phase -- init-schema
+cargo phase init-schema
 ```
 
 For bounded phase work, invoke an implemented phase explicitly with
 `BIGNAME_DATABASE_URL` pointing at the shared PostgreSQL database:
 
 ```sh
-cargo phase -- redo \
+cargo phase redo \
   --chain ethereum-mainnet \
   --phase ingest \
   --from-block 0 \
@@ -113,7 +135,33 @@ cargo phase -- redo \
   --source ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
 ```
 
-Use `--phase verify` with the intake descriptors plus a distinct verification-only `reth_db` descriptor to earn `node_checked` for a finalized Ethereum range; without the independent descriptor it records `quick_synced`. Verify also requires
+After normal Mainnet Verify has completed through block 100, the same current
+five-field descriptor can recheck that retained extent:
+
+```sh
+cargo phase redo \
+  --chain ethereum-mainnet \
+  --phase verify \
+  --from-block 0 \
+  --to-block 100 \
+  --source ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
+```
+
+Verify redo cannot establish a chain's first verified extent; use the normal
+phase pipeline for initial verification.
+
+Today, Verify redo accepts the five-field descriptors the operator supplies; it
+does not enforce a complete Base source list. For each selected chain,
+operators must copy only that chain's complete deployed set: Base's Coinbase
+and dRPC descriptors, Mainnet's reth descriptor, or Sepolia's single dRPC
+descriptor. Base can report `cross_checked` and
+Mainnet `node_checked`, but those current labels do not prove that the selected
+reference was excluded from intake; Sepolia reports `quick_synced`.
+
+With the Issue #411 enforcement binary, use `--phase verify` with the intake
+descriptors plus a distinct verification-only `reth_db` descriptor to earn
+`node_checked` for a finalized Ethereum range; without the independent
+descriptor it records `quick_synced`. Verify also requires
 `BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL` (or
 `--verification-database-url`). Base Verify uses the required target-covering
 intake dRPC for `quick_synced`, or an optional distinct dRPC reference for
@@ -124,12 +172,17 @@ seam is rejected before writing the redo marker. A Base
 rationale and pinned reth evidence are in [deployment](deployment.md). A partial
 redo keeps the weaker of the retained full-extent level and the level available
 from the current source roles; a full-extent redo can establish the current plan's level.
-Sepolia Verify redo records `cross_checked` with a distinct verification-only dRPC and otherwise records `quick_synced` without selecting intake as a reference.
+Under that enforcement, Sepolia Verify redo records `cross_checked` with a
+distinct verification-only dRPC and otherwise records `quick_synced` without
+selecting intake as a reference.
 The reader URL must authenticate the dedicated role directly and resolve to the
 same PostgreSQL system/database identity as `BIGNAME_DATABASE_URL`.
 
-Interpret and project redo use the same range without requiring an ingest
-provider source. Project redo, including the automatic project cascade after
+Interpret and Project redo perform no ingest-provider I/O. On the current
+binary, standalone Interpret redo still requires the selected chain's complete
+five-field source set for cursor identity; after Issue #411 enforcement it will
+require only the complete intake-capable set. Project redo is source-free.
+Project redo, including the automatic project cascade after
 interpret redo, performs the same canonical-head hydration as supervised
 project; configure `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` or pass
 `--hydration-rpc CHAIN=HTTP_URL` when eligible Ethereum rows exist. The

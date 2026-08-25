@@ -1043,7 +1043,8 @@ marker](glossary.md#manifest-authority-marker) on Interpret and Project and
 stamps a required Ingest redo from the first newly watched block through the
 latest published ingested head. It does not contact a provider or perform that
 potentially expensive fetch. The phase runner fails closed before derivation
-and prints the exact operator command. Run that command with the updated
+and prints the exact chain, phase, and range command prefix plus an instruction
+to append the configured sources. Complete that command with the updated
 manifests active and the chain's configured sources. Its shape is:
 
 ```sh
@@ -1052,8 +1053,15 @@ phase-runner redo \
   --phase ingest \
   --from-block <first-affected-block> \
   --to-block <last-affected-block> \
-  --source <CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV>
+  --source <CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV>
 ```
+
+That is the current binary's five-field form. After Issue #411 enforcement
+lands, copy each [intake-capable](glossary.md#source-role) descriptor with its configured role preserved
+as `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK:ROLE=URL_ENV`; pass only `intake` or
+`both` sources to Ingest redo, never a `verification-only` source. In both
+versions, repeat `--source` once for every required source key: every configured
+key on the current binary, or every intake-capable key after enforcement.
 
 An ingest redo fetches and retains the newly selected facts, but intentionally
 does not advance the finite `ingest_cursors` used by the initial spine. Finite

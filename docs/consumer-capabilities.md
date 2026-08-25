@@ -260,13 +260,57 @@ must remain valid, although their non-snapshot remaining rows and fields may
 reflect those explicit activated deltas. Any other difference or cursor
 rejection blocks the `ethereum-sepolia` publication decision.
 
-The production Verify phase validates `ethereum-sepolia`'s durable ingested extent through its finalized marker. A distinct [verification-only](glossary.md#source-role) dRPC earns `cross_checked`; without one, the target-covering intake cursor earns `quick_synced` and is never selected as its own reference. The persisted intake cursor must match its key, kind, seed basis, and start block and cover that
+The production Verify phase already validates `ethereum-sepolia`'s durable
+ingested extent through its finalized marker and records `quick_synced` for its
+single configured source. The Issue #411 enforcement change will add
+[source roles](glossary.md#source-role): a distinct verification-only dRPC will earn
+`cross_checked`; without one, the target-covering intake cursor will earn
+`quick_synced` and will never be selected as its own reference. The persisted
+intake cursor must match its key, kind, seed basis, and start block and cover that
 finalized marker. Project publishes before Verify in the
 pipeline sequence, but that publication remains unready and traffic-drained
-until Verify succeeds for the target. Slice-1 fixtures prove the Sepolia path
-can report `quick_synced` without calling a reference and that a phase cannot
-persist a stronger, unearned level, accept a stale or mismatched intake cursor,
-or proceed to Live.
+until Verify succeeds for the target. Existing fixtures prove the current
+Sepolia path reports `quick_synced` without calling a reference and rejects an
+unearned stronger level. Part-2 acceptance fixtures will additionally prove
+that distinct intake and verification-only endpoints produce `cross_checked`,
+that the verification-only source receives no Ingest/Live requests or cursor,
+and that equal intake/reference endpoints fail before cursor initialization,
+provider construction or access, raw-fact writes, or redo-state publication.
+Base fixtures must keep Coinbase and dRPC intake-capable, use only an optional
+distinct verification-only dRPC for `cross_checked` through the ingest seam,
+and otherwise fall back to the target-covering intake dRPC's `quick_synced`.
+Ethereum Mainnet fixtures must likewise reserve `node_checked` for a distinct
+verification-only reth and fall back to its intake reth's `quick_synced`; a
+`both` source can never earn either independent level. Normal and
+manifest-widening Ingest redo must receive every intake-capable source and no
+verification-only source, while role-aware Verify and `all` redo must enforce
+the complete intake-capable key set before publication or provider access.
+Standalone Interpret redo must likewise ignore verification-only descriptors
+for cursor identity, require no cursor for them, and reject a missing or extra
+intake-capable key before replay.
+An `--phase all` fixture must prove its Ingest and Interpret contexts receive
+only the complete intake-capable set while its Verify context still receives
+the optional verification-only reference; the reference must not leak into
+intake or cause Interpret cursor rejection.
+Configuration errors and logs must name source keys without exposing either
+resolved endpoint. A retained pre-#411 fixture must also prove that a role
+change which alters the intake-capable cursor-key set is rejected while raw
+facts remain, until the owner-approved reset and full re-walk occur.
+Five-field descriptors must remain accepted for normal run and redo, with the
+omitted role defaulting to `both`. Each known level—`quick_synced`,
+`cross_checked`, and `node_checked`—must satisfy the API's `quick_synced`
+readiness floor, while an unknown stored level must fail closed. Completed
+pre-part-2 `cross_checked` or `node_checked` evidence must be revalidated and
+downgraded to `quick_synced` when the current role configuration cannot earn the
+stronger level; it must neither halt revalidation nor preserve the stale claim,
+and it must not call a reference provider. Adding an independent source must
+not automatically upgrade a completed `quick_synced` extent; only the required
+from-zero walk or an explicit full-extent Verify redo may establish the stronger
+level. For every accepted production chain, persistence and completed-state
+validation must derive the maximum reportable level from the same role-aware
+verification plan, without a second chain allowlist or fail-open fallback. The fixtures
+will continue to reject a stale or mismatched
+intake cursor and prevent Live before Verify succeeds.
 Omitting, disabling, or replacing Verify with a no-op is not an acceptable
 readiness gate.
 
