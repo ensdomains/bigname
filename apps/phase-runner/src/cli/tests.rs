@@ -1,5 +1,15 @@
 use super::*;
 use crate::config::{SeedBasis, SourceRole};
+
+const REDO_SOURCE_ENV: &str = "BIGNAME_TEST_REDO_SOURCE_ENDPOINT";
+const REDO_SOURCE: &str =
+    "ethereum-mainnet:reth:reth_db:ethereum_head:0=BIGNAME_TEST_REDO_SOURCE_ENDPOINT";
+
+fn configure_redo_source_endpoint() {
+    // SAFETY: every caller writes the same value to this test-only environment key.
+    unsafe { std::env::set_var(REDO_SOURCE_ENV, "/tmp/bigname-test-reth") };
+}
+
 #[test]
 fn source_descriptor_roles_are_backward_compatible_and_validated() {
     const ENDPOINT_ENV: &str = "BIGNAME_TEST_SOURCE_ROLE_ENDPOINT";
@@ -17,14 +27,24 @@ fn source_descriptor_roles_are_backward_compatible_and_validated() {
         .expect("supported source role must parse");
         assert_eq!(source.role, expected);
     }
-    for role in ["", "reader"] {
+    for role in ["", "reader", "verification_only"] {
         let error = parse_source(&format!(
             "ethereum-sepolia:source:drpc:ethereum_head:0:{role}={ENDPOINT_ENV}"
         ))
         .expect_err("empty and unknown source roles must fail");
         assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(error.to_string().contains("ethereum-sepolia:source"));
         assert!(!error.to_string().contains("https://"), "{error}");
     }
+    const EMPTY_ENDPOINT_ENV: &str = "BIGNAME_TEST_SOURCE_ROLE_EMPTY_ENDPOINT";
+    // SAFETY: this test owns a unique environment key and never mutates it after parsing starts.
+    unsafe { std::env::set_var(EMPTY_ENDPOINT_ENV, "") };
+    let error = parse_source(&format!(
+        "ethereum-sepolia:empty-source:drpc:ethereum_head:0={EMPTY_ENDPOINT_ENV}"
+    ))
+    .expect_err("an empty resolved endpoint must fail");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("ethereum-sepolia:empty-source"));
 }
 #[test]
 fn runnable_and_redo_source_role_validation_matrix() {
@@ -55,8 +75,8 @@ fn runnable_and_redo_source_role_validation_matrix() {
         (RedoPhase::Phase(PhaseName::Ingest), true),
         (RedoPhase::Phase(PhaseName::Verify), true),
         (RedoPhase::All, true),
-        (RedoPhase::Phase(PhaseName::Interpret), false),
-        (RedoPhase::Phase(PhaseName::Project), false),
+        (RedoPhase::Phase(PhaseName::Interpret), true),
+        (RedoPhase::Phase(PhaseName::Project), true),
         (RedoPhase::RecomputeFlags, false),
     ] {
         assert_eq!(phase.requires_intake_sources(), needs_intake);
@@ -143,6 +163,7 @@ fn run_cli_rejects_a_nonpositive_heartbeat_threshold() {
 
 #[test]
 fn redo_cli_carries_canonical_head_hydration_rpc() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -150,6 +171,8 @@ fn redo_cli_carries_canonical_head_hydration_rpc() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
         "--phase",
         "project",
         "--from-block",
@@ -176,6 +199,7 @@ fn redo_cli_carries_canonical_head_hydration_rpc() {
 
 #[test]
 fn redo_cli_carries_watch_set_coverage_attestation() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -183,6 +207,8 @@ fn redo_cli_carries_watch_set_coverage_attestation() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
         "--phase",
         "interpret",
         "--from-block",
@@ -214,6 +240,7 @@ fn redo_cli_carries_watch_set_coverage_attestation() {
 
 #[test]
 fn single_chain_redo_accepts_a_matching_chain_token_attestation() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -221,6 +248,8 @@ fn single_chain_redo_accepts_a_matching_chain_token_attestation() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
         "--phase",
         "interpret",
         "--from-block",
@@ -252,6 +281,7 @@ fn single_chain_redo_accepts_a_matching_chain_token_attestation() {
 
 #[test]
 fn single_chain_redo_rejects_a_mismatched_chain_token_attestation() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -259,6 +289,8 @@ fn single_chain_redo_rejects_a_mismatched_chain_token_attestation() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
         "--phase",
         "interpret",
         "--from-block",
@@ -280,6 +312,7 @@ fn single_chain_redo_rejects_a_mismatched_chain_token_attestation() {
 
 #[test]
 fn multi_chain_redo_requires_and_carries_per_chain_attestations() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -287,6 +320,10 @@ fn multi_chain_redo_requires_and_carries_per_chain_attestations() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet,base-mainnet",
+        "--source",
+        REDO_SOURCE,
+        "--source",
+        "base-mainnet:coinbase:coinbase:ethereum_head:0=BIGNAME_TEST_REDO_SOURCE_ENDPOINT",
         "--phase",
         "interpret",
         "--from-block",

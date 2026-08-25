@@ -233,6 +233,7 @@ impl PhaseRunner {
         let context = self
             .phase_context(chain, phase_name, RunMode::Normal, None)
             .await?;
+        let retained_verification_level = context.resume.verification_level;
         let progress = phase_lock
             .run_while_alive(
                 self.timing.live_poll_interval,
@@ -265,7 +266,15 @@ impl PhaseRunner {
                 None,
                 &progress,
             )
-            .await
+            .await?;
+        if phase_name == PhaseName::Verify {
+            crate::verify_level::warn_optional_downgrade(
+                &chain.chain_id,
+                retained_verification_level,
+                progress.verification_level,
+            );
+        }
+        Ok(())
     }
 
     pub(super) async fn phase_context(

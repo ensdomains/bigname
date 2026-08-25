@@ -1757,7 +1757,7 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
     let store = PhaseStore::new(scratch.runner().pool().clone());
     let chain_id = "redo-state-chain";
     store.initialize_chain(chain_id).await?;
-    seed_readable_lineage(scratch.pool(), chain_id, 3).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 3).await?;
     mark_completed(scratch.pool(), chain_id, PhaseName::Ingest, None).await?;
     mark_completed(
         scratch.pool(),
@@ -3355,6 +3355,69 @@ async fn interpret_redo_accepts_a_normalized_equivalent_source_kind() -> Result<
     )
     .await?;
 
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn project_redo_rejects_an_incomplete_intake_source_set_before_its_marker() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_project_redo_source_identity").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "project-redo-source-identity-chain";
+    store.initialize_chain(chain_id).await?;
+    for phase in [PhaseName::Ingest, PhaseName::Interpret, PhaseName::Project] {
+        mark_completed(
+            scratch.pool(),
+            chain_id,
+            phase,
+            phase
+                .writes_derived_data()
+                .then_some(phase_runner::INTERPRETER_CONTENT_HASH),
+        )
+        .await?;
+    }
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Project, 1).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    let configured = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "replacement-source",
+            "test",
+            SeedBasis::EthereumHead,
+            0,
+            "http://replacement.invalid",
+        )?],
+        false,
+    )?;
+
+    let error = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "project-redo-source-identity-runner",
+    )?
+    .redo(
+        &configured,
+        RedoPhase::Phase(PhaseName::Project),
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("Project redo must reject an incomplete intake source set");
+    let redo_in_progress: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("has no matching cursor"),
+        "{error}"
+    );
+    assert!(!redo_in_progress);
     scratch.cleanup().await
 }
 

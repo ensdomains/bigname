@@ -474,7 +474,9 @@ pick up the new preimages through Project:
   Project walk; the first walk derives child names with the preimages present.
 - On a populated database, run the import and then redo Project over each
   chain's full retained range, for example
-  `phase-runner redo --chain ethereum-mainnet --phase project --from-block <first retained block> --to-block <head>`.
+  `phase-runner redo --chain ethereum-mainnet --source 'ethereum-mainnet:<key>:<kind>:<seed-basis>:<start>[:<role>]=<endpoint-env>' --phase project --from-block <first retained block> --to-block <head>`.
+  Repeat `--source` with the complete intake-capable descriptor set recorded by
+  that chain's Ingest cursors.
   A windowed or incremental Project run re-derives only its affected scope.
   Child-topology closure can add a connected component, but it does not cover
   older disconnected child edges; the full-range redo is the required

@@ -16,8 +16,14 @@ impl RedoPhase {
     pub const fn requires_intake_sources(self) -> bool {
         matches!(
             self,
-            Self::Phase(PhaseName::Ingest | PhaseName::Verify) | Self::All
+            Self::Phase(
+                PhaseName::Ingest | PhaseName::Interpret | PhaseName::Project | PhaseName::Verify
+            ) | Self::All
         )
+    }
+
+    pub const fn requires_verify(self) -> bool {
+        matches!(self, Self::Phase(PhaseName::Verify) | Self::All)
     }
 }
 impl PhaseRunner {

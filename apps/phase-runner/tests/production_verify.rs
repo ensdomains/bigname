@@ -3,6 +3,7 @@ mod support;
 
 use std::{
     collections::BTreeMap,
+    io::{self, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -34,7 +35,8 @@ use phase_runner::{
     heads::{BlockMarker, HeadMarkers},
     phase::{
         BlockRange, IngestCursor, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext,
-        PhaseFuture, PhaseName, PhaseProgress, PhaseSet, SourceProgress, VerificationLevel,
+        PhaseFuture, PhaseName, PhaseProgress, PhaseSet, RunMode, SourceProgress,
+        VerificationLevel,
     },
     phase_lock::PhaseLock,
     runner::{PhaseRunner, RedoPhase},
@@ -47,6 +49,8 @@ use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tokio::{net::TcpListener, sync::Notify};
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
 use support::ScratchDatabase;
@@ -58,6 +62,58 @@ const CONTRACT: &str = "0x00000000000000000000000000000000000000aa";
 const MULTI_BATCH_VERIFY_TARGET: i64 = 131_073;
 const FIRST_VERIFY_BATCH_END: i64 = 131_071;
 type FailedVerifyState = (String, Option<i64>, Option<i64>, Option<String>);
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8(
+            self.0
+                .lock()
+                .expect("captured log lock must not be poisoned")
+                .clone(),
+        )
+        .expect("structured logs must be UTF-8")
+    }
+}
+
+impl<'a> MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogWriter(Arc::clone(&self.0))
+    }
+}
+
+impl Write for CapturedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("captured log lock must not be poisoned")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn assert_role_downgrade_log(logs: &str, chain_id: &str, old_level: &str, new_level: &str) {
+    for expected in [
+        "\"level\":\"WARN\"".to_owned(),
+        "\"event\":\"verification_level_downgraded\"".to_owned(),
+        format!("\"chain_id\":\"{chain_id}\""),
+        format!("\"old_verification_level\":\"{old_level}\""),
+        format!("\"new_verification_level\":\"{new_level}\""),
+        "\"cause\":\"current_source_role_configuration\"".to_owned(),
+    ] {
+        assert!(logs.contains(&expected), "missing {expected} in {logs}");
+    }
+}
 
 #[tokio::test]
 async fn verifier_rejects_a_database_role_with_write_privileges() -> Result<()> {
@@ -296,8 +352,15 @@ async fn completed_stronger_level_downgrades_under_roleless_provider_trusted_con
         "production-verify-sepolia-positive",
         test_timing(),
     )?;
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
     runner
         .run_chain(&sepolia_chain()?, CancellationToken::new())
+        .with_subscriber(subscriber)
         .await?;
     let state: (String, String, i64, i64) = sqlx::query_as(
         "SELECT phase_status, verification_level,
@@ -313,6 +376,7 @@ async fn completed_stronger_level_downgrades_under_roleless_provider_trusted_con
         ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
     );
     assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+    assert_role_downgrade_log(&logs.text(), SEPOLIA, "cross_checked", "quick_synced");
     drop(runner);
     scratch.cleanup().await
 }
@@ -1610,8 +1674,9 @@ async fn completed_sepolia_ingest_rejects_unreviewed_source_shape_before_interpr
     assert_eq!(error.kind(), ErrorKind::Configuration);
     assert_eq!(
         error.to_string(),
-        "chain ethereum-sepolia requires exactly one dRPC intake-capable source with \
-         ethereum_head seed basis and start block 0"
+        "chain ethereum-sepolia intake descriptors [ethereum-sepolia:rpc-intake] violate the \
+         required shape: exactly one dRPC intake-capable source with ethereum_head seed basis \
+         and start block 0"
     );
     assert_eq!(
         observed_calls,
@@ -3146,6 +3211,191 @@ async fn full_verify_redo_updates_the_full_extent_level() -> Result<()> {
     assert_eq!(state, ("cross_checked".to_owned(), 5, false));
 
     drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn partial_verify_redo_persists_the_weaker_current_role_level() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_partial_redo_weaker_level").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'completed',
+             verification_level = 'cross_checked', current_block_number = 5,
+             current_block_hash = $2, target_block_number = 5, target_block_hash = $2,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 5))
+    .execute(scratch.pool())
+    .await?;
+    let runner = sepolia_verifier_runner(&scratch, Arc::new(AtomicUsize::new(0))).await?;
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+    runner
+        .redo(
+            &sepolia_chain()?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 4)?,
+            CancellationToken::new(),
+        )
+        .with_subscriber(subscriber)
+        .await?;
+
+    let level: String = sqlx::query_scalar(
+        "SELECT verification_level FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(level, "quick_synced");
+    assert_role_downgrade_log(&logs.text(), SEPOLIA, "cross_checked", "quick_synced");
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn failed_partial_verify_redo_does_not_log_an_unpersisted_downgrade() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_failed_partial_redo_level").await?;
+    seed_sparse_verify_boundaries(scratch.pool()).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'finalized')",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, FIRST_VERIFY_BATCH_END + 1))
+    .bind(block_hash(SEPOLIA, FIRST_VERIFY_BATCH_END))
+    .bind(FIRST_VERIFY_BATCH_END + 1)
+    .execute(scratch.pool())
+    .await?;
+    seed_ingest_cursor(
+        scratch.pool(),
+        SEPOLIA,
+        "drpc-intake",
+        MULTI_BATCH_VERIFY_TARGET + 1,
+    )
+    .await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, MULTI_BATCH_VERIFY_TARGET).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'completed',
+             verification_level = 'cross_checked', current_block_number = $2,
+             current_block_hash = $3, target_block_number = $2, target_block_hash = $3,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(MULTI_BATCH_VERIFY_TARGET)
+    .bind(block_hash(SEPOLIA, MULTI_BATCH_VERIFY_TARGET))
+    .execute(scratch.pool())
+    .await?;
+    let cancellation = CancellationToken::new();
+    let hook_cancellation = cancellation.clone();
+    let runner = sepolia_verifier_runner(&scratch, Arc::new(AtomicUsize::new(0)))
+        .await?
+        .with_before_redo_progress_write(move || {
+            let hook_cancellation = hook_cancellation.clone();
+            async move {
+                hook_cancellation.cancel();
+            }
+        });
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+
+    let error = runner
+        .redo(
+            &sepolia_chain()?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, FIRST_VERIFY_BATCH_END + 1)?,
+            cancellation,
+        )
+        .with_subscriber(subscriber)
+        .await
+        .expect_err("cancellation after the first batch must leave the partial redo incomplete");
+    let level: String = sqlx::query_scalar(
+        "SELECT verification_level FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+    assert_eq!(level, "cross_checked");
+    assert!(!logs.text().contains("verification_level_downgraded"));
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn more_than_one_verification_only_source_is_rejected_loudly() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_multiple_references").await?;
+    let reference = Arc::new(FixtureReferences::new([]));
+    let phase = VerifyPhase::with_reference_provider(
+        scratch.verification_database(2).await?,
+        reference.clone(),
+    );
+    let chain = ChainConfig::new(
+        SEPOLIA,
+        vec![
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-intake",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::Intake,
+                "https://sepolia-intake.invalid",
+            )?,
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-verify-a",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                "https://sepolia-verify-a.invalid",
+            )?,
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-verify-b",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                "https://sepolia-verify-b.invalid",
+            )?,
+        ],
+        true,
+    )?;
+
+    let error = phase
+        .preflight(&chain.chain_id, &chain.sources, &RunMode::Normal)
+        .expect_err("multiple verification-only sources must fail before provider preflight");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "chain ethereum-sepolia configures more than one verification-only source: \
+         sepolia-verify-a, sepolia-verify-b"
+    );
+    assert_eq!(reference.preflights(), 0);
+
+    drop(phase);
     scratch.cleanup().await
 }
 

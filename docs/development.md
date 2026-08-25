@@ -158,7 +158,7 @@ Sepolia Verify redo records `cross_checked` with a distinct verification-only dR
 The reader URL must authenticate the dedicated role directly and resolve to the
 same PostgreSQL system/database identity as `BIGNAME_DATABASE_URL`.
 
-Interpret and Project redo perform no ingest-provider I/O and accept no source descriptors. In an `all` redo, Interpret receives only intake-capable descriptors after Ingest validates their exact cursor-key set.
+Standalone Interpret and Project redo perform no ingest-provider I/O, but they require the complete intake-capable source descriptor set so the persisted cursor identities can prove the redo range. In an `all` redo, Interpret receives only intake-capable descriptors after Ingest validates their exact cursor-key set.
 Project redo, including the automatic project cascade after
 interpret redo, performs the same canonical-head hydration as supervised
 project; configure `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` or pass

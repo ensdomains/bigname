@@ -34,7 +34,10 @@ pub(super) fn parse_source(specification: &str) -> RunnerResult<SourceConfig> {
         .map_err(|_| invalid_source("START_BLOCK is not an integer", specification))?;
     let role = fields
         .get(5)
-        .map(|role| SourceRole::parse(role))
+        .map(|role| {
+            SourceRole::parse(role)
+                .map_err(|error| invalid_source(&error.to_string(), specification))
+        })
         .transpose()?
         .unwrap_or(SourceRole::Both);
     SourceConfig::new_with_role(

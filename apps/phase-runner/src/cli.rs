@@ -413,7 +413,8 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
     if phase.requires_intake_sources() && sources.is_empty() {
         return Err(RunnerError::new(
             ErrorKind::Configuration,
-            "ingest, verify, or all-phase redo requires at least one intake-capable --source",
+            "ingest, interpret, project, verify, or all-phase redo requires at least one \
+             intake-capable --source",
         ));
     }
     if phase.requires_verify() && args.verification_database_url.is_none() {

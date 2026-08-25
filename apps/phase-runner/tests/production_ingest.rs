@@ -2736,9 +2736,74 @@ async fn fresh_sepolia_rejects_invalid_intake_shape_before_raw_facts_are_written
     assert_eq!(error.kind(), ErrorKind::Configuration);
     assert_eq!(
         error.to_string(),
-        "chain ethereum-sepolia requires exactly one dRPC intake-capable source with \
-         ethereum_head seed basis and start block 0"
+        "chain ethereum-sepolia intake descriptors [ethereum-sepolia:intake] violate the required \
+         shape: exactly one dRPC intake-capable source with ethereum_head seed basis and start \
+         block 0"
     );
+    assert_eq!(observed_rpc_requests, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_sepolia_rejects_equal_role_endpoints_before_cursor_or_raw_fact_writes() -> Result<()>
+{
+    let scratch =
+        ScratchDatabase::create("production_ingest_fresh_sepolia_equal_endpoints").await?;
+    seed_watch_set(scratch.pool(), SEPOLIA).await?;
+    let (endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    let runner = crash_window_runner(&scratch, Arc::new(AtomicUsize::new(0)))?;
+    let chain = ChainConfig::new(
+        SEPOLIA,
+        vec![
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-intake",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::Intake,
+                endpoint.clone(),
+            )?,
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-verify",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                endpoint,
+            )?,
+        ],
+        true,
+    )?;
+
+    let error = runner
+        .run_chain(&chain, CancellationToken::new())
+        .await
+        .expect_err("equal intake and verification endpoints must fail before Ingest");
+    let cursor_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
+            .bind(SEPOLIA)
+            .fetch_one(scratch.pool())
+            .await?;
+    let raw_fact_count: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM raw_logs WHERE chain_id = $1)
+              + (SELECT count(*) FROM raw_transactions WHERE chain_id = $1)
+              + (SELECT count(*) FROM raw_receipts WHERE chain_id = $1)",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    let observed_rpc_requests = rpc_requests.load(Ordering::SeqCst);
+
+    drop(runner);
+    rpc_server.abort();
+    scratch.cleanup().await?;
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("sepolia-intake"), "{error}");
+    assert!(error.to_string().contains("sepolia-verify"), "{error}");
+    assert_eq!(cursor_count, 0);
+    assert_eq!(raw_fact_count, 0);
     assert_eq!(observed_rpc_requests, 0);
     Ok(())
 }

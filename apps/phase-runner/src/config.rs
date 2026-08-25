@@ -100,7 +100,6 @@ impl SourceConfig {
             ("chain id", self.chain_id.as_str()),
             ("source key", self.source_key.as_str()),
             ("source kind", self.source_kind.as_str()),
-            ("source endpoint", self.endpoint()),
         ] {
             if value.trim().is_empty() {
                 return Err(RunnerError::new(
@@ -108,6 +107,15 @@ impl SourceConfig {
                     format!("{label} must not be empty"),
                 ));
             }
+        }
+        if self.endpoint().trim().is_empty() {
+            return Err(RunnerError::new(
+                ErrorKind::Configuration,
+                format!(
+                    "source descriptor {}:{} has an empty endpoint",
+                    self.chain_id, self.source_key
+                ),
+            ));
         }
         if self.start_block_number < 0 {
             return Err(RunnerError::new(

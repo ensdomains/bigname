@@ -359,7 +359,7 @@ impl VerificationStore {
                  {value:?}"
             )))?,
         };
-        Ok(crate::verify_phase::weakest_level(
+        Ok(crate::verify_level::weakest_level(
             retained,
             full_redo_level,
         ))

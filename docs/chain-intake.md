@@ -130,7 +130,7 @@ admitted source must return to `ingest` for its required range before
 CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV
 ```
 
-The endpoint is read from `URL_ENV`; `ROLE` is `intake`, `verification-only`, or `both`, and omission defaults to `both`. Ingest, Live, cursor identity, and ingest progress receive only `intake` and `both` sources. A verification-only source receives no cursor and alone can earn independent `cross_checked` (dRPC) or `node_checked` (local reth); `both` earns only provider-trusted `quick_synced`. The runner rejects equal endpoints without logging them; no new verification level is introduced. A stronger level is downgraded when current roles support only `quick_synced`; retained `quick_synced` is not automatically upgraded. Changing intake membership requires the reset and [full source
+The endpoint is read from `URL_ENV`; `ROLE` is `intake`, `verification-only`, or `both`, and omission defaults to `both`. Role tokens are exact: use `verification-only`, not `verification_only`; source-kind normalization does not apply to roles. Ingest, Live, cursor identity, and ingest progress receive only `intake` and `both` sources. A verification-only source receives no cursor and alone can earn independent `cross_checked` (dRPC) or `node_checked` (local reth); `both` earns only provider-trusted `quick_synced`. The runner rejects equal endpoints without logging them; no new verification level is introduced. A stronger level is downgraded when current roles support only `quick_synced`; retained `quick_synced` is not automatically upgraded. Changing intake membership requires the reset and [full source
 re-walk](glossary.md#re-derivation-boundary) below. Source cursors are independent, so
 one source cannot claim another source's range. The runner records the resolved
 target and last processed block hash for each source; restart resumes from that
@@ -352,8 +352,8 @@ cargo phase redo \
   --to-block <inclusive-end>
 ```
 
-Verify joins Ingest and `all` in
-requiring intake-capable `--source` descriptors at startup for every selected chain.
+Interpret, Project, and Verify join Ingest and `all` in requiring the complete
+intake-capable `--source` descriptor set at startup for every selected chain.
 Before loading each Base Ingest redo batch whose requested range spans the
 Coinbase/RPC seam, the runner independently queries the seam-block identity
 from Coinbase SQL `base.blocks` and from RPC. A mismatch is a terminal data

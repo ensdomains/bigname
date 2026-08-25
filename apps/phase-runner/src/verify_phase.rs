@@ -312,28 +312,11 @@ fn normal_extent_level(
         context.resume.verification_level,
     ) {
         (None, _) => Ok(source_level),
-        (Some(_), Some(retained)) => Ok(weakest_level(retained, source_level)),
+        (Some(_), Some(retained)) => Ok(crate::verify_level::weakest_level(retained, source_level)),
         (Some(current), None) => Err(RunnerError::data_integrity(format!(
             "verification resume for chain {} at block {} has no retained verification level",
             context.chain_id, current.number
         ))),
-    }
-}
-
-pub(crate) const fn weakest_level(
-    retained: VerificationLevel,
-    source: VerificationLevel,
-) -> VerificationLevel {
-    match (retained, source) {
-        (VerificationLevel::QuickSynced, _) | (_, VerificationLevel::QuickSynced) => {
-            VerificationLevel::QuickSynced
-        }
-        (VerificationLevel::CrossChecked, _) | (_, VerificationLevel::CrossChecked) => {
-            VerificationLevel::CrossChecked
-        }
-        (VerificationLevel::NodeChecked, VerificationLevel::NodeChecked) => {
-            VerificationLevel::NodeChecked
-        }
     }
 }
 
@@ -391,9 +374,16 @@ fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<V
         .filter(|source| source.role == SourceRole::VerificationOnly)
         .collect::<Vec<_>>();
     if candidates.len() > 1 {
+        let source_keys = candidates
+            .iter()
+            .map(|source| source.source_key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(RunnerError::new(
             ErrorKind::Configuration,
-            format!("chain {chain_id} configures more than one verification-only source"),
+            format!(
+                "chain {chain_id} configures more than one verification-only source: {source_keys}"
+            ),
         ));
     }
     if let Some(source) = candidates.first() {

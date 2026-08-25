@@ -194,7 +194,9 @@ fn phase_readiness(
             (Some("completed"), _) if row.verify_settled_while_unconfigured => {
                 (ingest_incomplete, true)
             }
-            (Some("completed"), level) if meets_floor(level) => (ingest_incomplete, false),
+            (Some("completed"), level) if meets_floor(level, "quick_synced") => {
+                (ingest_incomplete, false)
+            }
             (Some("idle" | "running" | "paused") | None, _) => (ingest_incomplete, true),
             (Some("completed" | "failed"), _) | (Some(_), _) => {
                 return StatusReadiness::Stale;

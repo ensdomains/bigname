@@ -267,7 +267,7 @@ pipeline sequence, but that publication remains unready and traffic-drained
 until Verify succeeds for the target. Acceptance fixtures prove
 that distinct intake and verification-only endpoints produce `cross_checked`,
 that the verification-only source receives no Ingest/Live requests or cursor,
-and that equal intake/reference endpoints fail before reference-provider construction or access and before redo-state publication.
+and that equal intake/reference endpoints fail before cursor initialization, provider construction or access, raw-fact writes, or [redo-marker](glossary.md#redo-marker-scope) publication.
 Base fixtures must keep Coinbase and dRPC intake-capable, use only an optional
 distinct verification-only dRPC for `cross_checked` through the ingest seam,
 and otherwise fall back to the target-covering intake dRPC's `quick_synced`.
@@ -277,7 +277,7 @@ verification-only reth and fall back to its intake reth's `quick_synced`; a
 manifest-widening Ingest redo must receive every intake-capable source and no
 verification-only source, while role-aware Verify and `all` redo must enforce
 the complete intake-capable key set before publication or provider access.
-Standalone Interpret and Project redo accept no sources. In `all` redo, Interpret receives only intake-capable descriptors after Ingest enforces the complete cursor-key set.
+Standalone Interpret and Project redo require the complete intake-capable source descriptor set so persisted cursor identities can prove the range, but they perform no ingest-provider I/O. In `all` redo, Interpret receives only intake-capable descriptors after Ingest enforces the complete cursor-key set.
 An `--phase all` fixture must prove its Ingest and Interpret contexts receive
 only the complete intake-capable set while its Verify context still receives
 the optional verification-only reference; the reference must not leak into

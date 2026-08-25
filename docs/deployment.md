@@ -182,7 +182,7 @@ that role's write authority, and startup rejects it.
 
 The phase runner accepts each
 `BIGNAME_PHASE_RUNNER_SOURCES` entry in the form
-`CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV`; omission of `ROLE` defaults to `both`. The named
+`CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV`; omission of `ROLE` defaults to `both`. Role tokens are exact: use `verification-only`, not `verification_only`; source-kind normalization does not apply to roles. The named
 environment variable contains the provider URL. Under the ratified contract,
 before Ingest can make its first provider write, the runner persists each
 [intake-capable source](glossary.md#source-role)'s cursor row with its kind, seed basis,
@@ -193,7 +193,7 @@ hyphen/underscore spelling changes are equivalent. Before a runnable Ingest
 phase contacts a provider, each row's seed basis and start block must also match
 the runtime source. A restart that skips an already-completed Ingest phase still
 requires every configured intake-capable source's persisted key, kind, seed basis, and start
-block to match, and the configured intake-capable source-key set must exactly match the persisted cursor keys. Standalone Interpret and Project redo accept no source descriptors; in an `all` redo, Ingest performs that exact-key check before Interpret replays. Any change to a persisted identity field—source key,
+block to match, and the configured intake-capable source-key set must exactly match the persisted cursor keys. Standalone Interpret and Project redo require the complete intake-capable descriptor set and perform that exact-key check without contacting ingest providers; in an `all` redo, Ingest performs the check before Interpret replays. Any change to a persisted identity field—source key,
 normalized kind, seed basis, or start block—requires an explicitly reviewed
 reset that removes the cursor and every durable Ingest output that may have come
 from the source, followed by a [full source

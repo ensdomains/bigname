@@ -48,16 +48,6 @@ pub enum RedoPhase {
     All,
 }
 
-impl RedoPhase {
-    pub const fn requires_ingest(self) -> bool {
-        matches!(self, Self::Phase(PhaseName::Ingest) | Self::All)
-    }
-
-    pub const fn requires_verify(self) -> bool {
-        matches!(self, Self::Phase(PhaseName::Verify) | Self::All)
-    }
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SupervisorReport {
     pub stopped_chains: Vec<(String, RunnerError)>,
@@ -470,6 +460,7 @@ impl PhaseRunner {
             let context = self
                 .phase_context(chain, phase_name, mode.clone(), redo_attempt)
                 .await?;
+            let retained_verification_level = context.resume.verification_level;
             let outcome = phase_lock
                 .run_while_alive(self.timing.live_poll_interval, phase.run_batch(context))
                 .await;
@@ -522,6 +513,13 @@ impl PhaseRunner {
                 self.store
                     .record_progress(&chain.chain_id, phase_name, &mode, redo_attempt, &progress)
                     .await?;
+            }
+            if phase_name == PhaseName::Verify && matches!(mode, RunMode::Normal) {
+                crate::verify_level::warn_optional_downgrade(
+                    &chain.chain_id,
+                    retained_verification_level,
+                    progress.verification_level,
+                );
             }
             phase_lock.check_alive().await?;
             heartbeat

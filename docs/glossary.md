@@ -113,7 +113,8 @@ Issue #411 enforces the role-dependent contract below; five-field descriptors re
 **Source role** — whether a configured provider may serve `intake`, is
 `verification-only`, or may serve `both`. Intake-capable sources receive
 cursors and feed Ingest and Live; only verification-only sources can earn an
-independent [verification level](#verification-level).
+independent [verification level](#verification-level). Role tokens are exact;
+`verification_only` is not an alias for `verification-only`.
 
 **Stored-history verification** — the read-only phase that validates a chain's
 stored extent through a finalized block and, when the chain has an independent
