@@ -20,6 +20,7 @@ pub use types::{Block, BlockBundle, HeadSnapshot, Log, Receipt, ResolvedBlock, T
 
 use http_client::RecoveringHttpClient;
 use request::validate_endpoint;
+pub use reth_db::RETH_DB_OPENED_STORAGE_CHILDREN;
 use reth_db::RethDbProvider;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

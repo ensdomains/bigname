@@ -341,11 +341,7 @@ fn contiguous_numbers(numbers: &[i64]) -> Result<Option<(u64, u64)>> {
 }
 
 fn validate_datadir(datadir: &Path) -> Result<()> {
-    for path in [
-        datadir.join("db"),
-        datadir.join("static_files"),
-        datadir.join("rocksdb"),
-    ] {
+    for path in super::RETH_DB_OPENED_STORAGE_CHILDREN.map(|child| datadir.join(child)) {
         if !path.is_dir() {
             bail!("Reth DB directory {} is missing", path.display());
         }

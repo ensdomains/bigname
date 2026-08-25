@@ -7,7 +7,7 @@ use crate::{
     config::{SeedBasis, SourceConfig, normalized_source_kind},
     error::{ErrorKind, RunnerError, RunnerResult},
 };
-use bigname_ingest::BASE_COINBASE_SEAM_BLOCK;
+use bigname_ingest::{BASE_COINBASE_SEAM_BLOCK, RETH_DB_OPENED_STORAGE_CHILDREN};
 use url::Url;
 pub(crate) fn production_verify_chain(id: &str) -> bool {
     matches!(id, "base-mainnet" | "ethereum-mainnet" | "ethereum-sepolia")
@@ -111,11 +111,16 @@ pub(super) fn same_source_identity(
 fn same_reth_path_identity(left: &SourceConfig, right: &SourceConfig) -> RunnerResult<bool> {
     let left = absolute_reth_path(left)?;
     let right = absolute_reth_path(right)?;
-    Ok(same_reth_paths_with_fallback(
-        &left,
-        &right,
-        reth_path_spelling_identity,
-    ))
+    if same_reth_paths_with_fallback(&left, &right, reth_path_spelling_identity) {
+        return Ok(true);
+    }
+    Ok(RETH_DB_OPENED_STORAGE_CHILDREN.into_iter().any(|child| {
+        same_reth_paths_with_fallback(
+            &left.join(child),
+            &right.join(child),
+            reth_path_spelling_identity,
+        )
+    }))
 }
 
 fn absolute_reth_path(source: &SourceConfig) -> RunnerResult<PathBuf> {
@@ -396,5 +401,75 @@ mod tests {
             &distinct,
             lexical_path_identity,
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_reth_storage_children_are_not_independent() -> RunnerResult<()> {
+        let root = std::env::temp_dir().join(format!(
+            "bigname-reth-shared-children-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let shared = root.join("shared");
+        let left = root.join("left");
+        let right = root.join("right");
+        fs::create_dir_all(&shared).map_err(fixture_error)?;
+        fs::create_dir_all(&left).map_err(fixture_error)?;
+        fs::create_dir_all(&right).map_err(fixture_error)?;
+        for child in RETH_DB_OPENED_STORAGE_CHILDREN {
+            let target = shared.join(child);
+            fs::create_dir_all(&target).map_err(fixture_error)?;
+            std::os::unix::fs::symlink(&target, left.join(child)).map_err(fixture_error)?;
+            std::os::unix::fs::symlink(&target, right.join(child)).map_err(fixture_error)?;
+        }
+        let left_source = reth_source("left", &left)?;
+        let right_source = reth_source("right", &right)?;
+
+        let same = same_reth_path_identity(&left_source, &right_source)?;
+        fs::remove_dir_all(root).map_err(fixture_error)?;
+        assert!(
+            same,
+            "shared opened storage children must fail independence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_reth_storage_children_remain_independent() -> RunnerResult<()> {
+        let root = std::env::temp_dir().join(format!(
+            "bigname-reth-distinct-children-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let left = root.join("left");
+        let right = root.join("right");
+        for wrapper in [&left, &right] {
+            for child in RETH_DB_OPENED_STORAGE_CHILDREN {
+                fs::create_dir_all(wrapper.join(child)).map_err(fixture_error)?;
+            }
+        }
+        let left_source = reth_source("left", &left)?;
+        let right_source = reth_source("right", &right)?;
+
+        let same = same_reth_path_identity(&left_source, &right_source)?;
+        fs::remove_dir_all(root).map_err(fixture_error)?;
+        assert!(!same, "distinct opened storage children remain independent");
+        Ok(())
+    }
+
+    fn reth_source(key: &str, datadir: &Path) -> RunnerResult<SourceConfig> {
+        SourceConfig::new(
+            "ethereum-mainnet",
+            key,
+            "reth_db",
+            SeedBasis::EthereumHead,
+            0,
+            datadir
+                .to_str()
+                .ok_or_else(|| RunnerError::data_integrity("non-UTF-8 test datadir"))?,
+        )
+    }
+
+    fn fixture_error(error: std::io::Error) -> RunnerError {
+        RunnerError::data_integrity(format!("reth identity fixture: {error}"))
     }
 }
