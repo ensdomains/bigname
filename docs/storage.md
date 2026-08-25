@@ -164,10 +164,10 @@ that active epoch to zero so the widened watch range is reproducible. A
 readmission after retirement remains bounded after the preceding epoch, and a
 fresh admission still stores its declared finite start. For compatibility,
 retained omitted-start manifest history supplies the zero widening floor even
-if Interpret's discovery refresh replaces the stored `NULL` with the
-first-observed block before the next manifest sync or an older binary left the
-same finite state ([issue #547](https://github.com/ensdomains/bigname/issues/547)). When a desired
-active declaration omits its start, synchronization restores zero on the
+when an older binary left a finite first-observed block. Interpret's discovery
+refresh now leaves the stored `NULL` untouched, fixing
+[issue #547](https://github.com/ensdomains/bigname/issues/547), so this repair is
+legacy-only. When a desired active declaration omits its start, synchronization restores zero on the
 earliest address epoch even if retired; later re-admitted epochs keep their
 bounded starts. It stamps the required Ingest redo from block zero (clamped to
 the earliest configured source start) and invalidates the derived phases for the

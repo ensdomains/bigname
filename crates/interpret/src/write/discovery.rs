@@ -80,11 +80,10 @@ pub(super) async fn write(
         })?;
         if let Some((row_id, current_start, current_hash, prior_end)) = active {
             let bounded_start = bound_address_epoch(address.active_from_block_number, prior_end)?;
-            let effective_start =
-                current_start.map_or(bounded_start, |start| start.min(bounded_start));
-            let effective_hash = if current_start == Some(effective_start) {
+            let effective_start = current_start.map(|start| start.min(bounded_start));
+            let effective_hash = if current_start == effective_start {
                 current_hash
-            } else if effective_start == address.active_from_block_number {
+            } else if effective_start == Some(address.active_from_block_number) {
                 Some(address.active_from_block_hash.clone())
             } else {
                 None
