@@ -167,7 +167,11 @@ retained omitted-start manifest history supplies the zero widening floor even
 when an older binary left a finite first-observed block. Interpret's discovery
 refresh now leaves the stored `NULL` untouched, fixing
 [issue #547](https://github.com/ensdomains/bigname/issues/547), so this repair is
-legacy-only. When a desired active declaration omits its start, synchronization restores zero on the
+legacy-only for the laundering sequence between unchanged synchronizations of
+an already-declared address, while it still intentionally fires when a finite
+discovery-created address row is later declared for the first time with an
+omitted start. When a desired active declaration omits its start,
+synchronization restores zero on the
 earliest address epoch even if retired; later re-admitted epochs keep their
 bounded starts. It stamps the required Ingest redo from block zero (clamped to
 the earliest configured source start) and invalidates the derived phases for the

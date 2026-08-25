@@ -201,6 +201,76 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
 }
 
 #[tokio::test]
+async fn rediscovery_below_retired_epoch_bounds_floor_and_drops_hash() -> TestResult {
+    let database = TestDatabase::create(TestDatabaseConfig::new(
+        "interpret_discovery_retired_epoch_bound",
+    ))
+    .await?;
+    for sql in [
+        include_str!("../../../../../schema-v2/baseline/01_chain.sql"),
+        include_str!("../../../../../schema-v2/baseline/03_identity.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(database.pool()).await?;
+    }
+
+    let instance_id = Uuid::from_u128(552);
+    let address = "0x0000000000000000000000000000000000000552";
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind
+         ) VALUES ($1, 'bound-test', 'contract')",
+    )
+    .bind(instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address,
+             active_from_block_number, active_from_block_hash,
+             active_to_block_number, active_to_block_hash,
+             admitted_at, deactivated_at
+         ) VALUES
+             ($1, 'bound-test', $2, 2, 'retired-start', 9, 'retired-end',
+              now() - interval '2 hours', now() - interval '1 hour'),
+             ($1, 'bound-test', $2, 20, 'active-start', NULL, NULL,
+              now(), NULL)",
+    )
+    .bind(instance_id)
+    .bind(address)
+    .execute(database.pool())
+    .await?;
+
+    let output = BatchOutput {
+        contract_addresses: vec![ContractAddress {
+            contract_instance_id: instance_id,
+            chain_id: "bound-test".to_owned(),
+            address: address.to_owned(),
+            active_from_block_number: 5,
+            active_from_block_hash: "discovery-block-5".to_owned(),
+            source_manifest_id: 552,
+            provenance: json!({"discovered_at": 5}),
+        }],
+        ..BatchOutput::default()
+    };
+    let mut transaction = database.pool().begin().await?;
+    write(&mut transaction, &output, false).await?;
+    transaction.commit().await?;
+
+    let active_floor: (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT active_from_block_number, active_from_block_hash
+         FROM contract_instance_addresses
+         WHERE contract_instance_id = $1 AND deactivated_at IS NULL",
+    )
+    .bind(instance_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(active_floor, (Some(10), None));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn values_boundary_and_idempotent_replay_persist_every_contract_instance() -> TestResult {
     let database = TestDatabase::create(TestDatabaseConfig::new(
         "interpret_contract_instances_values_boundary",
