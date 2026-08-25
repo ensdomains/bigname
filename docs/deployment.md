@@ -28,11 +28,16 @@ in-place change cannot preserve durable state. `phases` then invokes
 `phase-runner run` with `bigname_phase` as its search path. It can
 persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
-read-only verification phase compares Base's Coinbase-loaded range with dRPC
-through the `48,428,000` ingest seam and Ethereum Mainnet with local reth.
-Ethereum Sepolia instead records the
-[provider-trusted](glossary.md#verification-level) durable ingested extent
-through the finalized head. V2, GraphQL, and operational paths consume its
+read-only verification phase can compare Base's Coinbase-loaded range with dRPC
+through the `48,428,000` ingest seam and Ethereum Mainnet with local reth. In
+the current binary, whose five-field descriptors have no
+[source-role](glossary.md#source-role) field, those references come from the same configured
+source set used by intake, so `cross_checked` and `node_checked` do not prove
+source independence; Sepolia records
+[provider-trusted](glossary.md#verification-level) `quick_synced`. After Issue
+#411 enforcement lands, only a distinct verification-only reference will earn
+an independent level, and the target-covering intake cursor will record
+`quick_synced` without one. V2, GraphQL, and operational paths consume its
 phase projections and lookup output. Apply append-only SQLx schema-migrations
 through deployment automation; there is no application schema-migration command
 in the image. A release may also carry explicitly reviewed additive baseline
@@ -182,18 +187,21 @@ the verification URL:
 setting a writer session's default transaction to read-only does not remove
 that role's write authority, and startup rejects it.
 
-Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
-`CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
-contains the provider URL. Before Ingest can make its first provider write, the
-runner persists each configured source's cursor row with its kind, seed basis,
+The Issue #411 enforcement binary will accept each
+`BIGNAME_PHASE_RUNNER_SOURCES` entry in the form
+`CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV`; until part 2 lands, use
+the five-field form accepted by the current binary. The named
+environment variable contains the provider URL. Under the ratified contract,
+before Ingest can make its first provider write, the runner persists each
+[intake-capable source](glossary.md#source-role)'s cursor row with its kind, seed basis,
 and start block and with empty progress fields. On every chain, changing a
 source's normalized kind after that row exists is a data-integrity error checked
 before Ingest runs. Case-only changes, surrounding whitespace, and
 hyphen/underscore spelling changes are equivalent. Before a runnable Ingest
 phase contacts a provider, each row's seed basis and start block must also match
 the runtime source. A restart that skips an already-completed Ingest phase still
-requires every configured source's persisted key, kind, seed basis, and start
-block to match, and the configured source-key set must exactly match the
+requires every configured intake-capable source's persisted key, kind, seed basis, and start
+block to match, and the configured intake-capable source-key set must exactly match the
 persisted cursor keys. Interpret redo checks the same source-key set before it
 rewrites derived data. Any change to a persisted identity field—source key,
 normalized kind, seed basis, or start block—requires an explicitly reviewed
@@ -205,21 +213,29 @@ of persisted source identity. Retained raw facts, chain lineage, or header-audit
 any missing configured source row. Lineage and header rows can remain after a
 range with no watched transactions, receipts, or logs, and none of this output
 identifies its provider. The runner therefore cannot distinguish a safe source
-addition from replacement of the source that supplied it. Use the affected-chain
-wipe and resync under [verification mismatch repair](#verification-mismatch-repair)
-unless a narrower reset procedure has been separately reviewed. An ordinary
-redo is not that reset. Capacity, retry, and polling controls use the
+addition from replacement of the source that supplied it. The
+[verification-mismatch repair](#verification-mismatch-repair) section describes
+the state that a reviewed repair must cover, but it is not an executable reset
+authorization. For the Issue #411 source-role transition, only the
+[owner-ratified rollout gate](#owner-ratified-sepolia-source-role-rollout), its
+applicable reviewed reset and preservation procedure, and the owner-approved
+rollback and restoration plan authorize the reset. An ordinary redo is not that
+reset.
+Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
+For that rollout, [source roles](glossary.md#source-role) are `intake`, `verification-only`, and `both`; omission defaults to `both`. Only intake-capable keys will receive cursors or Ingest/Live requests, and only verification-only sources will earn `cross_checked` or `node_checked`; `both` will fall back to `quick_synced`. The enforcement binary will reject equal endpoints without exposure; intake-membership changes require reset. Stronger levels will be downgraded after provider-trusted revalidation, while `quick_synced` will not be auto-upgraded.
+Sepolia's from-zero sources for the Issue #411 rollout are `ethereum-sepolia:sepolia-intake:drpc:ethereum_head:0:intake=SEPOLIA_INTAKE_RPC_URL` and `ethereum-sepolia:sepolia-verify:drpc:ethereum_head:0:verification-only=SEPOLIA_VERIFY_RPC_URL`.
 The server Compose file forwards the documented `RETH_DATA_DIR` source and the
 hydration URL map. Its reth overlay bind-mounts `RETH_DATA_DIR` read-only at the
 same container path. Add any differently named provider environment variable
 to the phase-runner service explicitly; `docker compose --env-file` supplies
 interpolation values but does not expose arbitrary variables to a container.
-Base Verify requires exactly one `drpc` reference. Its independent reference
-records `cross_checked`; its start block and independent verification extent
-are fixed at the block `48,428,000` Coinbase-to-dRPC ingest seam. A moved dRPC
-source start or Verify redo above that seam is rejected before redo state is
-created. Base with `reth_db` is also rejected during configuration validation:
+With the Issue #411 enforcement binary, Base intake requires Coinbase history
+plus the target-covering dRPC at block `48,428,000`. An optional distinct
+verification-only dRPC records `cross_checked` through that seam; without one,
+the intake dRPC records `quick_synced`. A moved verification source start or
+comparison redo above the seam is rejected before redo state is created. Base
+with `reth_db` is also rejected during configuration validation:
 the pinned reader uses reth's Ethereum node type and Ethereum transaction and
 receipt primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
 (upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
@@ -227,12 +243,11 @@ receipt primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @
 implement a separate OP Stack transaction and receipt reader.
 Base-aware local database verification is tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433).
-`ethereum-mainnet` must configure one `reth_db` source; that source records
-`node_checked`. `ethereum-sepolia` must configure exactly one `drpc` intake
-source with `ethereum_head` seed basis and start block zero. Because that dRPC
-is the intake provider, Verify does not select it as a reference. Verify
-validates the durable ingested extent through its finalized marker and records
-`quick_synced` only when that exact source's persisted cursor matches its
+Under that enforcement, an explicit verification-only Ethereum Mainnet
+`reth_db` records `node_checked`; intake-capable reth alone records
+`quick_synced`. `ethereum-sepolia` requires exactly one `drpc` intake source at
+block zero. A distinct verification-only dRPC records `cross_checked`;
+otherwise Verify records `quick_synced` when the intake cursor matches its
 configuration and covers the finalized target. That binding and coverage are
 checked when verification completes, and the returned final block-number/hash
 marker must equal the frozen target before completion is recorded or Live can
@@ -240,13 +255,11 @@ run. A later reorg may orphan the retained cursor tip above that target, but
 the stored parent chain must still reach the exact frozen target hash; a fork
 at or below the target is rejected. The runner validates this exact Sepolia
 source shape before Ingest creates the source cursor or contacts the provider.
-Because that shape selects the provider-trusted verification path, the runner
-always completes Verify before starting Live even if Sepolia is omitted from
-`verify-before-live`. On every runner start, Verify checks the current
-configuration and cursor once against the completion-time target without
-changing the recorded `quick_synced` extent as Live finality moves. Separating
-intake and verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to
-[issue #411](https://github.com/ensdomains/bigname/issues/411). A generic RPC
+The runner always completes Verify before starting Live even if Sepolia is
+omitted from `verify-before-live`. For a provider-trusted completed row, Verify
+checks the current configuration and target-covering intake cursor against the
+completion-time target without changing the recorded extent as Live finality
+moves. A generic RPC
 kind is not accepted as Base verification authority
 because it does not identify the ratified independent provider.
 Each completed dRPC comparison batch logs its actual request count, including
@@ -285,9 +298,10 @@ It rechecks only a range inside the recorded verification extent: the range
 end cannot exceed the current verify cursor. Each batch is additionally
 constrained to finalized lineage. Blocks above the verify cursor are covered
 by normal verification resume, never by redo.
-Completion restores the pre-redo normal extent; a partial redo retains its
-level, while a redo covering the full retained extent can report the level
-fixed by its source kind. An interrupted attempt keeps the normal resumable
+Completion restores the pre-redo normal extent. After Issue #411 enforcement
+lands, a partial redo will keep the weaker of the retained full-extent level
+and the level available from the current source roles, while a redo covering
+the full retained extent can establish the current plan's level. An interrupted attempt keeps the normal resumable
 redo marker and must be rerun with the same range.
 Historical `live` redo is rejected because live follows only the current head.
 Live does not advance the finite per-source ingest cursors. Interpret redo
@@ -325,12 +339,13 @@ new hash. Later interruptions under the new hash resume normally. The locked
 begin rejects a stale token, including one from an earlier transition to the
 same authority. Manifest synchronization detects manifest-authored watch-plan
 widening over retained Ingest coverage and stamps the exact required Ingest
-range. Normal phase execution stops and prints the explicit `ingest` redo
-command; it never performs the potentially expensive historical fetch
-automatically. Complete that command before the attested Interpret redo.
+range. Normal phase execution stops and prints the `ingest` redo chain, phase,
+and range command prefix plus an instruction to append configured sources; it
+never performs the potentially expensive historical fetch automatically.
+Complete that command before the attested Interpret redo.
 Until it completes, the runner also refuses the start of any explicit
-Interpret, Project, or recompute-flags redo and repeats the exact required
-Ingest command. Supplying
+Interpret, Project, or recompute-flags redo and repeats the required Ingest
+command prefix and source instruction. Supplying
 `--attest-watch-set-coverage` does not override this refusal: the attestation
 describes retained-fact coverage, while the durable Ingest stamp records an
 uncompleted historical-fetch obligation.
@@ -412,7 +427,8 @@ published latest marker to an exact stored readable ancestor and uses normal
 head publication to orphan the suffix, clear affected divergence observations,
 and stamp downstream redo. If the rewind makes the end of an uncompleted
 required Ingest redo unreadable, the next supervised run first uses Live intake
-to publish the winning suffix and then repeats the exact pending command. When
+to publish the winning suffix and then repeats the pending command prefix and
+source instruction. When
 finite Ingest was interrupted before it recorded a handoff, that recovery-only
 Live pass anchors at the published readable ancestor.
 
@@ -447,7 +463,7 @@ cursor and does not re-verify the re-ingested prefix below that cursor. If an
 approved repair procedure intentionally preserves phase state, run verify redo
 from the durable ingest start through the retained verified extent (the current
 verify cursor). That range satisfies the full-extent condition and records the
-level fixed by its source kind again. Normal verification resume then covers
+current plan's level again. Normal verification resume then covers
 the re-ingested blocks above the cursor. A mismatch in the first-ever verify
 batch leaves no recorded verification extent, so no verify redo range is
 expressible and a full phase-state reset is the only repair. Under the
@@ -598,6 +614,33 @@ Configure
 API docs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
+
+## Owner-ratified Sepolia source-role rollout
+
+Do not begin this destructive rollout until the Issue #411 part-2 release
+artifact, two distinct endpoint secrets, and an owner-approved rollback and
+restoration procedure are available; a binary-only rollback is insufficient.
+No narrower per-chain reset procedure is checked in. The only checked-in reset
+broad enough to remove complete intake and source-identity state,
+[Replacing an initialized phase schema](#replacing-an-initialized-phase-schema),
+replaces the entire `bigname_phase` namespace and rebuilds every configured
+chain, not Sepolia alone. Its authorization is limited to a reviewed
+schema-migration that cannot preserve an initialized namespace; a source-role
+transition does not meet that condition. It therefore does not authorize this
+rollout, and using it would incorrectly give a nominally single-chain Sepolia
+transition whole-schema downtime, all-chain rebuild scope, and public-identity
+and audit-preservation obligations. The rollout must stop until part 2 supplies
+a reviewed per-chain reset and lossless preservation procedure. Never improvise
+a reset, data transfer, or rollback. Once that procedure exists, the
+owner-ratified from-zero Sepolia source-role rollout is: stop old runners and
+redo processes; deploy the part-2 binary and distinct secrets; configure and
+validate `sepolia-intake` as intake and `sepolia-verify` as verification-only;
+perform the reviewed per-chain reset; run Ingest through Verify before Live.
+Confirm only the intake cursor exists, Verify reaches its frozen target with
+`cross_checked`, match logs name `sepolia-verify`, and provider/operator request
+accounting shows zero Ingest/Live requests for that key. Do not substitute an
+ordinary redo. The required per-chain reset and preservation procedure is
+part-2 work.
 
 ## Removed operational surfaces
 

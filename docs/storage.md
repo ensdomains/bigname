@@ -506,8 +506,10 @@ active phase row to the non-paging `completed` state without claiming that the
 phase finished its work. If the chain is configured again, a completed Ingest
 row resumes unless its current block and live handoff match its target. A
 completed Verify row resumes unless it has a matching current/target block pair
-and a [verification level](glossary.md#verification-level). Ingest persists its
-summary and every source cursor in one transaction, so those completion markers
+and a [verification level](glossary.md#verification-level). Ingest already
+persists its summary and every configured source cursor in one transaction.
+After Issue #411 enforcement lands, that atomic set will contain only
+[intake-capable sources](glossary.md#source-role), so those completion markers
 cannot survive without the matching source progress. Recovery also clears the
 live handoff when it changes an active Ingest row to `completed`; this makes a
 later re-add resume from the preserved source cursors even if an older runner
@@ -614,8 +616,10 @@ Interpret redo proves raw-data presence without pretending that Live extended
 each finite ingest source. Each `ingest_cursors` row proves that the source
 reached from its configured start through its persisted target; Live does not
 advance those source cursors. Before checking range coverage, the redo guard
-requires the configured source-key set and every source's normalized kind,
-seed basis, and start block to match the persisted cursor identities. A runtime
+already requires the complete configured source-key set and each source's
+normalized kind, seed basis, and start block to match the persisted cursor
+identities. After Issue #411 enforcement lands, that same check will apply to
+the configured intake-capable source set. A runtime
 start above the redo range does not bypass that identity check. The guard also
 requires exactly one readable
 `chain_lineage` row at every height in the full execution range. Cursors and
