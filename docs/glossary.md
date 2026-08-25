@@ -260,9 +260,13 @@ an effective block-zero bound; refreshing its initial-epoch active address row
 materializes zero so a later finite declaration cannot recap that retained
 admission, and omitting a previously finite start backdates that active epoch to
 zero. Retained omitted-start manifest history contributes zero even when
-Interpret's discovery refresh rewrites the address row from `NULL` to its
-first-observed block or an older binary left the same finite state
-([issue #547](https://github.com/ensdomains/bigname/issues/547)). When a desired
+an older binary left a finite first-observed block. Interpret's discovery refresh
+now leaves the address row's `NULL` untouched, fixing
+[issue #547](https://github.com/ensdomains/bigname/issues/547), so this repair is
+legacy-only for the laundering sequence between unchanged synchronizations of
+an already-declared address, while it still intentionally fires when a finite
+discovery-created address row is later declared for the first time with an
+omitted start. When a desired
 active declaration omits its start, synchronization restores zero on the
 earliest address epoch even if retired; later re-admitted epochs keep their
 bounded starts. It stamps the required Ingest redo from block zero (clamped to

@@ -922,11 +922,14 @@ effective-zero floor. Conversely, omitting a previously finite start backdates
 that active epoch to zero, so the required redo can select the newly widened
 interval. Re-admitting a retired address still begins after its prior epoch.
 Retained omitted-start manifest history also contributes zero during widening
-classification. Interpret's discovery refresh can replace an initial epoch's
-stored `NULL` with the first-observed block before the next manifest sync, and
-older binaries may leave the same finite state
-([issue #547](https://github.com/ensdomains/bigname/issues/547)). When a desired
-active declaration omits its start, synchronization restores zero on the
+classification. Interpret's discovery refresh now leaves an initial epoch's
+stored `NULL` untouched, fixing
+[issue #547](https://github.com/ensdomains/bigname/issues/547); the laundering
+sequence between unchanged synchronizations of an already-declared address is
+legacy-only, while the repair still intentionally fires when a finite
+discovery-created address row is later declared for the first time with an
+omitted start. When a desired active declaration omits its start,
+synchronization restores zero on the
 earliest address epoch even if it has retired, while any re-admitted epoch
 remains bounded after it, stamps the required Ingest redo from block zero
 (clamped to the earliest configured source start), and invalidates the derived
