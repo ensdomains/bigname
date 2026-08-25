@@ -719,11 +719,14 @@ cold-restore reconstruction therefore depends on the predecessor remaining
 readable in the same input snapshot.
 
 For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
-[name surface](glossary.md#surface-name-surface) permanently establishes that
-the surface is known in restored protocol state. A registration release or
-expiry can remove the current binding and resource without removing that
-observation. Normalization-rejected name observations are not admitted to
-this state. Later `RecordChanged` and `RecordVersionChanged` resolver events
+[name surface](glossary.md#surface-name-surface), or a retained resolver
+`AliasChanged` preimage observation whose DNS name passes normalization,
+permanently establishes that the surface is known in restored protocol state.
+Alias restoration records only the known surface; it never creates or restores
+a resource binding. A registration release or expiry can remove the current
+binding and resource without removing that observation. Normalization-rejected
+name observations are not admitted to this state. Later `RecordChanged` and
+`RecordVersionChanged` resolver events
 therefore retain the logical-name attribution but carry no `resource_id` when
 no current resource exists, identically in a continuous walk and after a cold
 restore. Project's resource-keyed record inventory follows the resource's

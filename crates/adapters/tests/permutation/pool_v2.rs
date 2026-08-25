@@ -3,7 +3,7 @@ use alloy_sol_types::SolEvent;
 
 use super::{
     events::{V2Registrar, V2Registry, V2Resolver},
-    names::{labelhash, namehash},
+    names::{dns_encode, labelhash, namehash},
     scenario::{
         Action, AuthorityShape, Dimensions, ExpiryWindow, Perturbation, RecordState,
         RegistrationPath, SubnameShape, WrapState, action, emission, stage,
@@ -79,6 +79,8 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         let token = U256::from_be_bytes(hash.0);
         let resource = U256::from(0x0100_u64 + seat);
         let node = namehash(&[label, "eth"]);
+        let alias_label = format!("alias-{label}");
+        let alias_node = namehash(&[alias_label.as_str(), "eth"]);
 
         actions.push(action(
             format!("{label}:label-registered"),
@@ -163,6 +165,37 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 )],
             ));
         }
+
+        actions.push(action(
+            format!("{label}:alias"),
+            stage::WRITE,
+            vec![emission(
+                wires.resolver,
+                V2Resolver::AliasChanged {
+                    indexedFromName: alloy_primitives::keccak256(dns_encode(&[label, "eth"])),
+                    indexedToName: alloy_primitives::keccak256(dns_encode(&[
+                        alias_label.as_str(),
+                        "eth",
+                    ])),
+                    fromName: dns_encode(&[label, "eth"]).into(),
+                    toName: dns_encode(&[alias_label.as_str(), "eth"]).into(),
+                }
+                .encode_log_data(),
+            )],
+        ));
+        actions.push(action(
+            format!("{label}:alias-record"),
+            stage::LATE,
+            vec![emission(
+                wires.resolver,
+                V2Resolver::AddressChanged {
+                    node: alias_node,
+                    coinType: U256::from(60_u64),
+                    newAddress: owner.to_vec().into(),
+                }
+                .encode_log_data(),
+            )],
+        ));
 
         match dimensions.record_state {
             RecordState::NoResolver => {}

@@ -47,7 +47,7 @@ use permutation::{
         V1Wrapper, V2Registry, V2Resolver, declared_events,
     },
     invariants::{IdentityReferences, assert_upsert_guards_agree, converge, split},
-    names::{labelhash, namehash},
+    names::{dns_encode, labelhash, namehash},
     scenario::{self, BurstPhase},
     world::{
         BlockSpec, ENS_V1_MAINNET, ENS_V1_SEPOLIA, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World,
@@ -301,6 +301,47 @@ fn wrapped_past_grace_lapse_is_batch_grid_independent() -> Result<()> {
 }
 
 #[test]
+fn v2_alias_observed_record_name_link_is_batch_grid_independent() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let node = namehash(&["alias", "eth"]);
+    let expected_name = format!("ens:{node:#x}");
+    let input = v2_alias_observed_record_input(&wiring)?;
+    let converged = converge(
+        "directed=v2-alias-observed-record-name-link",
+        input,
+        vec![0..1, 1..2],
+    )?;
+    let whole_record = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("whole pass omitted the resolver record change")?;
+    let split_record = converged
+        .batches
+        .iter()
+        .flat_map(|batch| &batch.output.normalized_events)
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("split replay omitted the resolver record change")?;
+    assert_eq!(
+        (
+            whole_record.logical_name_id.as_deref(),
+            split_record.logical_name_id.as_deref(),
+            converged.artifacts.rebased_attributions,
+        ),
+        (
+            Some(expected_name.as_str()),
+            Some(expected_name.as_str()),
+            0
+        ),
+        "alias-observed names must survive restored and resumed batch boundaries"
+    );
+    Ok(())
+}
+
+#[test]
 fn v2_unregistered_record_name_link_is_batch_grid_independent() -> Result<()> {
     // Four logs distilled from generated seed 17846172577370688067: register and link a
     // resource without a resolver, unregister, then write the late resolver record in a later
@@ -482,6 +523,94 @@ fn v2_shadow_registry_preimage_does_not_gain_record_attribution_after_restore() 
         "a normalization-rejected name must not become attributable after restore"
     );
     Ok(())
+}
+
+#[test]
+fn v2_shadow_alias_preimage_does_not_gain_record_attribution_after_restore() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_alias_record_input(&wiring, "a\0b", "target")?;
+    let converged = converge("directed=v2-shadow-alias-preimage", input, vec![0..1, 1..2])?;
+    let whole_record = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("whole pass omitted the resolver record change")?;
+    let split_record = converged
+        .batches
+        .iter()
+        .flat_map(|batch| &batch.output.normalized_events)
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("split replay omitted the resolver record change")?;
+    assert_eq!(whole_record.logical_name_id, None);
+    assert_eq!(
+        whole_record.logical_name_id, split_record.logical_name_id,
+        "an alias name rejected by normalization must not become attributable after restore"
+    );
+    Ok(())
+}
+
+fn v2_alias_observed_record_input(wiring: &Wiring) -> Result<BatchInput> {
+    v2_alias_record_input(wiring, "alias", "target")
+}
+
+fn v2_alias_record_input(wiring: &Wiring, from_label: &str, to_label: &str) -> Result<BatchInput> {
+    const RESOLVER: &str = "ens_v2_resolver_l1";
+    let resolver = wiring.address(RESOLVER, "resolver");
+    let from_name = dns_encode(&[from_label, "eth"]);
+    let to_name = dns_encode(&[to_label, "eth"]);
+    let node = namehash(&[from_label, "eth"]);
+    let blocks = [
+        BlockSpec {
+            number: 20_000_020,
+            hash: format!("0x{:064x}", 0x5290_u64),
+            timestamp: 1_700_000_020,
+        },
+        BlockSpec {
+            number: 20_000_021,
+            hash: format!("0x{:064x}", 0x5291_u64),
+            timestamp: 1_700_000_021,
+        },
+    ];
+    let log = |block_index: usize, ordinal: u64, encoded: LogData| {
+        let emission = scenario::emission(resolver, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x5290_0000_u64 + ordinal),
+            transaction_index: 0,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = [
+        log(
+            0,
+            0,
+            V2Resolver::AliasChanged {
+                indexedFromName: keccak256(&from_name),
+                indexedToName: keccak256(&to_name),
+                fromName: from_name.into(),
+                toName: to_name.into(),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            1,
+            V2Resolver::AddressChanged {
+                node,
+                coinType: U256::from(60_u64),
+                newAddress: vec![0x52, 0x9].into(),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
 }
 
 /// Builds a released-name sequence followed by the supplied resolver events.
@@ -1268,6 +1397,7 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
     (
         ENS_V2_SEPOLIA.label,
         &[
+            "AliasChanged",
             "AuthorityTransferred",
             "ExpiryChanged",
             "ParentChanged",
@@ -1307,9 +1437,9 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// happen — `counts` omits zero-count classes. The 600-case sweep agrees with the fix on the
 /// classes it covered: ENSv1 `carried_before_states` fell 7 to 0 alongside the anchors, and the
 /// four ENSv2 `rebased_attributions` catalogued by issue #348 fell to 0 when restore began rebuilding
-/// the retained namehash-to-name observation. One structurally identified sibling shape stays open
-/// and unreached: a link created only by an alias observation carries no preimage metadata, so
-/// restore cannot rebuild it (issue #529); the corpus generates no alias-only names today.
+/// the retained namehash-to-name observation. Issue #529 extended the ENSv2 corpus with an
+/// alias-only name followed by a record write, so the sibling restore path is now generated as well
+/// as pinned by `v2_alias_observed_record_name_link_is_batch_grid_independent`.
 const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
     (ENS_V1_MAINNET.label, &[]),
     (ENS_V1_SEPOLIA.label, &[]),
@@ -1408,12 +1538,6 @@ const UNREACHED_EVENT_KINDS: &[(&str, &str, &str)] = &[
         "RegistrationRenewed",
         "numeric BaseRegistrar renewals are candidate-only ENSv1→ENSv2 migration input and the \
          dedicated ENSv1→ENSv2 migration corpus exercises their correlation",
-    ),
-    (
-        ENS_V2_SEPOLIA.label,
-        "AliasChanged",
-        "the resolver pool emits no AliasChanged; alias resolution has no interpreter state the \
-         convergence checks here would exercise",
     ),
     (
         ENS_V2_SEPOLIA.label,
@@ -1648,6 +1772,18 @@ fn volume_floors_fail_under_the_minimum() {
     let mut one_log_under = at;
     one_log_under[1].2 -= 1;
     assert!(assert_volume_floors(&one_log_under).is_err());
+}
+
+#[test]
+fn alias_changed_is_a_required_ens_v2_corpus_kind() {
+    let required = REQUIRED_EVENT_KINDS
+        .iter()
+        .find_map(|(world, kinds)| (*world == ENS_V2_SEPOLIA.label).then_some(*kinds))
+        .expect("ENSv2 required-event floor");
+    assert!(
+        required.contains(&"AliasChanged"),
+        "the generated alias restore path must stay in the ENSv2 coverage floor"
+    );
 }
 
 #[test]
