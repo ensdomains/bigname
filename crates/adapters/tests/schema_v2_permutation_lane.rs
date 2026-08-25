@@ -36,7 +36,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
-use bigname_adapters::schema_v2::{BatchInput, BatchOutput};
+use bigname_adapters::schema_v2::{
+    BatchInput, BatchOutput, interpret_schema_v2_batch,
+    seam::{self, INTERPRETER_STATE_KEY},
+};
 use serde_json::Value;
 
 use permutation::{
@@ -342,6 +345,71 @@ fn v2_alias_observed_record_name_link_is_batch_grid_independent() -> Result<()> 
 }
 
 #[test]
+#[ignore = "pre-existing named-resource/alias retained preimage key collision"]
+// Known defect: named-resource and alias preimages can compact onto the same retained key. Keep
+// this probe as evidence until a separate issue and fix domain-separate those observation classes.
+fn v2_named_resource_alias_retained_key_collision_is_batch_grid_independent() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_named_resource_alias_collision_input(&wiring)?;
+    let whole = interpret_schema_v2_batch(input.clone())?;
+    let collision_name = format!("ens:{:#x}", namehash(&["collision", "eth"]));
+    let preimage_key = |source_event: &str| {
+        whole
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.event_kind == "PreimageObserved"
+                    && event.logical_name_id.as_deref() == Some(collision_name.as_str())
+                    && event
+                        .after_state
+                        .get("source_event")
+                        .and_then(Value::as_str)
+                        == Some(source_event)
+            })
+            .and_then(|event| {
+                event
+                    .raw_fact_ref
+                    .get(INTERPRETER_STATE_KEY)
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_owned)
+            .with_context(|| format!("whole pass omitted the {source_event} preimage key"))
+    };
+    let named_key = preimage_key("NamedAddrResource")?;
+    let alias_key = preimage_key("AliasChanged")?;
+    assert_eq!(
+        named_key, alias_key,
+        "the probe must exercise the named-resource/alias retained-key collision"
+    );
+    let retained = seam::fold_prior_events(Vec::new(), &whole.normalized_events, &input.blocks)?;
+    let collided_rows = retained
+        .iter()
+        .filter(|event| event.retained_state_key == format!("state:{named_key}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        collided_rows.len(),
+        1,
+        "both observations must compact onto one retained key"
+    );
+    assert_eq!(
+        collided_rows[0]
+            .after_state
+            .get("source_event")
+            .and_then(Value::as_str),
+        Some("AliasChanged"),
+        "the later alias observation must win retained-key compaction"
+    );
+
+    converge(
+        "directed=v2-named-resource-alias-retained-key-collision",
+        input,
+        vec![0..2, 2..4],
+    )?;
+    Ok(())
+}
+
+#[test]
 fn v2_unregistered_record_name_link_is_batch_grid_independent() -> Result<()> {
     // Four logs distilled from generated seed 17846172577370688067: register and link a
     // resource without a resolver, unregister, then write the late resolver record in a later
@@ -554,6 +622,71 @@ fn v2_shadow_alias_preimage_does_not_gain_record_attribution_after_restore() -> 
 
 fn v2_alias_observed_record_input(wiring: &Wiring) -> Result<BatchInput> {
     v2_alias_record_input(wiring, "alias", "target")
+}
+
+fn v2_named_resource_alias_collision_input(wiring: &Wiring) -> Result<BatchInput> {
+    const RESOLVER: &str = "ens_v2_resolver_l1";
+    let resolver = wiring.address(RESOLVER, "resolver");
+    let from_name = dns_encode(&["collision", "eth"]);
+    let to_name = dns_encode(&["target", "eth"]);
+    let node = namehash(&["collision", "eth"]);
+    let resource = U256::from_be_bytes(node.0);
+    let account: Address = "0x0000000000000000000000000000000000000529".parse()?;
+    let blocks = (0..4)
+        .map(|index| BlockSpec {
+            number: 20_000_030 + index,
+            hash: format!("0x{:064x}", 0x5292_u64 + index as u64),
+            timestamp: 1_700_000_030 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, encoded: LogData| {
+        let emission = scenario::emission(resolver, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x5292_0000_u64 + ordinal),
+            transaction_index: 0,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = [
+        log(
+            0,
+            0,
+            V2Resolver::NamedAddrResource {
+                resource,
+                name: from_name.clone().into(),
+                coinType: U256::from(60_u64),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            1,
+            V2Resolver::AliasChanged {
+                indexedFromName: keccak256(&from_name),
+                indexedToName: keccak256(&to_name),
+                fromName: from_name.into(),
+                toName: to_name.into(),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            3,
+            2,
+            V2Resolver::EACRolesChanged {
+                resource,
+                account,
+                oldRoleBitmap: U256::ZERO,
+                newRoleBitmap: U256::from(1_u64),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
 }
 
 fn v2_alias_record_input(wiring: &Wiring, from_label: &str, to_label: &str) -> Result<BatchInput> {

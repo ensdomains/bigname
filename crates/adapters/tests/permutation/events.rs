@@ -164,6 +164,13 @@ sol! {
             bytes fromName,
             bytes toName
         );
+        event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
+        event EACRolesChanged(
+            uint256 indexed resource,
+            address indexed account,
+            uint256 oldRoleBitmap,
+            uint256 newRoleBitmap
+        );
         event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
         event TextChanged(
             bytes32 indexed node,
