@@ -166,7 +166,8 @@ for migration_file in \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
-    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql"
+    "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
+    "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -310,10 +311,7 @@ for migration_file in \
     "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
     "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql"
 do
-    {
-        printf 'SET search_path TO "%s";\n' "$scratch_schema"
-        sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
-    } | run_psql
+    sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
 
 # Exercise the authority-arm upgrade from its exact preceding empty binding
@@ -684,11 +682,9 @@ for ignored in 1 2; do
     sed "s/bigname_phase/$scratch_schema/g" \
         "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
         | run_psql
-    {
-        printf 'SET search_path TO "%s";\n' "$scratch_schema"
-        sed "s/bigname_phase/$scratch_schema/g" \
-            "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql"
-    } | run_psql
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
+        | run_psql
 done
 redo_attempt_generation_upgrade_check="$({
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
