@@ -553,10 +553,8 @@ loads the full range under those inputs. Existing active redo rows receive no
 backfill, so their first post-upgrade resume fails closed and requires that
 full-range reload.
 
-`chain_phase_state.redo_attempt_generation` is a nonnegative, row-local counter
-that increments whenever an explicit redo begins or a required redo stamp is installed or
-extended, including whenever resumable markers are invalidated. A batch carries that
-generation together with the persisted redo mode and the actual execution
+`chain_phase_state.redo_attempt_generation` has this contract: This nonnegative, row-local counter increments when an explicit redo begins and when the phase runner installs or extends a required redo stamp for a downstream phase (Interpret/Project). Manifest-synchronization Ingest stamps do not advance it; their superseded progress writes are fenced by the cleared manifest-authority fingerprint and stamped last_error instead.
+A batch carries that generation together with the persisted redo mode and the actual execution
 range chosen at begin time. Its pool-backed progress update, including the
 per-source boundary-marker map, succeeds only while all three values still
 match the active row. No match means another attempt has superseded the batch;
