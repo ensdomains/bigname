@@ -260,18 +260,11 @@ must remain valid, although their non-snapshot remaining rows and fields may
 reflect those explicit activated deltas. Any other difference or cursor
 rejection blocks the `ethereum-sepolia` publication decision.
 
-The production Verify phase validates `ethereum-sepolia`'s durable ingested
-extent through its finalized marker and records `quick_synced`. The configured
-dRPC source's persisted intake cursor must match its key, kind, seed basis, and
-start block and cover that finalized marker. The phase performs no
-independent comparison because the configured dRPC source also supplies intake;
-selecting it as a reference would only compare the provider with itself.
-Independent verification requires source-role separation and is deferred to
-[issue #411](https://github.com/ensdomains/bigname/issues/411), which will
-upgrade the chain to `cross_checked`. Project publishes before Verify in the
+The production Verify phase validates `ethereum-sepolia`'s durable ingested extent through its finalized marker. A distinct [verification-only](glossary.md#source-role) dRPC earns `cross_checked`; without one, the target-covering intake cursor earns `quick_synced` and is never selected as its own reference. The persisted intake cursor must match its key, kind, seed basis, and start block and cover that
+finalized marker. Project publishes before Verify in the
 pipeline sequence, but that publication remains unready and traffic-drained
 until Verify succeeds for the target. Slice-1 fixtures prove the Sepolia path
-reports `quick_synced` without calling a reference and that a phase cannot
+can report `quick_synced` without calling a reference and that a phase cannot
 persist a stronger, unearned level, accept a stale or mismatched intake cursor,
 or proceed to Live.
 Omitting, disabling, or replacing Verify with a no-op is not an acceptable

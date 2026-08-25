@@ -299,10 +299,7 @@ phase's lifecycle state, redo marker, and newest per-chain heartbeat in
 unconfigured is not eligible for `ready` until genuine phase completion or
 completed-state revalidation clears that marker. It reports `degraded` unless
 a stronger `stale` condition applies, such as a genuinely failed phase or an
-expired heartbeat. For Ethereum Sepolia, readiness also requires its
-[provider-trusted](glossary.md#verification-level) `verify` phase to be
-`completed` with `quick_synced` evidence and its `ingest` phase to remain
-`completed`.
+expired heartbeat. For Ethereum Sepolia, readiness also requires its [verification](glossary.md#verification-level) phase to be `completed` at or above the `quick_synced` readiness floor and its `ingest` phase to remain `completed`; `cross_checked` and `node_checked` satisfy that floor, while an unknown stored level fails closed.
 A failed Ingest or Verify, or an ordinary completed Verify without that
 evidence, maps to `stale`. An idle, running, paused, or missing Ingest or Verify
 maps to `degraded`. An expired runner heartbeat remains `stale` while either

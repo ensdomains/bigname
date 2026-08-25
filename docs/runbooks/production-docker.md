@@ -230,6 +230,14 @@ indexes are additive; rollback may leave them in place.
 
 1. stop the API and phase runner;
 2. take and verify a database backup;
+   For the Issue #411 Sepolia [source-role rollout](../glossary.md#source-role), follow the
+   [owner-ratified walk gate](../deployment.md#owner-ratified-sepolia-source-role-rollout):
+   perform the approved affected-chain reset after this backup, then complete a
+   full Ingest-through-Verify walk before Live. The preservation and optional
+   Ingest-redo instructions below do not apply to that affected chain; they are
+   not substitutes for its reset and full [source re-walk](../glossary.md#re-derivation-boundary). Require
+   `cross_checked`, and use provider/operator request accounting to confirm the
+   verification-only key received zero Ingest/Live requests;
 3. for the release containing Issue #400, apply and validate the concurrent
    baseline indexes above; otherwise skip this step;
    For the release containing
@@ -285,20 +293,14 @@ indexes are additive; rollback may leave them in place.
 9. start the long-running phase runner only after those one-shot redos succeed,
    let the production Verify phase complete for every affected chain, and require
    its reviewed verification path rather than omitting or bypassing Verify;
-   `ethereum-sepolia` must finish `quick_synced` over the selected durable
-   ingested extent after accepting exactly one `drpc` intake source with
-   `ethereum_head` seed basis and start block zero. That dRPC is the intake
-   provider; confirm its persisted cursor matches that configured source and
-   covers the finalized Verify target. This release
-   performs no independent Sepolia comparison; source-role separation and the
-   `cross_checked` upgrade are tracked in
-   [issue #411](https://github.com/ensdomains/bigname/issues/411);
+   `ethereum-sepolia` must finish `cross_checked` for the Issue #411 rollout; other configurations use `cross_checked` when a distinct [verification-only](../glossary.md#source-role) dRPC is configured, or `quick_synced` from the target-covering intake cursor without one.
+   Confirm exactly one intake dRPC uses `ethereum_head` and start block zero, only its cursor exists, and the finalized Verify target is covered;
 10. confirm the phase state directly in the database while the API is still
    stopped — the `project` row in `chain_phase_state` current with no pending
    redo, and Verify success from the `verify` row for each affected chain plus
    the supervisor's Verify completion output (`/v2/status` cannot be used here
    because the API is stopped; after startup, it reads the required Sepolia
-   Verify status and `quick_synced` evidence as part of publication readiness);
+   Verify status and evidence at or above `quick_synced` as part of publication readiness);
 11. start the API built from the same commit and confirm `/v2/status` reports
    current phase state and no pending redo; and
 12. run the release smoke and public-edge checks before undraining traffic.
@@ -481,7 +483,7 @@ error while another chain continues running.
    Pin the one-shot container to `<recovery-image>`. Copy every source
    descriptor for the affected chain exactly from the deployed configuration
    and repeat `--source` once for each descriptor. Each descriptor has the
-   `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV` form. The explicit arguments
+   `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV` form. The explicit arguments
    override the multi-chain `BIGNAME_PHASE_RUNNER_SOURCES` value for this
    one-off redo:
 

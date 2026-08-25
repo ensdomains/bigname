@@ -107,6 +107,11 @@ lose the named-resource resolver hint and diverge from a fresh walk
 in as an ignored collision probe). See [interpretation
 replay](storage.md#interpretation-replay).
 
+**Source role** — whether a configured provider may serve `intake`, is
+`verification-only`, or may serve `both`. Intake-capable sources receive
+cursors and feed Ingest and Live; only verification-only sources can earn an
+independent [verification level](#verification-level).
+
 **Stored-history verification** — the read-only phase that validates a chain's
 stored extent through a finalized block and, when the chain has an independent
 reference, compares canonical selected raw logs with it. Base uses dRPC to
@@ -114,10 +119,8 @@ cross-check the Coinbase-loaded history and cannot extend that independent
 comparison past the Coinbase-to-dRPC ingest seam. Base `reth_db` verification
 is unsupported and tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433). Ethereum Mainnet
-uses local reth for a node check. Ethereum Sepolia validates its durable
-ingested extent and records provider trust without an independent comparison;
-source-role separation is deferred to
-[issue #411](https://github.com/ensdomains/bigname/issues/411). The phase records
+uses a distinct verification-only reth for a node check and otherwise records provider trust. Ethereum Sepolia validates its durable ingested extent: it compares with a distinct verification-only dRPC when one is
+configured, and otherwise records provider trust without comparing intake with itself. The phase records
 only its block extent, trust level, and any fatal mismatch in phase state. It
 does not write coverage attestations or repair raw data.
 
@@ -126,8 +129,11 @@ history through its reported verification extent: `quick_synced` is
 provider-trusted bootstrap data, `cross_checked` matched an independent
 provider, and `node_checked` matched a local node. The live-follow block is a
 separate position rather than a verification level. A partial verification
-redo rechecks its requested range but retains the level that applies to the
-whole recorded extent; only a full-extent redo can change that level. A normal
+redo rechecks its requested range and keeps the weaker of the retained
+full-extent level and the level available from the current source roles; it can
+downgrade but cannot upgrade the whole extent. The current plan's level is the
+maximum allowed by the configured source roles and chain policy for the checked
+range. A full-extent redo can establish that level. A normal
 scan starts from the durable ingest extent. If it resumes through a reference
 with a different level, the completed extent retains the weaker level rather
 than upgrading the already-checked prefix.

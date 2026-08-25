@@ -267,10 +267,7 @@ Field ownership:
   genuine phase completion or completed-state revalidation clears that marker.
   It reports `degraded` unless a stronger `stale` condition applies, such as a
   genuinely failed phase or an expired heartbeat.
-  Ethereum Sepolia is not eligible for `ready` until its
-  [provider-trusted](glossary.md#verification-level) `verify` phase is
-  `completed` with `quick_synced` evidence and its `ingest` phase remains
-  `completed`. A failed Ingest or Verify, or an ordinary completed Verify without that
+  Ethereum Sepolia is not eligible for `ready` until its [verification](glossary.md#verification-level) phase is `completed` at or above the `quick_synced` readiness floor and its `ingest` phase remains `completed`. The known stronger levels satisfy that floor; unknown stored levels fail closed. A failed Ingest or Verify, or an ordinary completed Verify without that
   evidence, is `stale`; an idle, running, paused, or missing Ingest or Verify is
   `degraded`. An expired runner heartbeat remains `stale` while either required
   phase is incomplete. Chains without this requirement omit those Ingest and

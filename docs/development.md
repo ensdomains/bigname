@@ -72,12 +72,8 @@ writer has been removed.
 
 The current phase runner implements `ingest`, `interpret`, `project`, read-only
 `verify`, and continuous `live` follow. Verification operates only on finalized
-history. Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest
-seam, while Ethereum Mainnet local reth records `node_checked` through its
-finalized marker. Ethereum Sepolia validates its durable provider-trusted
-ingested extent and records `quick_synced`; its dRPC intake source is not reused
-as an independent reference. Source roles and a Sepolia `cross_checked` path
-are tracked in [issue #411](https://github.com/ensdomains/bigname/issues/411).
+history. A distinct [verification-only](glossary.md#source-role) Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest
+seam, while an explicit verification-only Ethereum Mainnet reth records `node_checked`; Ethereum Sepolia records `cross_checked` with a distinct verification-only dRPC and otherwise `quick_synced`.
 V2 verified name, record, and ENS/60 primary-name reads use the phase runner's
 schema-v2 lookup state. Other API reads use phase projections.
 
@@ -89,7 +85,7 @@ export BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=manifests/mainnet
 export BIGNAME_PHASE_RUNNER_CHAINS=ethereum-mainnet
 export BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL=postgresql://bigname_verify:<secret>@127.0.0.1:5432/bigname
 export RETH_DATA_DIR=/var/lib/reth/mainnet
-export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
+export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:reth:reth_db:ethereum_head:0:both=RETH_DATA_DIR
 export BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545
 ```
 
@@ -117,19 +113,18 @@ cargo phase -- redo \
   --source ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
 ```
 
-Use `--phase verify` with the same `reth_db` descriptor to recheck a finalized
-Ethereum range; it also requires
+Use `--phase verify` with the intake descriptors plus a distinct verification-only `reth_db` descriptor to earn `node_checked` for a finalized Ethereum range; without the independent descriptor it records `quick_synced`. Verify also requires
 `BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL` (or
-`--verification-database-url`). Base Verify redo requires one `drpc` reference.
-It records `cross_checked`, must retain the fixed `48,428,000` source start, and
-rejects a range above that seam before writing the redo marker. A Base
+`--verification-database-url`). Base Verify uses the required target-covering
+intake dRPC for `quick_synced`, or an optional distinct dRPC reference for
+`cross_checked` through the fixed `48,428,000` seam. Comparison redo above that
+seam is rejected before writing the redo marker. A Base
 `reth_db` reference is explicitly unsupported and tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433); the operator
 rationale and pinned reth evidence are in [deployment](deployment.md). A partial
-redo retains the level for the whole recorded extent, while a full-extent redo
-can change it.
-Sepolia verify redo does not select an intake descriptor as a reference and
-records `quick_synced` for the finalized durable extent.
+redo keeps the weaker of the retained full-extent level and the level available
+from the current source roles; a full-extent redo can establish the current plan's level.
+Sepolia Verify redo records `cross_checked` with a distinct verification-only dRPC and otherwise records `quick_synced` without selecting intake as a reference.
 The reader URL must authenticate the dedicated role directly and resolve to the
 same PostgreSQL system/database identity as `BIGNAME_DATABASE_URL`.
 

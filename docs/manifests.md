@@ -1052,7 +1052,7 @@ phase-runner redo \
   --phase ingest \
   --from-block <first-affected-block> \
   --to-block <last-affected-block> \
-  --source <CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV>
+  --source <CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV>
 ```
 
 An ingest redo fetches and retains the newly selected facts, but intentionally
