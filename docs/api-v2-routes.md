@@ -87,16 +87,26 @@ That identical-product continuation rule applies to a re-walk whose declared
 contract preserves product behavior. An intentional [interpreter content
 hash](glossary.md#interpreter-content-hash) change may instead have a documented
 field and route-membership delta. For the
-[#348](https://github.com/ensdomains/bigname/issues/348) change, an existing late
+[#348](https://github.com/ensdomains/bigname/issues/348) and
+[#529](https://github.com/ensdomains/bigname/issues/529) changes, an existing late
 ENSv2 resolver `RecordChanged` or `RecordVersionChanged` keeps its
 `event_identity`, gains `logical_name_id`, keeps `resource_id=null`, and updates
 the corresponding `raw_fact_ref.interpreter_state_key` attribution field. Its
 `before_state` may also become the preceding `after_state` from the
-logical-name/resource-null state stream that the event now joins. Those events
+logical-name/resource-null state stream that the event now joins. Issue #348
+retains the surface from registry/root evidence; issue #529 retains a surface
+observed only by resolver `AliasChanged` before a batch boundary. Those events
 may consequently enter name-filtered diagnostics and product history. An
 outstanding cursor has no continuation guarantee across this behavior-changing
-boundary and may be rejected. Consumers must discard pre-#348 cursors and
+boundary and may be rejected. Consumers must discard pre-#348/#529 cursors and
 restart from the first page; fresh post-publication cursors continue normally.
+This boundary does not claim fresh/resumed parity for the known pre-existing
+exception: when a resolver-emitted resource equals `namehash(N)`,
+named-resource and alias preimages can share one retained [interpreter state
+key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
+named-resource resolver hint and diverge from a fresh walk
+([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
+in as an ignored collision probe).
 If an ended resource retains a resolver pointer to the emitter, its rebuildable
 record-inventory projection may change. The event remains resource-less and
 does not restore `name_current.resource_id`, so the released or expired name's
@@ -1328,8 +1338,9 @@ so there is no persisted artifact to explain. See
   A behavior-preserving full re-walk may assign a different numeric
   `normalized_event_id` to a pre-existing row while its `event_identity` and
   pre-existing semantic fields remain stable; the numeric ID change and the
-  candidate fields are explicit diagnostic-only deltas. The intentional #348
-  interpreter change is the documented exception above: `RecordChanged` and
+  candidate fields are explicit diagnostic-only deltas. The intentional
+  #348/#529 interpreter changes are the documented exception above:
+  `RecordChanged` and
   `RecordVersionChanged` can gain `logical_name_id`, keep `resource_id=null`,
   update `raw_fact_ref.interpreter_state_key`, and rethread `before_state` on
   the same resolver event identity.

@@ -67,10 +67,13 @@ Public identity rules:
 - permissions and control are resource-first and keyed by `resource_id`
 - token IDs are never treated as logical identity
 - a time-ranged `SurfaceBinding` joins `logical_name_id` to `resource_id`
-- a canonical ENSv2 registry/root `PreimageObserved` keeps its [name
-  surface](../glossary.md#surface-name-surface) known after its active binding
-  and resource end; later node-scoped records keep `logical_name_id` but do not
-  inherit the ended `resource_id`
+- a canonical ENSv2 registry/root `PreimageObserved`, or a resolver
+  `AliasChanged` preimage observation whose DNS name passes normalization, keeps
+  its [name surface](../glossary.md#surface-name-surface) known after its active
+  binding and resource end; later node-scoped records keep `logical_name_id`
+  but do not inherit the ended `resource_id`, and alias restoration never
+  creates a resource binding; this cross-run rule has one known pre-existing
+  exception described below
 
 ENSv1 authority-anchor rules:
 
@@ -131,11 +134,19 @@ Resource-centric permissions follow the same lifecycle: while one ENSv1 authorit
 
 Two public surfaces may bind to the same `resource_id`. Permissions and role history stay attached to the resource; surface-specific reads keep their own binding provenance.
 
-A retained canonical registry/root `PreimageObserved` rebuilds the known name
-surface during replay even after registration release or expiry closed its
-binding. A later resolver `NameChanged` or `VersionChanged` for that node
+A retained canonical registry/root `PreimageObserved`, or a resolver
+`AliasChanged` preimage observation whose DNS name passes normalization,
+rebuilds the known name surface during replay even after registration release
+or expiry closed its binding. Alias evidence never creates or restores a
+resource binding. A later resolver `NameChanged` or `VersionChanged` for that node
 remains attributed to the surface without an active `resource_id`. The
-resolver stores records by node and version. `setName` passes part zero,
+known exception is when a resolver-emitted resource equals `namehash(N)`:
+named-resource and alias preimages can share one retained [interpreter state
+key](../glossary.md#interpreter-state-key), so resumed interpretation can lose
+the named-resource resolver hint and diverge from a fresh walk
+([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
+in as an ignored collision probe). The resolver stores records by node and
+version. `setName` passes part zero,
 selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no
 current registry-registration lookup. (upstream:

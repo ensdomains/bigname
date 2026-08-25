@@ -718,16 +718,25 @@ cold-restore reconstruction therefore depends on the predecessor remaining
 readable in the same input snapshot.
 
 For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
-[name surface](glossary.md#surface-name-surface) permanently establishes that
-the surface is known in restored protocol state. A registration release or
-expiry can remove the current binding and resource without removing that
-observation. Normalization-rejected name observations are not admitted to
-this state. Later `RecordChanged` and `RecordVersionChanged` resolver events
+[name surface](glossary.md#surface-name-surface), or a retained resolver
+`AliasChanged` preimage observation whose DNS name passes normalization,
+permanently establishes that the surface is known in restored protocol state.
+Alias restoration records only the known surface; it never creates or restores
+a resource binding. A registration release or expiry can remove the current
+binding and resource without removing that observation. Normalization-rejected
+name observations are not admitted to this state. Later `RecordChanged` and
+`RecordVersionChanged` resolver events
 therefore retain the logical-name attribution but carry no `resource_id` when
 no current resource exists, identically in a continuous walk and after a cold
-restore. Project's resource-keyed record inventory follows the resource's
-latest retained `ResolverChanged` pointer. When an ended resource still has a
-pointer to the emitting resolver, the newly attributed event can therefore
+restore, except for the known retained preimage-key collision: when a
+resolver-emitted resource equals `namehash(N)`, named-resource and alias
+preimages can share one retained [interpreter state
+key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
+named-resource resolver hint and diverge from a fresh walk
+([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
+in as an ignored collision probe). Project's resource-keyed record inventory
+follows the resource's latest retained `ResolverChanged` pointer. When an ended
+resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
 resource-less. This does not restore a current binding: name and record reads
 join inventory through `name_current.resource_id`, which remains null for the

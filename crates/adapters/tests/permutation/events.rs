@@ -158,6 +158,19 @@ sol! {
     }
 
     interface V2Resolver {
+        event AliasChanged(
+            bytes indexed indexedFromName,
+            bytes indexed indexedToName,
+            bytes fromName,
+            bytes toName
+        );
+        event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
+        event EACRolesChanged(
+            uint256 indexed resource,
+            address indexed account,
+            uint256 oldRoleBitmap,
+            uint256 newRoleBitmap
+        );
         event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
         event TextChanged(
             bytes32 indexed node,
@@ -234,6 +247,7 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V2Registry::Upgraded,
             V2Registrar::NameRegistered,
             V2Registrar::NameRenewed,
+            V2Resolver::AliasChanged,
             V2Resolver::AddressChanged,
             V2Resolver::TextChanged,
             V2Resolver::NameChanged,

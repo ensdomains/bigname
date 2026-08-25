@@ -7,6 +7,20 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
 }
 pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
     if event.source_family == "ens_v2_resolver_l1" && event.event_kind == "PreimageObserved" {
+        if event
+            .after_state
+            .get("source_event")
+            .and_then(Value::as_str)
+            == Some("AliasChanged")
+            && event
+                .after_state
+                .get("visibility_state")
+                .and_then(Value::as_str)
+                != Some("shadow")
+            && let Some(logical_name_id) = event.logical_name_id.as_ref()
+        {
+            state.observe_name_surface(logical_name_id.clone());
+        }
         if let (Some(resolver), Some(upstream_resource), Some(logical_name_id)) = (
             event.after_state.get("resolver").and_then(Value::as_str),
             event

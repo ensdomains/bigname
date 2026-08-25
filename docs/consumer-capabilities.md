@@ -157,17 +157,27 @@ statements that complete migration groups remain candidate-only.
 | 3B. Children publication invariant | Stage the parent-child relation each authority arm states into `project_child_candidates` and publish the arm the child's own staged authority selects, so recency orders only the current relation inside that one arm and never picks the arm: an unmigrated ENSv1 child keeps its ENSv1 relation below a migrated parent, a child with an activated ENSv1→ENSv2 migration boundary or a current positive ENSv2 registration publishes its ENSv2 relation over retained ENSv1 residue, a released ENSv2 child publishes nothing and does not fall back, and a pair whose arms disagree with no authority proof is omitted as unsupported rather than ranked. Add the ordered child assertion that fails a Mainnet [projection generation](glossary.md#projection-generation) with failure kind `dual_current_child_authority` only when a child holding `migration_authority_transition` or `positive_v2_child_registration` authority has an ENSv1 parent-child relation asserted after its authority epoch started, write the child transition relative to the ENSv1 cleanup, and scope the redo reopen to the authority arm. Activating a complete ENSv1→ENSv2 migration group remains the separate follow-on. | 4 (children projection builder, Project integrity assertion, child transition writer, redo reopen) plus one reviewed schema-migration file for the failure-kind vocabulary |
 | Final activation. Production [complete groups](glossary.md#complete-group) | Run the already-proven activation function after all batch correlation paths finish; activate all five authority paths and complete non-boundary normalized rows while retaining candidate-only diagnostic effect records; preserve named refusals, ordinary events, exact predecessor selection, and Sepolia's non-blocking overlap rule; rotate the [interpreter content hash](glossary.md#interpreter-content-hash) and require the full Interpret→Project walk before publication. Coverage is enumerated in [`migration-activation-coverage.md`](migration-activation-coverage.md). | 4 adapter production files, one of which deletes the superseded helper; no schema, manifest, API, or Project vocabulary change |
 
-Issue [#348](https://github.com/ensdomains/bigname/issues/348) ships at its own
+Issues [#348](https://github.com/ensdomains/bigname/issues/348) and
+[#529](https://github.com/ensdomains/bigname/issues/529) ship together at one
 [interpreter content hash](glossary.md#interpreter-content-hash)
 [re-derivation boundary](glossary.md#re-derivation-boundary), before the
-combined slice/PR-#391 boundary. Its allowed product delta arises from late
+combined slice/PR-#391 boundary. Their allowed product delta arises from late
 ENSv2 resolver `RecordChanged` and `RecordVersionChanged` rows for a retained
 canonical [name surface](glossary.md#surface-name-surface): `event_identity`
 stays fixed, `logical_name_id` becomes non-null, `resource_id` stays null,
 `raw_fact_ref.interpreter_state_key`
 changes with the attribution, and `before_state` may rethread onto the
-logical-name/resource-null state stream. Those rows may newly enter
-name-filtered diagnostics and product history. An ended resource whose latest
+logical-name/resource-null state stream. Issue #348 retains the surface from
+registry/root evidence; issue #529 retains a surface observed only by resolver
+`AliasChanged` before a batch boundary. Those rows may newly enter
+name-filtered diagnostics and product history. This boundary does not claim
+fresh/resumed parity for the known pre-existing exception: when a
+resolver-emitted resource equals `namehash(N)`, named-resource and alias
+preimages can share one retained [interpreter state
+key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
+named-resource resolver hint and diverge from a fresh walk
+([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
+in as an ignored collision probe). An ended resource whose latest
 retained `ResolverChanged` pointer names the emitting resolver may also receive
 a different rebuildable `record_inventory_current` row; the released or
 expired name must still have no current binding or resource, and its name and
@@ -175,10 +185,11 @@ record reads must not expose that inventory. The boundary invalidates the
 continuation contract for outstanding collection cursors; consumers restart
 from the first page. Acceptance verifies the declared normalized-event and
 inventory-row deltas, proves the ended name remains unbound with no served
-record inventory, and verifies fresh complete pages, fields, membership, and
+record inventory, verifies both surface-retention triggers, and verifies fresh
+complete pages, fields, membership, and
 cursor continuation under the new publication. Any other product difference
-blocks that publication. The later combined-boundary gate uses the post-#348
-publication as its behavior-preserving baseline.
+blocks that publication. The later combined-boundary gate uses the
+post-#348/#529 publication as its behavior-preserving baseline.
 
 Slices 1, 2A, 2B, and 2C are separately reviewed and separately merged implementation
 PRs, but deploy together at the same planned [re-derivation

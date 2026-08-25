@@ -628,19 +628,29 @@ post-re-walk cursors.
 That identical-product continuation rule applies only when the declared
 [re-derivation boundary](glossary.md#re-derivation-boundary) preserves product
 semantics. The intentional
-[#348](https://github.com/ensdomains/bigname/issues/348) interpreter change keeps
+[#348](https://github.com/ensdomains/bigname/issues/348) and
+[#529](https://github.com/ensdomains/bigname/issues/529) interpreter changes keep
 an ENSv2 resolver `RecordChanged.event_identity` or
 `RecordVersionChanged.event_identity`, changes `logical_name_id` from null to
 the retained canonical [name surface](glossary.md#surface-name-surface), keeps
 `resource_id` null, and updates the attribution embedded in
 `raw_fact_ref.interpreter_state_key`. Its `before_state` may also become the
 preceding `after_state` from the logical-name/resource-null state stream that
-the event now joins. The event may therefore newly enter name-filtered
+the event now joins. Issue #348 retains the surface from registry/root
+evidence; issue #529 retains a surface observed only by resolver
+`AliasChanged` before a batch boundary. The event may therefore newly enter name-filtered
 diagnostics and product history. A cursor issued before that change has no
 continuation guarantee and may be rejected. Consumers must discard
-pre-#348 cursors and restart from the first page; fresh post-publication cursors
-continue normally. If an ended resource still retains a resolver pointer to the
-emitter, its rebuildable record-inventory projection may change too. The
+pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
+continue normally. This boundary does not claim fresh/resumed parity for the
+known pre-existing exception: when a resolver-emitted resource equals
+`namehash(N)`, named-resource and alias preimages can share one retained
+[interpreter state key](glossary.md#interpreter-state-key), so resumed
+interpretation can lose the named-resource resolver hint and diverge from a
+fresh walk ([#560](https://github.com/ensdomains/bigname/issues/560); evidence
+is checked in as an ignored collision probe). If an ended resource still
+retains a resolver pointer to the emitter, its rebuildable record-inventory
+projection may change too. The
 resource-less late event does not restore `name_current.resource_id`, so name
 and record reads for the released or expired name continue to expose no current
 record inventory.

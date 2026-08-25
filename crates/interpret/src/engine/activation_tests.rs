@@ -53,6 +53,8 @@ mod base_registrar {
 }
 
 sol! {
+    event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName);
+    event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
     event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry);
     event NameUnwrapped(bytes32 indexed node, address owner);
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
@@ -66,6 +68,9 @@ mod unlocked_wrapped;
 
 #[path = "activation_tests/equivalence.rs"]
 mod equivalence;
+
+#[path = "activation_tests/alias_equivalence.rs"]
+mod alias_equivalence;
 
 /// Exercises the checked-in Sepolia manifests through the production adapter and transition
 /// writer. Its BaseRegistrar address is pinned upstream here:

@@ -191,7 +191,7 @@ async fn project_full(pool: &PgPool) -> TestResult {
     Ok(())
 }
 
-async fn install_stage_capture(pool: &PgPool) -> TestResult {
+pub(super) async fn install_stage_capture(pool: &PgPool) -> TestResult {
     sqlx::raw_sql(
         "CREATE TABLE activation_project_stage_capture (
              stage_kind text NOT NULL,
@@ -259,7 +259,9 @@ async fn plant_valid_replay_marker(
     Ok(())
 }
 
-async fn semantic_end_state(pool: &PgPool) -> TestResult<Vec<(String, serde_json::Value)>> {
+pub(super) async fn semantic_end_state(
+    pool: &PgPool,
+) -> TestResult<Vec<(String, serde_json::Value)>> {
     let tables = [
         ("normalized_events", "normalized_event_id"),
         ("migration_event_associations", ""),
@@ -348,7 +350,7 @@ fn remove_generated_event_ids(value: &mut serde_json::Value) {
     }
 }
 
-fn first_json_difference(
+pub(super) fn first_json_difference(
     left: &serde_json::Value,
     right: &serde_json::Value,
     path: &str,
