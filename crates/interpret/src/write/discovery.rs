@@ -6,8 +6,7 @@ use crate::{InterpretError, Result};
 
 use super::batching::{batch_row_context, conflict_free_batches};
 
-type ActiveAddressEpoch = (i64, Option<i64>, Option<String>, Option<i64>);
-
+type ActiveAddressEpoch = (i64, Option<i64>, Option<String>, Option<i64>, Option<i64>);
 pub(super) async fn write(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
@@ -59,7 +58,17 @@ pub(super) async fn write(
                          AND lower(history.address) = lower(current.address)
                          AND history.contract_instance_address_id <>
                              current.contract_instance_address_id
-                   ) AS prior_epoch_end
+                   ) AS prior_epoch_end,
+                   (
+                       SELECT max(history.active_to_block_number)
+                       FROM contract_instance_addresses history
+                       WHERE history.contract_instance_id = current.contract_instance_id
+                         AND history.chain_id = current.chain_id
+                         AND lower(history.address) = lower(current.address)
+                         AND history.deactivated_at IS NOT NULL
+                         AND history.provenance ->> 'source' IN
+                             ('manifest_declaration', 'manifest_proxy_implementation')
+                   ) AS manifest_retired_through
             FROM contract_instance_addresses current
             WHERE current.contract_instance_id = $1
               AND current.chain_id = $2
@@ -78,7 +87,10 @@ pub(super) async fn write(
         .map_err(|error| {
             InterpretError::database("failed to lock discovered address epoch", error)
         })?;
-        if let Some((row_id, current_start, current_hash, prior_end)) = active {
+        if let Some((row_id, current_start, current_hash, prior_end, retired_through)) = active {
+            if retired_through.is_some_and(|end| address.active_from_block_number <= end) {
+                continue;
+            }
             let bounded_start = bound_address_epoch(address.active_from_block_number, prior_end)?;
             let effective_start = current_start.map(|start| start.min(bounded_start));
             let effective_hash = if current_start == effective_start {
@@ -93,8 +105,18 @@ pub(super) async fn write(
                 UPDATE contract_instance_addresses
                 SET active_from_block_number = $2,
                     active_from_block_hash = $3,
-                    source_manifest_id = $4,
-                    provenance = $5
+                    source_manifest_id = CASE
+                        WHEN provenance ->> 'source' IN
+                            ('manifest_declaration', 'manifest_proxy_implementation')
+                        THEN source_manifest_id
+                        ELSE $4
+                    END,
+                    provenance = CASE
+                        WHEN provenance ->> 'source' IN
+                            ('manifest_declaration', 'manifest_proxy_implementation')
+                        THEN provenance
+                        ELSE $5
+                    END
                 WHERE contract_instance_address_id = $1
                 ",
             )
@@ -110,9 +132,14 @@ pub(super) async fn write(
             })?;
             continue;
         }
-        let prior_end: Option<i64> = sqlx::query_scalar(
+        let (prior_end, manifest_retired_through): (Option<i64>, Option<i64>) = sqlx::query_as(
             "
-            SELECT max(active_to_block_number)
+            SELECT max(active_to_block_number),
+                   max(active_to_block_number) FILTER (
+                       WHERE deactivated_at IS NOT NULL
+                         AND provenance ->> 'source' IN
+                             ('manifest_declaration', 'manifest_proxy_implementation')
+                   )
             FROM contract_instance_addresses
             WHERE contract_instance_id = $1
               AND chain_id = $2
@@ -127,6 +154,9 @@ pub(super) async fn write(
         .map_err(|error| {
             InterpretError::database("failed to bound new discovered address epoch", error)
         })?;
+        if manifest_retired_through.is_some_and(|end| address.active_from_block_number <= end) {
+            continue;
+        }
         let bounded_start = bound_address_epoch(address.active_from_block_number, prior_end)?;
         let bounded_hash = (bounded_start == address.active_from_block_number)
             .then_some(&address.active_from_block_hash);

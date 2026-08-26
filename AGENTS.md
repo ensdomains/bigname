@@ -20,9 +20,11 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 
 - Schema-v2 interpret writes identity rows, discovery edges, and normalized
   events. Before deleting a redo range, Interpret may also preserve the small
-  set of resolver references that Project consumes during replay; those rows
-  are coordination state, not projection or serving data. Adapters provide
-  interpretation behavior and do not write projection rows.
+  set of resolver references that Project consumes during replay and finitely
+  retired manifest-declared address ranges that keep older observations from
+  reopening retired authority. Those rows are coordination state, not
+  projection or serving data. Adapters provide interpretation behavior and do
+  not write projection rows.
 - API code reads phase projections, normalized events, and request-scoped lookup
   output only, except explicit audit endpoints and the schema-v2 lookup engine's
   guarded [resolution divergence

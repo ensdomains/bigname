@@ -202,6 +202,13 @@ async fn prepare_redo_range(
         DELETE FROM contract_instance_addresses address
         WHERE address.chain_id = $1
           AND address.active_from_block_number BETWEEN $2 AND $3
+          AND NOT (
+              address.deactivated_at IS NOT NULL
+              AND address.provenance ->> 'source' IN (
+                  'manifest_declaration',
+                  'manifest_proxy_implementation'
+              )
+          )
           AND NOT EXISTS (
               SELECT 1
               FROM manifest_contract_instances declaration
