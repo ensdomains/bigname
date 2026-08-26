@@ -1214,11 +1214,20 @@ current manifest-authority marker nor an active audited redo remains flagless.
 Manifest declaration changes produce the `SourceManifestUpdated` [normalized
 event](glossary.md). Its state includes proxy declarations and the staged
 authored capability fields, so manifest synchronization does not mint separate
-proxy- or capability-change event kinds. The synchronization transaction also
-invalidates completed interpret and project phase content hashes for changed
-chains. The deleted admission-epoch and full-source reconciliation writers no
-longer participate; phase redo applies the new authority to discovery and
-projection state.
+proxy- or capability-change event kinds. Each `SourceManifestUpdated` event
+written by current synchronization carries `raw_fact_ref.applied_change_count`,
+the per-manifest transition counter incremented once for each applied manifest
+transition in the same transaction, and that counter participates in
+`event_identity`; older events retain their original `raw_fact_ref` and
+identities. When persisted manifest authority already matches the desired
+declaration but the newest stored event is missing or its `after_state`
+disagrees with that persisted state, synchronization appends another
+`SourceManifestUpdated` that re-derives the current-state transition without
+changing manifest authority.
+The synchronization transaction also invalidates completed interpret and
+project phase content hashes for changed chains. The deleted admission-epoch
+and full-source reconciliation writers no longer participate; phase redo
+applies the new authority to discovery and projection state.
 
 The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 
