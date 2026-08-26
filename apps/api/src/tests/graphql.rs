@@ -1975,6 +1975,65 @@ async fn graphql_name_order_uses_stored_normalized_name_bytes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+
+    let config = database.database_config(1)?;
+    let options = PgConnectOptions::from_str(
+        config
+            .database_url
+            .as_deref()
+            .context("GraphQL SQL-capture database URL is missing")?,
+    )?
+    .options([("search_path", "bigname_phase".to_owned())]);
+    let capture_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let state = AppState::new_with_rpc_urls(
+        capture_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    )
+    .with_public_namespaces_for_test(["ens", "basenames"]);
+
+    for direction in ["asc", "desc"] {
+        post_graphql(
+            state.clone(),
+            &format!(
+                r#"query Domains($where: DomainFilter!) {{
+                    domains(where: $where, orderBy: name, orderDirection: {direction}) {{ name }}
+                }}"#
+            ),
+            json!({ "where": { "owner": GRAPHQL_FALLBACK_HOLDER } }),
+        )
+        .await?;
+    }
+
+    let prepared_statements: Vec<String> = sqlx::query_scalar(
+        "SELECT statement FROM pg_prepared_statements \
+         WHERE statement LIKE '%canonical_display_name%'",
+    )
+    .fetch_all(&capture_pool)
+    .await?;
+    for direction in ["ASC", "DESC"] {
+        let expected = format!(
+            "ORDER BY canonical_display_name COLLATE \"C\" {direction}, \
+             namespace ASC, normalized_name ASC, namehash ASC"
+        );
+        assert!(
+            prepared_statements
+                .iter()
+                .any(|statement| statement.contains(&expected)),
+            "GraphQL name {direction} SQL must include `{expected}`"
+        );
+    }
+
+    capture_pool.close().await;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
