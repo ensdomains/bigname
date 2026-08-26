@@ -36,9 +36,11 @@ All collection routes use the standard `page` object: `cursor`,
 The top-level latest-state collections are `GET /v2/names/{name}/subnames`,
 `GET /v2/names/{name}/history`, `GET /v2/permissions`,
 `GET /v2/addresses/{address}/names`,
-`GET /v2/addresses/{address}/history`, `GET /v2/search`, `GET /v2/events`,
-and `GET /v2/diagnostics/events`. They omit `meta.as_of` and
-`meta.as_of_token`, and their cursors bind the collection anchor, namespace,
+`GET /v2/addresses/{address}/history`, `GET /v2/search`, `GET /v2/events`, and
+`GET /v2/diagnostics/events`. They omit `meta.as_of` and
+`meta.as_of_token`, except that search reports request-scoped `meta.as_of` and
+`meta.as_of_completeness` for staleness and suppression disclosure while still
+omitting `meta.as_of_token`. Their cursors bind the collection anchor, namespace,
 filters, and sort without claiming a frozen snapshot. Newly issued cursors
 carry no snapshot token; a legacy cursor's snapshot component is ignored. They
 accept omitted or explicit `finality=latest`. An `at` selector returns `400 invalid_input` with
@@ -230,8 +232,17 @@ Field ownership:
   declaration change returns `409 conflict`. A redo that begins mid-request, an
   invalid target, phase lag, readiness change, or other mid-request
   head/projection change returns the existing retryable `409 stale`, never a
-  partial page. Name-only lookup does not use public namespace derivation and is
-  unaffected.
+  partial page. For a bare public reverse request, the request scope contains
+  every active public namespace's chains even when the readable namespace set
+  excludes one of them. Readable chains appear in `meta.as_of`; an excluded
+  request-scope chain appears in `meta.as_of_completeness` with
+  `completeness=unsupported` and
+  `unsupported_reason=temporarily_unavailable`. Name-only lookup does not use
+  public namespace derivation: its inferred or explicit namespace determines
+  the chain scope, and out-of-scope chains are absent from both disclosure maps.
+  In a mixed name-and-address batch, reverse suppression takes precedence over
+  a real `meta.as_of` entry for the same chain. `meta.as_of_token` can still
+  contain the position actually used by the name input.
 - Replaces (v1): `POST /v1/identity:lookup`.
 
 ### `GET /v2/status`
@@ -1017,20 +1028,31 @@ Field ownership:
 - Pagination behavior: standard collection pagination. Without an explicit
   namespace, the cursor binds the deployment-derived namespace set and is
   rejected if that set changes.
-- Snapshot behavior: search rows come from current state. The response omits
-  `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
-  validity claim. True as-of search enumeration is deferred to the
+- Snapshot behavior: search rows come from current state. The response reports
+  readable request-scope positions in `meta.as_of` and reports each suppressed
+  request-scope chain in `meta.as_of_completeness` with
+  `completeness=unsupported` and
+  `unsupported_reason=temporarily_unavailable`. A bare request accounts for
+  every active public namespace's chains. An explicit namespace accounts only
+  for that namespace's chains, even when another public namespace is readable.
+  Returned search rows do not change that denominator. The response omits
+  `meta.as_of_token`, and its cursor carries no snapshot validity claim. True
+  as-of search enumeration is deferred to the
   revision-bound storage follow-up. Bare search reloads the active manifest
   declarations, selected authority chain heads, project generations, and
   Interpret redo state after reading its page; a redo that begins mid-request
   or another captured-state change returns the existing retryable `409 conflict`,
-  never a partial page.
+  never a partial page. Explicit-namespace search likewise captures its
+  request-scope metadata before reading the page and reloads it afterward; a
+  head, completed publication generation, or readiness change returns `409
+  conflict` rather than attributing the page to a later position.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
   required; a missing or empty `q` returns `400 invalid_input`. An explicit
   recognized namespace bypasses public namespace derivation and reads its
-  current rows without a deployment-readiness gate, including the Interpret
-  redo check, preserving the existing behavior. Bare search excludes a
-  namespace while its selected authority chain has Interpret
+  current rows without a deployment-readiness gate, while its metadata still
+  discloses a request-scope chain suppressed by that gate. A disclosure change
+  during the read returns `409 conflict`. Bare search excludes a namespace
+  while its selected authority chain has Interpret
   `redo_in_progress=true`, regardless of redo mode, and returns `409 conflict`
   when no public namespace is ready or when its captured deployment state
   changes during the read.

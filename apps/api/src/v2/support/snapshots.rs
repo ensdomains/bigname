@@ -23,6 +23,22 @@ pub(crate) struct PublicNamespaceDeployment {
     read_token: Option<PublicNamespaceReadToken>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RequestScopeSnapshot {
+    pub(super) scope: SnapshotSelectionScope,
+    pub(super) selected: Option<SelectedSnapshot>,
+}
+
+impl RequestScopeSnapshot {
+    pub(crate) fn scope(&self) -> &SnapshotSelectionScope {
+        &self.scope
+    }
+
+    pub(crate) fn selected(&self) -> Option<&SelectedSnapshot> {
+        self.selected.as_ref()
+    }
+}
+
 impl PublicNamespaceDeployment {
     pub(crate) fn scope(&self) -> &SnapshotSelectionScope {
         &self.scope
@@ -32,6 +48,7 @@ impl PublicNamespaceDeployment {
 #[derive(Clone, Debug)]
 pub(crate) struct PublicNamespaceSet {
     deployments: Arc<[PublicNamespaceDeployment]>,
+    request_scope: Arc<[RequestScopeSnapshot]>,
     manifest_tokens: Arc<[PublicNamespaceManifestToken]>,
     names: Arc<[String]>,
 }
@@ -39,6 +56,7 @@ pub(crate) struct PublicNamespaceSet {
 impl PublicNamespaceSet {
     fn new(
         deployments: Vec<PublicNamespaceDeployment>,
+        request_scope: Vec<RequestScopeSnapshot>,
         manifest_tokens: Vec<PublicNamespaceManifestToken>,
     ) -> Self {
         let names = deployments
@@ -47,6 +65,7 @@ impl PublicNamespaceSet {
             .collect::<Vec<_>>();
         Self {
             deployments: Arc::from(deployments),
+            request_scope: Arc::from(request_scope),
             manifest_tokens: Arc::from(manifest_tokens),
             names: Arc::from(names),
         }
@@ -54,6 +73,10 @@ impl PublicNamespaceSet {
 
     pub(crate) fn deployments(&self) -> &[PublicNamespaceDeployment] {
         &self.deployments
+    }
+
+    pub(crate) fn request_scope(&self) -> &[RequestScopeSnapshot] {
+        &self.request_scope
     }
 
     pub(crate) fn names(&self) -> &[String] {
@@ -87,6 +110,7 @@ impl PublicNamespaceSet {
 pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<PublicNamespaceSet> {
     if let Some(namespaces) = state.public_namespaces_override() {
         let mut deployments = Vec::new();
+        let mut request_scope = Vec::new();
         for namespace in namespaces.iter() {
             let active_chains = match namespace.as_str() {
                 "ens" => BTreeSet::from(["ethereum-mainnet"]),
@@ -96,6 +120,11 @@ pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<P
             if let Some(scope) =
                 public_namespace_snapshot_scope(&state.pool, namespace, &active_chains).await?
             {
+                let read_token = load_request_scope_snapshot(&state.pool, &scope).await?;
+                request_scope.push(RequestScopeSnapshot {
+                    scope: scope.clone(),
+                    selected: read_token.map(|token| token.selected),
+                });
                 deployments.push(PublicNamespaceDeployment {
                     namespace: namespace.clone(),
                     scope,
@@ -103,7 +132,11 @@ pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<P
                 });
             }
         }
-        return Ok(PublicNamespaceSet::new(deployments, Vec::new()));
+        return Ok(PublicNamespaceSet::new(
+            deployments,
+            request_scope,
+            Vec::new(),
+        ));
     }
 
     let manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
@@ -115,6 +148,7 @@ async fn derive_public_namespace_set_from_manifests(
     manifest_tokens: Vec<PublicNamespaceManifestToken>,
 ) -> ApiResult<PublicNamespaceSet> {
     let mut deployments = Vec::new();
+    let mut request_scope = Vec::new();
     for manifest_token in &manifest_tokens {
         let active_chains = manifest_token
             .manifests
@@ -127,34 +161,51 @@ async fn derive_public_namespace_set_from_manifests(
         else {
             continue;
         };
-        let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
-            .map_err(snapshot_selection_api_error)?;
-        match resolve_exact_name_snapshot_selection(&state.pool, &scope, &input).await {
-            Ok(selected) => {
-                let Some(project_generations) =
-                    load_public_namespace_project_generations(&state.pool, &selected).await?
-                else {
-                    continue;
-                };
-                deployments.push(PublicNamespaceDeployment {
-                    namespace: manifest_token.namespace.clone(),
-                    scope,
-                    read_token: Some(PublicNamespaceReadToken {
-                        selected,
-                        project_generations,
-                    }),
-                });
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    SnapshotSelectionErrorKind::Conflict | SnapshotSelectionErrorKind::Stale
-                ) => {}
-            Err(error) => return Err(snapshot_selection_api_error(error)),
+        let read_token = load_request_scope_snapshot(&state.pool, &scope).await?;
+        request_scope.push(RequestScopeSnapshot {
+            scope: scope.clone(),
+            selected: read_token.as_ref().map(|token| token.selected.clone()),
+        });
+        if let Some(read_token) = read_token {
+            deployments.push(PublicNamespaceDeployment {
+                namespace: manifest_token.namespace.clone(),
+                scope,
+                read_token: Some(read_token),
+            });
         }
     }
 
-    Ok(PublicNamespaceSet::new(deployments, manifest_tokens))
+    Ok(PublicNamespaceSet::new(
+        deployments,
+        request_scope,
+        manifest_tokens,
+    ))
+}
+
+async fn load_request_scope_snapshot(
+    pool: &PgPool,
+    scope: &SnapshotSelectionScope,
+) -> ApiResult<Option<PublicNamespaceReadToken>> {
+    let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
+        .map_err(snapshot_selection_api_error)?;
+    let selected = match resolve_exact_name_snapshot_selection(pool, scope, &input).await {
+        Ok(selected) => selected,
+        Err(error)
+            if matches!(
+                error.kind(),
+                SnapshotSelectionErrorKind::Conflict | SnapshotSelectionErrorKind::Stale
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(snapshot_selection_api_error(error)),
+    };
+    Ok(load_public_namespace_project_generations(pool, &selected)
+        .await?
+        .map(|project_generations| PublicNamespaceReadToken {
+            selected,
+            project_generations,
+        }))
 }
 
 pub(crate) async fn revalidate_public_namespace_set(

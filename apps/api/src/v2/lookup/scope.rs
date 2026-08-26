@@ -6,12 +6,29 @@ use tracing::error;
 use crate::{
     AppState,
     v2::support::{
-        PublicNamespaceSet, derive_public_namespace_set, revalidate_lookup_public_namespace_set,
+        PublicNamespaceSet, apply_request_scope_completeness, derive_public_namespace_set,
+        revalidate_lookup_public_namespace_set,
     },
 };
 
-use super::{super::chains::deployment_profile_for_slug, parse::ParsedNameLookup};
-use crate::v2::{V2Error, V2Result, api_error_to_v2, v2_exact_name_snapshot_scope};
+use super::{
+    super::chains::deployment_profile_for_slug, head::ServedHead, parse::ParsedNameLookup,
+};
+use crate::v2::{Meta, V2Error, V2Result, api_error_to_v2, v2_exact_name_snapshot_scope};
+
+pub(super) fn lookup_request_scope_meta(
+    served_head: Option<&ServedHead>,
+    namespaces: Option<&PublicNamespaceSet>,
+) -> V2Result<Meta> {
+    let mut meta = served_head
+        .map(ServedHead::meta)
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(namespaces) = namespaces {
+        apply_request_scope_completeness(&mut meta, namespaces.request_scope())?;
+    }
+    Ok(meta)
+}
 
 pub(super) async fn lookup_snapshot_scope(
     state: &AppState,

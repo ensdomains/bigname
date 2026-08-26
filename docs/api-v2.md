@@ -67,6 +67,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
 | `source` | answer origin `indexed` or `verified` (the records route adds request value `auto`) | `mode` = `declared`/`verified`/`both`/`auto`; `declared_state`/`verified_state` |
 | `as_of` | readable per-chain `{block_number, block_hash, timestamp}`, keyed by `chain_id` | `chain_positions` (and the `execution_checkpoint` pseudo-slot is diagnostics-only) |
+| `as_of_completeness` | per-chain positions suppressed from `as_of`, keyed by `chain_id`, with `{completeness, unsupported_reason}` | inferring request coverage from whichever rows happened to be returned |
 | `as_of_token` | opaque URL-safe snapshot token for replaying the exact served positions with `at` | reconstructing `at` from `chain_positions` |
 | `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
 | `include` | route-documented expansion allowlist | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
@@ -209,6 +210,12 @@ One success shape applies to every route:
         "timestamp": "2026-06-10T00:00:00Z"
       }
     },
+    "as_of_completeness": {
+      "8453": {
+        "completeness": "unsupported",
+        "unsupported_reason": "temporarily_unavailable"
+      }
+    },
     "as_of_token": "opaque-token",
     "completeness": "partial",
     "unsupported_fields": ["role_summary"],
@@ -234,7 +241,9 @@ Rules:
 - `meta` is always present. Single-resource routes that read chain-derived state
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Top-level collection routes omit
-  both because their mutable latest-state rows are not bound to one snapshot.
+  both because their mutable latest-state rows are not bound to one snapshot,
+  except that `/v2/search` reports request-scoped `meta.as_of` positions as
+  human-readable staleness attribution and still omits `meta.as_of_token`.
   Control-plane routes (`/v2/status`, `/v2/namespaces/{namespace}`) omit both.
   Verified name and record responses keep the same metadata shape as their
   indexed peers. The authoritative position identifies the projection snapshot
@@ -253,6 +262,22 @@ Rules:
   `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
   read is not clean. `meta.source` appears when the route supports `source`.
+- Public reverse requests to `POST /v2/lookup` and all `GET /v2/search`
+  requests disclose the chain scope selected by the request. A public reverse
+  request or search without an explicit `namespace` accounts for the chains of
+  every active public namespace; an explicit search namespace accounts only
+  for that namespace's chains. Name-only lookup retains its inferred or
+  explicit namespace scope. A chain with a readable position appears under
+  `meta.as_of`. A chain suppressed by the deployment-readiness check instead
+  appears under `meta.as_of_completeness` as
+  `{completeness:"unsupported", unsupported_reason:"temporarily_unavailable"}`.
+  The two maps have disjoint keys, and their union is exactly the request's
+  chain scope; returned rows never reduce that denominator. The sibling map is
+  omitted when no in-scope chain is suppressed. A suppressed chain is not added
+  to `meta.as_of_token` solely for disclosure. In a mixed lookup batch, the
+  token can still contain that chain when another input actually uses its
+  snapshot position; the suppression entry takes precedence over a
+  human-readable `meta.as_of` entry because some requested data was withheld.
 - `meta.unsupported_fields` names response-level sections or expansions the
   route could not serve. Record-level `unsupported_fields` names data fields
   the index could not prove for that record. One unsupported field is not
@@ -446,18 +471,20 @@ Common parameter rules:
 | `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
-For a cross-namespace read with no explicit `namespace`, the API derives the
-namespace set at request time from recognized public namespaces whose active
-[source manifests](manifests.md) have a completed projection publication at the
-current head of the namespace's authority chain in the selected deployment. It
-excludes a namespace while its selected authority chain has Interpret
+For a cross-namespace read with no explicit `namespace`, the API accounts for
+every recognized public namespace with active
+[source manifests](manifests.md). It separately determines which of those
+namespaces may serve rows: their active manifests must have a completed
+projection publication at the current head of the namespace's authority chain
+in the selected deployment. A namespace may not serve rows while its selected
+authority chain has Interpret
 `redo_in_progress=true`, regardless of redo mode. An Interpret redo rewrites
 previously served identity history batch by batch, so a page read during the
 redo can be incomplete even while Project still reports its prior completed
 head.
 Bare search and public reverse lookup filter current rows and counts to exactly
-that set, and public reverse lookup builds its snapshot scope from the same
-authority chains. After reading a bare search page, the API reloads the active
+the eligible namespaces, and public reverse lookup builds its snapshot scope
+from the same authority chains. After reading a bare search page, the API reloads the active
 manifest declarations, selected authority chain heads, and completed projection
 publication generations captured during derivation, and confirms that no
 selected authority chain began an Interpret redo. Any change returns the
@@ -469,17 +496,24 @@ Interpret redo check: a manifest change returns `409 conflict`, while a redo,
 head, or publication change returns the existing retryable `409 stale`. A redo
 that begins after derivation therefore never exposes a partial page through
 either route.
-Their namespace-omitted cursors bind that derived set and fail closed if it
+Explicit-namespace search captures its request-scope metadata before reading
+the page and reloads it afterward. A head, completed publication generation, or
+readiness change returns the same retryable `409 conflict` instead of
+attributing the page to a position selected after the rows were read.
+Their namespace-omitted cursors bind that derived namespace list and fail closed if it
 changes. Search with an explicit recognized `namespace` bypasses public
 namespace derivation and reads that namespace's current rows without a
 deployment-readiness gate, including the Interpret redo check, preserving the
 pre-derivation behavior. Name-only lookup likewise keeps its existing name
 snapshot selection and does not derive the public set; only address inputs
 invoke public reverse derivation.
-Completeness metadata is relative to the effective request set, so omitting a
-namespace does not make a response partial merely because the deployment does
-not serve another public namespace. A bare cross-namespace read returns `409
-conflict` when that effective set is empty.
+The chains accounted for by `meta.as_of` and `meta.as_of_completeness` are
+selected by the namespace parameter and input kinds, not by the namespaces
+eligible to serve rows or the rows returned. An explicit namespace does not
+account for another public namespace's chains. A bare cross-namespace read
+returns `409 conflict` when no public namespace may serve rows; when at least
+one may serve rows, every other in-scope chain is disclosed through
+`meta.as_of_completeness`.
 
 Unknown or undocumented query parameters are rejected with `400 invalid_input`
 on every `v2` route. As a documented temporary exception, latest-state
@@ -529,6 +563,10 @@ response carries `meta.as_of`, keyed by stringified `chain_id`, and
 `meta.as_of_token`, an opaque token that can round-trip as `at` to pin exact
 per-chain positions. Tokens must cover every required slot in the target
 route's snapshot scope and must not carry extra slots outside that scope.
+For lookup and search responses that account for chains selected by the
+request, the target route's served snapshot scope can be narrower than that
+chain scope; every additional in-scope chain is reported under
+`meta.as_of_completeness` and is not added to the token.
 
 The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
@@ -551,8 +589,9 @@ from `chain_heads`, project progress from the `project` row in
 `chain_lineage` rows.
 
 Top-level collections page over mutable latest-state tables. They therefore
-omit `meta.as_of` and `meta.as_of_token`, and their cursors do not claim a
-snapshot bound. Newly issued collection cursors carry no snapshot token; a
+omit `meta.as_of` and `meta.as_of_token`, except that search reports
+request-scoped `meta.as_of` for staleness attribution while still omitting
+`meta.as_of_token`. Their cursors do not claim a snapshot bound. Newly issued collection cursors carry no snapshot token; a
 legacy cursor's snapshot component is ignored rather than treated as a
 validity condition. Omitted `finality` and explicit `finality=latest` are accepted.
 An `at` selector returns `400 invalid_input` with

@@ -10,7 +10,7 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
     assert_eq!(payload["page"]["page_size"], json!(50));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(payload["meta"], json!({}));
+    assert_search_meta_chains(&payload, &["1"], &[]);
 
     let data = payload["data"]
         .as_array()
@@ -103,7 +103,7 @@ async fn v2_search_lowercases_q_and_filters_namespace() -> Result<()> {
         v2_search_names(public["data"].as_array().expect("public data")),
         vec!["alpha.base.eth", "alpha.eth"]
     );
-    assert_eq!(public["meta"], json!({}));
+    assert_search_meta_chains(&public, &["1", "8453"], &[]);
 
     let basenames =
         v2_search_payload_for_database(&database, "/v2/search?q=alpha&namespace=basenames").await?;
@@ -133,7 +133,7 @@ async fn v2_search_bare_scope_matches_the_served_deployment_namespaces() -> Resu
         v2_search_names(codeployed["data"].as_array().expect("codeployed data")),
         vec!["alpha.base.eth", "alpha.eth"]
     );
-    assert_eq!(codeployed["meta"], json!({}));
+    assert_search_meta_chains(&codeployed, &["1", "8453"], &[]);
 
     let ens_only = v2_search_payload_for_database_with_public_namespaces(
         &database,
@@ -145,7 +145,7 @@ async fn v2_search_bare_scope_matches_the_served_deployment_namespaces() -> Resu
         v2_search_names(ens_only["data"].as_array().expect("ENS-only data")),
         vec!["alpha.eth"]
     );
-    assert_eq!(ens_only["meta"], json!({}));
+    assert_search_meta_chains(&ens_only, &["1"], &[]);
     assert!(ens_only["meta"].get("completeness").is_none());
 
     let explicit_basenames = v2_search_payload_for_database_with_public_namespaces(
@@ -449,7 +449,7 @@ async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpo
         v2_search_names(payload["data"].as_array().expect("search data")),
         vec!["alpha.eth"]
     );
-    assert_eq!(payload["meta"], json!({}));
+    assert_search_meta_chains(&payload, &["11155111"], &[]);
     sepolia.cleanup().await?;
 
     let codeployed = TestDatabase::new_migrated().await?;
@@ -552,7 +552,7 @@ async fn v2_search_bare_request_narrows_when_a_publication_is_not_ready() -> Res
         v2_search_names(payload["data"].as_array().expect("search data")),
         vec!["alpha.eth"]
     );
-    assert_eq!(payload["meta"], json!({}));
+    assert_search_meta_chains(&payload, &["1"], &["8453"]);
 
     database.cleanup().await
 }
@@ -616,13 +616,13 @@ async fn v2_search_bare_request_recovers_when_publication_becomes_ready() -> Res
         v2_search_names(payload["data"].as_array().expect("search data")),
         vec!["alpha.base.eth", "alpha.eth"]
     );
-    assert_eq!(payload["meta"], json!({}));
+    assert_search_meta_chains(&payload, &["1", "8453"], &[]);
 
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_search_derivation_excludes_interpret_redo_but_explicit_namespace_bypasses()
+async fn v2_search_discloses_interpret_redo_for_bare_and_explicit_namespace_requests()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
@@ -657,6 +657,15 @@ async fn v2_search_derivation_excludes_interpret_redo_but_explicit_namespace_byp
         v2_search_names(bare_payload["data"].as_array().expect("bare search data")),
         vec!["alpha.eth"]
     );
+    assert!(bare_payload["meta"]["as_of"]["1"].is_object());
+    assert!(bare_payload["meta"]["as_of"].get("8453").is_none());
+    assert_eq!(
+        bare_payload["meta"]["as_of_completeness"]["8453"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "temporarily_unavailable"
+        })
+    );
 
     let explicit_response = app_router(state)
         .oneshot(
@@ -675,6 +684,20 @@ async fn v2_search_derivation_excludes_interpret_redo_but_explicit_namespace_byp
                 .expect("explicit search data")
         ),
         vec!["alpha.base.eth"]
+    );
+    assert!(explicit_payload["meta"].get("as_of").is_none());
+    assert_eq!(
+        explicit_payload["meta"]["as_of_completeness"]["8453"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "temporarily_unavailable"
+        })
+    );
+    assert!(
+        explicit_payload["meta"]["as_of_completeness"]
+            .get("1")
+            .is_none(),
+        "an explicit Basenames request must not disclose out-of-scope Ethereum"
     );
 
     database.cleanup().await
@@ -833,6 +856,93 @@ async fn v2_search_rejects_project_republication_during_public_read() -> Result<
         .await
         .context("search generation-change request task panicked")?
         .context("search generation-change request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        json!("conflict")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_explicit_namespace_rejects_a_position_change_after_the_page_read() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .body(Body::empty())
+                    .expect("explicit search request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 999,
+                "block_hash": "0xsearch-explicit-later",
+                "timestamp": "2026-08-26T00:16:39Z"
+            }
+        }))
+        .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("explicit search position-change request task panicked")?
+        .context("explicit search position-change request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        json!("conflict")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_explicit_namespace_rejects_project_republication_after_the_page_read()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .body(Body::empty())
+                    .expect("explicit search request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET updated_at = updated_at
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("explicit search republication request task panicked")?
+        .context("explicit search republication request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(
         read_json::<Value>(response).await?["error"]["code"],
@@ -1087,7 +1197,7 @@ async fn v2_search_rejects_snapshot_selectors_and_accepts_explicit_latest() -> R
     let latest =
         v2_search_payload_for_database(&database, "/v2/search?q=al&namespace=ens&finality=latest")
             .await?;
-    assert_eq!(latest["meta"], json!({}));
+    assert_search_meta_chains(&latest, &["1"], &[]);
 
     database.cleanup().await
 }
@@ -1115,18 +1225,20 @@ async fn v2_search_rejects_unknown_params_and_returns_empty_matches() -> Result<
 }
 
 #[tokio::test]
-async fn v2_search_omits_snapshot_metadata_across_namespace_scopes() -> Result<()> {
+async fn v2_search_discloses_request_scope_without_snapshot_tokens() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
 
-    for uri in [
-        "/v2/search?q=alpha",
-        "/v2/search?q=alpha&namespace=ens",
-        "/v2/search?q=alpha&namespace=basenames",
+    for (uri, chains) in [
+        ("/v2/search?q=alpha", &["1", "8453"][..]),
+        ("/v2/search?q=alpha&namespace=ens", &["1"][..]),
+        (
+            "/v2/search?q=alpha&namespace=basenames",
+            &["8453"][..],
+        ),
     ] {
         let payload = v2_search_payload_for_database(&database, uri).await?;
-        assert!(payload["meta"].get("as_of").is_none(), "{uri}");
-        assert!(payload["meta"].get("as_of_token").is_none(), "{uri}");
+        assert_search_meta_chains(&payload, chains, &[]);
     }
 
     database.cleanup().await
@@ -1235,6 +1347,36 @@ fn v2_search_names(rows: &[Value]) -> Vec<&str> {
     rows.iter()
         .map(|row| row["name"].as_str().expect("search row must include name"))
         .collect()
+}
+
+fn assert_search_meta_chains(payload: &Value, as_of: &[&str], suppressed: &[&str]) {
+    let mut actual_as_of = payload["meta"]["as_of"]
+        .as_object()
+        .map(|positions| positions.keys().map(String::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    actual_as_of.sort_unstable();
+    let mut expected_as_of = as_of.to_vec();
+    expected_as_of.sort_unstable();
+    assert_eq!(actual_as_of, expected_as_of);
+
+    let mut actual_suppressed = payload["meta"]["as_of_completeness"]
+        .as_object()
+        .map(|positions| positions.keys().map(String::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    actual_suppressed.sort_unstable();
+    let mut expected_suppressed = suppressed.to_vec();
+    expected_suppressed.sort_unstable();
+    assert_eq!(actual_suppressed, expected_suppressed);
+    for chain_id in suppressed {
+        assert_eq!(
+            payload["meta"]["as_of_completeness"][chain_id],
+            json!({
+                "completeness": "unsupported",
+                "unsupported_reason": "temporarily_unavailable"
+            })
+        );
+    }
+    assert!(payload["meta"].get("as_of_token").is_none());
 }
 
 async fn seed_v2_search_public_authority(database: &TestDatabase) -> Result<()> {

@@ -42,6 +42,7 @@ enum V2TopLevelEnvelope {
 #[derive(Clone, Copy)]
 enum V2AsOfExpectation {
     Present,
+    PresentWithoutToken,
     Conditional,
     Absent,
 }
@@ -254,7 +255,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/search",
         success: V2SuccessFixture::Search,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Absent,
+        as_of: V2AsOfExpectation::PresentWithoutToken,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -1599,6 +1600,14 @@ fn assert_v2_success_envelope(route: &V2ConformanceRoute, payload: &Value) {
         V2AsOfExpectation::Present => {
             assert_as_of_shape(route, &payload["meta"]["as_of"]);
             assert_as_of_token_shape(route, &payload["meta"]["as_of_token"]);
+        }
+        V2AsOfExpectation::PresentWithoutToken => {
+            assert_as_of_shape(route, &payload["meta"]["as_of"]);
+            assert!(
+                payload["meta"].get("as_of_token").is_none(),
+                "{} must omit meta.as_of_token",
+                route.label
+            );
         }
         V2AsOfExpectation::Conditional => {
             if payload["meta"].get("as_of").is_some()
