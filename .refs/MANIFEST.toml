@@ -41,8 +41,8 @@ authoritative_for = [
 
 [refs.ens_v2]
 repo = "https://github.com/ensdomains/contracts-v2"
-commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
-purpose = "Post-audit ENSv2 contracts and current Sepolia deployment evidence."
+commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+purpose = "Post-audit ENSv2 contracts and pinned Sepolia deployment evidence (admitted 2026-06-29 deployment archived upstream at sepolia-20260629-r1/)."
 authoritative_for = [
   "ENSv2 semantics referenced in docs/architecture.md",
   "ENSv2-specific rules in docs/adrs/0002-surface-resource-identity.md § ENSv2 linked surfaces",
