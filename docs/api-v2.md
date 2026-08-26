@@ -278,6 +278,10 @@ Rules:
   token can still contain that chain when another input actually uses its
   snapshot position; the suppression entry takes precedence over a
   human-readable `meta.as_of` entry because some requested data was withheld.
+  That precedence is the general rule for every route that emits these maps:
+  whenever one chain is both readable in one part of the request's scope and
+  suppressed in another, the suppression entry wins and the chain is removed
+  from `meta.as_of`.
 - `meta.unsupported_fields` names response-level sections or expansions the
   route could not serve. Record-level `unsupported_fields` names data fields
   the index could not prove for that record. One unsupported field is not
