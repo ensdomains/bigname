@@ -28,6 +28,7 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
         include_str!("../../../../../schema-v2/baseline/10_phase_state.sql"),
         include_str!("../../../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
         include_str!("../../../../../schema-v2/baseline/12_project_generation_failures.sql"),
+        include_str!("../../../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
     ] {
         sqlx::raw_sql(sql).execute(database.pool()).await?;
     }

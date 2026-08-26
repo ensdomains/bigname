@@ -312,6 +312,7 @@ fn interpret_loaded(
 
 fn append_output(into: &mut BatchOutput, from: BatchOutput) {
     let BatchOutput {
+        decode_skips,
         normalized_events,
         label_preimages,
         name_surfaces,
@@ -329,6 +330,7 @@ fn append_output(into: &mut BatchOutput, from: BatchOutput) {
         migration_candidate_discovery_effects,
         migration_authority_transitions,
     } = from;
+    into.decode_skips.extend(decode_skips);
     into.normalized_events.extend(normalized_events);
     into.label_preimages.extend(label_preimages);
     into.name_surfaces.extend(name_surfaces);
@@ -418,14 +420,33 @@ fn interpret_raw(
     } else {
         None
     };
+    // Some protocol paths advance time-derived state before reaching their event-specific
+    // decoder. Interpret each log on a structurally shared candidate and commit it only after the
+    // whole protocol dispatch succeeds, so a non-fatal malformed log cannot change retained state.
+    let mut candidate_state = state.clone();
     let interpreted = match super::protocol::interpret(
         &selected,
         raw,
-        state,
+        &mut candidate_state,
         registrar_migration_source.is_some(),
     ) {
         Ok(interpreted) => interpreted,
-        Err(error) if selected.match_all && crate::evm_abi::is_malformed_event_log(&error) => {
+        Err(error)
+            if crate::evm_abi::is_malformed_event_log(&error)
+                && !selected.manifest_declared_emitter =>
+        {
+            output.decode_skips.push(super::DecodeSkip {
+                chain_id: raw.chain_id.clone(),
+                block_hash: raw.block_hash.clone(),
+                block_number: raw.block_number,
+                transaction_hash: raw.transaction_hash.clone(),
+                log_index: raw.log_index,
+                emitting_address: raw.emitting_address.clone(),
+                source_family: selected.source.source_family.clone(),
+                selection_topic0: selected.event.topic0.clone(),
+                match_all: selected.match_all,
+                decode_context: error.to_string(),
+            });
             return Ok(());
         }
         Err(error) => {
@@ -437,6 +458,7 @@ fn interpret_raw(
             });
         }
     };
+    *state = candidate_state;
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
     super::identity::materialize(&selected, raw, &interpreted, state, output)?;
     super::discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;

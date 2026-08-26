@@ -167,7 +167,8 @@ for migration_file in \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
     "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
-    "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql"
+    "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
+    "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -309,7 +310,9 @@ for migration_file in \
     "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
     "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
     "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
-    "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql"
+    "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
+    "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
+    "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -1090,6 +1093,7 @@ BEGIN
             ('discovery_edges'),
             ('ens_names'),
             ('ingest_cursors'),
+            ('interpret_decode_skips'),
             ('label_preimages'),
             ('manifest_contract_instances'),
             ('manifest_discovery_rules'),
@@ -1144,6 +1148,7 @@ BEGIN
             ('discovery_edges'),
             ('ens_names'),
             ('ingest_cursors'),
+            ('interpret_decode_skips'),
             ('label_preimages'),
             ('manifest_contract_instances'),
             ('manifest_discovery_rules'),

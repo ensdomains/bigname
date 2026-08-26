@@ -1,4 +1,5 @@
 mod batching;
+mod decode_skips;
 mod discovery;
 mod identity;
 mod identity_names;
@@ -42,6 +43,7 @@ pub(crate) async fn batch(
     if let Some((from_block, to_block)) = redo_range.filter(|_| prepare_redo) {
         prepare_redo_range(&mut transaction, chain_id, from_block, to_block).await?;
     }
+    decode_skips::write(&mut transaction, &output.decode_skips).await?;
     identity::write_rows(&mut transaction, output, preserve_outside_range_closes).await?;
     discovery::write(&mut transaction, output, preserve_outside_range_closes).await?;
     normalized::events(&mut transaction, &output.normalized_events).await?;
@@ -577,7 +579,8 @@ async fn reanchor_stable_identities(
 }
 
 fn estimate(output: &BatchOutput) -> u64 {
-    let rows = output.normalized_events.len()
+    let rows = output.decode_skips.len()
+        + output.normalized_events.len()
         + output.label_preimages.len()
         + output.name_surfaces.len()
         + output.token_lineages.len()

@@ -12090,7 +12090,252 @@ fn assert_named_resource_shadow_without_hint(
 }
 
 #[test]
-fn malformed_match_all_lookalike_is_ignored() -> anyhow::Result<()> {
+fn malformed_manifest_declared_log_stays_fatal_with_family_and_position_context() {
+    let encoded = v2_registry::TokenResource {
+        tokenId: U256::from(1),
+        resource: U256::from(2),
+    }
+    .encode_log_data();
+    let mut raw = raw(encoded);
+    raw.topics.push(format!("{:#x}", B256::repeat_byte(0xff)));
+    let error = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            76,
+            "ens_v2_registry_l1",
+            "TokenResource",
+            "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+            &["registry"],
+            &["TokenResourceLinked"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(76, "registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw],
+    })
+    .expect_err("a malformed log from a manifest-declared emitter stays fatal");
+
+    assert!(format!("{error:#}").contains(
+        "ens_v2_registry_l1 adapter failed for raw log block-1:0: TokenResource log is malformed"
+    ));
+}
+
+#[test]
+fn malformed_discovery_admitted_log_is_skipped_and_recorded() -> anyhow::Result<()> {
+    const ANNOUNCED: &str = "0x0000000000000000000000000000000000000098";
+    let encoded = v2_registry::TokenResource {
+        tokenId: U256::from(1),
+        resource: U256::from(2),
+    }
+    .encode_log_data();
+    let mut raw = raw_at(encoded, 1, 0, ANNOUNCED);
+    raw.topics.push(format!("{:#x}", B256::repeat_byte(0xff)));
+    let mut announced = admission(77, "registry");
+    announced.address = ANNOUNCED.to_owned();
+    announced.contract_instance_id = super::common::contract_id(CHAIN, ANNOUNCED);
+    announced.role = None;
+    announced.discovery_edge_kind = Some("registry_announcement".to_owned());
+    announced.discovery_from_contract_instance_id = Some(announced.contract_instance_id);
+    announced.discovery_observation_key = Some("registry-announcement:fixture".to_owned());
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            77,
+            "ens_v2_registry_l1",
+            "TokenResource",
+            "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+            &["registry"],
+            &["TokenResourceLinked"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![announced],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw],
+    })?;
+
+    assert_eq!(output.decode_skips.len(), 1);
+    let skip = &output.decode_skips[0];
+    assert_eq!(skip.chain_id, CHAIN);
+    assert_eq!(skip.block_hash, "block-1");
+    assert_eq!(skip.block_number, 1);
+    assert_eq!(skip.transaction_hash, "transaction-1");
+    assert_eq!(skip.log_index, 0);
+    assert_eq!(skip.emitting_address, ANNOUNCED);
+    assert_eq!(skip.source_family, "ens_v2_registry_l1");
+    assert_eq!(
+        skip.selection_topic0,
+        format!("{:#x}", v2_registry::TokenResource::SIGNATURE_HASH)
+    );
+    assert!(!skip.match_all);
+    assert_eq!(skip.decode_context, "TokenResource log is malformed");
+    let mut state_output = output.clone();
+    state_output.decode_skips.clear();
+    assert_eq!(state_output, BatchOutput::default());
+    Ok(())
+}
+
+#[test]
+fn malformed_skip_matches_omitting_log_with_retained_v2_state() -> anyhow::Result<()> {
+    const ANNOUNCED: &str = "0x0000000000000000000000000000000000000098";
+    let manifest = || {
+        manifest_with_events(
+            78,
+            "ens",
+            "ens_v2_registry_l1",
+            &[
+                (
+                    "LabelRegistered",
+                    "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                    &["registry"],
+                    &["RegistrationGranted"],
+                ),
+                (
+                    "TokenResource",
+                    "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                    &["registry"],
+                    &["TokenResourceLinked"],
+                ),
+            ],
+        )
+    };
+    let announced_admission = || {
+        let mut announced = admission(78, "registry");
+        announced.address = ANNOUNCED.to_owned();
+        announced.contract_instance_id = super::common::contract_id(CHAIN, ANNOUNCED);
+        announced.role = None;
+        announced.discovery_edge_kind = Some("registry_announcement".to_owned());
+        announced.discovery_from_contract_instance_id = Some(announced.contract_instance_id);
+        announced.discovery_observation_key =
+            Some("registry-announcement:state-fixture".to_owned());
+        announced
+    };
+    let token_id = versioned_token("expiring", 1);
+    let sender: Address = CONTRACT.parse()?;
+    let setup_input = || BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest()],
+        discovery_rules: Vec::new(),
+        admissions: vec![announced_admission()],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: token_id,
+                    labelHash: keccak256(b"expiring"),
+                    label: "expiring".to_owned(),
+                    owner: sender,
+                    expiry: 1,
+                    sender,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                ANNOUNCED,
+            ),
+            raw_at(
+                v2_registry::TokenResource {
+                    tokenId: token_id,
+                    resource: U256::from(2),
+                }
+                .encode_log_data(),
+                1,
+                1,
+                ANNOUNCED,
+            ),
+        ],
+    };
+    let (_, skipped_session) = interpret_test_batch_incremental(setup_input(), None)?;
+    let (_, omitted_session) = interpret_test_batch_incremental(setup_input(), None)?;
+
+    let encoded = v2_registry::TokenResource {
+        tokenId: token_id,
+        resource: U256::from(3),
+    }
+    .encode_log_data();
+    let mut malformed = raw_at(encoded, 2, 0, ANNOUNCED);
+    malformed
+        .topics
+        .push(format!("{:#x}", B256::repeat_byte(0xff)));
+    let (mut skipped, skipped_session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest()],
+            discovery_rules: Vec::new(),
+            admissions: vec![announced_admission()],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![malformed],
+        },
+        Some(skipped_session),
+    )?;
+    let (omitted, omitted_session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest()],
+            discovery_rules: Vec::new(),
+            admissions: vec![announced_admission()],
+            prior_events: Vec::new(),
+            blocks: vec![test_block(2)],
+            raw_logs: Vec::new(),
+        },
+        Some(omitted_session),
+    )?;
+
+    assert_eq!(skipped.decode_skips.len(), 1);
+    skipped.decode_skips.clear();
+    assert_eq!(skipped, omitted);
+    assert_eq!(skipped_session, omitted_session);
+    Ok(())
+}
+
+#[test]
+fn malformed_match_all_log_from_declared_emitter_is_fatal() -> anyhow::Result<()> {
+    const DECLARED_RESOLVER: &str = "0x0000000000000000000000000000000000000099";
+    let mut declared_resolver = admission(40, "resolver");
+    declared_resolver.address = DECLARED_RESOLVER.to_owned();
+    let error = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            40,
+            "ens_v1_resolver_l1",
+            "AddrChanged",
+            "event AddrChanged(bytes32 indexed node, address a)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![declared_resolver],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![RawLogInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-1".to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+            canonicality_state: "canonical".to_owned(),
+            transaction_hash: "transaction-1".to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: DECLARED_RESOLVER.to_owned(),
+            topics: vec![format!("{:#x}", resolver::AddrChanged::SIGNATURE_HASH)],
+            data: vec![0x01],
+        }],
+    })
+    .expect_err("a malformed log from a declared emitter must halt interpretation");
+
+    assert!(format!("{error:#}").contains(
+        "ens_v1_resolver_l1 adapter failed for raw log block-1:0: AddrChanged log is malformed"
+    ));
+    Ok(())
+}
+
+#[test]
+fn malformed_match_all_lookalike_from_undeclared_emitter_is_skipped_and_recorded()
+-> anyhow::Result<()> {
+    const UNDECLARED_RESOLVER: &str = "0x000000000000000000000000000000000000009a";
     let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
@@ -12114,7 +12359,7 @@ fn malformed_match_all_lookalike_is_ignored() -> anyhow::Result<()> {
             transaction_hash: "transaction-1".to_owned(),
             transaction_index: 0,
             log_index: 0,
-            emitting_address: "0x0000000000000000000000000000000000000099".to_owned(),
+            emitting_address: UNDECLARED_RESOLVER.to_owned(),
             topics: vec![format!("{:#x}", resolver::AddrChanged::SIGNATURE_HASH)],
             data: vec![0x01],
         }],
@@ -12126,6 +12371,103 @@ fn malformed_match_all_lookalike_is_ignored() -> anyhow::Result<()> {
             .iter()
             .all(|event| event.event_kind != "RecordChanged")
     );
+    assert_eq!(output.decode_skips.len(), 1);
+    let skip = &output.decode_skips[0];
+    assert_eq!(skip.chain_id, CHAIN);
+    assert_eq!(skip.block_hash, "block-1");
+    assert_eq!(skip.block_number, 1);
+    assert_eq!(skip.transaction_hash, "transaction-1");
+    assert_eq!(skip.log_index, 0);
+    assert_eq!(skip.emitting_address, UNDECLARED_RESOLVER);
+    assert_eq!(skip.source_family, "ens_v1_resolver_l1");
+    assert_eq!(
+        skip.selection_topic0,
+        format!("{:#x}", resolver::AddrChanged::SIGNATURE_HASH)
+    );
+    assert!(skip.match_all);
+    assert_eq!(skip.decode_context, "AddrChanged log is malformed");
+    let mut state_output = output.clone();
+    state_output.decode_skips.clear();
+    assert_eq!(state_output, BatchOutput::default());
+    Ok(())
+}
+
+#[test]
+fn malformed_log_from_declared_and_discovery_admitted_emitter_is_fatal() -> anyhow::Result<()> {
+    const DUAL_ADMITTED_RESOLVER: &str = "0x000000000000000000000000000000000000009b";
+    let mut declared = admission(41, "resolver");
+    declared.address = DUAL_ADMITTED_RESOLVER.to_owned();
+    declared.contract_instance_id = super::common::contract_id(CHAIN, DUAL_ADMITTED_RESOLVER);
+    let mut discovered = declared.clone();
+    discovered.role = None;
+    discovered.discovery_edge_kind = Some("resolver".to_owned());
+    discovered.discovery_from_contract_instance_id = Some(discovered.contract_instance_id);
+    discovered.discovery_observation_key = Some("resolver:dual-admission".to_owned());
+    let error = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            41,
+            "ens_v1_resolver_l1",
+            "AddrChanged",
+            "event AddrChanged(bytes32 indexed node, address a)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![declared, discovered],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![RawLogInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-1".to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+            canonicality_state: "canonical".to_owned(),
+            transaction_hash: "transaction-1".to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: DUAL_ADMITTED_RESOLVER.to_owned(),
+            topics: vec![format!("{:#x}", resolver::AddrChanged::SIGNATURE_HASH)],
+            data: vec![0x01],
+        }],
+    })
+    .expect_err("direct manifest declaration must outrank discovery skip posture");
+
+    assert!(format!("{error:#}").contains(
+        "ens_v1_resolver_l1 adapter failed for raw log block-1:0: AddrChanged log is malformed"
+    ));
+    Ok(())
+}
+
+#[test]
+fn non_malformed_error_from_undeclared_match_all_selection_is_fatal() -> anyhow::Result<()> {
+    const UNDECLARED_RESOLVER: &str = "0x000000000000000000000000000000000000009c";
+    let encoded = resolver::AddrChanged {
+        node: B256::repeat_byte(0x42),
+        a: UNDECLARED_RESOLVER.parse()?,
+    }
+    .encode_log_data();
+    let error = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            42,
+            "ens_v1_resolver_l1",
+            "AddrChanged",
+            "event AddrChanged(bytes32 indexed node, address a)",
+            &[],
+            &[],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(encoded, 1, 0, UNDECLARED_RESOLVER)],
+    })
+    .expect_err("only malformed ABI decode errors may take the skip path");
+
+    assert!(format!("{error:#}").contains(
+        "ens_v1_resolver_l1 adapter failed for raw log block-1:0: manifest event AddrChanged(bytes32,address) for ens_v1_resolver_l1 does not declare required normalized event RecordChanged"
+    ));
     Ok(())
 }
 

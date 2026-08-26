@@ -1,7 +1,7 @@
 use std::{fmt, str::FromStr};
 
 use alloy_primitives::{Address, B256, LogData, U256, hex, keccak256};
-use alloy_sol_types::SolEvent;
+use alloy_sol_types::{SolEvent, TopicList};
 use anyhow::{Context, Result, bail};
 
 const ABI_WORD_BYTES: usize = 32;
@@ -24,6 +24,7 @@ where
     E: SolEvent,
 {
     let log_data = alloy_log_data(topics, data).context(MalformedEventLog(context))?;
+    validate_event_topic_count::<E>(&log_data, context)?;
     E::decode_log_data_validate(&log_data).context(MalformedEventLog(context))
 }
 
@@ -37,6 +38,7 @@ where
     E: SolEvent,
 {
     let log_data = alloy_log_data(topics, data).context(MalformedEventLog(context))?;
+    validate_event_topic_count::<E>(&log_data, context)?;
     let actual_topic0 = log_data
         .topics()
         .first()
@@ -50,6 +52,16 @@ where
     let decoded_data =
         E::abi_decode_data_validate(&log_data.data).context(MalformedEventLog(context))?;
     Ok(E::new(decoded_topics, decoded_data))
+}
+
+fn validate_event_topic_count<E>(log_data: &LogData, context: &'static str) -> Result<()>
+where
+    E: SolEvent,
+{
+    if log_data.topics().len() != <E::TopicList as TopicList>::COUNT {
+        return Err(anyhow::anyhow!(MalformedEventLog(context)));
+    }
+    Ok(())
 }
 
 /// A tolerantly decoded event plus its provenance: `unmasked_word` carries the original 32-byte
@@ -255,8 +267,9 @@ mod tests {
     use alloy_sol_types::{SolEvent, sol};
 
     use super::{
-        ABI_WORD_BYTES, decode_event_log, decode_event_log_tolerant_address_word,
-        decode_event_log_tolerant_uint64_word, is_malformed_event_log, saturating_seconds_i64,
+        ABI_WORD_BYTES, decode_event_log, decode_event_log_data_as,
+        decode_event_log_tolerant_address_word, decode_event_log_tolerant_uint64_word,
+        is_malformed_event_log, saturating_seconds_i64,
     };
 
     sol! {
@@ -298,6 +311,73 @@ mod tests {
         assert_eq!(decoded.event.node, node);
         assert_eq!(decoded.event.who, who);
         assert_eq!(decoded.unmasked_word, None);
+    }
+
+    #[test]
+    fn strict_decode_rejects_an_extra_topic() {
+        let node = B256::repeat_byte(0x42);
+        let who = alloy_primitives::Address::repeat_byte(0x24);
+        let encoded = SingleAddress { node, who }.encode_log_data();
+        let mut topics = encoded
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect::<Vec<_>>();
+        topics.push(format!("{:#x}", B256::repeat_byte(0xff)));
+
+        let error = decode_event_log::<SingleAddress>(&topics, &encoded.data, CONTEXT)
+            .map(|_| ())
+            .expect_err("an extra topic must make the strict event decode malformed");
+        assert!(is_malformed_event_log(&error));
+    }
+
+    #[test]
+    fn strict_data_as_decode_rejects_an_extra_topic() {
+        let node = B256::repeat_byte(0x42);
+        let who = alloy_primitives::Address::repeat_byte(0x24);
+        let encoded = SingleAddress { node, who }.encode_log_data();
+        let mut topics = encoded
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect::<Vec<_>>();
+        topics.push(format!("{:#x}", B256::repeat_byte(0xff)));
+
+        let error = decode_event_log_data_as::<SingleAddress>(
+            &topics,
+            &encoded.data,
+            &format!("{:#x}", SingleAddress::SIGNATURE_HASH),
+            CONTEXT,
+        )
+        .map(|_| ())
+        .expect_err("an extra topic must make the strict data-as decode malformed");
+        assert!(is_malformed_event_log(&error));
+    }
+
+    #[test]
+    fn strict_decoders_reject_a_missing_topic() {
+        let node = B256::repeat_byte(0x42);
+        let who = alloy_primitives::Address::repeat_byte(0x24);
+        let encoded = SingleAddress { node, who }.encode_log_data();
+        let topics = encoded
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect::<Vec<_>>();
+
+        let direct = decode_event_log::<SingleAddress>(&topics[..1], &encoded.data, CONTEXT)
+            .map(|_| ())
+            .expect_err("a missing topic must make the strict event decode malformed");
+        assert!(is_malformed_event_log(&direct));
+        let data_as = decode_event_log_data_as::<SingleAddress>(
+            &topics[..1],
+            &encoded.data,
+            &format!("{:#x}", SingleAddress::SIGNATURE_HASH),
+            CONTEXT,
+        )
+        .map(|_| ())
+        .expect_err("a missing topic must make the strict data-as decode malformed");
+        assert!(is_malformed_event_log(&data_as));
     }
 
     #[test]

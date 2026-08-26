@@ -19,6 +19,7 @@ pub(super) struct Selected {
     pub contract_instance_id: Uuid,
     pub emitter_role: Option<String>,
     pub match_all: bool,
+    pub manifest_declared_emitter: bool,
 }
 
 pub(super) struct Catalog {
@@ -97,6 +98,10 @@ impl Catalog {
         let Some(topic0) = raw.topics.first() else {
             return Ok(None);
         };
+        let manifest_declared_emitter = self
+            .admissions
+            .iter()
+            .any(|admission| admission.discovery_edge_kind.is_none() && applies(admission, raw));
         let announcement_namespaces = self
             .admissions
             .iter()
@@ -150,6 +155,7 @@ impl Catalog {
                         None,
                         admission.discovery_edge_kind.as_deref(),
                         admission.contract_instance_id,
+                        manifest_declared_emitter,
                     );
                 }
             } else {
@@ -161,6 +167,7 @@ impl Catalog {
                     admission.role.as_deref(),
                     admission.discovery_edge_kind.as_deref(),
                     admission.contract_instance_id,
+                    manifest_declared_emitter,
                 );
             }
         }
@@ -185,6 +192,7 @@ impl Catalog {
                         contract_instance_id,
                         emitter_role: None,
                         match_all: true,
+                        manifest_declared_emitter,
                     },
                 ));
             }
@@ -368,6 +376,7 @@ impl Catalog {
         role: Option<&str>,
         discovery_kind: Option<&str>,
         instance: Uuid,
+        manifest_declared_emitter: bool,
     ) {
         for event in source.events.iter().filter(|event| {
             event.topic0.eq_ignore_ascii_case(topic0)
@@ -375,6 +384,7 @@ impl Catalog {
                     || discovery_kind == Some("registry_announcement")
                     || role.is_some_and(|role| event.emitter_roles.iter().any(|item| item == role)))
         }) {
+            let match_all = self.is_match_all(source, event);
             let required_rule = required_discovery_rule(source, event);
             let discovery_authority_rank =
                 u8::from(required_rule.is_some_and(|edge_kind| {
@@ -396,7 +406,8 @@ impl Catalog {
                     event: event.clone(),
                     contract_instance_id: instance,
                     emitter_role,
-                    match_all: false,
+                    match_all,
+                    manifest_declared_emitter,
                 },
             ));
         }
@@ -455,6 +466,7 @@ fn select_unambiguous(
             && left.2.contract_instance_id == right.2.contract_instance_id
             && left.2.emitter_role == right.2.emitter_role
             && left.2.match_all == right.2.match_all
+            && left.2.manifest_declared_emitter == right.2.manifest_declared_emitter
     });
     if candidates.len() > 1 {
         let sources = candidates
@@ -481,12 +493,13 @@ fn select_unambiguous(
     Ok(candidates.pop().map(|candidate| candidate.2))
 }
 
-fn candidate_identity(selected: &Selected) -> (i64, &str, Uuid, Option<&str>, bool) {
+fn candidate_identity(selected: &Selected) -> (i64, &str, Uuid, Option<&str>, bool, bool) {
     (
         selected.source.manifest_id,
         selected.event.signature.as_str(),
         selected.contract_instance_id,
         selected.emitter_role.as_deref(),
         selected.match_all,
+        selected.manifest_declared_emitter,
     )
 }

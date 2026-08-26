@@ -4,8 +4,10 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 
 ## Boundaries
 
-- Schema-v2 interpret writes identity rows and normalized events; adapters
-  provide interpretation behavior and do not write projection rows.
+- Schema-v2 interpret writes identity rows, discovery edges, normalized events,
+  and append-only diagnostics for malformed event logs from undeclared
+  emitters; adapters provide interpretation behavior and do not write database
+  rows or projections.
 - Schema-v2 Project owns projection tables and rebuild behavior.
 - API code reads phase projections and request-scoped lookup output; lookup may
   write only the guarded divergence ledger.

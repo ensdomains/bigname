@@ -18,6 +18,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "discovery_edges",
     "ens_names",
     "ingest_cursors",
+    "interpret_decode_skips",
     "label_preimages",
     "manifest_contract_instances",
     "manifest_discovery_rules",
@@ -95,6 +96,10 @@ const BASELINE: &[(&str, &str)] = &[
     (
         "project generation failures",
         include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
+    ),
+    (
+        "interpret decode skips",
+        include_str!("../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
     ),
 ];
 

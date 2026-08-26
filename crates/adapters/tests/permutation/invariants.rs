@@ -783,6 +783,7 @@ fn absorb_discovered_admissions(admitted: &mut Vec<AddressAdmissionInput>, from:
 /// them, because each of those enumerates the families too.
 fn absorb_rows(into: &mut BatchOutput, from: BatchOutput) {
     let BatchOutput {
+        decode_skips,
         normalized_events,
         label_preimages,
         name_surfaces,
@@ -800,6 +801,7 @@ fn absorb_rows(into: &mut BatchOutput, from: BatchOutput) {
         migration_candidate_discovery_effects,
         migration_authority_transitions,
     } = from;
+    into.decode_skips.extend(decode_skips);
     into.normalized_events.extend(normalized_events);
     into.label_preimages.extend(label_preimages);
     into.name_surfaces.extend(name_surfaces);
