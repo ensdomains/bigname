@@ -25,6 +25,18 @@ in-place schema-migrations for initialized `bigname_phase` databases.
 API use that namespace in one database. Reviewed versioned schema-migrations
 normally upgrade an initialized namespace in place when the change can preserve
 its durable state; the reviewed replacement procedure is required otherwise.
+One deployment's `bigname_phase` tables are one table set. Chains carrying the
+`ens` namespace never share a table set: Ethereum Mainnet and Ethereum Sepolia
+must not write to the same tables, and Sepolia always runs as its own deployment
+with its own tables. Two chains may share one database only when their
+chain-native name-system namespaces differ, as in the supported Ethereum-plus-Base
+production deployment. The phase runner derives each configured chain's
+namespace from the binary-approved [deployment
+profiles](glossary.md#deployment-profile) and refuses this invalid topology
+before starting any chain. A chain ID absent from those approved deployment
+profiles is unsupported and refused explicitly. The check runs for supervised
+startup and operator redo after its chain set is resolved, before manifest
+synchronization or any indexing phase runs.
 An additive baseline index may be an explicitly reviewed release exception when
 its production build must use `CREATE INDEX CONCURRENTLY`: the release runbook
 must carry the exact live DDL, validity checks, recovery procedure, and
