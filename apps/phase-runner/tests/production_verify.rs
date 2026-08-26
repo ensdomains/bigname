@@ -3848,8 +3848,9 @@ async fn assert_reth_path_alias_rejected(
     assert_eq!(error.kind(), ErrorKind::Configuration);
     assert_eq!(
         error.to_string(),
-        "verification-only source ethereum-mainnet:reth-reference resolves to the same provider \
-         location as intake source ethereum-mainnet:reth-intake"
+        "verification-only source ethereum-mainnet:reth-reference opened object configured \
+         datadir resolves to the same provider location as intake source \
+         ethereum-mainnet:reth-intake opened object configured datadir"
     );
     assert!(!error.to_string().contains(intake_path));
     assert!(!error.to_string().contains(verification_path));

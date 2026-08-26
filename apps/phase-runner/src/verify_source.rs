@@ -94,33 +94,72 @@ fn valid_sepolia_drpc_shape(sources: &[&SourceConfig]) -> bool {
 pub(super) fn same_source_identity(
     left: &SourceConfig,
     right: &SourceConfig,
-) -> RunnerResult<bool> {
+) -> RunnerResult<Option<SourceIdentityConflict>> {
     let left_kind = normalized_source_kind(&left.source_kind);
     let right_kind = normalized_source_kind(&right.source_kind);
     if left_kind == "drpc" && right_kind == "drpc" {
-        return Ok(rpc_endpoint_identity(left)? == rpc_endpoint_identity(right)?);
+        return Ok(
+            (rpc_endpoint_identity(left)? == rpc_endpoint_identity(right)?)
+                .then(SourceIdentityConflict::default),
+        );
     }
     if matches!(left_kind.as_str(), "reth" | "reth_db")
         && matches!(right_kind.as_str(), "reth" | "reth_db")
     {
         return same_reth_path_identity(left, right);
     }
-    Ok(left.endpoint() == right.endpoint())
+    Ok((left.endpoint() == right.endpoint()).then(SourceIdentityConflict::default))
 }
 
-fn same_reth_path_identity(left: &SourceConfig, right: &SourceConfig) -> RunnerResult<bool> {
-    let left = absolute_reth_path(left)?;
-    let right = absolute_reth_path(right)?;
-    if same_reth_paths_with_fallback(&left, &right, reth_path_spelling_identity) {
-        return Ok(true);
+#[derive(Default)]
+pub(super) struct SourceIdentityConflict {
+    pub(super) left_object: Option<&'static str>,
+    pub(super) right_object: Option<&'static str>,
+}
+
+struct RethOpenedObject {
+    name: &'static str,
+    path: PathBuf,
+}
+
+fn same_reth_path_identity(
+    left: &SourceConfig,
+    right: &SourceConfig,
+) -> RunnerResult<Option<SourceIdentityConflict>> {
+    let left = reth_opened_objects(absolute_reth_path(left)?);
+    let right = reth_opened_objects(absolute_reth_path(right)?);
+    for left_object in &left {
+        for right_object in &right {
+            if same_reth_paths_with_fallback(
+                &left_object.path,
+                &right_object.path,
+                reth_path_spelling_identity,
+            ) {
+                return Ok(Some(SourceIdentityConflict {
+                    left_object: Some(left_object.name),
+                    right_object: Some(right_object.name),
+                }));
+            }
+        }
     }
-    Ok(RETH_DB_OPENED_STORAGE_CHILDREN.into_iter().any(|child| {
-        same_reth_paths_with_fallback(
-            &left.join(child),
-            &right.join(child),
-            reth_path_spelling_identity,
-        )
-    }))
+    Ok(None)
+}
+
+fn reth_opened_objects(datadir: PathBuf) -> Vec<RethOpenedObject> {
+    let mut objects = Vec::with_capacity(RETH_DB_OPENED_STORAGE_CHILDREN.len() + 1);
+    objects.push(RethOpenedObject {
+        name: "configured datadir",
+        path: datadir.clone(),
+    });
+    objects.extend(
+        RETH_DB_OPENED_STORAGE_CHILDREN
+            .into_iter()
+            .map(|child| RethOpenedObject {
+                name: child,
+                path: datadir.join(child),
+            }),
+    );
+    objects
 }
 
 fn absolute_reth_path(source: &SourceConfig) -> RunnerResult<PathBuf> {
@@ -299,6 +338,7 @@ pub(super) fn provider_trusted_source<'a>(
 mod tests {
     use super::super::VerificationLevel;
     use super::*;
+    use crate::config::SourceRole;
     #[test]
     fn base_provider_trust_selects_drpc_and_quick_synced() -> RunnerResult<()> {
         let source = |key, kind, start| {
@@ -411,6 +451,64 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn nested_reth_opened_object_is_not_independent() -> RunnerResult<()> {
+        let root =
+            std::env::temp_dir().join(format!("bigname-reth-nested-{}", uuid::Uuid::new_v4()));
+        let intake = root.join("reth");
+        let reference = intake.join("db");
+        fs::create_dir_all(&reference).map_err(fixture_error)?;
+        let intake_source = reth_role_source("intake", &intake, SourceRole::Intake)?;
+        let reference_source =
+            reth_role_source("reference", &reference, SourceRole::VerificationOnly)?;
+
+        let conflict = same_reth_path_identity(&intake_source, &reference_source)?;
+        let conflict = conflict
+            .expect("a reference datadir nested at an intake storage child must fail independence");
+        assert_eq!(conflict.left_object, Some("db"));
+        assert_eq!(conflict.right_object, Some("configured datadir"));
+        assert_eq!(
+            verification_plan_error(&[intake_source, reference_source]),
+            "verification-only source ethereum-mainnet:reference opened object configured \
+             datadir resolves to the same provider location as intake source \
+             ethereum-mainnet:intake opened object db"
+        );
+        fs::remove_dir_all(root).map_err(fixture_error)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cross_named_reth_storage_child_alias_is_not_independent() -> RunnerResult<()> {
+        let root =
+            std::env::temp_dir().join(format!("bigname-reth-cross-child-{}", uuid::Uuid::new_v4()));
+        let intake = root.join("intake");
+        let reference = root.join("reference");
+        let intake_db = intake.join("db");
+        fs::create_dir_all(&intake_db).map_err(fixture_error)?;
+        fs::create_dir_all(&reference).map_err(fixture_error)?;
+        std::os::unix::fs::symlink(&intake_db, reference.join("static_files"))
+            .map_err(fixture_error)?;
+        let intake_source = reth_role_source("intake", &intake, SourceRole::Intake)?;
+        let reference_source =
+            reth_role_source("reference", &reference, SourceRole::VerificationOnly)?;
+
+        let conflict = same_reth_path_identity(&intake_source, &reference_source)?;
+        let conflict = conflict.expect(
+            "differently named opened storage children must be compared for shared identity",
+        );
+        assert_eq!(conflict.left_object, Some("db"));
+        assert_eq!(conflict.right_object, Some("static_files"));
+        assert_eq!(
+            verification_plan_error(&[intake_source, reference_source]),
+            "verification-only source ethereum-mainnet:reference opened object static_files \
+             resolves to the same provider location as intake source ethereum-mainnet:intake \
+             opened object db"
+        );
+        fs::remove_dir_all(root).map_err(fixture_error)?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn shared_reth_storage_children_are_not_independent() -> RunnerResult<()> {
@@ -436,7 +534,7 @@ mod tests {
         let same = same_reth_path_identity(&left_source, &right_source)?;
         fs::remove_dir_all(root).map_err(fixture_error)?;
         assert!(
-            same,
+            same.is_some(),
             "shared opened storage children must fail independence"
         );
         Ok(())
@@ -460,21 +558,36 @@ mod tests {
 
         let same = same_reth_path_identity(&left_source, &right_source)?;
         fs::remove_dir_all(root).map_err(fixture_error)?;
-        assert!(!same, "distinct opened storage children remain independent");
+        assert!(
+            same.is_none(),
+            "distinct opened storage children remain independent"
+        );
         Ok(())
     }
 
     fn reth_source(key: &str, datadir: &Path) -> RunnerResult<SourceConfig> {
-        SourceConfig::new(
+        reth_role_source(key, datadir, SourceRole::Both)
+    }
+
+    fn reth_role_source(key: &str, datadir: &Path, role: SourceRole) -> RunnerResult<SourceConfig> {
+        SourceConfig::new_with_role(
             "ethereum-mainnet",
             key,
             "reth_db",
             SeedBasis::EthereumHead,
             0,
+            role,
             datadir
                 .to_str()
                 .ok_or_else(|| RunnerError::data_integrity("non-UTF-8 test datadir"))?,
         )
+    }
+
+    fn verification_plan_error(sources: &[SourceConfig]) -> String {
+        match super::super::verification_plan("ethereum-mainnet", sources) {
+            Ok(_) => panic!("shared reth opened objects must fail verification planning"),
+            Err(error) => error.to_string(),
+        }
     }
 
     fn fixture_error(error: std::io::Error) -> RunnerError {

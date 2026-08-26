@@ -393,21 +393,21 @@ fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<V
         if chain_id == "ethereum-sepolia" {
             validate_sepolia_verification_shape(chain_id, &[*source])?;
         }
-        let mut conflict = None;
         for intake_source in &intake {
-            if same_source_identity(intake_source, source)? {
-                conflict = Some(*intake_source);
-                break;
-            }
-        }
-        if let Some(conflict) = conflict {
-            return Err(RunnerError::new(
-                ErrorKind::Configuration,
-                format!(
-                    "verification-only source {chain_id}:{} resolves to the same provider location as intake source {chain_id}:{}",
-                    source.source_key, conflict.source_key,
-                ),
-            ));
+            let Some(identity) = same_source_identity(intake_source, source)? else {
+                continue;
+            };
+            let describe = |object: Option<&str>| {
+                object.map_or_else(String::new, |object| format!(" opened object {object}"))
+            };
+            let reference_object = describe(identity.right_object);
+            let intake_object = describe(identity.left_object);
+            let message = format!(
+                "verification-only source {chain_id}:{}{reference_object} resolves to the same \
+                 provider location as intake source {chain_id}:{}{intake_object}",
+                source.source_key, intake_source.source_key
+            );
+            return Err(RunnerError::new(ErrorKind::Configuration, message));
         }
         return select_source(chain_id, sources).map(VerificationPlan::Compared);
     }
