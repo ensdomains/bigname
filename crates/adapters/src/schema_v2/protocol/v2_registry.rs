@@ -26,7 +26,10 @@ use super::{
     ResourceDraft, ShadowNameDraft, ensure_declared,
 };
 pub(in crate::schema_v2) use topology::boundary_reassertion;
-use topology::{append_terminal_boundaries, append_v2_name_transitions, discovery_observation_key};
+use topology::{
+    append_resolver_discovery_closures, append_terminal_boundaries,
+    append_token_discovery_closures, append_v2_name_transitions, discovery_observation_key,
+};
 
 pub(super) fn boundary_expiration(transition: V2NameTransition) -> anyhow::Result<Interpreted> {
     topology::boundary_expiration(transition)
@@ -93,7 +96,7 @@ fn registry(
         }
         "LabelRegistered" => label_event(selected, raw, state, true),
         "LabelReserved" => label_event(selected, raw, state, false),
-        "LabelUnregistered" => label_unregistered(selected, raw, state),
+        "LabelUnregistered" => transfer::label_unregistered(selected, raw, state),
         "ExpiryUpdated" => {
             let e = decode_event_log::<ExpiryUpdated>(
                 &raw.topics,
@@ -185,11 +188,15 @@ fn registry(
                 e.tokenId,
                 json!({"source_event":"ResolverUpdated","resolver":nullable_address(e.resolver),"sender":address_hex(e.sender)}),
             )?;
-            state.set_v2_resolver(
+            let aliases = state.set_v2_resolver(
                 &raw.emitting_address,
                 &u256_word_hex(e.tokenId),
                 (e.resolver != Address::ZERO).then(|| address.clone()),
             );
+            let protected_tokens =
+                state.live_v2_resolver_tokens_sharing(&raw.emitting_address, &aliases);
+            let protected = topology::resolver_discovery_keys(raw, None, &protected_tokens)?;
+            append_resolver_discovery_closures(&mut output, raw, None, &aliases, &protected)?;
             output.discovery.push(DiscoveryDraft::Edge {
                 edge_kind: "resolver".to_owned(),
                 to_address: address,
@@ -430,12 +437,19 @@ fn label_event(
         let replaced_token_id = replaced_token
             .parse::<U256>()
             .with_context(|| format!("stored ENSv2 token ID {replaced_token} is malformed"))?;
-        for (edge_kind, resolver) in [("subregistry", false), ("resolver", true)] {
-            output.discovery.push(DiscoveryDraft::Close {
-                edge_kind: edge_kind.to_owned(),
-                observation_key: discovery_observation_key(raw, replaced_token_id, resolver),
-            });
-        }
+        let mut candidates = previous.resolver_discovery_aliases.clone();
+        candidates.insert(replaced_token.clone());
+        let protected_tokens =
+            state.live_v2_resolver_tokens_sharing(&raw.emitting_address, &candidates);
+        let protected_resolver_keys =
+            topology::resolver_discovery_keys(raw, None, &protected_tokens)?;
+        append_token_discovery_closures(
+            &mut output,
+            raw,
+            replaced_token_id,
+            Some(previous),
+            &protected_resolver_keys,
+        )?;
     }
     let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     append_v2_name_transitions(
@@ -445,63 +459,20 @@ fn label_event(
         &selected.event.name,
         direct_name.then_some((&raw.emitting_address, token_id.as_str())),
     );
-    for (edge_kind, resolver) in [("subregistry", false), ("resolver", true)] {
-        output.discovery.push(DiscoveryDraft::Close {
-            edge_kind: edge_kind.to_owned(),
-            observation_key: discovery_observation_key(
-                raw,
-                token_id
-                    .parse::<U256>()
-                    .with_context(|| format!("stored ENSv2 token ID {token_id} is malformed"))?,
-                resolver,
-            ),
-        });
-    }
-    Ok(output)
-}
-
-fn label_unregistered(
-    selected: &Selected,
-    raw: &RawLogInput,
-    state: &mut State,
-) -> anyhow::Result<Interpreted> {
-    let event = decode_event_log::<LabelUnregistered>(
-        &raw.topics,
-        &raw.data,
-        "LabelUnregistered log is malformed",
-    )?;
-    let token_id = u256_word_hex(event.tokenId);
-    let linked = state.release_v2_token(&raw.emitting_address, &token_id);
-    // Registration events are partitioned by their emitting registry. PermissionedRegistry emits
-    // LabelUnregistered from that registry's public unregister path.
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58)
-    let mut output = token_state_event(
-        selected,
-        "RegistrationReleased",
-        event.tokenId,
-        linked.as_ref(),
-        json!({
-            "source_event":"LabelUnregistered",
-            "sender":address_hex(event.sender),
-            "registry_contract_instance_id":selected.contract_instance_id.to_string(),
-        }),
-    )?;
-    append_terminal_boundaries(
+    let mut candidates = linked.resolver_discovery_aliases.clone();
+    candidates.insert(token_id.clone());
+    let protected_tokens =
+        state.live_v2_resolver_tokens_sharing(&raw.emitting_address, &candidates);
+    let protected_resolver_keys = topology::resolver_discovery_keys(raw, None, &protected_tokens)?;
+    append_token_discovery_closures(
         &mut output,
-        state,
-        linked.as_ref(),
-        &token_id,
-        "LabelUnregistered",
-    );
-    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
-    append_v2_name_transitions(&mut output, transitions, raw, "LabelUnregistered", None);
-    for (edge_kind, resolver) in [("subregistry", false), ("resolver", true)] {
-        output.discovery.push(DiscoveryDraft::Close {
-            edge_kind: edge_kind.to_owned(),
-            observation_key: discovery_observation_key(raw, event.tokenId, resolver),
-        });
-    }
+        raw,
+        token_id
+            .parse::<U256>()
+            .with_context(|| format!("stored ENSv2 token ID {token_id} is malformed"))?,
+        Some(&linked),
+        &protected_resolver_keys,
+    )?;
     Ok(output)
 }
 

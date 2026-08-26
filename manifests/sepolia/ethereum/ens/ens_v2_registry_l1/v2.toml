@@ -142,7 +142,7 @@ normalized_events = ["SurfaceUnbound", "RegistrationReleased", "PermissionChange
 name = "TokenRegenerated"
 fragment = "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
 emitter_roles = ["registry"]
-normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenRegenerated"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenRegenerated", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
 
 # ParentUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58).
 [[abi.events]]

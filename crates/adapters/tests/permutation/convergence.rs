@@ -83,7 +83,7 @@ impl std::fmt::Display for BatchBoundaryArtifacts {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Row {
     key: String,
     body: String,
@@ -98,7 +98,9 @@ struct Row {
 /// re-observation carrying the same row content under a new anchor — so a successor emission whose
 /// body disagrees is a divergence the kept-row comparison would discard unseen. The comparison
 /// asserts that premise — a pass repeating a key with differing bodies fails before the multisets
-/// are compared. The default corpus repeats contract_addresses keys only as same-body
+/// are compared. `OrderedEvery` compares the complete emission sequence when later operations for
+/// one key intentionally carry different bodies and writer order is semantic. The default corpus
+/// repeats contract_addresses keys only as same-body
 /// re-observations, so both the multiset and the premise run over real repeats today, while a
 /// differing-body repeat stays an unexercised failure path — the same honest-reach caveat
 /// `EXPECTED_ARTIFACTS` carries for classes the corpus does not reach.
@@ -107,6 +109,7 @@ enum Keeps {
     First,
     Last,
     Every,
+    OrderedEvery,
 }
 
 /// Reconciliation can drop a superseded resource row whose only in-batch reference moved to a later
@@ -212,6 +215,14 @@ fn assert_identity_family(
 ) -> Result<()> {
     if keeps == Keeps::Every {
         return assert_emission_multiset(context, family, whole, split);
+    }
+    if keeps == Keeps::OrderedEvery {
+        if whole != split {
+            bail!(
+                "{context}: split replay emitted a different ordered {family} stream:\n      whole={whole:?}\n   replayed={split:?}"
+            );
+        }
+        return Ok(());
     }
     let whole_first = kept_by_key(whole, keeps);
     let split_first = kept_by_key(split, keeps);
@@ -495,8 +506,10 @@ fn kept_by_key(rows: &[Row], keeps: Keeps) -> BTreeMap<String, &Row> {
             Keeps::Last => {
                 kept.insert(row.key.clone(), row);
             }
-            // Handled by `assert_emission_multiset`, which never reduces to a kept row.
-            Keeps::Every => unreachable!("Every compares the full emission multiset"),
+            // Handled before this helper; neither reduces to a kept row.
+            Keeps::Every | Keeps::OrderedEvery => {
+                unreachable!("complete emission comparisons do not select a kept row")
+            }
         }
     }
     kept
@@ -607,13 +620,13 @@ fn families(
         ),
         (
             "discovery_edges",
-            Keeps::Every,
+            Keeps::OrderedEvery,
             discovery_edges(fresh),
             discovery_edges(replayed),
         ),
         (
             "discovery_edge_closures",
-            Keeps::First,
+            Keeps::OrderedEvery,
             discovery_edge_closures(fresh),
             discovery_edge_closures(replayed),
         ),

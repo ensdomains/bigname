@@ -1,8 +1,13 @@
+use std::collections::BTreeSet;
+
 use alloy_primitives::U256;
+use anyhow::Context;
 use serde_json::{Value, json};
 
 use crate::schema_v2::{
-    protocol::{BindingClosureDraft, EventDraft, Interpreted, NameDraft, ShadowNameDraft},
+    protocol::{
+        BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, NameDraft, ShadowNameDraft,
+    },
     seam::{ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, SURFACE_BINDING_ID_KEY},
     state::{State, V2NameTransition, V2TokenState},
 };
@@ -500,4 +505,64 @@ pub(super) fn discovery_observation_key(
     } else {
         base
     }
+}
+
+pub(super) fn resolver_discovery_keys(
+    raw: &crate::schema_v2::RawLogInput,
+    current_token_id: Option<U256>,
+    aliases: &BTreeSet<String>,
+) -> anyhow::Result<BTreeSet<String>> {
+    let mut keys = current_token_id
+        .map(|token_id| discovery_observation_key(raw, token_id, true))
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for alias in aliases {
+        let token_id = alias
+            .parse::<U256>()
+            .with_context(|| format!("stored ENSv2 resolver token ID {alias} is malformed"))?;
+        keys.insert(discovery_observation_key(raw, token_id, true));
+    }
+    Ok(keys)
+}
+
+pub(super) fn append_token_discovery_closures(
+    output: &mut Interpreted,
+    raw: &crate::schema_v2::RawLogInput,
+    token_id: U256,
+    token: Option<&V2TokenState>,
+    protected_resolver_keys: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    output.discovery.push(DiscoveryDraft::Close {
+        edge_kind: "subregistry".to_owned(),
+        observation_key: discovery_observation_key(raw, token_id, false),
+    });
+    let empty = BTreeSet::new();
+    let aliases = token
+        .map(|token| &token.resolver_discovery_aliases)
+        .unwrap_or(&empty);
+    append_resolver_discovery_closures(
+        output,
+        raw,
+        Some(token_id),
+        aliases,
+        protected_resolver_keys,
+    )
+}
+
+pub(super) fn append_resolver_discovery_closures(
+    output: &mut Interpreted,
+    raw: &crate::schema_v2::RawLogInput,
+    current_token_id: Option<U256>,
+    aliases: &BTreeSet<String>,
+    protected_resolver_keys: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    for observation_key in
+        resolver_discovery_keys(raw, current_token_id, aliases)?.difference(protected_resolver_keys)
+    {
+        output.discovery.push(DiscoveryDraft::Close {
+            edge_kind: "resolver".to_owned(),
+            observation_key: observation_key.clone(),
+        });
+    }
+    Ok(())
 }

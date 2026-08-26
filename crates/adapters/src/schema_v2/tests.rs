@@ -9115,6 +9115,160 @@ fn release_the_loser_reasserts_the_surviving_holders_persisted_binding() -> anyh
 }
 
 #[test]
+fn regeneration_collision_reasserts_a_displaced_names_surviving_coholder() -> anyhow::Result<()> {
+    const RIVAL: &str = "0x0000000000000000000000000000000000000069";
+    const MANIFEST_ID: i64 = 96;
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let alpha = versioned_token("alpha", 1);
+    let beta = versioned_token("beta", 1);
+    let manifest = manifest_with_events(
+        MANIFEST_ID,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["registry"],
+                &["TokenResourceLinked"],
+            ),
+            (
+                "TokenRegenerated",
+                "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)",
+                &["registry"],
+                &[
+                    "SurfaceUnbound",
+                    "RegistrationReleased",
+                    "TokenRegenerated",
+                    "PreimageObserved",
+                    "SurfaceBound",
+                    "RegistrationGranted",
+                    "AuthorityTransferred",
+                    "ExpiryChanged",
+                    "ResolverChanged",
+                    "SubregistryChanged",
+                ],
+            ),
+        ],
+    );
+    let mut rival_admission = admission(MANIFEST_ID, "registry");
+    rival_admission.address = RIVAL.to_owned();
+    rival_admission.contract_instance_id = super::common::contract_id(CHAIN, RIVAL);
+    let register = |emitter: &str, token_id, label: &str, resource, block| {
+        vec![
+            raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: token_id,
+                    labelHash: keccak256(label.as_bytes()),
+                    label: label.to_owned(),
+                    owner,
+                    expiry: 5_000,
+                    sender,
+                }
+                .encode_log_data(),
+                block,
+                0,
+                emitter,
+            ),
+            raw_at(
+                v2_registry::TokenResource {
+                    tokenId: token_id,
+                    resource,
+                }
+                .encode_log_data(),
+                block,
+                1,
+                emitter,
+            ),
+        ]
+    };
+    let mut logs = register(CONTRACT, alpha, "alpha", U256::from(0xaa), 1);
+    logs.extend(register(RIVAL, alpha, "alpha", U256::from(0xbb), 2));
+    logs.extend(register(CONTRACT, beta, "beta", U256::from(0xcc), 3));
+    logs.push(raw_at(
+        v2_registry::TokenRegenerated {
+            oldTokenId: beta,
+            newTokenId: alpha,
+        }
+        .encode_log_data(),
+        4,
+        0,
+        CONTRACT,
+    ));
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(MANIFEST_ID, "registry"), rival_admission],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: logs,
+    })?;
+    let coholder_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "TokenResourceLinked" && event.block_number == Some(2))
+        .and_then(|event| event.resource_id)
+        .expect("the rival coholder links a resource");
+    let reassertion = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.block_number == Some(4)
+                && event.event_kind == "PreimageObserved"
+                && event.after_state["source_event"] == "TokenRegenerated"
+        })
+        .expect("the collision reasserts the surviving coholder");
+    assert_eq!(reassertion.after_state["arm_wide_binding_close"], true);
+    assert_eq!(reassertion.after_state["closed_authority_arm"], "ens_v2");
+    assert!(
+        output.surface_bindings.iter().any(|binding| {
+            binding.block_number == 4 && binding.resource_id == coholder_resource
+        })
+    );
+    assert!(output.normalized_events.iter().all(|event| {
+        event.block_number != Some(4)
+            || event.resource_id != Some(coholder_resource)
+            || !matches!(
+                event.event_kind.as_str(),
+                "SurfaceUnbound"
+                    | "RegistrationReleased"
+                    | "SurfaceBound"
+                    | "RegistrationGranted"
+                    | "AuthorityTransferred"
+                    | "ExpiryChanged"
+                    | "ResolverChanged"
+                    | "SubregistryChanged"
+            )
+    }));
+    let persisted = simulate_binding_writer(&output);
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|binding| {
+                binding.live()
+                    && binding.active_to.is_none()
+                    && binding.logical_name_id
+                        == reassertion
+                            .logical_name_id
+                            .clone()
+                            .expect("reasserted name")
+                    && binding.authority_arm == "ens_v2"
+            })
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn contested_loser_reregistration_emits_one_marked_name_observation() -> anyhow::Result<()> {
     const RIVAL: &str = "0x0000000000000000000000000000000000000069";
     const MANIFEST_ID: i64 = 96;

@@ -4,9 +4,12 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{
-    EACRolesChanged, TokenRegenerated, TokenResource, TransferBatch, TransferSingle, single_event,
-    token_state_event,
-    topology::{append_terminal_boundaries, append_v2_name_transitions},
+    EACRolesChanged, LabelUnregistered, TokenRegenerated, TokenResource, TransferBatch,
+    TransferSingle, single_event, token_state_event,
+    topology::{
+        append_terminal_boundaries, append_token_discovery_closures, append_v2_name_transitions,
+        discovery_observation_key, resolver_discovery_keys,
+    },
 };
 use crate::{
     evm_abi::{address_hex, decode_event_log, u256_word_hex},
@@ -15,7 +18,7 @@ use crate::{
         common::{ens_v2_registry_resource_id, ens_v2_registry_token_lineage_id, stable_uuid},
         model::RawLogInput,
         protocol::{
-            EventDraft, Interpreted, NameDraft, ResourceDraft, ensure_declared,
+            DiscoveryDraft, EventDraft, Interpreted, NameDraft, ResourceDraft, ensure_declared,
             permissions::{V2PermissionState, V2Vocabulary, v2_states},
         },
         state::{State, V2TokenState},
@@ -181,6 +184,60 @@ pub(super) fn token_resource(
             }
         }
     }
+    Ok(output)
+}
+
+pub(super) fn label_unregistered(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+) -> anyhow::Result<Interpreted> {
+    let event = decode_event_log::<LabelUnregistered>(
+        &raw.topics,
+        &raw.data,
+        "LabelUnregistered log is malformed",
+    )?;
+    let token_id = u256_word_hex(event.tokenId);
+    let linked = state.release_v2_token(&raw.emitting_address, &token_id);
+    let mut candidates = linked
+        .as_ref()
+        .map(|token| token.resolver_discovery_aliases.clone())
+        .unwrap_or_default();
+    candidates.insert(token_id.clone());
+    let protected_tokens =
+        state.live_v2_resolver_tokens_sharing(&raw.emitting_address, &candidates);
+    let protected_resolver_keys = resolver_discovery_keys(raw, None, &protected_tokens)?;
+    // Registration events are emitter-partitioned. PermissionedRegistry emits this event from the
+    // registry's public unregister path.
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58)
+    let mut output = token_state_event(
+        selected,
+        "RegistrationReleased",
+        event.tokenId,
+        linked.as_ref(),
+        json!({
+            "source_event":"LabelUnregistered",
+            "sender":address_hex(event.sender),
+            "registry_contract_instance_id":selected.contract_instance_id.to_string(),
+        }),
+    )?;
+    append_terminal_boundaries(
+        &mut output,
+        state,
+        linked.as_ref(),
+        &token_id,
+        "LabelUnregistered",
+    );
+    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
+    append_v2_name_transitions(&mut output, transitions, raw, "LabelUnregistered", None);
+    append_token_discovery_closures(
+        &mut output,
+        raw,
+        event.tokenId,
+        linked.as_ref(),
+        &protected_resolver_keys,
+    )?;
     Ok(output)
 }
 
@@ -418,11 +475,57 @@ pub(super) fn token_regenerated(
             &new_token,
             "TokenRegenerated",
         );
+        let mut candidates = displaced.resolver_discovery_aliases.clone();
+        candidates.insert(new_token.clone());
+        let mut protected_resolver_tokens =
+            state.live_v2_resolver_tokens_sharing(&raw.emitting_address, &candidates);
+        protected_resolver_tokens.extend(linked.resolver_discovery_aliases.iter().cloned());
+        let protected_resolver_keys =
+            resolver_discovery_keys(raw, Some(event.oldTokenId), &protected_resolver_tokens)?;
+        append_token_discovery_closures(
+            &mut release,
+            raw,
+            event.newTokenId,
+            Some(displaced),
+            &protected_resolver_keys,
+        )?;
         output.append(&mut release);
+    }
+    match selected.event.name.as_str() {
+        "TokenRegenerated" => {
+            let subregistry_keys =
+                discovery_reassertion_keys(raw, &event, false, displaced.is_some());
+            if let (Some(target), Some((old_observation_key, new_observation_key))) =
+                (linked.subregistry.as_deref(), subregistry_keys)
+            {
+                output.discovery.push(DiscoveryDraft::Close {
+                    edge_kind: "subregistry".to_owned(),
+                    observation_key: old_observation_key,
+                });
+                output.discovery.push(DiscoveryDraft::Edge {
+                    edge_kind: "subregistry".to_owned(),
+                    to_address: target.to_owned(),
+                    admission_basis: "linked_subregistry_event".to_owned(),
+                    observation_key: new_observation_key,
+                });
+            }
+        }
+        _ => unreachable!("token regeneration dispatch selected another manifest event"),
     }
     let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
     append_v2_name_transitions(&mut output, transitions, raw, "TokenRegenerated", None);
     Ok(output)
+}
+
+fn discovery_reassertion_keys(
+    raw: &RawLogInput,
+    event: &TokenRegenerated,
+    resolver: bool,
+    destination_was_occupied: bool,
+) -> Option<(String, String)> {
+    let old = discovery_observation_key(raw, event.oldTokenId, resolver);
+    let new = discovery_observation_key(raw, event.newTokenId, resolver);
+    (destination_was_occupied || old != new).then_some((old, new))
 }
 
 fn upstream_identity(
