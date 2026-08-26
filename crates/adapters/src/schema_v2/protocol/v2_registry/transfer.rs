@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::{
     EACRolesChanged, TokenRegenerated, TokenResource, TransferBatch, TransferSingle, single_event,
     token_state_event,
+    topology::{append_terminal_boundaries, append_v2_name_transitions},
 };
 use crate::{
     evm_abi::{address_hex, decode_event_log, u256_word_hex},
@@ -17,7 +18,7 @@ use crate::{
             EventDraft, Interpreted, NameDraft, ResourceDraft, ensure_declared,
             permissions::{V2PermissionState, V2Vocabulary, v2_states},
         },
-        state::State,
+        state::{State, V2TokenState},
     },
 };
 
@@ -367,7 +368,7 @@ pub(super) fn token_regenerated(
     ensure_declared(selected, &["TokenRegenerated"])?;
     let old_token = u256_word_hex(event.oldTokenId);
     let new_token = u256_word_hex(event.newTokenId);
-    let linked = state
+    let (linked, displaced) = state
         .regenerate_v2_token(&raw.emitting_address, &old_token, &new_token)
         .with_context(|| {
             format!("TokenRegenerated {old_token} has no retained TokenResource predecessor")
@@ -393,6 +394,34 @@ pub(super) fn token_regenerated(
             token_lineage_id: linked.token_lineage_id,
         });
     }
+    if let Some(displaced) = displaced.as_ref() {
+        let displaced_registration = V2TokenState {
+            resolver: None,
+            subregistry: None,
+            ..displaced.clone()
+        };
+        let mut release = token_state_event(
+            selected,
+            "RegistrationReleased",
+            event.newTokenId,
+            Some(&displaced_registration),
+            json!({
+                "source_event":"TokenRegenerated",
+                "terminal_reason":"registry_name_binding_changed",
+                "registry_contract_instance_id":selected.contract_instance_id.to_string(),
+            }),
+        )?;
+        append_terminal_boundaries(
+            &mut release,
+            state,
+            Some(&displaced_registration),
+            &new_token,
+            "TokenRegenerated",
+        );
+        output.append(&mut release);
+    }
+    let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
+    append_v2_name_transitions(&mut output, transitions, raw, "TokenRegenerated", None);
     Ok(output)
 }
 

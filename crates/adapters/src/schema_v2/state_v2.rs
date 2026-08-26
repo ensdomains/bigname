@@ -214,8 +214,7 @@ impl State {
             registration,
         );
         // Live interpretation preserves the historical one-shot behavior while producing the
-        // batch. A retained-event restore has no displaced token to refresh at the end, so clear
-        // only the opaque restored state here after the output boundary.
+        // batch; restore clears only opaque displaced state after the output boundary.
         for (_, displaced) in &replaced {
             self.remove_v2_active_resource(displaced);
         }
@@ -468,7 +467,7 @@ impl State {
         emitter: &str,
         old_token_id: &str,
         new_token_id: &str,
-    ) -> Option<V2TokenState> {
+    ) -> Option<(V2TokenState, Option<V2TokenState>)> {
         let old_key = v2_key(emitter, old_token_id);
         let state = self.v2_tokens.remove(&old_key)?;
         self.replace_v2_token_indexes(&old_key, Some(&state), None);
@@ -480,17 +479,25 @@ impl State {
                 new_key.clone(),
             );
         }
-        if let Some(displaced) = self.v2_tokens.insert(new_key.clone(), state.clone()) {
-            self.replace_v2_token_indexes(&new_key, Some(&displaced), None);
+        let displaced = self.v2_tokens.insert(new_key.clone(), state.clone());
+        if let Some(displaced) = displaced.as_ref() {
+            self.replace_v2_token_indexes(&new_key, Some(displaced), None);
             self.replace_v2_expiry_index(&new_key, displaced.expiry, None);
+            self.remove_v2_current_name(displaced);
             if let Some(subregistry) = displaced.subregistry.as_deref() {
                 self.mark_v2_registry_dirty(subregistry);
+            }
+            if displaced.raw_label != state.raw_label
+                && let Some(label) = displaced.raw_label.as_ref()
+            {
+                self.v2_entry_by_parent_label
+                    .remove(&(emitter.to_ascii_lowercase(), label.clone()));
             }
         }
         self.replace_v2_token_indexes(&new_key, None, Some(&state));
         self.replace_v2_expiry_index(&new_key, None, state.expiry);
         self.mark_v2_token_component_dirty(&new_key);
-        Some(state)
+        Some((state, displaced))
     }
 
     pub(in crate::schema_v2) fn release_v2_token(

@@ -467,6 +467,152 @@ fn v2_unregistered_record_name_link_is_batch_grid_independent() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn v2_regeneration_collision_closes_displaced_registration_in_every_replay_shape() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    for (case, collision) in [
+        ("regeneration-collision", true),
+        ("unregister-comparator", false),
+    ] {
+        let input = v2_regeneration_collision_input(&wiring, collision)?;
+        let fresh = interpret_schema_v2_batch(input.clone())?;
+        assert_v2_regeneration_collision_output(&fresh, collision)?;
+        let converged = converge(
+            &format!("directed=v2-{case}"),
+            input,
+            vec![0..1, 1..2, 2..3, 3..4, 4..5],
+        )?;
+        assert!(
+            converged.artifacts.counts().is_empty(),
+            "{case} retained batch-boundary byte differences: {}",
+            converged.artifacts
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn v2_regeneration_collision_preserves_survivor_topology_across_restore() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let converged = converge(
+        "directed=v2-regeneration-collision-survivor-topology",
+        v2_regeneration_collision_input_with_topology(&wiring)?,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+    )?;
+    assert!(
+        converged
+            .whole
+            .output
+            .normalized_events
+            .iter()
+            .all(|event| {
+                event.after_state["source_event"] != "TokenRegenerated"
+                    || !matches!(
+                        event.event_kind.as_str(),
+                        "ResolverChanged" | "SubregistryChanged"
+                    )
+            }),
+        "a registration collision must not clear topology inherited by the surviving token"
+    );
+    Ok(())
+}
+
+fn assert_v2_regeneration_collision_output(output: &BatchOutput, collision: bool) -> Result<()> {
+    let alpha = format!("ens:{:#x}", namehash(&["alpha", "eth"]));
+    let beta = format!("ens:{:#x}", namehash(&["beta", "eth"]));
+    let alpha_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound"
+                && event.logical_name_id.as_deref() == Some(alpha.as_str())
+        })
+        .and_then(|event| event.resource_id)
+        .context("alpha's surface must be bound before displacement")?;
+    let beta_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound"
+                && event.logical_name_id.as_deref() == Some(beta.as_str())
+        })
+        .and_then(|event| event.resource_id)
+        .context("beta's surface must be bound before regeneration")?;
+    let source_event = if collision {
+        "TokenRegenerated"
+    } else {
+        "LabelUnregistered"
+    };
+    let released = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(20_000_002)
+                && event.event_kind == "RegistrationReleased"
+                && event.logical_name_id.as_deref() == Some(alpha.as_str())
+                && event.resource_id == Some(alpha_resource)
+                && event.after_state["source_event"] == source_event
+        })
+        .count();
+    let unbound = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(20_000_002)
+                && event.event_kind == "SurfaceUnbound"
+                && event.logical_name_id.as_deref() == Some(alpha.as_str())
+                && event.resource_id == Some(alpha_resource)
+                && event.after_state["source_event"] == source_event
+        })
+        .count();
+    let terminal_closures = output
+        .binding_closures
+        .iter()
+        .filter(|closure| {
+            closure.block_number == 20_000_002
+                && closure.logical_name_id == alpha
+                && closure.authority_arm == "ens_v2"
+        })
+        .count();
+    assert_eq!(
+        (released, unbound, terminal_closures),
+        (1, 1, 1),
+        "the displaced registration must have the comparator's exact terminal shape"
+    );
+
+    let renewals = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(20_000_003) && event.event_kind == "RegistrationRenewed"
+        })
+        .collect::<Vec<_>>();
+    if collision {
+        assert_eq!(renewals.len(), 1, "only the surviving token is renewed");
+        assert_eq!(renewals[0].logical_name_id.as_deref(), Some(beta.as_str()));
+        assert_eq!(renewals[0].resource_id, Some(beta_resource));
+    } else {
+        assert!(
+            renewals.is_empty(),
+            "the unregistered token cannot be renewed"
+        );
+    }
+
+    let record = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("the late resolver record must be interpreted")?;
+    assert_eq!(record.logical_name_id.as_deref(), Some(alpha.as_str()));
+    assert_eq!(
+        record.resource_id, None,
+        "the late record must not retain the displaced registration's resource"
+    );
+    Ok(())
+}
+
 /// `clearRecords` emits `VersionChanged` for the node after incrementing its record version.
 /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
 /// ens_v2@ccaeb58)
@@ -834,6 +980,175 @@ fn v2_released_name_record_input(
             .enumerate()
             .map(|(index, event)| log(2 + index, 3 + index as u64, resolver, event)),
     );
+    wiring.batch_input(&blocks, &logs)
+}
+
+/// Registers two ENSv2 names, then either regenerates the second token onto the first token's
+/// occupied key or unregisters the first token as the terminal-boundary comparator. A later renewal
+/// and resolver record expose any surviving attribution to the displaced registration.
+fn v2_regeneration_collision_input(wiring: &Wiring, collision: bool) -> Result<BatchInput> {
+    v2_regeneration_collision_input_inner(wiring, collision, false)
+}
+
+fn v2_regeneration_collision_input_with_topology(wiring: &Wiring) -> Result<BatchInput> {
+    v2_regeneration_collision_input_inner(wiring, true, true)
+}
+
+fn v2_regeneration_collision_input_inner(
+    wiring: &Wiring,
+    collision: bool,
+    survivor_topology: bool,
+) -> Result<BatchInput> {
+    const REGISTRY: &str = "ens_v2_registry_l1";
+    const RESOLVER: &str = "ens_v2_resolver_l1";
+    let registry = wiring.address(REGISTRY, "registry");
+    let resolver = wiring.address(RESOLVER, "resolver");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let alpha_hash = labelhash("alpha");
+    let beta_hash = labelhash("beta");
+    let token_a = U256::from_be_bytes(alpha_hash.0);
+    let token_b = U256::from_be_bytes(beta_hash.0);
+    let resource_a = U256::from(0xa483_u64);
+    let resource_b = U256::from(0xb483_u64);
+    let node_a = namehash(&["alpha", "eth"]);
+    let blocks = (0..5_i64)
+        .map(|index| BlockSpec {
+            number: 20_000_000 + index,
+            hash: format!("0x{:064x}", 0x4830_u64 + index as u64),
+            timestamp: 1_700_000_000 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, emitter: &str, encoded: LogData| {
+        let emission = scenario::emission(emitter, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x4830_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let displacement = if collision {
+        V2Registry::TokenRegenerated {
+            oldTokenId: token_b,
+            newTokenId: token_a,
+        }
+        .encode_log_data()
+    } else {
+        V2Registry::LabelUnregistered {
+            tokenId: token_a,
+            sender,
+        }
+        .encode_log_data()
+    };
+    let mut logs = vec![
+        log(
+            0,
+            0,
+            registry,
+            V2Registry::LabelRegistered {
+                tokenId: token_a,
+                labelHash: alpha_hash,
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            0,
+            1,
+            registry,
+            V2Registry::TokenResource {
+                tokenId: token_a,
+                resource: resource_a,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            2,
+            registry,
+            V2Registry::LabelRegistered {
+                tokenId: token_b,
+                labelHash: beta_hash,
+                label: "beta".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            3,
+            registry,
+            V2Registry::TokenResource {
+                tokenId: token_b,
+                resource: resource_b,
+            }
+            .encode_log_data(),
+        ),
+        log(2, 4, registry, displacement),
+        log(
+            3,
+            5,
+            registry,
+            V2Registry::ExpiryUpdated {
+                tokenId: token_a,
+                newExpiry: 1_850_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            4,
+            6,
+            resolver,
+            V2Resolver::AddressChanged {
+                node: node_a,
+                coinType: U256::from(60_u64),
+                newAddress: vec![0x48, 0x3].into(),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    if survivor_topology {
+        let resolver = resolver.parse()?;
+        logs.insert(
+            2,
+            log(
+                0,
+                2,
+                registry,
+                V2Registry::ResolverUpdated {
+                    tokenId: token_a,
+                    resolver,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        );
+        logs.insert(
+            5,
+            log(
+                1,
+                4,
+                registry,
+                V2Registry::ResolverUpdated {
+                    tokenId: token_b,
+                    resolver,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        );
+    }
     wiring.batch_input(&blocks, &logs)
 }
 
