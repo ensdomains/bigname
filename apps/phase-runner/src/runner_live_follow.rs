@@ -89,6 +89,8 @@ impl PhaseRunner {
                     self.run_spine_phase(chain, phase, cancellation.clone())
                         .await?;
                 }
+                self.run_required_verify_redo(chain, cancellation.clone())
+                    .await?;
                 Ok(())
             })
             .await;

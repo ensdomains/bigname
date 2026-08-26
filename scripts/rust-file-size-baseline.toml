@@ -57,3 +57,8 @@ review_justification = "Reviewed as non-serving release tooling: the file is bel
 path = "tools/benchmark-gate/src/indexing.rs"
 loc = 723
 justification = "Index timing, rebuild, throughput, memory measurement, and red-report construction remain one release-gate operation with its budget and false-green regression tests."
+
+[[files]]
+path = "apps/phase-runner/src/redo_state.rs"
+loc = 610
+justification = "Redo marker state: PR #563 grew the file to exactly 600 on main and the #543 Verify-demotion stamping wiring adds ten lines; the stamp-at-Ingest-redo-begin logic belongs beside the marker transactions it locks with. Crossed the threshold only at the rebase combining the two; split on next substantive touch."

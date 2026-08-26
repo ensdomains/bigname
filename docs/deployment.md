@@ -290,8 +290,10 @@ later selected chains from running; the command still exits nonzero with the
 collected failures. Interpret's effective replay range is handed to Project
 through the downstream redo stamp. `--phase all` refuses a chain with any
 already-pending redo rather than absorbing that work. If one of its phases
-fails, the error gives the phase-specific command that must complete the
-durable marker before the operator reruns `--phase all`. Verify redo checks its source
+fails, the error lists every pending phase-specific recovery command in
+dependency order, including a required Verify redo created by Ingest. The
+operator must complete those durable markers before rerunning `--phase all`.
+Verify redo checks its source
 and SELECT-only database configuration before phase initialization, locking,
 or redo-state publication.
 It rechecks only a range inside the recorded verification extent: the range
