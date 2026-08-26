@@ -743,6 +743,16 @@ Basenames registry `NewResolver` updates a node binding but does not discover a 
 
 Manifest loading admits source-graph nodes as `contract_instance_id`s, not raw addresses. Each active `[[roots]]` and `[[contracts]]` entry resolves to one admitted instance.
 
+[Address-admission floors](glossary.md#discovery-rule-widening-and-narrowing)
+are monotone: manifest synchronization keeps the earliest declared
+`start_block` for an address. A later declaration with a higher start has no
+effect on the stored floor. Keeping the earlier floor can only over-fetch, which
+is safe. Raising a stored floor could silently stop fetching previously
+included history, so in-place floor narrowing is unsupported. An operator who
+needs a narrower floor must retire the address, synchronize that close, and
+then re-declare it at the later start: this explicit close-and-reopen path
+creates the new bounded active range.
+
 - `[[roots]]` seed canonical graph and watch-plan expansion; otherwise they follow the same identity rules as `[[contracts]]`.
 - Reusing the same address on the same chain across manifest versions, even across an inactive gap, carries forward the existing `contract_instance_id` and appends a new non-overlapping active range.
 - Changing a declared address closes the prior active range and admits a new instance, with a new `contract_instance_id` rather than ID reuse. No discovery edge records the succession: the loader writes only `proxy_implementation` edges, and the [`migration` edge kind](glossary.md#migration-edge-migration) the schema permits is [reserved surface](glossary.md#reserved-surface) with no writer. What ties the two instances together is the manifest declaration, not their addresses: successive manifest versions carry the same `(chain_id, declaration_kind, declaration_name, role)` tuple against different declared addresses. Do not try to recover succession from the instances' active ranges — a retired address is closed at the chain head observed when the manifest loaded, while its successor opens at its own declared `start_block`, so the two ranges frequently overlap instead of abutting.

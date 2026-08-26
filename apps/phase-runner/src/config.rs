@@ -40,6 +40,9 @@ impl SourceRole {
         matches!(self, Self::VerificationOnly | Self::Both)
     }
 }
+
+include!(concat!(env!("OUT_DIR"), "/compiled_chain_namespaces.rs"));
+
 #[derive(Clone)]
 pub struct SourceConfig {
     pub chain_id: String,
@@ -404,4 +407,99 @@ pub fn group_sources(
             Ok(chain)
         })
         .collect()
+}
+
+pub fn validate_deployment_table_set<'a>(
+    chains: &[ChainConfig],
+    manifest_namespaces: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> RunnerResult<()> {
+    let configured_chains = chains
+        .iter()
+        .map(|chain| chain.chain_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let ens_chains = manifest_namespaces
+        .into_iter()
+        .filter(|(chain_id, namespace)| *namespace == "ens" && configured_chains.contains(chain_id))
+        .map(|(chain_id, _)| chain_id)
+        .collect::<BTreeSet<_>>();
+    if ens_chains.len() > 1 {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            format!(
+                "configured ENS chains {} violate the deployment topology: chains carrying the \
+                 ens namespace never share a table set; Sepolia always runs as its own deployment \
+                 writing its own tables; two chains in one database are supported only when their \
+                 namespaces differ (the existing ethereum-plus-base production shape)",
+                ens_chains.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain(chain_id: &str) -> ChainConfig {
+        ChainConfig::new(
+            chain_id,
+            vec![
+                SourceConfig::new(
+                    chain_id,
+                    "rpc",
+                    "rpc",
+                    SeedBasis::BaseSeam,
+                    0,
+                    "http://rpc.invalid",
+                )
+                .unwrap(),
+            ],
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn two_ens_chains_refuse_to_share_a_table_set() {
+        let chains = [chain("ethereum-mainnet"), chain("ethereum-sepolia")];
+        let error = validate_deployment_table_set(
+            &chains,
+            [("ethereum-mainnet", "ens"), ("ethereum-sepolia", "ens")],
+        )
+        .expect_err("two chains carrying ens must fail startup validation");
+
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        let message = error.to_string();
+        assert!(message.contains("chains carrying the ens namespace never share a table set"));
+        assert!(message.contains("Sepolia always runs as its own deployment"));
+        assert!(message.contains(
+            "two chains in one database are supported only when their namespaces differ"
+        ));
+        assert!(message.contains("ethereum-mainnet"));
+        assert!(message.contains("ethereum-sepolia"));
+    }
+
+    #[test]
+    fn ethereum_and_base_with_different_namespaces_share_a_table_set() {
+        let chains = [chain("ethereum-mainnet"), chain("base-mainnet")];
+
+        validate_deployment_table_set(
+            &chains,
+            [
+                ("ethereum-mainnet", "ens"),
+                ("ethereum-mainnet", "basenames"),
+                ("base-mainnet", "basenames"),
+            ],
+        )
+        .expect("the production ethereum-plus-base shape must remain supported");
+    }
+
+    #[test]
+    fn single_chain_sepolia_uses_its_own_table_set() {
+        let chains = [chain("ethereum-sepolia")];
+
+        validate_deployment_table_set(&chains, [("ethereum-sepolia", "ens")])
+            .expect("a single-chain Sepolia deployment must remain supported");
+    }
 }

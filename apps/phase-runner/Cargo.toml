@@ -27,6 +27,10 @@ bigname-metrics.workspace = true
 bigname-project.workspace = true
 bigname-storage.workspace = true
 
+[build-dependencies]
+bigname-content-hash.workspace = true
+bigname-manifests.workspace = true
+
 [dev-dependencies]
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
