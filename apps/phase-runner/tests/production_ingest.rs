@@ -763,20 +763,31 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
     let chain = ChainConfig::new(
         BASE,
         vec![
-            SourceConfig::new(
+            SourceConfig::new_with_role(
                 BASE,
                 "coinbase-history",
                 "coinbase_sql",
                 SeedBasis::BaseSeam,
                 BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
                 "https://coinbase.invalid",
             )?,
-            SourceConfig::new(
+            SourceConfig::new_with_role(
+                BASE,
+                "drpc-intake",
+                "drpc",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
+                "https://drpc-intake.invalid",
+            )?,
+            SourceConfig::new_with_role(
                 BASE,
                 "drpc-reference",
                 "drpc",
                 SeedBasis::BaseSeam,
                 BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::VerificationOnly,
                 "https://drpc.invalid",
             )?,
         ],
@@ -784,7 +795,9 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
     )?;
     let store = PhaseStore::new(scratch.pool().clone());
     store.initialize_chain(BASE).await?;
-    store.ensure_ingest_sources(BASE, &chain.sources).await?;
+    store
+        .ensure_ingest_sources(BASE, &chain.intake_sources())
+        .await?;
     sqlx::query(
         "INSERT INTO chain_lineage (
              chain_id, block_hash, parent_hash, block_number,
@@ -855,7 +868,8 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
                  WHEN source_key = 'coinbase-history' THEN $4
                  ELSE $5
              END
-         WHERE chain_id = $1",
+         WHERE chain_id = $1
+           AND source_key IN ('coinbase-history', 'drpc-intake')",
     )
     .bind(BASE)
     .bind(BASE_COINBASE_SEAM_BLOCK)
