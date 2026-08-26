@@ -1,8 +1,47 @@
 use std::collections::BTreeSet;
 
-use super::{State, v2::v2_key};
+use serde_json::Value;
+
+use super::{State, v2::V2TokenState, v2::v2_key};
 
 impl State {
+    pub(in crate::schema_v2) fn restore_v2_regeneration(
+        &mut self,
+        emitter: &str,
+        old_token_id: &str,
+        new_token_id: &str,
+        after_state: &Value,
+    ) {
+        if self
+            .regenerate_v2_token(emitter, old_token_id, new_token_id)
+            .is_none()
+        {
+            return;
+        }
+        let Some(aliases) = after_state
+            .get("resolver_discovery_aliases")
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        let aliases = aliases
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let token_key = v2_key(emitter, new_token_id);
+        let previous = self
+            .v2_tokens
+            .get(&token_key)
+            .map(|token| token.resolver_discovery_aliases.clone())
+            .unwrap_or_default();
+        self.set_v2_resolver_alias_index(emitter, new_token_id, &previous, false);
+        if let Some(token) = self.v2_tokens.get_mut(&token_key) {
+            token.resolver_discovery_aliases = aliases.clone();
+        }
+        self.set_v2_resolver_alias_index(emitter, new_token_id, &aliases, true);
+    }
+
     pub(super) fn remove_v2_displaced_restored_token(
         &mut self,
         emitter: &str,
@@ -11,10 +50,11 @@ impl State {
         let Some(displaced) = self.v2_tokens.remove(displaced_key) else {
             return;
         };
-        if displaced.resolver.is_some()
-            && let Some((_, displaced_token_id)) = displaced_key.rsplit_once(':')
-        {
-            self.set_v2_resolver_token_index(emitter, displaced_token_id, false);
+        if let Some((_, displaced_token_id)) = displaced_key.rsplit_once(':') {
+            if displaced.resolver.is_some() {
+                self.set_v2_resolver_token_index(emitter, displaced_token_id, false);
+            }
+            self.set_v2_token_resolver_alias_index(emitter, displaced_token_id, &displaced, false);
         }
         self.replace_v2_token_indexes(displaced_key, Some(&displaced), None);
         self.replace_v2_expiry_index(displaced_key, displaced.expiry, None);
@@ -48,15 +88,17 @@ impl State {
         candidates: &BTreeSet<String>,
     ) -> BTreeSet<String> {
         let emitter = emitter.to_ascii_lowercase();
-        candidates
-            .iter()
-            .filter_map(|token| {
-                self.v2_resolver_tokens_by_observation
-                    .get(&(emitter.clone(), resolver_observation_id(token)))
-            })
-            .flatten()
-            .cloned()
-            .collect()
+        let mut sharing = BTreeSet::new();
+        for candidate in candidates {
+            let key = (emitter.clone(), resolver_observation_id(candidate));
+            if let Some(tokens) = self.v2_resolver_tokens_by_observation.get(&key) {
+                sharing.extend(tokens.iter().cloned());
+            }
+            if let Some(aliases) = self.v2_resolver_aliases_by_observation.get(&key) {
+                sharing.extend(aliases.iter().map(|(_, alias)| alias.clone()));
+            }
+        }
+        sharing
     }
 
     pub(in crate::schema_v2) fn set_v2_resolver(
@@ -79,6 +121,7 @@ impl State {
         if was_active != is_active {
             self.set_v2_resolver_token_index(emitter, token_id, is_active);
         }
+        self.set_v2_resolver_alias_index(emitter, token_id, &aliases, false);
         self.mark_v2_token_dirty(key);
         aliases
     }
@@ -110,6 +153,55 @@ impl State {
                 self.v2_resolver_tokens_by_observation.remove(&key);
             }
         }
+    }
+
+    pub(super) fn set_v2_resolver_alias_index(
+        &mut self,
+        emitter: &str,
+        holder_token_id: &str,
+        aliases: &BTreeSet<String>,
+        active: bool,
+    ) {
+        let emitter = emitter.to_ascii_lowercase();
+        for alias in aliases {
+            let key = (emitter.clone(), resolver_observation_id(alias));
+            let entry = (holder_token_id.to_owned(), alias.clone());
+            if active {
+                self.v2_resolver_aliases_by_observation
+                    .entry(key)
+                    .or_default()
+                    .insert(entry);
+            } else {
+                let remove_key = self
+                    .v2_resolver_aliases_by_observation
+                    .get_mut(&key)
+                    .is_some_and(|holders| {
+                        holders.remove(&entry);
+                        holders.is_empty()
+                    });
+                if remove_key {
+                    self.v2_resolver_aliases_by_observation.remove(&key);
+                }
+            }
+        }
+    }
+
+    pub(super) fn set_v2_token_resolver_alias_index(
+        &mut self,
+        emitter: &str,
+        holder_token_id: &str,
+        token: &V2TokenState,
+        active: bool,
+    ) {
+        if active && token.resolver.is_none() {
+            return;
+        }
+        self.set_v2_resolver_alias_index(
+            emitter,
+            holder_token_id,
+            &token.resolver_discovery_aliases,
+            active,
+        );
     }
 }
 

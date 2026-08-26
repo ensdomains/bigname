@@ -443,6 +443,7 @@ pub(super) fn token_regenerated(
             "new_token_id":new_token,
             "resource":linked.upstream_resource,
             "token_lineage_id":linked.token_lineage_id.map(|id| id.to_string()),
+            "resolver_discovery_aliases":linked.resolver_discovery_aliases,
         }),
     );
     if let Some(resource_id) = linked.resource_id {

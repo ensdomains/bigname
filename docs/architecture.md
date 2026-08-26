@@ -738,7 +738,9 @@ ENSv2 mappings:
   the destination token's key. Its resolver observation stays continuously
   active under the source token's key. That prior key is recorded on the
   successor so the next explicit resolver update or terminal token event retires
-  it unless a different live token has since reused the same masked key. A
+  it unless another live token still uses or retains the same resolver
+  `observation_key`. The normalized event's `resolver_discovery_aliases` records
+  the complete retained-key set so compacted restore preserves that protection. A
   resolver key shared by the survivor and displaced registration is not closed
   at the collision. Regeneration never reopens a resolver edge from retained
   state, so interpretation cannot claim historical address coverage that

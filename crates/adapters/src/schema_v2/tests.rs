@@ -9269,6 +9269,122 @@ fn regeneration_collision_reasserts_a_displaced_names_surviving_coholder() -> an
 }
 
 #[test]
+fn regenerated_resolver_alias_stays_live_while_another_successor_retains_it() -> anyhow::Result<()>
+{
+    const MANIFEST_ID: i64 = 97;
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let resolver_one: Address = "0x0000000000000000000000000000000000000011".parse()?;
+    let resolver_two: Address = "0x0000000000000000000000000000000000000012".parse()?;
+    let resolver_replacement: Address = "0x0000000000000000000000000000000000000013".parse()?;
+    let alpha = versioned_token("alpha", 1);
+    let beta = versioned_token("alpha", 2);
+    let alpha_successor = versioned_token("gamma", 1);
+    let beta_successor = versioned_token("delta", 1);
+    let manifest = manifest_with_events(
+        MANIFEST_ID,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "ResolverUpdated",
+                "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
+                &["registry"],
+                &["ResolverChanged"],
+            ),
+            (
+                "TokenRegenerated",
+                "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)",
+                &["registry"],
+                &["TokenRegenerated"],
+            ),
+        ],
+    );
+    let registration = |token_id, label: &str, block| {
+        raw_at(
+            v2_registry::LabelRegistered {
+                tokenId: token_id,
+                labelHash: keccak256(label.as_bytes()),
+                label: label.to_owned(),
+                owner,
+                expiry: 5_000,
+                sender,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            CONTRACT,
+        )
+    };
+    let resolver = |token_id, resolver, block| {
+        raw_at(
+            v2_registry::ResolverUpdated {
+                tokenId: token_id,
+                resolver,
+                sender,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            CONTRACT,
+        )
+    };
+    let regeneration = |old_token_id, new_token_id, block| {
+        raw_at(
+            v2_registry::TokenRegenerated {
+                oldTokenId: old_token_id,
+                newTokenId: new_token_id,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            CONTRACT,
+        )
+    };
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: vec![DiscoveryRuleInput {
+            manifest_id: MANIFEST_ID,
+            edge_kind: "resolver".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "protocol_event".to_owned(),
+        }],
+        admissions: vec![admission(MANIFEST_ID, "registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            registration(alpha, "alpha", 1),
+            registration(beta, "beta", 2),
+            resolver(alpha, resolver_one, 3),
+            resolver(beta, resolver_two, 4),
+            regeneration(alpha, alpha_successor, 5),
+            regeneration(beta, beta_successor, 6),
+            resolver(alpha_successor, resolver_replacement, 7),
+        ],
+    })?;
+    let mut masked = alpha.to_be_bytes::<32>();
+    masked[28..].fill(0);
+    let observation_key = format!("resolver:{}:{:#x}", CONTRACT, U256::from_be_bytes(masked));
+    assert!(
+        output.discovery_edge_closures.iter().all(|closure| {
+            closure.active_to_block_number != 7
+                || closure.edge_kind != "resolver"
+                || closure.observation_key != observation_key
+        }),
+        "the first successor retired resolver coverage retained by the second: {:#?}",
+        output.discovery_edge_closures
+    );
+    Ok(())
+}
+
+#[test]
 fn contested_loser_reregistration_emits_one_marked_name_observation() -> anyhow::Result<()> {
     const RIVAL: &str = "0x0000000000000000000000000000000000000069";
     const MANIFEST_ID: i64 = 96;

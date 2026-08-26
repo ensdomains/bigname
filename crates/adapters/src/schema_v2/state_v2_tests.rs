@@ -10,6 +10,8 @@ const THIRD: &str = "0x0000000000000000000000000000000000000044";
 const NEST_ROOT: &str = "0x0000000000000000000000000000000000000050";
 const NEST: &str = "0x0000000000000000000000000000000000000051";
 const NAMESPACE: &str = "ens";
+#[path = "state_v2_pointer_tests.rs"]
+mod pointer_tests;
 #[test]
 fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
     let mut state = anchored_state();
@@ -22,70 +24,6 @@ fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
     let transitions = state.refresh_dirty_v2_names(2);
     assert!(transitions.is_empty() && state.v2_token(ROOT, "0x02").is_some());
     assert_eq!(super::v2_refresh_visits(), 1);
-    assert_v2_indexes_are_derived(&state);
-}
-#[test]
-fn v2_resolver_observation_index_moves_and_queries_only_candidate_keys() {
-    const OLD: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000001";
-    const ALIAS: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000002";
-    const NEW: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb00000001";
-    let mut state = anchored_state();
-    install_token(&mut state, ROOT, OLD, b"alpha", 100);
-    state.set_v2_resolver(ROOT, OLD, Some("0xresolver".to_owned()));
-    install_token(&mut state, ROOT, NEW, b"beta", 100);
-    state.set_v2_resolver(ROOT, NEW, Some("0xdisplaced".to_owned()));
-    assert_eq!(
-        state.live_v2_resolver_tokens_sharing(
-            ROOT,
-            &std::collections::BTreeSet::from([ALIAS.into()])
-        ),
-        std::collections::BTreeSet::from([OLD.into()]),
-    );
-    state.regenerate_v2_token(ROOT, OLD, NEW).unwrap();
-    assert!(
-        state
-            .live_v2_resolver_tokens_sharing(
-                ROOT,
-                &std::collections::BTreeSet::from([ALIAS.into()]),
-            )
-            .is_empty()
-    );
-    assert_eq!(
-        state
-            .live_v2_resolver_tokens_sharing(ROOT, &std::collections::BTreeSet::from([NEW.into()])),
-        std::collections::BTreeSet::from([NEW.into()]),
-    );
-    state.set_v2_resolver(ROOT, NEW, None);
-    assert!(state.v2_resolver_tokens_by_observation.is_empty());
-}
-#[test]
-fn v2_restore_displacement_removes_the_displaced_resolver_index_entry() {
-    const RESTORED: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000001";
-    const DISPLACED: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb00000001";
-    let mut state = anchored_state();
-    install_token(&mut state, ROOT, RESTORED, b"alpha", 100);
-    install_token(&mut state, ROOT, DISPLACED, b"alpha", 100);
-    state.attach_v2_unbound_resource(
-        ROOT,
-        RESTORED,
-        "0x99".to_owned(),
-        Uuid::from_u128(99),
-        Some(Uuid::from_u128(100)),
-    );
-    state.set_v2_resolver(ROOT, RESTORED, Some("0xrestored".to_owned()));
-    state.set_v2_resolver(ROOT, DISPLACED, Some("0xdisplaced".to_owned()));
-
-    state.restore_v2_registration(
-        ROOT,
-        RESTORED,
-        Some(Uuid::from_u128(1)),
-        NAMESPACE,
-        b"alpha",
-        200,
-        Some(json!({"registrant":"0xowner", "expiry":200})),
-    );
-
-    assert!(state.v2_token(ROOT, DISPLACED).is_none());
     assert_v2_indexes_are_derived(&state);
 }
 #[test]
@@ -542,6 +480,7 @@ fn assert_v2_indexes_are_derived(state: &State) {
     let mut current_names = OrdMap::<String, OrdSet<String>>::new();
     let mut expiries = OrdSet::new();
     let mut resolver_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
+    let mut resolver_aliases = OrdMap::<(String, String), OrdSet<(String, String)>>::new();
     for (token_key, token) in &state.v2_tokens {
         let (emitter, token_id) = token_key
             .rsplit_once(':')
@@ -576,10 +515,20 @@ fn assert_v2_indexes_are_derived(state: &State) {
                 .or_default()
                 .insert(token_id.to_owned());
         }
+        for alias in &token.resolver_discovery_aliases {
+            resolver_aliases
+                .entry((
+                    emitter.to_owned(),
+                    super::v2_pointers::resolver_observation_id(alias),
+                ))
+                .or_default()
+                .insert((token_id.to_owned(), alias.clone()));
+        }
     }
     assert_eq!(state.v2_token_by_upstream_resource_index, upstream);
     assert_eq!(state.v2_token_by_name_index, names);
     assert_eq!(state.v2_tokens_by_current_name_index, current_names);
     assert_eq!(state.v2_expiries, expiries);
     assert_eq!(state.v2_resolver_tokens_by_observation, resolver_tokens);
+    assert_eq!(state.v2_resolver_aliases_by_observation, resolver_aliases);
 }

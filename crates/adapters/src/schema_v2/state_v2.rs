@@ -105,6 +105,7 @@ impl State {
             if previous.resolver.is_some() {
                 self.set_v2_resolver_token_index(&emitter, token_id, false);
             }
+            self.set_v2_token_resolver_alias_index(&emitter, token_id, previous, false);
             self.replace_v2_token_indexes(&token_key, Some(previous), None);
             self.replace_v2_expiry_index(&token_key, previous.expiry, None);
             self.remove_v2_current_surface(previous);
@@ -134,6 +135,7 @@ impl State {
             if displaced.resolver.is_some() {
                 self.set_v2_resolver_token_index(&emitter, &displaced_token, false);
             }
+            self.set_v2_token_resolver_alias_index(&emitter, &displaced_token, &displaced, false);
             self.replace_v2_token_indexes(&replaced_key, Some(&displaced), None);
             self.replace_v2_expiry_index(&replaced_key, displaced.expiry, None);
             self.remove_v2_current_surface(&displaced);
@@ -446,10 +448,11 @@ impl State {
         if state.resolver.is_some() {
             self.set_v2_resolver_token_index(emitter, old_token_id, false);
         }
+        self.set_v2_token_resolver_alias_index(emitter, old_token_id, &state, false);
         self.replace_v2_token_indexes(&old_key, Some(&state), None);
         self.replace_v2_expiry_index(&old_key, state.expiry, None);
         let new_key = v2_key(emitter, new_token_id);
-        if !same_resolver_observation(old_token_id, new_token_id) {
+        if state.resolver.is_some() && !same_resolver_observation(old_token_id, new_token_id) {
             state
                 .resolver_discovery_aliases
                 .insert(old_token_id.to_owned());
@@ -465,6 +468,7 @@ impl State {
             if displaced.resolver.is_some() {
                 self.set_v2_resolver_token_index(emitter, new_token_id, false);
             }
+            self.set_v2_token_resolver_alias_index(emitter, new_token_id, displaced, false);
             self.replace_v2_token_indexes(&new_key, Some(displaced), None);
             self.replace_v2_expiry_index(&new_key, displaced.expiry, None);
             self.remove_v2_current_name(displaced);
@@ -482,6 +486,7 @@ impl State {
         if state.resolver.is_some() {
             self.set_v2_resolver_token_index(emitter, new_token_id, true);
         }
+        self.set_v2_token_resolver_alias_index(emitter, new_token_id, &state, true);
         self.replace_v2_expiry_index(&new_key, None, state.expiry);
         self.mark_v2_token_component_dirty(&new_key);
         Some((state, displaced))
@@ -498,6 +503,7 @@ impl State {
         if state.resolver.is_some() {
             self.set_v2_resolver_token_index(&emitter, token_id, false);
         }
+        self.set_v2_token_resolver_alias_index(&emitter, token_id, &state, false);
         self.replace_v2_token_indexes(&token_key, Some(&state), None);
         self.replace_v2_expiry_index(&token_key, state.expiry, None);
         self.remove_v2_current_name(&state);

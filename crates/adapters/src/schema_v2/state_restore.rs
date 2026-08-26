@@ -108,7 +108,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
                 .get("new_token_id")
                 .and_then(Value::as_str);
             if let (Some(old), Some(new)) = (old, new) {
-                state.regenerate_v2_token(emitter, old, new);
+                state.restore_v2_regeneration(emitter, old, new, &event.after_state);
             }
         }
         "TokenControlTransferred" => {
