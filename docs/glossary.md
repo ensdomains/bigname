@@ -1256,9 +1256,10 @@ transfer powers before the later wrapper expiry.
 **Manifest-authority marker** — a
 `manifest-authority:<authority-fingerprint>:<invalidation-token>` value that
 manifest synchronization records in a derived phase's input-hash field when
-the active manifest authority changes or a persisted admission-floor repair
-invalidates derived results. The fingerprint identifies the desired manifest
-set. The database mints a new invalidation token for every invalidation,
+the active manifest authority changes, a persisted admission-floor repair
+invalidates derived results, or stored manifest event history is repaired. The
+fingerprint identifies the desired manifest set. The database mints a new
+invalidation token for every invalidation,
 including a later return to the same desired set. The marker poisons ordinary
 hash adoption until the required full redo begins. It proves that derived
 results must be redone under the named authority; it does not itself prove the

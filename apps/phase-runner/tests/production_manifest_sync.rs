@@ -942,6 +942,61 @@ async fn manifest_watch_comparison_refuses_coverage_below_the_persisted_floor() 
 }
 
 #[tokio::test]
+async fn empty_retired_intervals_do_not_lower_the_persisted_watch_floor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_empty_interval_floor").await?;
+    let chain_id = "manifest-empty-interval-floor";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    let path = fixture.root.join("test/test_events/v1.toml");
+
+    fixture.write_with_start(false, false, 5)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_chain_head(scratch.pool(), chain_id, 5).await?;
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen(
+            "0x0000000000000000000000000000000000000004",
+            "0x0000000000000000000000000000000000000005",
+            1,
+        ),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    fixture.write_with_start(false, false, 10)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    advance_chain_head(scratch.pool(), chain_id, 10).await?;
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen(
+            "0x0000000000000000000000000000000000000004",
+            "0x0000000000000000000000000000000000000006",
+            1,
+        ),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    let epochs: Vec<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT active_from_block_number, active_to_block_number
+         FROM contract_instance_addresses
+         WHERE chain_id = $1 AND lower(address) = $2
+         ORDER BY contract_instance_address_id",
+    )
+    .bind(chain_id)
+    .bind("0x0000000000000000000000000000000000000004")
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(epochs, [(Some(5), Some(5)), (Some(10), Some(10))]);
+
+    fixture.write_with_start(false, false, 7)?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("empty retired intervals must not lower the persisted Ingest floor");
+    let message = error.to_string();
+    assert!(message.contains("promised coverage start 7"), "{message}");
+    assert!(message.contains("persisted ingest floor 10"), "{message}");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn desired_all_emitter_watch_covers_an_address_below_its_persisted_floor() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_desired_all_covers_floor").await?;
     let chain_id = "manifest-desired-all-covers-floor";
@@ -3251,6 +3306,19 @@ async fn schema_v2_manifest_sync_is_idempotent_and_retires_absent_history() -> R
     assert_eq!(stored_count, 4);
 
     let second_deprecation_identity = identities_and_counts[3].0.clone();
+    PhaseStore::new(scratch.pool().clone())
+        .initialize_chain("ethereum-mainnet")
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', input_content_hash = $2,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind("ethereum-mainnet")
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
     sqlx::query(
         "DELETE FROM normalized_events
          WHERE source_manifest_id = $1
@@ -3264,6 +3332,25 @@ async fn schema_v2_manifest_sync_is_idempotent_and_retires_absent_history() -> R
         .bind(retained_manifest.0)
         .execute(scratch.pool())
         .await?;
+    let mut lock_connection = scratch.pool().acquire().await?;
+    let lock_name = "phase-runner:ethereum-mainnet:interpret";
+    let acquired: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1::text, 0::bigint))")
+            .bind(lock_name)
+            .fetch_one(&mut *lock_connection)
+            .await?;
+    assert!(acquired);
+    let error = sync_schema_v2_repository(scratch.pool(), &base_repository)
+        .await
+        .expect_err("history repair must not race the affected chain's phase writer");
+    assert!(error.to_string().contains("phase advisory lock"));
+    let released: bool =
+        sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1::text, 0::bigint))")
+            .bind(lock_name)
+            .fetch_one(&mut *lock_connection)
+            .await?;
+    assert!(released);
+    drop(lock_connection);
     sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
     let repaired_latest: Option<(String, i64)> = sqlx::query_as(
         "SELECT event_identity, (raw_fact_ref ->> 'applied_change_count')::bigint
@@ -3280,6 +3367,23 @@ async fn schema_v2_manifest_sync_is_idempotent_and_retires_absent_history() -> R
         repaired_latest,
         Some((second_deprecation_identity, 4)),
         "sync must repair stale history so its newest event agrees with stored current state"
+    );
+    let hash: Option<String> = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind("ethereum-mainnet")
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_ne!(
+        hash.as_deref(),
+        Some(INTERPRETER_CONTENT_HASH),
+        "history repair must invalidate Project so rows built from the stale event are re-derived"
+    );
+    assert!(
+        hash.as_deref()
+            .is_some_and(|hash| hash.starts_with("manifest-authority:")),
+        "history repair must leave a manifest-authority invalidation marker"
     );
     scratch.cleanup().await
 }
@@ -3562,7 +3666,9 @@ async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("manifests/mainnet");
-    sync_schema_v2_repository(scratch.pool(), &load_repository(&root)?).await?;
+    let full_repository = load_repository(&root)?;
+    let base_repository = load_repository(root.join("base"))?;
+    sync_schema_v2_repository(scratch.pool(), &full_repository).await?;
 
     let store = PhaseStore::new(scratch.pool().clone());
     for chain_id in ["ethereum-mainnet", "base-mainnet"] {
@@ -3584,8 +3690,114 @@ async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> 
         .await?;
     }
 
+    let basenames_manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = 'ethereum-mainnet'
+           AND namespace = 'basenames'
+           AND source_family = 'basenames_execution'
+           AND manifest_version = 2
+           AND rollout_status = 'active'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT applied_change_count FROM manifest_versions WHERE manifest_id = $1",
+    )
+    .bind(basenames_manifest_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE source_manifest_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+           AND (raw_fact_ref ->> 'applied_change_count')::bigint = $2",
+    )
+    .bind(basenames_manifest_id)
+    .bind(active_count)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("UPDATE manifest_versions SET applied_change_count = $2 WHERE manifest_id = $1")
+        .bind(basenames_manifest_id)
+        .bind(active_count - 1)
+        .execute(scratch.pool())
+        .await?;
+    sync_schema_v2_repository(scratch.pool(), &full_repository).await?;
+    let active_repair_base_hash: String = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        active_repair_base_hash.starts_with("manifest-authority:"),
+        "active basenames_execution history repair must invalidate its Base Project consumer"
+    );
+
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $1
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+    let shadow_manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = 'ethereum-mainnet'
+           AND namespace = 'basenames'
+           AND source_family = 'basenames_execution'
+           AND manifest_version = 1
+           AND rollout_status = 'shadow'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    let shadow_count: i64 = sqlx::query_scalar(
+        "SELECT applied_change_count FROM manifest_versions WHERE manifest_id = $1",
+    )
+    .bind(shadow_manifest_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE source_manifest_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+           AND (raw_fact_ref ->> 'applied_change_count')::bigint = $2",
+    )
+    .bind(shadow_manifest_id)
+    .bind(shadow_count)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET applied_change_count = $2,
+             manifest_payload = manifest_payload || '{\"injected_drift\": true}'::jsonb
+         WHERE manifest_id = $1",
+    )
+    .bind(shadow_manifest_id)
+    .bind(shadow_count - 1)
+    .execute(scratch.pool())
+    .await?;
+    sync_schema_v2_repository(scratch.pool(), &full_repository).await?;
+    let combined_repair_base_hash: String = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        combined_repair_base_hash.starts_with("manifest-authority:"),
+        "inactive payload drift plus history repair must invalidate the Base Project consumer"
+    );
+
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $1
+         WHERE chain_id IN ('ethereum-mainnet', 'base-mainnet')
+           AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
     seed_chain_head(scratch.pool(), "ethereum-mainnet", 30_000_000).await?;
-    sync_schema_v2_repository(scratch.pool(), &load_repository(root.join("base"))?).await?;
+    sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
 
     let project_hashes: Vec<(String, String)> = sqlx::query_as(
         "
@@ -3613,6 +3825,46 @@ async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(base_interpret_hash, INTERPRETER_CONTENT_HASH);
+
+    let deprecated_count: i64 = sqlx::query_scalar(
+        "SELECT applied_change_count FROM manifest_versions WHERE manifest_id = $1",
+    )
+    .bind(basenames_manifest_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE source_manifest_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+           AND (raw_fact_ref ->> 'applied_change_count')::bigint = $2",
+    )
+    .bind(basenames_manifest_id)
+    .bind(deprecated_count)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("UPDATE manifest_versions SET applied_change_count = $2 WHERE manifest_id = $1")
+        .bind(basenames_manifest_id)
+        .bind(deprecated_count - 1)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $1
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+    sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
+    let deprecated_repair_base_hash: String = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        deprecated_repair_base_hash.starts_with("manifest-authority:"),
+        "deprecated basenames_execution history repair must invalidate its Base Project consumer"
+    );
     scratch.cleanup().await
 }
 

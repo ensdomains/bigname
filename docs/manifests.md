@@ -932,6 +932,9 @@ topic. The transaction records no new coverage promise, and the error names
 both values as `promised coverage start <S>` and [`persisted ingest floor
 <F>`](glossary.md#persisted-ingest-floor). This bound is used only by the
 compiled-watch comparison.
+For a closed stored interval, only a non-empty intersection with the declared
+start contributes to that floor; an interval ending before that intersection
+starts cannot support the coverage promise.
 The operator may re-declare the address at or above `<F>`. To close and reopen
 instead, remove the declaration and synchronize, complete the full Interpret
 redo that closes the old stored interval, then restore the declaration and
@@ -1225,9 +1228,15 @@ disagrees with that persisted state, synchronization appends another
 `SourceManifestUpdated` that re-derives the current-state transition without
 changing manifest authority.
 The synchronization transaction also invalidates completed interpret and
-project phase content hashes for changed chains. The deleted admission-epoch
-and full-source reconciliation writers no longer participate; phase redo
-applies the new authority to discovery and projection state.
+project phase content hashes for chains with changed authority or repaired
+manifest event history. The deleted [admission
+epoch](glossary.md#admission-epoch) and full-source
+reconciliation writers no longer participate; phase redo applies the current
+authority to discovery and projection state. Repairing Ethereum Mainnet
+`basenames_execution` history also invalidates the Base project phase because
+that phase consumes the repaired events. A history-triggered invalidation uses
+the same manifest-authority marker and attested full Interpret redo as an
+authority change.
 
 The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 

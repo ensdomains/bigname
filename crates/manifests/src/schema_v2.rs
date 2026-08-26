@@ -117,6 +117,8 @@ pub async fn sync_schema_v2_repository(
     let mut proxy_edge_count = 0usize;
     let mut desired_keys = HashSet::new();
     let mut repaired_floor_chains = HashSet::new();
+    let mut repaired_history_chains = HashSet::new();
+    let mut repaired_basenames_execution_history = false;
     let mut notices = Vec::new();
     for loaded in repository.manifests() {
         let file_path = loaded.relative_path.to_string_lossy().into_owned();
@@ -126,7 +128,12 @@ pub async fn sync_schema_v2_repository(
         match existing.get(&state.key) {
             None => write_manifest_event(&mut transaction, json!({}), &state).await?,
             Some(before) if !before.authority_matches(&state) => {
-                write_manifest_event(&mut transaction, before.event_state(), &state).await?
+                let repaired_history = !before.history_matches();
+                write_manifest_event(&mut transaction, before.event_state(), &state).await?;
+                if repaired_history {
+                    repaired_history_chains.insert(state.key.chain_id.clone());
+                    repaired_basenames_execution_history |= is_basenames_execution(&state.key);
+                }
             }
             Some(before) if !before.history_matches() => {
                 write_manifest_event(
@@ -134,7 +141,9 @@ pub async fn sync_schema_v2_repository(
                     before.latest_event_state_or_empty(),
                     &state,
                 )
-                .await?
+                .await?;
+                repaired_history_chains.insert(state.key.chain_id.clone());
+                repaired_basenames_execution_history |= is_basenames_execution(&state.key);
             }
             Some(_) => {}
         }
@@ -155,6 +164,7 @@ pub async fn sync_schema_v2_repository(
             && (state.rollout_status == "active" || !state.history_matches())
     }) {
         let mut after = before.clone();
+        let repaired_history = before.rollout_status != "active";
         let before_state = if before.rollout_status == "active" {
             after.rollout_status = "deprecated".to_owned();
             before.event_state()
@@ -162,6 +172,10 @@ pub async fn sync_schema_v2_repository(
             before.latest_event_state_or_empty()
         };
         write_manifest_event(&mut transaction, before_state, &after).await?;
+        if repaired_history {
+            repaired_history_chains.insert(before.key.chain_id.clone());
+            repaired_basenames_execution_history |= is_basenames_execution(&before.key);
+        }
     }
     deactivate_retired_manifest_addresses(&mut transaction, &previous_declarations).await?;
     repair_retired_omitted_admission_floors(
@@ -176,6 +190,8 @@ pub async fn sync_schema_v2_repository(
         &desired_authority,
         &previous_admission_floors,
         &repaired_floor_chains,
+        &repaired_history_chains,
+        repaired_basenames_execution_history,
     )
     .await?;
     transaction
@@ -189,6 +205,12 @@ pub async fn sync_schema_v2_repository(
         proxy_edge_count,
         notices,
     })
+}
+
+fn is_basenames_execution(key: &event_history::ManifestKey) -> bool {
+    key.chain_id == "ethereum-mainnet"
+        && key.namespace == "basenames"
+        && key.source_family == "basenames_execution"
 }
 
 async fn upsert_manifest(

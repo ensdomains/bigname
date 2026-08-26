@@ -665,8 +665,9 @@ lineage both prove only the facts selected by the [watch
 plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded;
 neither proves facts added by a later watch plan. Manifest synchronization
 records a [manifest-authority marker](glossary.md#manifest-authority-marker)
-when that authority changes. Every Interpret redo that would discharge the
-marker fails closed unless the operator passes
+when that authority changes, a persisted admission-floor repair invalidates
+derived results, or stored manifest event history is repaired. Every Interpret
+redo that would discharge the marker fails closed unless the operator passes
 `--attest-watch-set-coverage <token>` with the invalidation token printed by the
 fence error. Before passing it, the operator must run the
 [mandatory historical fetch for any widened
@@ -696,7 +697,8 @@ from narrowing and unrelated authority changes. A widening over retained
 coverage stamps the required Ingest redo; successful completion supplies the
 current-watch-plan fetch before Interpret can run. The attestation remains the
 operator's durable acknowledgement of every manifest-authority change,
-including changes that stamp no Ingest work. An interpreter content hash
+persisted admission-floor repair, or stored manifest event-history repair,
+including invalidations that stamp no Ingest work. An interpreter content hash
 rotation with neither a current manifest-authority marker nor an active audited
 redo remains flagless.
 A missing lineage height, an ambiguous readable height, or an uncovered part of

@@ -29,7 +29,13 @@ pub(super) async fn load(
            AND compiled.entry -> 'emitter' ->> 'kind' = 'address'
            AND (
                address.deactivated_at IS NULL
-               OR address.active_to_block_number IS NOT NULL
+               OR (
+                   address.active_to_block_number IS NOT NULL
+                   AND GREATEST(
+                       COALESCE(declaration.start_block_number, 0),
+                       COALESCE(address.active_from_block_number, 0)
+                   ) <= address.active_to_block_number
+               )
            )
          GROUP BY 1, 2, 3, 4",
     )
