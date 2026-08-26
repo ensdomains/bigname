@@ -1,6 +1,78 @@
 use std::collections::BTreeSet;
 
 #[tokio::test]
+async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
+    const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
+
+    let database = TestDatabase::new_migrated().await?;
+    let specs = [V2AddressNameSpec {
+        logical_name_id: "ens:ᏣᎳᎩ.eth",
+        name: NORMALIZED_NAME,
+        namehash: "node:ᏣᎳᎩ.eth",
+        resource_id: Uuid::from_u128(0x34900),
+        token_lineage_id: Uuid::from_u128(0x34901),
+        surface_binding_id: Uuid::from_u128(0x34902),
+        block_hash: "0xname349",
+        block_number: 349,
+        owner: "0x0000000000000000000000000000000000000349",
+        registrant: "0x0000000000000000000000000000000000000349",
+        registered_at: "2024-01-02T00:00:00Z",
+        created_at: "2023-01-02T00:00:00Z",
+        expires_at: "2027-01-02T00:00:00Z",
+        relations: &[bigname_storage::AddressNameRelation::TokenHolder],
+    }];
+    seed_v2_address_name_storage(&database, &specs).await?;
+    seed_v2_address_name_current_rows(&database, &specs).await?;
+    seed_v2_address_name_relations(&database, &specs).await?;
+    let stored_raw_name: String = sqlx::query_scalar(
+        "SELECT raw_name FROM bigname_phase.name_surfaces
+         WHERE raw_name = $1 AND visibility_state = 'active'
+           AND normalization_errors = '[]'::jsonb",
+    )
+    .bind(NORMALIZED_NAME)
+    .fetch_one(&database.pool)
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"].as_str(), Some(stored_raw_name.as_str()));
+
+    let prefix_payload = v2_address_names_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        prefix_payload["data"][0]["name"],
+        json!(NORMALIZED_NAME)
+    );
+    let boundary_payload = v2_address_names_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ADDRESS}/names?q=%E1%8F%A3%E1%8E%B3%E1%8E%A9."
+        ),
+    )
+    .await?;
+    assert_eq!(
+        boundary_payload["data"][0]["name"],
+        json!(NORMALIZED_NAME)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_flag() -> Result<()> {
     let (database, payload) =
         v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names")).await?;
@@ -81,24 +153,115 @@ async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()
         .expect("q data must be an array");
     assert_eq!(names(q_rows), vec!["gamma.eth"]);
 
-    let lowercase_q_payload = v2_address_names_payload_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?q=al"),
-    )
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_address_names_normalizes_ascii_mixed_case_q_prefix() -> Result<()> {
+    let (database, lowercase_payload) = v2_address_names_payload(&format!(
+        "/v2/addresses/{V2_ADDRESS}/names?q=al"
+    ))
     .await?;
-    let uppercase_q_payload = v2_address_names_payload_for_database(
+    let mixed_case_payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v2/addresses/{V2_ADDRESS}/names?q=AL"),
     )
     .await?;
-    let lowercase_q_rows = lowercase_q_payload["data"]
+
+    let lowercase_rows = lowercase_payload["data"]
         .as_array()
         .expect("lowercase q data must be an array");
-    let uppercase_q_rows = uppercase_q_payload["data"]
+    let mixed_case_rows = mixed_case_payload["data"]
         .as_array()
-        .expect("uppercase q data must be an array");
-    assert_eq!(names(lowercase_q_rows), vec!["alpha.eth"]);
-    assert_eq!(names(uppercase_q_rows), names(lowercase_q_rows));
+        .expect("mixed-case q data must be an array");
+    assert_eq!(names(lowercase_rows), vec!["alpha.eth"]);
+    assert_eq!(names(mixed_case_rows), names(lowercase_rows));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_address_names_treats_empty_q_as_absent() -> Result<()> {
+    let (database, unfiltered_payload) =
+        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names")).await?;
+    let empty_q_payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q="),
+    )
+    .await?;
+
+    assert_eq!(empty_q_payload, unfiltered_payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_address_names_trailing_dot_q_matches_label_boundary() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let specs = v2_address_name_boundary_specs();
+    seed_v2_address_name_storage(&database, &specs).await?;
+    seed_v2_address_name_current_rows(&database, &specs).await?;
+    seed_v2_address_name_relations(&database, &specs).await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alice."),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    assert_eq!(names(rows), vec!["alice.eth"]);
+
+    let mixed_case_payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q=ALICE."),
+    )
+    .await?;
+    assert_eq!(mixed_case_payload, payload);
+
+    let interior_dot_payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alice.e"),
+    )
+    .await?;
+    assert_eq!(interior_dot_payload, payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_address_names_rejects_invalid_q_dot_shapes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
+
+    for q in ["alice..", ".", "alice..x"] {
+        let response = v2_address_names_response_for_database(
+            &database,
+            &format!("/v2/addresses/{V2_ADDRESS}/names?q={q}"),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "q={q}");
+        let payload = read_json::<Value>(response).await?;
+        assert_eq!(
+            payload["error"]["code"],
+            json!("invalid_input"),
+            "q={q}"
+        );
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message
+                    .starts_with("q must be a valid ENSIP-15 name prefix:")),
+            "q={q}"
+        );
+    }
 
     database.cleanup().await?;
     Ok(())
@@ -1439,6 +1602,43 @@ fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {
             registered_at: "2024-04-02T00:00:00Z",
             created_at: "2024-04-01T00:00:00Z",
             expires_at: "2029-01-02T00:00:00Z",
+            relations: &[bigname_storage::AddressNameRelation::TokenHolder],
+        },
+    ]
+}
+
+fn v2_address_name_boundary_specs() -> Vec<V2AddressNameSpec> {
+    vec![
+        V2AddressNameSpec {
+            logical_name_id: "ens:alice.eth",
+            name: "alice.eth",
+            namehash: "node:alice.eth",
+            resource_id: Uuid::from_u128(0x34a00),
+            token_lineage_id: Uuid::from_u128(0x34a01),
+            surface_binding_id: Uuid::from_u128(0x34a02),
+            block_hash: "0xname34a",
+            block_number: 350,
+            owner: "0x000000000000000000000000000000000000034a",
+            registrant: "0x000000000000000000000000000000000000034a",
+            registered_at: "2024-01-02T00:00:00Z",
+            created_at: "2023-01-02T00:00:00Z",
+            expires_at: "2027-01-02T00:00:00Z",
+            relations: &[bigname_storage::AddressNameRelation::TokenHolder],
+        },
+        V2AddressNameSpec {
+            logical_name_id: "ens:alicex.eth",
+            name: "alicex.eth",
+            namehash: "node:alicex.eth",
+            resource_id: Uuid::from_u128(0x34b00),
+            token_lineage_id: Uuid::from_u128(0x34b01),
+            surface_binding_id: Uuid::from_u128(0x34b02),
+            block_hash: "0xname34b",
+            block_number: 351,
+            owner: "0x000000000000000000000000000000000000034b",
+            registrant: "0x000000000000000000000000000000000000034b",
+            registered_at: "2024-01-02T00:00:00Z",
+            created_at: "2023-01-02T00:00:00Z",
+            expires_at: "2027-01-02T00:00:00Z",
             relations: &[bigname_storage::AddressNameRelation::TokenHolder],
         },
     ]
