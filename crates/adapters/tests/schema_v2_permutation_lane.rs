@@ -563,6 +563,49 @@ fn v2_unregistered_record_stream_rethreads_before_state_after_restore() -> Resul
 }
 
 #[test]
+fn v2_release_then_resolver_only_batches_restore_boundary_clock_exactly() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let node = namehash(&["alpha", "eth"]);
+    let mut input = v2_released_name_record_input(
+        &wiring,
+        vec![
+            V2Resolver::AddressChanged {
+                node,
+                coinType: U256::from(60_u64),
+                newAddress: vec![0x53, 0x2].into(),
+            }
+            .encode_log_data(),
+            V2Resolver::TextChanged {
+                node,
+                indexedKey: keccak256("description"),
+                key: "description".to_owned(),
+                value: "released".to_owned(),
+            }
+            .encode_log_data(),
+        ],
+    )?;
+    for (index, block) in input.blocks.iter_mut().enumerate() {
+        let timestamp = time::OffsetDateTime::from_unix_timestamp(1_700_000_000 + index as i64)?;
+        block.block_timestamp = timestamp;
+        for raw_log in input
+            .raw_logs
+            .iter_mut()
+            .filter(|raw_log| raw_log.block_hash == block.block_hash)
+        {
+            raw_log.block_timestamp = timestamp;
+        }
+    }
+
+    converge(
+        "directed=v2-release-then-resolver-only-boundary-clock",
+        input,
+        vec![0..2, 2..3, 3..4],
+    )?;
+    Ok(())
+}
+
+#[test]
 fn v2_shadow_registry_preimage_does_not_gain_record_attribution_after_restore() -> Result<()> {
     let checked_in = checked_in_manifests()?;
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
