@@ -8,6 +8,9 @@ in-place schema-migrations for initialized `bigname_phase` databases.
 ## Invariants
 
 - [Raw facts](glossary.md#raw-fact) are immutable and block-hash anchored.
+- A Verify row with a recorded cursor is stamped before intake replay can
+  rewrite its readable raw-fact extent; stamping makes any retained level
+  historical until Verify reruns.
 - [Canonicality](glossary.md#canonicality) is explicit; block number alone is
   never sufficient identity.
 - Interpretation output and [projections](glossary.md#projection) are
