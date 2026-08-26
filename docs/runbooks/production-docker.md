@@ -588,7 +588,8 @@ The restore-or-re-roll decision was validated on 2026-07-29.
 5. Treat saved Interpret and Project redo progress from the prior hash as
    invalid. Preserve pending Ingest or Verify redo markers and complete the
    exact persisted work named by the runner before starting `--phase all`; do
-   not delete or skip those markers.
+   not delete or skip those markers. When an all-phase redo fails, follow every
+   phase-specific recovery command that it reports in dependency order.
 6. If no re-derivation is required, or after the required re-derivation
    boundary completes, [start or refresh
    services](#start-or-refresh-services).

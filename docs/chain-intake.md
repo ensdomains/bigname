@@ -48,8 +48,13 @@ raw-fact range already admitted by `ingest`. The project phase likewise reads
 only canonical identity and normalized-event input.
 
 Starting Ingest redo stamps overlapping Verify phase state with a recorded cursor
-as [required redo](glossary.md#redo-marker-scope). Readiness degrades; any prior
-level remains historical until the ordinary or continuous runner re-verifies.
+as [required redo](glossary.md#redo-marker-scope). Sepolia's
+[provider-trusted verification](glossary.md#verification-level) readiness degrades
+until re-verification completes. On Base and Ethereum Mainnet, serving remains
+governed by Project: the demotion is visible in phase status and operator surfaces,
+but `/v2/status` readiness does not observe the Verify marker today. On every
+chain, any prior level remains historical until the ordinary or continuous runner
+re-verifies.
 
 When a non-retryable check of an already-completed Ingest or Verify phase
 fails, the runner changes that phase from `completed` to `failed` and keeps its
@@ -387,17 +392,18 @@ through the ordinary per-chain path.
 verify in dependency order. If Interpret widens a
 partial request through its recorded head, its downstream redo stamp carries
 that widened range into Project. Project still owns canonical-head hydration;
-there is no standalone hydrate phase. Any already-pending redo must be
-completed before `--phase all`, so the all-phases shorthand cannot consume or
-clear unrelated operator work. Before any selected phase starts, the runner
+there is no standalone hydrate phase. Any already-pending redo must be completed
+before `--phase all`, so the all-phases shorthand cannot consume or clear
+unrelated operator work. Before any selected phase starts, the runner
 also refuses `--phase all` when Verify has no recorded extent or the requested
 end exceeds it. Complete Verify first, or run the needed finite phases
 individually and then complete Verify through the normal runner. A Verify stamp
 created by Ingest must match the all-phase range; a clipped overlap is reported
 instead of shrinking Verify. A phase failure leaves its normal durable redo
-marker, reports the phase-specific recovery command prefix, and stops the
-remaining phases for that chain. Complete that phase-specific redo, then rerun
-`--phase all`. Historical live redo remains invalid because live is a head
+marker and stops the remaining phases for that chain. The error reports every
+pending phase-specific recovery command in dependency order, including a
+required Verify redo created by Ingest. Complete those commands in order, then
+rerun `--phase all`. Historical live redo remains invalid because live is a head
 follower. A multi-chain command continues with later chains and exits nonzero
 with the collected chain failures; cancellation stops further chain dispatch.
 
