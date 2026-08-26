@@ -123,7 +123,7 @@ impl State {
             self.refresh_all_v2_names(timestamp);
         }
         if let Some(timestamp) = resume_predecessor_timestamp
-            && !self.v2_tokens.is_empty()
+            && (self.latest_v2_timestamp.is_some() || !self.v2_tokens.is_empty())
         {
             self.refresh_dirty_v2_names(timestamp);
         }
