@@ -417,20 +417,49 @@ pub fn validate_deployment_table_set<'a>(
         .iter()
         .map(|chain| chain.chain_id.as_str())
         .collect::<BTreeSet<_>>();
-    let ens_chains = manifest_namespaces
-        .into_iter()
-        .filter(|(chain_id, namespace)| *namespace == "ens" && configured_chains.contains(chain_id))
-        .map(|(chain_id, _)| chain_id)
-        .collect::<BTreeSet<_>>();
-    if ens_chains.len() > 1 {
+    let mut namespaces_by_chain = BTreeMap::<&str, BTreeSet<&str>>::new();
+    for (chain_id, namespace) in manifest_namespaces {
+        namespaces_by_chain
+            .entry(chain_id)
+            .or_default()
+            .insert(namespace);
+    }
+    let unknown_chains = configured_chains
+        .iter()
+        .filter(|chain_id| !namespaces_by_chain.contains_key(*chain_id))
+        .copied()
+        .collect::<Vec<_>>();
+    if !unknown_chains.is_empty() {
         return Err(RunnerError::new(
             ErrorKind::Configuration,
             format!(
-                "configured ENS chains {} violate the deployment topology: chains carrying the \
-                 ens namespace never share a table set; Sepolia always runs as its own deployment \
-                 writing its own tables; two chains in one database are supported only when their \
-                 namespaces differ (the existing ethereum-plus-base production shape)",
-                ens_chains.into_iter().collect::<Vec<_>>().join(", ")
+                "configured chain(s) {} are not declared by the binary-approved deployment \
+                 profiles",
+                unknown_chains.join(", ")
+            ),
+        ));
+    }
+
+    let ens_chains = configured_chains
+        .iter()
+        .filter(|chain_id| {
+            namespaces_by_chain
+                .get(*chain_id)
+                .is_some_and(|namespaces| namespaces.contains("ens"))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if (configured_chains.contains("ethereum-sepolia") && configured_chains.len() > 1)
+        || ens_chains.len() > 1
+    {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            format!(
+                "configured chains {} violate the deployment topology: chains carrying the ens \
+                 namespace never share a table set; Sepolia always runs as its own deployment \
+                 writing its own tables; two chains in one database are supported only when \
+                 their namespaces differ (the existing ethereum-plus-base production shape)",
+                configured_chains.into_iter().collect::<Vec<_>>().join(", ")
             ),
         ));
     }
@@ -501,5 +530,38 @@ mod tests {
 
         validate_deployment_table_set(&chains, [("ethereum-sepolia", "ens")])
             .expect("a single-chain Sepolia deployment must remain supported");
+    }
+
+    #[test]
+    fn sepolia_and_base_refuse_to_share_a_table_set() {
+        let chains = [chain("ethereum-sepolia"), chain("base-mainnet")];
+        let error = validate_deployment_table_set(
+            &chains,
+            [("ethereum-sepolia", "ens"), ("base-mainnet", "basenames")],
+        )
+        .expect_err("Sepolia must run as its own deployment");
+
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(
+            error
+                .to_string()
+                .contains("Sepolia always runs as its own deployment")
+        );
+    }
+
+    #[test]
+    fn unknown_chain_is_not_approved_for_runtime_configuration() {
+        let chains = [chain("unknown-chain-x")];
+        let error =
+            validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())
+                .expect_err("a chain absent from the approved profiles must fail closed");
+
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(error.to_string().contains("unknown-chain-x"));
+        assert!(
+            error
+                .to_string()
+                .contains("binary-approved deployment profiles")
+        );
     }
 }

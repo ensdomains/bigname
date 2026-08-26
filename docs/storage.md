@@ -33,7 +33,10 @@ chain-native name-system namespaces differ, as in the supported Ethereum-plus-Ba
 production deployment. The phase runner derives each configured chain's
 namespace from the binary-approved [deployment
 profiles](glossary.md#deployment-profile) and refuses this invalid topology
-before starting any chain.
+before starting any chain. A chain ID absent from those approved deployment
+profiles is unsupported and refused explicitly. The check runs for supervised
+startup and operator redo after its chain set is resolved, before manifest
+synchronization or any indexing phase runs.
 An additive baseline index may be an explicitly reviewed release exception when
 its production build must use `CREATE INDEX CONCURRENTLY`: the release runbook
 must carry the exact live DDL, validity checks, recovery procedure, and

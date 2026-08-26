@@ -140,7 +140,6 @@ async fn main() -> Result<()> {
             hydration_rpc_urls,
         } => {
             let database = RunnerDatabase::connect(&database_url, 4).await?;
-            sync_manifests(database.pool(), &manifests_root).await?;
             let chains = match chains {
                 RedoChains::Explicit(chains) => chains,
                 RedoChains::All { sources } => {
@@ -152,6 +151,8 @@ async fn main() -> Result<()> {
                     .await?
                 }
             };
+            validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
+            sync_manifests(database.pool(), &manifests_root).await?;
             validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
             let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
