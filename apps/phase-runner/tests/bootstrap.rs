@@ -35,6 +35,89 @@ async fn schema_migrations_apply_to_an_empty_database_before_the_phase_baseline(
 }
 
 #[tokio::test]
+async fn manifest_change_counter_migrates_existing_history_with_baseline_parity() -> Result<()> {
+    let migrated = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_manifest_change_counter_migration")
+            .pool_max_connections(2)
+            .parse_context("failed to parse manifest counter schema-migration database URL")
+            .admin_connect_context("failed to connect manifest counter schema-migration admin pool")
+            .pool_connect_context("failed to connect manifest counter schema-migration pool"),
+    )
+    .await?;
+    initialize_schema_v2(migrated.pool()).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE bigname_phase.manifest_versions
+             DROP CONSTRAINT manifest_versions_applied_change_count_check,
+             DROP COLUMN applied_change_count",
+    )
+    .execute(migrated.pool())
+    .await?;
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO bigname_phase.manifest_versions (
+             manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload
+         ) VALUES (
+             1, 'test', 'migration_counter', 'migration-counter-chain', 'fixture',
+             'deprecated', 'test-normalizer', 'test/migration_counter/v1.toml', '{}'::jsonb
+         )
+         RETURNING manifest_id",
+    )
+    .fetch_one(migrated.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.normalized_events (
+             event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, derivation_kind, canonicality_state
+         ) VALUES
+             ('manifest-counter-1', 'test', 'SourceManifestUpdated',
+              'migration_counter', 1, $1, 'migration-counter-chain',
+              'manifest_sync', 'finalized'),
+             ('manifest-counter-2', 'test', 'SourceManifestUpdated',
+              'migration_counter', 1, $1, 'migration-counter-chain',
+              'manifest_sync', 'finalized')",
+    )
+    .bind(manifest_id)
+    .execute(migrated.pool())
+    .await?;
+
+    let migration =
+        include_str!("../../../migrations/20260826120000_manifest_applied_change_count.sql");
+    sqlx::raw_sql(migration).execute(migrated.pool()).await?;
+    sqlx::raw_sql(migration).execute(migrated.pool()).await?;
+    let applied_change_count: i64 = sqlx::query_scalar(
+        "SELECT applied_change_count
+         FROM bigname_phase.manifest_versions
+         WHERE manifest_id = $1",
+    )
+    .bind(manifest_id)
+    .fetch_one(migrated.pool())
+    .await?;
+    assert_eq!(
+        applied_change_count, 2,
+        "migration backfill must count existing manifest history once"
+    );
+    let migrated_structure = load_manifest_counter_structure(migrated.pool()).await?;
+
+    let installed = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_manifest_change_counter_baseline")
+            .pool_max_connections(2)
+            .parse_context("failed to parse manifest counter baseline database URL")
+            .admin_connect_context("failed to connect manifest counter baseline admin pool")
+            .pool_connect_context("failed to connect manifest counter baseline pool"),
+    )
+    .await?;
+    initialize_schema_v2(installed.pool()).await?;
+    let installed_structure = load_manifest_counter_structure(installed.pool()).await?;
+    assert_eq!(
+        migrated_structure, installed_structure,
+        "the schema migration and phase baseline must define the same manifest counter"
+    );
+
+    installed.cleanup().await?;
+    migrated.cleanup().await
+}
+
+#[tokio::test]
 async fn reverse_hydration_attempt_state_migrates_an_initialized_phase_schema() -> Result<()> {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_reverse_hydration_attempt_migration")
@@ -745,6 +828,64 @@ async fn load_table_structure(pool: &sqlx::PgPool, table: &str) -> Result<Vec<St
         "#,
     )
     .bind(table)
+    .fetch_all(pool)
+    .await?)
+}
+
+async fn load_manifest_counter_structure(pool: &sqlx::PgPool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT object_identity
+        FROM (
+            SELECT format(
+                       'column:%s:%s:%s',
+                       pg_catalog.format_type(attribute.atttypid, attribute.atttypmod),
+                       attribute.attnotnull,
+                       COALESCE(pg_get_expr(default_value.adbin, default_value.adrelid), '')
+                   ) AS object_identity
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            JOIN pg_attribute attribute ON attribute.attrelid = relation.oid
+            LEFT JOIN pg_attrdef default_value
+              ON default_value.adrelid = relation.oid
+             AND default_value.adnum = attribute.attnum
+            WHERE namespace.nspname = 'bigname_phase'
+              AND relation.relname = 'manifest_versions'
+              AND attribute.attname = 'applied_change_count'
+              AND NOT attribute.attisdropped
+
+            UNION ALL
+
+            SELECT format(
+                       'constraint:%s:%s:%s',
+                       constraint_row.conname,
+                       constraint_row.convalidated,
+                       pg_get_constraintdef(constraint_row.oid)
+                   )
+            FROM pg_constraint constraint_row
+            JOIN pg_class relation ON relation.oid = constraint_row.conrelid
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'bigname_phase'
+              AND relation.relname = 'manifest_versions'
+              AND constraint_row.conname =
+                  'manifest_versions_applied_change_count_check'
+
+            UNION ALL
+
+            SELECT format('comment:%s', description.description)
+            FROM pg_description description
+            JOIN pg_class relation ON relation.oid = description.objoid
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            JOIN pg_attribute attribute
+              ON attribute.attrelid = relation.oid
+             AND attribute.attnum = description.objsubid
+            WHERE namespace.nspname = 'bigname_phase'
+              AND relation.relname = 'manifest_versions'
+              AND attribute.attname = 'applied_change_count'
+        ) structure
+        ORDER BY object_identity
+        "#,
+    )
     .fetch_all(pool)
     .await?)
 }

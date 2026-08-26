@@ -132,6 +132,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
     previous_admission_floors: &BTreeMap<String, super::watch::AdmissionFloors>,
     repaired_floor_chains: &HashSet<String>,
 ) -> Result<()> {
+    let persisted_watch_floors = super::watch_floors::load(transaction).await?;
     let mut chains = previous
         .manifests_by_chain
         .keys()
@@ -192,9 +193,12 @@ pub(super) async fn invalidate_changed_derived_epochs(
                     .await?;
             stamp_required_ingest(transaction, &chain_id, widened_from).await?;
         }
-        if let Some(widened_from) =
-            super::watch::widening_start(&previous.watch, &desired.watch, &chain_id)
-        {
+        if let Some(widened_from) = super::watch::widening_start(
+            &previous.watch,
+            &desired.watch,
+            &chain_id,
+            &persisted_watch_floors,
+        )? {
             stamp_required_ingest(transaction, &chain_id, widened_from).await?;
         }
         let encoded = serde_json::to_vec(&(chain_id.as_str(), desired_manifests))
@@ -247,6 +251,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
     }
     Ok(())
 }
+
 pub(super) async fn active_admission_floors(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<BTreeMap<String, super::watch::AdmissionFloors>> {

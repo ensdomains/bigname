@@ -898,6 +898,140 @@ async fn manifest_watch_comparison_trips_only_for_covered_widenings() -> Result<
 }
 
 #[tokio::test]
+async fn manifest_watch_comparison_refuses_coverage_below_the_persisted_floor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_watch_floor_refusal").await?;
+    let chain_id = "manifest-watch-floor-refusal";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_with_start(false, false, 1)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 10).await?;
+
+    // Construct the stored address interval left by the former producers of this state. The
+    // desired declaration promises block 1, while re-admission can only reopen after the stored
+    // block-5 interval and therefore has a persisted floor of block 5.
+    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE chain_id = $1")
+        .bind(chain_id)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses
+         SET active_from_block_number = 5,
+             active_to_block_number = 5, active_to_block_hash = NULL, deactivated_at = now()
+         WHERE chain_id = $1 AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("compiled-watch coverage below the persisted Ingest floor must be refused");
+    let message = error.to_string();
+    assert!(message.contains("promised coverage start 1"), "{message}");
+    assert!(message.contains("persisted ingest floor 5"), "{message}");
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+
+    fixture.move_source_a_root_start(1, 5)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((5, 10)),
+        "a normal declared start at the persisted floor must still sync"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn desired_all_emitter_watch_covers_an_address_below_its_persisted_floor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_desired_all_covers_floor").await?;
+    let chain_id = "manifest-desired-all-covers-floor";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
+    fixture.write_with_start(false, false, 1)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v1.toml");
+    let manifest = fs::read_to_string(&path)?.replace(
+        r#"[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
+emitter_roles = ["source_a"]
+normalized_events = []
+status = "supported"
+"#,
+        "",
+    );
+    fs::write(&path, manifest)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 10).await?;
+
+    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE chain_id = $1")
+        .bind(chain_id)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses
+         SET active_from_block_number = 5,
+             active_to_block_number = 5, active_to_block_hash = NULL, deactivated_at = now()
+         WHERE chain_id = $1 AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect("the desired all-emitter watch already honors the promised address coverage");
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 10))
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_sync_reports_only_declared_starts_that_keep_a_lower_floor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_start_notice").await?;
+    let chain_id = "manifest-start-notice";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write_with_start(false, false, 0)?;
+    let initial =
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert!(initial.notices.is_empty());
+
+    fixture.move_source_a_root_start(0, 2)?;
+    let no_effect =
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        no_effect.notices,
+        [format!(
+            "declared start 2 for {chain_id}:0x0000000000000000000000000000000000000004 did not raise persisted address floor; keeping 0"
+        )]
+    );
+    assert_eq!(
+        test_registry_active_from(scratch.pool(), chain_id).await?,
+        Some(0)
+    );
+    let filter = load_persisted_watch_filter(scratch.pool(), chain_id, 0, 2).await?;
+    let transfer = format!("{:#x}", keccak256(b"Transfer(address,address,uint256)"));
+    let address = "0x0000000000000000000000000000000000000004";
+    assert!(!filter.includes(address, &transfer, 1));
+    assert!(filter.includes(address, &transfer, 2));
+    scratch.cleanup().await?;
+
+    let no_notice = ScratchDatabase::create("production_manifest_start_no_notice").await?;
+    let at_floor = WatchManifestFixture::with_source_family(
+        "manifest-start-no-notice",
+        "test_events_no_notice",
+    )?;
+    at_floor.write_with_start(false, false, 2)?;
+    let initial_at_floor =
+        sync_schema_v2_repository(no_notice.pool(), &load_repository(&at_floor.root)?).await?;
+    assert!(initial_at_floor.notices.is_empty());
+    let repeated_at_floor =
+        sync_schema_v2_repository(no_notice.pool(), &load_repository(&at_floor.root)?).await?;
+    assert!(repeated_at_floor.notices.is_empty());
+    no_notice.cleanup().await
+}
+
+#[tokio::test]
 async fn required_ingest_obligation_persists_after_the_watch_plan_narrows_back() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_narrow_back_keeps_redo").await?;
     let chain_id = "manifest-narrow-back-keeps-redo";
@@ -2901,6 +3035,36 @@ async fn schema_v2_manifest_sync_is_idempotent_and_retires_absent_history() -> R
         ]
     );
 
+    let first_deprecation_identity: String = sqlx::query_scalar(
+        "SELECT event_identity FROM normalized_events
+         WHERE source_manifest_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+           AND raw_fact_ref ->> 'applied_change_count' = '2'",
+    )
+    .bind(retained_manifest.0)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET rollout_status = 'active', applied_change_count = 1
+         WHERE manifest_id = $1",
+    )
+    .bind(retained_manifest.0)
+    .execute(scratch.pool())
+    .await?;
+    sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
+    let replayed_deprecation: (i64, String) = sqlx::query_as(
+        "SELECT count(*), min(event_identity)
+         FROM normalized_events
+         WHERE source_manifest_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+           AND raw_fact_ref ->> 'applied_change_count' = '2'",
+    )
+    .bind(retained_manifest.0)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(replayed_deprecation, (1, first_deprecation_identity));
+
     sync_schema_v2_repository(scratch.pool(), &repository).await?;
     let manifest_event_states: Vec<(Option<String>, String)> = sqlx::query_as(
         "
@@ -2922,6 +3086,116 @@ async fn schema_v2_manifest_sync_is_idempotent_and_retires_absent_history() -> R
             (Some("active".into()), "deprecated".into()),
             (Some("deprecated".into()), "active".into()),
         ]
+    );
+
+    advance_chain_head(scratch.pool(), "ethereum-mainnet", 30_000_001).await?;
+    sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
+    let manifest_event_states: Vec<(Option<String>, String)> = sqlx::query_as(
+        "
+        SELECT before_state ->> 'rollout_status',
+               after_state ->> 'rollout_status'
+        FROM normalized_events
+        WHERE source_manifest_id = $1
+          AND event_kind = 'SourceManifestUpdated'
+        ORDER BY normalized_event_id
+        ",
+    )
+    .bind(retained_manifest.0)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        manifest_event_states,
+        [
+            (None, "active".into()),
+            (Some("active".into()), "deprecated".into()),
+            (Some("deprecated".into()), "active".into()),
+            (Some("active".into()), "deprecated".into()),
+        ],
+        "the second deprecation must append a distinct history event"
+    );
+    let project_serves_deprecated_manifest: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM normalized_events event
+             WHERE event.normalized_event_id = (
+                       SELECT max(latest.normalized_event_id)
+                       FROM normalized_events latest
+                       WHERE latest.source_manifest_id = $1
+                         AND latest.event_kind = 'SourceManifestUpdated'
+                   )
+               AND event.after_state ->> 'rollout_status' = 'active'
+         )",
+    )
+    .bind(retained_manifest.0)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        !project_serves_deprecated_manifest,
+        "Project's latest-event selection must stop serving the deprecated manifest"
+    );
+    let identities_and_counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT event_identity, (raw_fact_ref ->> 'applied_change_count')::bigint
+         FROM normalized_events
+         WHERE source_manifest_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+         ORDER BY normalized_event_id",
+    )
+    .bind(retained_manifest.0)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        identities_and_counts
+            .iter()
+            .map(|(_, count)| *count)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
+    assert_eq!(
+        identities_and_counts
+            .iter()
+            .map(|(identity, _)| identity)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4
+    );
+    let stored_count: i64 = sqlx::query_scalar(
+        "SELECT applied_change_count FROM manifest_versions WHERE manifest_id = $1",
+    )
+    .bind(retained_manifest.0)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(stored_count, 4);
+
+    let second_deprecation_identity = identities_and_counts[3].0.clone();
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE source_manifest_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+           AND raw_fact_ref ->> 'applied_change_count' = '4'",
+    )
+    .bind(retained_manifest.0)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("UPDATE manifest_versions SET applied_change_count = 3 WHERE manifest_id = $1")
+        .bind(retained_manifest.0)
+        .execute(scratch.pool())
+        .await?;
+    sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
+    let repaired_latest: Option<(String, i64)> = sqlx::query_as(
+        "SELECT event_identity, (raw_fact_ref ->> 'applied_change_count')::bigint
+         FROM normalized_events
+         WHERE source_manifest_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+         ORDER BY normalized_event_id DESC
+         LIMIT 1",
+    )
+    .bind(retained_manifest.0)
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(
+        repaired_latest,
+        Some((second_deprecation_identity, 4)),
+        "sync must repair stale history so its newest event agrees with stored current state"
     );
     scratch.cleanup().await
 }

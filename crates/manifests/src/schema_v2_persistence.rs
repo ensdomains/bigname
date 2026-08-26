@@ -30,6 +30,7 @@ pub(super) async fn resolve_contract(
     admit_address: bool,
     provenance: serde_json::Value,
     repaired_floor_chains: &mut std::collections::HashSet<String>,
+    notices: &mut Vec<String>,
 ) -> Result<Uuid> {
     let existing = sqlx::query_as::<_, ExistingContractAddress>(
         "
@@ -110,6 +111,14 @@ pub(super) async fn resolve_contract(
         .transpose()
         .with_context(|| format!("start block for {chain_id}:{address} exceeds BIGINT"))?;
     if let Some(existing) = existing.as_ref().filter(|existing| existing.is_active) {
+        if let Some(declared_start) = start_block
+            && declared_start > existing.active_from.unwrap_or(0)
+        {
+            notices.push(format!(
+                "declared start {declared_start} for {chain_id}:{address} did not raise persisted address floor; keeping {}",
+                existing.active_from.unwrap_or(0)
+            ));
+        }
         let repairs_legacy_floor = omitted_start
             && existing.active_from.is_some_and(|start| start > 0)
             && existing.prior_epoch_end.is_none();

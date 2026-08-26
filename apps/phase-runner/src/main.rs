@@ -240,6 +240,9 @@ async fn sync_loaded_manifests(
     profile: &str,
 ) -> Result<()> {
     let summary = bigname_manifests::sync_schema_v2_repository(pool, repository).await?;
+    for notice in &summary.notices {
+        tracing::warn!(notice = %notice, "schema-v2 manifest synchronization notice");
+    }
     tracing::info!(
         manifests_root = %root.display(),
         manifest_profile = profile,
