@@ -925,6 +925,21 @@ declared addresses remain explicit watch targets.
 Adding a less general target already covered by an all-emitter event does not
 count as widening.
 
+Synchronization refuses a newly widened direct-address watch when its declared
+start is earlier than the earliest block the stored Ingest intervals can honor
+and the desired compiled watch plan has no all-emitter entry for the same event
+topic. The transaction records no new coverage promise, and the error names
+both values as `promised coverage start <S>` and [`persisted ingest floor
+<F>`](glossary.md#persisted-ingest-floor). This bound is used only by the
+compiled-watch comparison.
+The operator may re-declare the address at or above `<F>`. To close and reopen
+instead, remove the declaration and synchronize, complete the full Interpret
+redo that closes the old stored interval, then restore the declaration and
+synchronize again; direct database edits are not supported. An all-emitter
+entry in the desired plan covers the direct address for that topic, so this
+refusal does not apply and any existing required Ingest redo continues to back
+the covered range.
+
 Adding or broadening an indexability-producing `resolver` discovery rule over
 an already-ingested range is a different ordering problem. Replacing a
 declaration that emits an unchanged active resolver rule has the same problem:
@@ -984,6 +999,13 @@ zero; a later finite declaration therefore cannot replace the retained
 effective-zero floor. Conversely, omitting a previously finite start backdates
 that active epoch to zero, so the required redo can select the newly widened
 interval. Re-admitting a retired address still begins after its prior epoch.
+When a later declared start does not raise an already lower stored address
+bound, synchronization keeps that bound. The [persisted address
+floor](glossary.md#persisted-address-floor) notice is `declared start … did not
+raise persisted address floor; keeping …`. It is informational: it reports
+that the shared address interval did not move, while the declaration's own
+start still participates in the effective Ingest range. It does not change
+admission, watch selection, or redo behavior.
 Retained omitted-start manifest history also contributes zero during widening
 classification. Interpret's discovery refresh now leaves an initial epoch's
 stored `NULL` untouched, fixing

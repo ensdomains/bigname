@@ -43,9 +43,44 @@ mod api_load {
 }
 
 #[tokio::test]
-async fn swallowed_second_deprecation_is_rejected_by_resolver_coverage() -> Result<()> {
+async fn repeated_deprecation_stays_aligned_and_resolver_coverage_stays_clean() -> Result<()> {
     let scratch = ScratchDatabase::create("benchmark_resolver_manifest_cycle").await?;
-    sync_resolver_manifest_cycle(&scratch, true).await?;
+    sync_resolver_manifest_cycle(&scratch).await?;
+    assert_eq!(
+        resolver_manifest_statuses(&scratch).await?,
+        ("deprecated".to_owned(), "deprecated".to_owned())
+    );
+    publish_project_heads(&scratch).await?;
+    seed_healthy_basenames_resolver(&scratch).await?;
+
+    let failures = api_load::resolver_coverage_failures(scratch.pool()).await?;
+
+    assert!(failures.is_empty(), "{failures:?}");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn manufactured_swallowed_deprecation_is_rejected_by_resolver_coverage() -> Result<()> {
+    let scratch = ScratchDatabase::create("benchmark_resolver_manifest_deprecated").await?;
+    sync_resolver_manifest_cycle(&scratch).await?;
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE normalized_event_id = (
+             SELECT max(event.normalized_event_id)
+             FROM normalized_events event
+             JOIN manifest_versions manifest
+               ON manifest.manifest_id = event.source_manifest_id
+             WHERE manifest.chain_id = 'ethereum-mainnet'
+               AND manifest.source_family = 'ens_v1_resolver_l1'
+               AND event.event_kind = 'SourceManifestUpdated'
+         )",
+    )
+    .execute(scratch.pool())
+    .await?;
+    assert_eq!(
+        resolver_manifest_statuses(&scratch).await?,
+        ("deprecated".to_owned(), "active".to_owned())
+    );
     publish_project_heads(&scratch).await?;
     seed_healthy_basenames_resolver(&scratch).await?;
 
@@ -64,23 +99,7 @@ async fn swallowed_second_deprecation_is_rejected_by_resolver_coverage() -> Resu
     scratch.cleanup().await
 }
 
-#[tokio::test]
-async fn resolver_family_deprecated_on_both_sides_stays_outside_coverage() -> Result<()> {
-    let scratch = ScratchDatabase::create("benchmark_resolver_manifest_deprecated").await?;
-    sync_resolver_manifest_cycle(&scratch, false).await?;
-    publish_project_heads(&scratch).await?;
-    seed_healthy_basenames_resolver(&scratch).await?;
-
-    let failures = api_load::resolver_coverage_failures(scratch.pool()).await?;
-
-    assert!(failures.is_empty(), "{failures:?}");
-    scratch.cleanup().await
-}
-
-async fn sync_resolver_manifest_cycle(
-    scratch: &ScratchDatabase,
-    swallow_second_deprecation: bool,
-) -> Result<()> {
+async fn sync_resolver_manifest_cycle(scratch: &ScratchDatabase) -> Result<()> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("manifests/mainnet");
@@ -91,32 +110,30 @@ async fn sync_resolver_manifest_cycle(
     seed_chain_head(scratch.pool(), "ethereum-mainnet", 30_000_000).await?;
     seed_chain_head(scratch.pool(), "base-mainnet", 30_000_000).await?;
     sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
-
-    if swallow_second_deprecation {
-        sync_schema_v2_repository(scratch.pool(), &full_repository).await?;
-        advance_chain_head(scratch.pool(), "ethereum-mainnet", 30_000_001).await?;
-        sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
-
-        let split: (String, String) = sqlx::query_as(
-            "SELECT manifest.rollout_status,
-                    event.after_state ->> 'rollout_status'
-             FROM manifest_versions manifest
-             JOIN LATERAL (
-                 SELECT after_state
-                 FROM normalized_events
-                 WHERE source_manifest_id = manifest.manifest_id
-                   AND event_kind = 'SourceManifestUpdated'
-                 ORDER BY normalized_event_id DESC
-                 LIMIT 1
-             ) event ON TRUE
-             WHERE manifest.chain_id = 'ethereum-mainnet'
-               AND manifest.source_family = 'ens_v1_resolver_l1'",
-        )
-        .fetch_one(scratch.pool())
-        .await?;
-        assert_eq!(split, ("deprecated".to_owned(), "active".to_owned()));
-    }
+    sync_schema_v2_repository(scratch.pool(), &full_repository).await?;
+    advance_chain_head(scratch.pool(), "ethereum-mainnet", 30_000_001).await?;
+    sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
     Ok(())
+}
+
+async fn resolver_manifest_statuses(scratch: &ScratchDatabase) -> Result<(String, String)> {
+    Ok(sqlx::query_as(
+        "SELECT manifest.rollout_status,
+                event.after_state ->> 'rollout_status'
+         FROM manifest_versions manifest
+         JOIN LATERAL (
+             SELECT after_state
+             FROM normalized_events
+             WHERE source_manifest_id = manifest.manifest_id
+               AND event_kind = 'SourceManifestUpdated'
+             ORDER BY normalized_event_id DESC
+             LIMIT 1
+         ) event ON TRUE
+         WHERE manifest.chain_id = 'ethereum-mainnet'
+           AND manifest.source_family = 'ens_v1_resolver_l1'",
+    )
+    .fetch_one(scratch.pool())
+    .await?)
 }
 
 async fn publish_project_heads(scratch: &ScratchDatabase) -> Result<()> {

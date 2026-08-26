@@ -1303,6 +1303,18 @@ not superseded normalized events, are the permanent audit trail for chain
 events. The current event stream is what projections consume. See the [reorg
 and redo boundary](storage.md#reorg-and-redo-boundary).
 
+**Persisted Ingest floor** — the earliest block that the stored address
+intervals can honor for one compiled-watch address and event topic. Manifest
+synchronization compares a newly promised direct-address start with this bound
+and refuses to record an earlier promise unless the desired all-emitter watch
+already covers the same topic.
+
+**Persisted address floor** — the earliest block stored on the shared active
+interval for one chain address. Refreshing a declaration keeps the lower bound
+already recorded for that active interval. Ingest separately combines that
+shared bound with each declaration's own start when it builds the effective
+watch range.
+
 **Path class / support class** — the classification of a resolution's shape
 that decides which verified answers are publicly supported. Direct, alias-only,
 wildcard-derived, and transport-assisted are the classes most relevant to

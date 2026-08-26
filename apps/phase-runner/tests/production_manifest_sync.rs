@@ -987,6 +987,90 @@ status = "supported"
 }
 
 #[tokio::test]
+async fn removing_previous_all_emitter_keeps_sub_floor_address_coverage_backed() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_previous_all_removed").await?;
+    let chain_id = "manifest-previous-all-removed";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
+    fixture.write_with_start(false, false, 1)?;
+    let path = fixture.root.join("test/ens_v2_registry_l1/v1.toml");
+    let manifest = fs::read_to_string(&path)?.replace(
+        r#"[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
+emitter_roles = ["source_a"]
+normalized_events = []
+status = "supported"
+"#,
+        "",
+    );
+    fs::write(&path, manifest)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 10).await?;
+
+    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE chain_id = $1")
+        .bind(chain_id)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses
+         SET active_from_block_number = 5,
+             active_to_block_number = 5, active_to_block_hash = NULL, deactivated_at = now()
+         WHERE chain_id = $1 AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 10)),
+        "the all-emitter re-admission must back the address's sub-floor range"
+    );
+
+    let without_all =
+        WatchManifestFixture::with_source_family(chain_id, "test_events_all_removed")?;
+    without_all.write_with_start(false, false, 1)?;
+    let path = without_all
+        .root
+        .join("test/test_events_all_removed/v1.toml");
+    let manifest = fs::read_to_string(&path)?.replace(
+        r#"name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 value)""#,
+        r#"name = "RegistryCreated"
+fragment = "event RegistryCreated()""#,
+    );
+    fs::write(&path, manifest)?;
+
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&without_all.root)?)
+        .await
+        .expect("removing previous all-emitter scope must not refuse its covered address");
+    let active_watch_shape: (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (
+                    WHERE entry -> 'emitter' ->> 'kind' = 'all'
+                ),
+                count(*) FILTER (
+                    WHERE entry -> 'emitter' ->> 'kind' = 'address'
+                )
+         FROM manifest_versions manifest
+         CROSS JOIN LATERAL jsonb_array_elements(
+             manifest.manifest_payload -> '_bigname_compiled_watch'
+         ) entry
+         WHERE manifest.chain_id = $1
+           AND manifest.rollout_status = 'active'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(active_watch_shape, (0, 1));
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 10)),
+        "removing all-emitter scope must preserve the redo that backs sub-floor coverage"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn manifest_sync_reports_only_declared_starts_that_keep_a_lower_floor() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_start_notice").await?;
     let chain_id = "manifest-start-notice";
