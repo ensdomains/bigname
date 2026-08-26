@@ -13,7 +13,6 @@ pub struct AddressNameCurrentRow {
     pub relation: AddressNameRelation,
     pub namespace: String,
     pub canonical_display_name: String,
-    pub normalized_name: String,
     pub namehash: String,
     pub surface_binding_id: Uuid,
     pub resource_id: Uuid,

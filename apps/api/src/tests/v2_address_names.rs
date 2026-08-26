@@ -1010,7 +1010,7 @@ async fn v2_address_name_collections_exclude_orphaned_phase_lineage_before_proje
     assert!(
         audit_rows
             .iter()
-            .any(|row| row.normalized_name == "beta.eth")
+            .any(|row| row.canonical_display_name == "beta.eth")
     );
 
     let compact_page = bigname_storage::load_name_current_list_page(
@@ -1153,7 +1153,7 @@ async fn v2_current_name_reads_exclude_orphaned_project_targets_before_redo() ->
         )
         .await?
         .iter()
-        .any(|row| row.normalized_name == "beta.eth")
+        .any(|row| row.canonical_display_name == "beta.eth")
     );
 
     sqlx::query(
@@ -1187,7 +1187,7 @@ async fn v2_current_name_reads_exclude_orphaned_project_targets_before_redo() ->
     assert!(
         default_rows
             .iter()
-            .all(|row| row.normalized_name != "beta.eth")
+            .all(|row| row.canonical_display_name != "beta.eth")
     );
     let audit_rows = bigname_storage::load_address_names_current_including_noncanonical(
         &database.pool,
@@ -1199,7 +1199,7 @@ async fn v2_current_name_reads_exclude_orphaned_project_targets_before_redo() ->
     assert!(
         audit_rows
             .iter()
-            .any(|row| row.normalized_name == "beta.eth")
+            .any(|row| row.canonical_display_name == "beta.eth")
     );
 
     database.cleanup().await?;
@@ -1233,7 +1233,9 @@ async fn v2_address_name_reads_require_readable_phase_identity_rows() -> Result<
         )
         .await?;
         assert!(
-            rows.iter().all(|row| row.normalized_name != "beta.eth"),
+            rows
+                .iter()
+                .all(|row| row.canonical_display_name != "beta.eth"),
             "canonical address read admitted beta after {orphan}"
         );
         sqlx::query(reset).execute(&database.pool).await?;

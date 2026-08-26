@@ -78,6 +78,7 @@ pub struct NameCurrentListFilter {
     pub name: Option<String>,
     pub prefix: Option<String>,
     pub contains: Option<String>,
+    /// ASCII-fold this already-valid name fragment before matching stored normalized bytes.
     pub contains_nocase: Option<String>,
     pub resolver: Option<String>,
     pub address: Option<NameCurrentAddressFilter>,
@@ -244,12 +245,12 @@ pub async fn load_name_current_list_row_by_namehash(
     row.map(decode_name_current_list_row).transpose()
 }
 
-/// Load a single derived list row by normalized ENS name within a namespace, or `None` if no current
-/// name matches. Backs the Manager's `domain(id: "alice.eth")`, which passes the ENS *name* string
-/// rather than the namehash. Mirrors [`load_name_current_list_row_by_namehash`] but keys on
-/// `normalized_name` (covered by the `(namespace, normalized_name)` index); the name and namespace
-/// are bound through the shared filter predicates, so the lookup stays injection-safe and produces
-/// the same derived columns as the paged reads.
+/// Load a single derived list row by byte-exact `raw_name` match within a namespace, or `None` if
+/// no current name matches.
+///
+/// Schema-v2 has no name index, so this read is unindexed and currently has no production caller.
+/// Callers must pass ENSIP-15-normalized bytes. The shared filter predicates keep the lookup
+/// injection-safe and return the same derived columns as the paged reads.
 pub async fn load_name_current_list_row_by_name(
     pool: &PgPool,
     namespace: &str,
@@ -358,7 +359,7 @@ fn push_filtered_name_current_cte<'a>(
                 nc.logical_name_id,
                 nc.namespace,
                 nc.raw_name AS canonical_display_name,
-                lower(nc.raw_name) AS normalized_name,
+                nc.raw_name AS normalized_name,
                 nc.namehash,
                 nc.surface_binding_id,
                 nc.resource_id,
@@ -507,21 +508,21 @@ fn push_name_current_filter_predicates<'a>(
         builder.push_bind(namespace);
     }
     if let Some(name) = filter.name.as_deref() {
-        builder.push(" AND lower(nc.raw_name) = ");
+        builder.push(" AND nc.raw_name = ");
         builder.push_bind(name);
     }
     if let Some(prefix) = filter.prefix.as_deref() {
-        builder.push(" AND lower(nc.raw_name) LIKE ");
+        builder.push(" AND nc.raw_name LIKE ");
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }
     if let Some(contains) = filter.contains.as_deref() {
-        builder.push(" AND lower(nc.raw_name) LIKE ");
+        builder.push(" AND nc.raw_name LIKE ");
         builder.push_bind(format!("%{}%", escape_like_pattern(contains)));
         builder.push(" ESCAPE '\\'");
     }
     if let Some(contains_nocase) = filter.contains_nocase.as_deref() {
-        builder.push(" AND lower(nc.raw_name) LIKE ");
+        builder.push(" AND nc.raw_name LIKE ");
         builder.push_bind(format!(
             "%{}%",
             escape_like_pattern(&contains_nocase.to_ascii_lowercase())

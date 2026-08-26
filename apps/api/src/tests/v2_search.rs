@@ -4,6 +4,49 @@ const V2_SEARCH_REGISTRATION_REGISTRANT: &str = "0x00000000000000000000000000000
 const V2_SEARCH_CONTROL_REGISTRANT: &str = "0x0000000000000000000000000000000000000d04";
 
 #[tokio::test]
+async fn v2_search_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
+    const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:ᏣᎳᎩ.eth",
+        NORMALIZED_NAME,
+        NORMALIZED_NAME,
+        "namehash:ᏣᎳᎩ.eth",
+        Uuid::from_u128(0x349_1001),
+        Uuid::from_u128(0x349_1002),
+        Uuid::from_u128(0x349_1003),
+        "0x0000000000000000000000000000000000034910",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        43,
+    )
+    .await?;
+    let stored_raw_name: String = sqlx::query_scalar(
+        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+    )
+    .bind(NORMALIZED_NAME)
+    .fetch_one(&database.pool)
+    .await?;
+
+    let prefix = v2_search_payload_for_database(
+        &database,
+        "/v2/search?q=%E1%8F%A3%E1%8E%B3&namespace=ens",
+    )
+    .await?;
+    assert_eq!(prefix["data"][0]["name"], json!(stored_raw_name));
+
+    let contains = v2_search_payload_for_database(
+        &database,
+        "/v2/search?q=%E1%8F%A3%E1%8E%B3&match=contains&namespace=ens",
+    )
+    .await?;
+    assert_eq!(contains["data"][0]["name"], json!(NORMALIZED_NAME));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_prefix_returns_record_rows() -> Result<()> {
     let (database, payload) = v2_search_payload("/v2/search?q=al&namespace=ens").await?;
 
@@ -80,6 +123,7 @@ async fn v2_search_match_modes_and_q_validation() -> Result<()> {
         "/v2/search?namespace=ens",
         "/v2/search?q=&namespace=ens",
         "/v2/search?q=al&match=suffix&namespace=ens",
+        "/v2/search?q=al%25&namespace=ens",
     ] {
         let response = v2_search_response_for_database(&database, uri).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
@@ -91,7 +135,7 @@ async fn v2_search_match_modes_and_q_validation() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_search_lowercases_q_and_filters_namespace() -> Result<()> {
+async fn v2_search_normalizes_q_and_filters_namespace() -> Result<()> {
     let (database, uppercase) = v2_search_payload("/v2/search?q=AL&namespace=ens").await?;
     assert_eq!(
         v2_search_names(uppercase["data"].as_array().expect("uppercase data")),
@@ -104,6 +148,13 @@ async fn v2_search_lowercases_q_and_filters_namespace() -> Result<()> {
         vec!["alpha.base.eth", "alpha.eth"]
     );
     assert_eq!(public["meta"], json!({}));
+
+    let label_boundary =
+        v2_search_payload_for_database(&database, "/v2/search?q=ALPHA.&namespace=ens").await?;
+    assert_eq!(
+        v2_search_names(label_boundary["data"].as_array().expect("boundary data")),
+        vec!["alpha.eth"]
+    );
 
     let basenames =
         v2_search_payload_for_database(&database, "/v2/search?q=alpha&namespace=basenames").await?;
@@ -119,6 +170,26 @@ async fn v2_search_lowercases_q_and_filters_namespace() -> Result<()> {
         read_json::<Value>(unknown).await?["error"]["code"],
         json!("invalid_input")
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_contains_nocase_normalizes_ascii_query_without_touching_stored_names(
+) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+
+    let count = bigname_storage::count_name_current_list(
+        &database.pool,
+        &bigname_storage::NameCurrentListFilter {
+            namespace: Some("ens".to_owned()),
+            contains_nocase: Some("AL".to_owned()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(count, 2);
 
     database.cleanup().await
 }
@@ -689,13 +760,6 @@ async fn v2_search_escapes_like_metacharacters() -> Result<()> {
         vec!["_under.eth"]
     );
 
-    // `al%` matches every `al`-prefixed name only if the percent stays a wildcard. The percent is
-    // exercised query-side only: the phase fixtures recompute identity through ENSIP-15, which
-    // rejects a literal `%` label, so a stored `percent%name.eth` cannot be seeded here.
-    let percent =
-        v2_search_payload_for_database(&database, "/v2/search?q=al%25&namespace=ens").await?;
-    assert_eq!(percent["data"], json!([]));
-
     // `contains` builds its own pattern, so it needs the same escaping. `_und` unescaped would
     // also match `bunder.eth`.
     let contains = v2_search_payload_for_database(
@@ -707,13 +771,6 @@ async fn v2_search_escapes_like_metacharacters() -> Result<()> {
         v2_search_names(contains["data"].as_array().expect("contains data")),
         vec!["_under.eth"]
     );
-
-    let contains_percent = v2_search_payload_for_database(
-        &database,
-        "/v2/search?q=al%25&namespace=ens&match=contains",
-    )
-    .await?;
-    assert_eq!(contains_percent["data"], json!([]));
 
     database.cleanup().await
 }

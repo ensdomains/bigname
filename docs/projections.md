@@ -218,7 +218,7 @@ and leaves the name columns null when none does — the labelhash and child node
 are proven, the label is not. Reads name such a child by the [non-name
 form](glossary.md#non-name-form)
 `[<labelhash-without-0x>].<parent-name>`, built from the parent's stored
-spelling, and lower-case it for the normalized form. A preimage whose label
+spelling, and returns those same stored bytes in both name fields. A preimage whose label
 bytes are not valid UTF-8, or contain a NUL, is a third state: Project stores
 the whole child name as raw bytes with no decoded form, and reads escape-encode
 that whole string, parent portion included. A preimage whose bytes decode but

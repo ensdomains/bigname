@@ -18,7 +18,6 @@ pub(super) fn decode_address_name_current_row(row: PgRow) -> Result<AddressNameC
         relation,
         namespace: crate::sql_row::get(&row, "namespace")?,
         canonical_display_name: crate::sql_row::get(&row, "canonical_display_name")?,
-        normalized_name: crate::sql_row::get(&row, "normalized_name")?,
         namehash: crate::sql_row::get(&row, "namehash")?,
         surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
         resource_id: crate::sql_row::get(&row, "resource_id")?,

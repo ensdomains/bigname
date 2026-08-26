@@ -69,7 +69,6 @@ async fn load_address_names_current_internal(
             anc.relation,
             anc.namespace,
             anc.raw_name AS canonical_display_name,
-            lower(anc.raw_name) AS normalized_name,
             anc.namehash,
             anc.surface_binding_id,
             anc.resource_id,

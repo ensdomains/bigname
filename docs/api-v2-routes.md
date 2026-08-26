@@ -515,7 +515,7 @@ Field ownership:
   labelhash but not the label, so two [non-name
   forms](glossary.md#non-name-form) are reachable here. A child whose label has
   never been observed carries `[<labelhash-without-0x>].<parent-name>` in
-  `display_name` and its lower-cased form in `name`. The same placeholder serves
+  `display_name` and the same stored bytes in `name`. The same placeholder serves
   a child whose label was observed — from the chain or the proof-checked rainbow
   import — but whose text fails ENSIP-15 normalization: the node commits to the
   raw label bytes, so serving the text as a name would name a different node,
@@ -1026,7 +1026,12 @@ Field ownership:
   or another captured-state change returns the existing retryable `409 conflict`,
   never a partial page.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
-  required; a missing or empty `q` returns `400 invalid_input`. An explicit
+  required; a missing or empty `q` returns `400 invalid_input`. The API treats
+  `q` as an ENSIP-15 name fragment, normalizes it, and then applies the selected
+  `match=prefix|contains` byte comparison directly to stored names. Invalid
+  normalization returns `400 invalid_input`. A single trailing dot is preserved
+  as a label boundary after the preceding nonempty name is normalized, matching
+  the address-names `q` behavior documented above. An explicit
   recognized namespace bypasses public namespace derivation and reads its
   current rows without a deployment-readiness gate, including the Interpret
   redo check, preserving the existing behavior. Bare search excludes a

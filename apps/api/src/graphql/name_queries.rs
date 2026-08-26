@@ -247,7 +247,7 @@ fn push_filtered_names<'a>(
     builder.push(
         r#"filtered_names AS (
         SELECT nc.logical_name_id, nc.namespace, nc.raw_name AS canonical_display_name,
-               LOWER(nc.raw_name) AS normalized_name, nc.namehash,
+               nc.raw_name AS normalized_name, nc.namehash,
                nc.surface_binding_id, nc.resource_id, nc.token_lineage_id,
                nc.binding_kind, nc.declared_summary, nc.provenance,
                nc.chain_positions, nc.canonicality_summary, nc.manifest_version,
@@ -356,7 +356,7 @@ fn push_filters<'a>(builder: &mut QueryBuilder<'a, Postgres>, filter: &'a NameCu
         }
     }
     if let Some(contains) = filter.contains.as_deref() {
-        builder.push(" AND LOWER(nc.raw_name) LIKE ");
+        builder.push(" AND nc.raw_name LIKE ");
         builder.push_bind(format!("%{}%", escape_like(contains)));
         builder.push(" ESCAPE '\\'");
     }

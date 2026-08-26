@@ -69,6 +69,56 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
+    const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
+    const ADDRESS: &str = "0x0000000000000000000000000000000000034930";
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:ᏣᎳᎩ.eth",
+        NORMALIZED_NAME,
+        NORMALIZED_NAME,
+        "namehash:ᏣᎳᎩ.eth",
+        Uuid::from_u128(0x349_3001),
+        Uuid::from_u128(0x349_3002),
+        Uuid::from_u128(0x349_3003),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        43,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=121).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[v2_history_event(
+            "cherokee-record",
+            Some("ens:ᏣᎳᎩ.eth"),
+            None,
+            "RecordChanged",
+            121,
+        )],
+    )
+    .await?;
+    let stored_raw_name: String = sqlx::query_scalar(
+        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+    )
+    .bind(NORMALIZED_NAME)
+    .fetch_one(&database.pool)
+    .await?;
+
+    for uri in [
+        "/v2/events?name=%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth&page_size=20".to_owned(),
+        format!("/v2/addresses/{ADDRESS}/history?page_size=20"),
+    ] {
+        let payload = v2_history_payload_for_database(&database, &uri).await?;
+        assert_eq!(payload["data"][0]["name"], json!(stored_raw_name), "{uri}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_history_filters_non_product_rows_and_advances_cursor() -> Result<()> {
     let (database, first_page) =
         v2_history_payload("/v2/names/History.eth/history?page_size=1").await?;

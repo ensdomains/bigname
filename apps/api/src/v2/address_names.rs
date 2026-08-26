@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::cursor::invalid_cursor_error;
+use super::name_filter::normalize_name_prefix;
 use super::permission_support::{
     apply_role_summary_support_meta, permission_support_for_resources,
 };
@@ -113,11 +114,7 @@ pub(crate) async fn get_address_names(
     let storage_dedupe = dedupe_to_storage(params.dedupe);
     let storage_sort = sort_to_storage(params.sort);
     let storage_order = order_to_storage(params.order);
-    let normalized_q = params
-        .q
-        .as_deref()
-        .map(normalize_address_names_prefix)
-        .transpose()?;
+    let normalized_q = params.q.as_deref().map(normalize_name_prefix).transpose()?;
 
     let cursor_binding = AddressNamesCursorBinding {
         address: &normalized_address,
@@ -278,29 +275,6 @@ pub(crate) async fn get_address_names(
         }),
         meta,
     }))
-}
-
-fn normalize_address_names_prefix(prefix: &str) -> V2Result<String> {
-    let (normalization_input, append_label_boundary) = prefix
-        .strip_suffix('.')
-        .filter(|prefix_without_dot| {
-            !prefix_without_dot.is_empty() && !prefix_without_dot.ends_with('.')
-        })
-        .map_or((prefix, false), |prefix_without_dot| {
-            (prefix_without_dot, true)
-        });
-    let mut normalized_prefix = bigname_domain::normalization::normalize_name(normalization_input)
-        .map(|normalized| normalized.normalized_name)
-        .map_err(|error| {
-            V2Error::invalid_input(format!(
-                "q must be a valid ENSIP-15 name prefix: {}",
-                error.message()
-            ))
-        })?;
-    if append_label_boundary {
-        normalized_prefix.push('.');
-    }
-    Ok(normalized_prefix)
 }
 
 async fn load_primary_names_by_namespace<'a>(

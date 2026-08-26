@@ -55,7 +55,7 @@ fn child_select() -> String {
     SELECT cc.parent_logical_name_id, cc.child_logical_name_id, cc.surface_class,
            cc.namespace,
            {CHILD_DISPLAY_NAME_EXPR} AS canonical_display_name,
-           lower({CHILD_DISPLAY_NAME_EXPR}) AS normalized_name,
+           {CHILD_DISPLAY_NAME_EXPR} AS normalized_name,
            cc.namehash, cc.labelhash, cc.owner, cc.registrant, cc.provenance,
            cc.chain_positions, cc.canonicality_summary, cc.manifest_version,
            cc.last_recomputed_at

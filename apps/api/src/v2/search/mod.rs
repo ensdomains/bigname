@@ -15,6 +15,7 @@ use tracing::error;
 use crate::{AppState, state::is_recognized_public_namespace};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::name_filter::normalize_name_prefix;
 use super::{
     AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
     RegistrationStatus, V2Error, V2Result, api_error_to_v2, decode, encode,
@@ -384,8 +385,8 @@ fn parse_q(value: Option<String>) -> V2Result<String> {
     value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .map(|value| value.to_lowercase())
         .ok_or_else(|| V2Error::invalid_input("q is required and must be non-empty"))
+        .and_then(|value| normalize_name_prefix(&value))
 }
 
 fn parse_match(value: Option<&str>) -> V2Result<SearchMatch> {

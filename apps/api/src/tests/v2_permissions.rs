@@ -16,6 +16,47 @@ async fn v2_get_permissions_requires_at_least_one_filter() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_get_permissions_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
+    const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current SET raw_name = $1
+         WHERE resource_id = $2",
+    )
+    .bind(NORMALIZED_NAME)
+    .bind(v2_permissions_current_resource_id())
+    .execute(&database.pool)
+    .await?;
+    let stored_raw_name: String = sqlx::query_scalar(
+        "SELECT raw_name FROM bigname_phase.name_current WHERE resource_id = $1",
+    )
+    .bind(v2_permissions_current_resource_id())
+    .fetch_one(&database.pool)
+    .await?;
+
+    let payload = v2_permissions_payload_for_database(
+        &database,
+        &format!(
+            "/v2/permissions?registration_id={}",
+            v2_permissions_current_resource_id()
+        ),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("permissions data must be an array");
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter()
+            .all(|row| row["name"] == json!(stored_raw_name))
+    );
+
+    database.cleanup().await
+}
+
 // A registration the name filter did not select is not a rejected filter combination: it is a
 // registration that no longer holds the name. It stays queryable on its own as an audit read, and
 // pairing it with the name it lost returns an empty collection.

@@ -10,6 +10,7 @@ mod error;
 mod events;
 mod history;
 pub(crate) mod lookup;
+mod name_filter;
 mod name_record;
 mod name_records;
 #[cfg(test)]
