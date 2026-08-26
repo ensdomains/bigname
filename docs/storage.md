@@ -191,6 +191,13 @@ restored interval. The repair is
 one-shot because the stored row is then zero and its positive-floor predicate
 cannot fire again; a current finite declaration keeps its finite watch bound.
 
+Before re-deriving a range, Interpret preserves a finitely retired
+manifest-declared contract-address row as coordination state. An event-derived
+observation at or before that row's close block may reproduce its discovery
+edge but cannot reopen its address range. An observation after the close block
+may append a new range bounded after the retired epoch. This preservation does
+not change raw facts, normalized-event identity, or projection ownership.
+
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing
 the retained range markers, source provenance, verification level, or content

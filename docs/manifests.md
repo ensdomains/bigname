@@ -835,7 +835,23 @@ and adapter-checkpoint machinery. Closed intervals remain historical emitter
 admission while their manifest authority is active, but do not expand the
 current watch plan.
 
-Schema-v2 manifest synchronization retires manifest-declared address ranges and
+Schema-v2 manifest synchronization snapshots the directly preceding active
+address declarations before replacing their stored children. It retires an
+active address range that belonged to that snapshot when no desired active
+manifest still declares the same contract instance and address. This membership
+check repairs a row whose declaration provenance was overwritten by an older
+interpreter before retiring it. Interpret may observe a currently declared
+address through a discovery event and backdate its active range, but that
+refresh preserves the declaration provenance and source-manifest ID; the
+event-derived discovery edge records the raw-log observation separately.
+Interpret redo preserves a finitely retired manifest-declared address row as
+coordination state. Replaying an observation at or before that row's close block
+may reproduce its discovery edge, but does not reopen the address range. A
+genuinely later discovery observation appends the normal bounded address range,
+so re-admission remains possible. Deprecating a manifest version or removing a
+declaration in place therefore cannot be undone by replay of the history that
+preceded retirement. An address admitted only through discovery keeps its event
+provenance and remains outside this retirement rule. Synchronization also
 updates manifest-declared proxy edges. It does not run a full-source
 reconciliation over event-driven edges. An authority change invalidates the
 interpret and project phase content hashes. Complete the [mandatory historical
@@ -1037,11 +1053,10 @@ with the two consequence classes described above, and normalized-output removal
 can be followed by an empty rebuild that clears before the next producer event.
 Reuse of a retired address under a different namespace, family, or role whose
 declared start precedes its bounded new contract-address active range can
-conservatively inherit the older address floor. Conversely, a full Interpret
-redo after declaration retirement can delete the last retired contract-address
-range; a later future-dated re-add then has retained declaration text but no
-persisted address floor and can evade historical resolver classification. A
-binary change can also add a new address-admitting discovery edge kind or change
+conservatively inherit the older address floor. Interpret redo preserves a
+finitely retired manifest-declared contract-address range, while a later
+observation can append a bounded re-admission range. A binary change can also
+add a new address-admitting discovery edge kind or change
 Interpret selection or discovery behavior without a manifest-field transition.
 The accepted fail-loud configurations are unsupported operator transitions,
 not proof of safe narrowing; supporting any listed shape requires a new proof

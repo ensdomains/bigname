@@ -758,7 +758,12 @@ Identity rows, discovery edges, and normalized events must be a pure function
 of the canonical raw facts and the declared manifests, discovery rules, and
 admissions: a fresh full walk, an incremental follow, and a resumed session
 over identical input must write identical rows no matter where the 500-block
-batch boundaries fall. The guarantee is verified for the divergence classes
+batch boundaries fall. A finitely retired manifest-declared address range is
+the narrow history-bearing exception: manifest synchronization supplies its
+retirement boundary, Interpret redo preserves it, and a fresh database that
+starts after the declaration was removed need not contain that historical
+range. The exception cannot admit an address, alter normalized-event output,
+or change a projection. The batching guarantee is verified for the divergence classes
 [#336](https://github.com/ensdomains/bigname/issues/336) identified on the
 ENSv1 path and [#348](https://github.com/ensdomains/bigname/issues/348)
 identified on the ENSv2 resolver path; the permutation lane's pinned
@@ -1163,10 +1168,14 @@ The phase runner stores competing block lineage per chain. Head publication
 marks a displaced readable lineage branch `orphaned` and promotes the selected
 branch; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
-identity, discovery, and normalized-event output for its selected range. Before
-that replacement it preserves only the resolver references that Project needs
-to find projection rows affected by disappearing events; Project consumes that
-coordination state during redo or later normal catch-up publication.
+identity, discovery, and normalized-event output for its selected range, except
+for two bounded kinds of coordination state carried across redo preparation.
+It preserves the resolver references that Project needs to find projection rows
+affected by disappearing events, and finitely retired manifest-declared address
+ranges that prevent replay of older observations from reopening retired
+authority. Project consumes the resolver references during redo or later normal
+catch-up publication; Interpret uses the retired address boundary while
+rewriting discovery output.
 
 The live phase uses the same head-publication transaction as ingest. That
 transaction orphans the displaced suffix, clears affected active resolution

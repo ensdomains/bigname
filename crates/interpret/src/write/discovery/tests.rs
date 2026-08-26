@@ -122,7 +122,7 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
             active_from_block_number: discovery_block,
             active_from_block_hash: block_hash.to_owned(),
             source_manifest_id,
-            provenance: json!({"discovered_at": discovery_block}),
+            provenance: json!({"source": "raw_log", "discovered_at": discovery_block}),
         }],
         ..BatchOutput::default()
     };
@@ -130,8 +130,13 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
     write(&mut transaction, &output, false).await?;
     transaction.commit().await?;
 
-    let refreshed_floor: Option<i64> = sqlx::query_scalar(
-        "SELECT active_from_block_number FROM contract_instance_addresses
+    let (refreshed_floor, refreshed_source, refreshed_manifest_id): (
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "SELECT active_from_block_number, provenance ->> 'source', source_manifest_id
+         FROM contract_instance_addresses
          WHERE chain_id = 'base-mainnet' AND lower(address) = $1
            AND deactivated_at IS NULL",
     )
@@ -139,6 +144,11 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
     .fetch_one(database.pool())
     .await?;
     assert_eq!(refreshed_floor, None);
+    assert_eq!(
+        refreshed_source.as_deref(),
+        Some("manifest_proxy_implementation")
+    );
+    assert_eq!(refreshed_manifest_id, Some(source_manifest_id));
     let discovery_only_floor: Option<i64> = sqlx::query_scalar(
         "SELECT active_from_block_number FROM contract_instance_addresses
          WHERE chain_id = 'base-mainnet' AND lower(address) = $1
@@ -180,6 +190,14 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
     }
 
     sync_schema_v2_repository(database.pool(), &repository).await?;
+    let discovery_only_active: bool = sqlx::query_scalar(
+        "SELECT deactivated_at IS NULL FROM contract_instance_addresses
+         WHERE chain_id = 'base-mainnet' AND lower(address) = $1",
+    )
+    .bind(discovery_only_address)
+    .fetch_one(database.pool())
+    .await?;
+    assert!(discovery_only_active);
     let required_ingest: bool = sqlx::query_scalar(
         "SELECT redo_in_progress FROM chain_phase_state
          WHERE chain_id = 'base-mainnet' AND phase_name = 'ingest'",
@@ -201,7 +219,7 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
 }
 
 #[tokio::test]
-async fn rediscovery_below_retired_epoch_bounds_floor_and_drops_hash() -> TestResult {
+async fn replay_before_manifest_retirement_does_not_backdate_later_epoch() -> TestResult {
     let database = TestDatabase::create(TestDatabaseConfig::new(
         "interpret_discovery_retired_epoch_bound",
     ))
@@ -228,11 +246,13 @@ async fn rediscovery_below_retired_epoch_bounds_floor_and_drops_hash() -> TestRe
              contract_instance_id, chain_id, address,
              active_from_block_number, active_from_block_hash,
              active_to_block_number, active_to_block_hash,
-             admitted_at, deactivated_at
+             provenance, admitted_at, deactivated_at
          ) VALUES
              ($1, 'bound-test', $2, 2, 'retired-start', 9, 'retired-end',
+              '{\"source\":\"manifest_declaration\"}'::jsonb,
               now() - interval '2 hours', now() - interval '1 hour'),
              ($1, 'bound-test', $2, 20, 'active-start', NULL, NULL,
+              '{\"source\":\"raw_log\",\"block_number\":20}'::jsonb,
               now(), NULL)",
     )
     .bind(instance_id)
@@ -256,15 +276,19 @@ async fn rediscovery_below_retired_epoch_bounds_floor_and_drops_hash() -> TestRe
     write(&mut transaction, &output, false).await?;
     transaction.commit().await?;
 
-    let active_floor: (Option<i64>, Option<String>) = sqlx::query_as(
-        "SELECT active_from_block_number, active_from_block_hash
+    let active_floor: (Option<i64>, Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT active_from_block_number, active_from_block_hash,
+                (provenance ->> 'block_number')::bigint
          FROM contract_instance_addresses
          WHERE contract_instance_id = $1 AND deactivated_at IS NULL",
     )
     .bind(instance_id)
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(active_floor, (Some(10), None));
+    assert_eq!(
+        active_floor,
+        (Some(20), Some("active-start".to_owned()), Some(20))
+    );
 
     database.cleanup().await?;
     Ok(())

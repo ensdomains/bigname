@@ -195,7 +195,8 @@ backfill, or manifest state.
 **Contract instance** (`contract_instance_id`) — the stable identity of a
 watched contract. Addresses are time-ranged attributes of an instance, a proxy
 keeps its instance across implementation changes, and re-admitting an old
-address reuses its prior instance with a new active range.
+address through a manifest declaration or an observation after its prior
+retirement boundary reuses its instance with a new active range.
 
 **Coverage frontier** (stored-lineage coverage frontier) — a schema-migration-era,
 revision-checked old-runtime proof of which watched block intervals had
@@ -295,10 +296,10 @@ the stored row is then zero and its positive-floor predicate cannot fire again;
 a current finite declaration keeps its finite watch bound. Reusing a retired
 address under another declaration identity remains conservative when the new
 declared start precedes the bounded new active range: the older shared address
-floor can still cause rejection. If a full Interpret redo deletes the last
-retired contract-address range, however, a later re-add can lack a persisted
-floor even though its old declaration text survives; that transition is not
-proved safe. A rule with no matching declaration contributes block zero, and an ENSv2 registry
+floor can still cause rejection. Full Interpret redo preserves the last
+finitely retired manifest-declared range as coordination state. Later manifest
+re-admission therefore retains its persisted floor, while a later event
+observation may append a bounded active range. A rule with no matching declaration contributes block zero, and an ENSv2 registry
 manifest with an active `registry_announcement` rule contributes a distinct
 block-zero, role-free emitter path even when an emitterless candidate or direct
 declarations already exist. Adding that path is widening because an
