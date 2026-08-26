@@ -1757,7 +1757,7 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
     let store = PhaseStore::new(scratch.runner().pool().clone());
     let chain_id = "redo-state-chain";
     store.initialize_chain(chain_id).await?;
-    seed_readable_lineage(scratch.pool(), chain_id, 3).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 3).await?;
     mark_completed(scratch.pool(), chain_id, PhaseName::Ingest, None).await?;
     mark_completed(
         scratch.pool(),
@@ -1876,9 +1876,15 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         available_capacity(),
         "redo-all-phases-runner",
     )?;
+    let mut sources = chain(completed_chain)?.sources.to_vec();
+    let mut reference = sources[0].clone();
+    reference.source_key = "reference".into();
+    reference.role = phase_runner::config::SourceRole::VerificationOnly;
+    sources.push(reference);
+    let completed_config = ChainConfig::new(completed_chain, sources, false)?;
     let report = phase_runner
         .redo_chains(
-            &[chain(failed_chain)?, chain(completed_chain)?],
+            &[chain(failed_chain)?, completed_config],
             RedoPhase::All,
             BlockRange::new(0, 0)?,
             CancellationToken::new(),
@@ -3353,6 +3359,69 @@ async fn interpret_redo_accepts_a_normalized_equivalent_source_kind() -> Result<
 }
 
 #[tokio::test]
+async fn project_redo_rejects_an_incomplete_intake_source_set_before_its_marker() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_project_redo_source_identity").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "project-redo-source-identity-chain";
+    store.initialize_chain(chain_id).await?;
+    for phase in [PhaseName::Ingest, PhaseName::Interpret, PhaseName::Project] {
+        mark_completed(
+            scratch.pool(),
+            chain_id,
+            phase,
+            phase
+                .writes_derived_data()
+                .then_some(phase_runner::INTERPRETER_CONTENT_HASH),
+        )
+        .await?;
+    }
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Project, 1).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    let configured = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "replacement-source",
+            "test",
+            SeedBasis::EthereumHead,
+            0,
+            "http://replacement.invalid",
+        )?],
+        false,
+    )?;
+
+    let error = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "project-redo-source-identity-runner",
+    )?
+    .redo(
+        &configured,
+        RedoPhase::Phase(PhaseName::Project),
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("Project redo must reject an incomplete intake source set");
+    let redo_in_progress: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("has no matching cursor"),
+        "{error}"
+    );
+    assert!(!redo_in_progress);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn ingest_summary_rolls_back_when_cursor_persistence_fails() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_atomic_ingest_progress").await?;
     let chain_id = "atomic-ingest-progress-chain";
@@ -3698,6 +3767,10 @@ impl Phase for RecordingRedoPhase {
                 .lock()
                 .expect("recorded calls lock")
                 .push((context.chain_id.clone(), self.name));
+            if context.chain_id == "redo-all-completed-chain" {
+                let count = context.sources.len();
+                assert_eq!(count, (self.name == PhaseName::Verify) as usize + 1);
+            }
             if self.fail_chain.as_deref() == Some(context.chain_id.as_str()) {
                 return Err(RunnerError::data_integrity(
                     "fixture failed during all-phase interpret redo",

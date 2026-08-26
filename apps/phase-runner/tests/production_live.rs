@@ -27,7 +27,7 @@ use bigname_storage::{
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
-    config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, SourceRole, TimingConfig},
     error::{ErrorKind, RunnerError},
     heads::{BlockMarker, HeadMarkers, publish_heads},
     ingest_phase::IngestPhase,
@@ -2892,7 +2892,7 @@ async fn genuine_lower_fork_snapshot_still_publishes_the_reorg() -> Result<()> {
 }
 
 #[tokio::test]
-async fn live_lower_head_waits_for_the_stamped_range_before_downstream_redo() -> Result<()> {
+async fn verification_only_source_never_reaches_live_follow_or_cursors() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_lower_head_reorg").await?;
     let chain = "live-lower-head-reorg";
     seed_branch(scratch.pool(), chain, 1, 3, None).await?;
@@ -2900,8 +2900,8 @@ async fn live_lower_head_waits_for_the_stamped_range_before_downstream_redo() ->
     seed_completed_spine(scratch.pool(), chain, 3, &block_hash(1, 3)).await?;
     seed_empty_watch_manifest(scratch.pool(), chain).await?;
     let fixture = RpcFixture::spawn(1, 3).await?;
+    let verification = RpcFixture::spawn(1, 3).await?;
     fixture.reorg(2, 1, 2).await;
-
     let ingest_engine = Arc::new(Engine::new(scratch.pool().clone()));
     let phases = PhaseSet::with_ingest_interpret_project_and_live(
         Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
@@ -2917,12 +2917,12 @@ async fn live_lower_head_waits_for_the_stamped_range_before_downstream_redo() ->
         "production-live-lower-head-reorg",
         fast_timing(),
     )?);
-    let configured_chain = live_chain(chain, &fixture.endpoint)?;
+    let configured_chain =
+        live_chain_with_verification(chain, &fixture.endpoint, &verification.endpoint)?;
     let cancellation = CancellationToken::new();
     let run_cancellation = cancellation.clone();
     let mut task =
         tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
-
     wait_for_head(scratch.pool(), chain, 2, &block_hash(2, 2)).await?;
     tokio::time::sleep(Duration::from_millis(50)).await;
     if task.is_finished() {
@@ -2938,8 +2938,16 @@ async fn live_lower_head_waits_for_the_stamped_range_before_downstream_redo() ->
     wait_for_rederived_head(scratch.pool(), chain, 3, &block_hash(2, 3)).await?;
     cancellation.cancel();
     task.await??;
-
+    let verification_cursor: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'verify'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(verification.requests().await, 0);
+    assert_eq!(verification_cursor, 0);
     fixture.server.abort();
+    verification.server.abort();
     scratch.cleanup().await
 }
 
@@ -4451,6 +4459,36 @@ fn live_chain(chain: &str, endpoint: &str) -> phase_runner::error::RunnerResult<
     )
 }
 
+fn live_chain_with_verification(
+    chain: &str,
+    intake: &str,
+    verification: &str,
+) -> phase_runner::error::RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        chain,
+        vec![
+            SourceConfig::new_with_role(
+                chain,
+                "rpc",
+                "rpc",
+                SeedBasis::NewSignatureRange,
+                0,
+                SourceRole::Intake,
+                intake,
+            )?,
+            SourceConfig::new_with_role(
+                chain,
+                "verify",
+                "rpc",
+                SeedBasis::NewSignatureRange,
+                0,
+                SourceRole::VerificationOnly,
+                verification,
+            )?,
+        ],
+        false,
+    )
+}
 fn runner_with_interpret_phase(
     scratch: &ScratchDatabase,
     instance_id: &str,
@@ -5134,6 +5172,7 @@ struct RpcChain {
     blocks: BTreeMap<String, Value>,
     logs: Vec<Value>,
     reorg_after_number_batch: Option<(u64, i64, i64)>,
+    requests: usize,
 }
 
 struct RpcFixture {
@@ -5192,6 +5231,9 @@ impl RpcFixture {
     async fn reorg_after_next_number_batch(&self, branch: u64, ancestor: i64, through: i64) {
         self.state.write().await.reorg_after_number_batch = Some((branch, ancestor, through));
     }
+    async fn requests(&self) -> usize {
+        self.state.read().await.requests
+    }
 }
 
 fn rpc_chain(branch: u64, through: i64) -> RpcChain {
@@ -5222,6 +5264,7 @@ fn rpc_chain(branch: u64, through: i64) -> RpcChain {
         blocks,
         logs: Vec::new(),
         reorg_after_number_batch: None,
+        requests: 0,
     }
 }
 
@@ -5230,6 +5273,7 @@ async fn chain_rpc(
     Json(request): Json<Value>,
 ) -> Json<Value> {
     let mut state = state.write().await;
+    state.requests += 1;
     let response = if let Some(requests) = request.as_array() {
         Value::Array(
             requests

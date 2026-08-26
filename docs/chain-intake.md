@@ -23,9 +23,7 @@ For each configured chain, the path is:
    and normalized events. When configured, it then applies
    [canonical-head hydration](glossary.md#hydration) to the two documented
    current projection surfaces.
-4. `verify` freezes a finalized boundary. The Issue #411 enforcement change
-   will make only a [`verification-only`](glossary.md#source-role) source
-   independent. With that enforcement, Base can compare with dRPC and record
+4. `verify` freezes a finalized boundary. Only a [`verification-only`](glossary.md#source-role) source is independent. Base can compare with dRPC and record
    `cross_checked` only through the Coinbase-to-dRPC ingest seam, Ethereum
    Mainnet can compare with reth and record `node_checked`, and Ethereum
    Sepolia can record `cross_checked` with a distinct verification-only dRPC or
@@ -111,13 +109,7 @@ mismatch remains a genuine lower-head reorg and follows the normal publication
 path.
 
 The `verify` reader may overlap the live loop. It freezes its target at the
-finalized marker while live continues toward the latest head. A chain
-configured with `verify-before-live` completes that finite scan before entering
-live follow. Sepolia's Ethereum-head intake shape always takes this serial path,
-even when the chain is omitted from that setting. The current five-field binary
-always uses [provider-trusted verification](glossary.md#verification-level) for
-Sepolia; after Issue #411 enforcement lands, the same serial path will support
-either a distinct verification-only comparison or that fallback. A mismatch is non-retryable and stops
+finalized marker while live continues toward the latest head. Every [provider-trusted verification](glossary.md#verification-level) plan completes that finite scan before entering Live, including reference-less Base, Ethereum Mainnet, and Sepolia. A Compared Base plan remains paired unless the chain is configured with `verify-before-live`. Ethereum-head intake derives that setting, so Mainnet and Sepolia remain serial even with a distinct verification-only reference. A mismatch is non-retryable and stops
 only that chain.
 
 Manifest synchronization uses the schema-v2 repository and checks the selected
@@ -130,28 +122,13 @@ admitted source must return to `ingest` for its required range before
 
 ## Sources and range progress
 
-The current `phase-runner run` accepts a comma-delimited chain list and
-five-field source descriptors without a role field. Every configured source currently
-participates in intake, and Verify selects a reference by source kind from that
-same set. Base can report `cross_checked` for dRPC and Ethereum Mainnet can
-report `node_checked` for reth, but those labels do not prove that the selected
-reference was excluded from intake; Sepolia records `quick_synced`. The Issue
-#411 enforcement binary will extend each descriptor to the form:
+`phase-runner run` accepts a comma-delimited chain list and source descriptors in this form:
 
 ```text
 CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV
 ```
 
-Under the ratified Issue #411 contract, the endpoint is read from `URL_ENV`;
-`ROLE` is `intake`, `verification-only`, or `both`, and omission defaults to
-`both`. Ingest, Live, cursor identity, and ingest progress will receive only
-`intake` and `both` sources. A verification-only source will receive no cursor
-and alone can earn independent `cross_checked` (dRPC) or `node_checked` (local
-reth); `both` earns only provider-trusted `quick_synced`. The enforcement
-binary will reject equal endpoints without logging them; no new verification
-level is introduced. A stronger level will be downgraded when current roles
-support only `quick_synced`; retained `quick_synced` will not be automatically
-upgraded. Changing intake membership requires the reset and [full source
+The endpoint is read from `URL_ENV`; `ROLE` is `intake`, `verification-only`, or `both`, and omission defaults to `both`. Role tokens are exact: use `verification-only`, not `verification_only`; source-kind normalization does not apply to roles. Ingest, Live, cursor identity, and ingest progress receive only `intake` and `both` sources. A verification-only source receives no cursor and alone can earn independent `cross_checked` (dRPC) or `node_checked` (local reth); `both` earns only provider-trusted `quick_synced`. The runner rejects dRPC endpoints with the same parsed URL identity—including host-case, default-port, trailing-slash, and unreserved percent-encoding aliases—without logging them. It resolves relative reth paths from the process working directory and compares filesystem device and inode for both the configured datadir and each storage root the provider opens (`db`, `static_files`, and `rocksdb`); any shared object rejects independence, including symlink and bind-mount aliases. Missing or inaccessible roots fall back individually to canonical or lexical spelling identity; configured paths are not logged. No new verification level is introduced. A stronger level is downgraded when current roles support only `quick_synced`; retained `quick_synced` is not automatically upgraded. Changing intake membership requires the reset and [full source
 re-walk](glossary.md#re-derivation-boundary) below. Source cursors are independent, so
 one source cannot claim another source's range. The runner records the resolved
 target and last processed block hash for each source; restart resumes from that
@@ -172,10 +149,17 @@ an explicitly reviewed reset that removes the cursor and every durable Ingest
 output that may have come from that source, followed by a [full source
 re-walk](glossary.md#re-derivation-boundary); it is never an in-place cursor
 update. Changing only the provider endpoint is allowed because endpoints are
-not persisted source identity, but reusing a former intake endpoint as a
-verification-only reference against retained facts requires the same reset and
-full source re-walk. Independent evidence is earned only when the reference is
-excluded from intake for the complete affected-chain walk. Retained raw facts, chain lineage, or
+not persisted source identity and therefore do not trip the runtime identity
+guard. An independent level attests only that the current verification-only
+endpoint was excluded from intake for all facts retained since the last full
+source re-walk under that endpoint-and-role configuration; it does not prove
+independence across earlier endpoint values. Never assign an endpoint that
+served intake during the retained walk to `verification-only`, even under a new
+key. Doing so voids the `cross_checked` or `node_checked` claim despite the
+current descriptors being distinct. First apply the same reviewed reset and
+full source re-walk under the new configuration. The operator must preserve and
+check that endpoint-rotation history because the runner cannot reconstruct it.
+Retained raw facts, chain lineage, or
 header-audit rows block creation
 of any missing configured source row. The lineage and header rows remain even
 when a loaded range contains no watched transactions, receipts, or logs. The
@@ -189,7 +173,7 @@ its applicable reviewed reset and preservation procedure, and the owner-approved
 rollback and restoration plan authorize that reset; the generic
 verification-mismatch prose does not, and an ordinary redo is not a substitute.
 
-With the Issue #411 enforcement binary, production intake shape is exact:
+Production intake shape is exact:
 `ethereum-mainnet` has one local Reth DB
 source, while `base-mainnet` has one Coinbase SQL historical source and one
 dRPC source meeting at block `48,428,000`; either may add one distinct verification-only source of its supported kind. `ethereum-sepolia` has exactly one
@@ -197,13 +181,9 @@ dRPC intake source with `ethereum_head` seed basis and start block zero, plus ze
 runner will validate the Sepolia rule before Ingest creates a source cursor,
 contacts the provider, or writes raw facts. Live follow uses only the chain
 block provider from that
-already-validated set. Verification will use a distinct local reth for Ethereum
-Mainnet and a second, distinct dRPC—the third Base source overall—as the
-independent reference for Base facts
-loaded from Coinbase. Without one, each chain will record `quick_synced` from
+already-validated set. Verification uses a distinct local reth for Ethereum Mainnet and a second, distinct dRPC—the third Base source overall—as the independent reference for Base facts loaded from Coinbase. Without one, each chain records `quick_synced` from
 its target-covering intake cursor. The dRPC
-source kind is capped at `cross_checked`, and its independent extent cannot pass
-the `48,428,000` seam because dRPC supplies intake after that block. A Base
+source kind is capped at `cross_checked`, and chain policy caps its independent extent at the `48,428,000` seam. A Base
 `reth_db` reference is unsupported because the pinned reader uses reth's
 Ethereum node type, whose signed transaction and receipt types are the Ethereum
 primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
@@ -377,21 +357,8 @@ cargo phase redo \
   --to-block <inclusive-end>
 ```
 
-The current binary accepts the five-field source list supplied for Verify redo;
-it does not enforce a complete Base list. For each selected chain, operators
-must copy that chain's complete deployed set and must not pass descriptors for
-unselected chains: Base uses its Coinbase and dRPC descriptors, Ethereum
-Mainnet its reth descriptor, and Sepolia its single dRPC descriptor. Verify
-selects from that same intake set, so current `cross_checked` and `node_checked`
-labels do not prove source independence; Sepolia records `quick_synced`.
-
-The current CLI requires at least one source for Ingest and `all`, and Verify
-and `all` require the SELECT-only verification database URL. Verify still needs
-the chain-appropriate source set above to build its plan even though the
-current CLI does not enforce Base-list completeness.
-
-After Issue #411 enforcement lands, Verify will join Ingest and `all` in
-requiring intake-capable `--source` descriptors at startup for every selected chain.
+Interpret, Project, and Verify join Ingest and `all` in requiring the complete
+intake-capable `--source` descriptor set at startup for every selected chain.
 Before loading each Base Ingest redo batch whose requested range spans the
 Coinbase/RPC seam, the runner independently queries the seam-block identity
 from Coinbase SQL `base.blocks` and from RPC. A mismatch is a terminal data
@@ -399,11 +366,7 @@ integrity error for that attempt and prevents redo completion; retry only after
 the sources agree. This applies to required and ordinary redos. The
 [manifest widening workflow](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)
 documents the source-schema evidence and why the check runs for every batch.
-Under that enforcement, for `--phase verify`, Base may add one distinct verification-only `drpc`,
-Ethereum Mainnet may add one distinct verification-only `reth_db`, and Sepolia
-may add one distinct verification-only `drpc`. Without that optional reference,
-each chain records `quick_synced` from its target-covering intake cursor. Base
-with `reth_db` is rejected during configuration validation rather than starting
+For `--phase verify`, Base may add one distinct verification-only `drpc`, Ethereum Mainnet one distinct verification-only `reth_db`, and Sepolia one distinct verification-only `drpc`. Without that optional reference, each chain records `quick_synced` from its target-covering intake cursor. Base with `reth_db` is rejected during configuration validation rather than starting
 a database walk. More than one `--chain` may
 be supplied. `--all-chains` is separate sugar that discovers every chain with
 an active synchronized manifest and applies the same phase selection and range
@@ -464,10 +427,7 @@ each block was loaded. Interpreter content hash rotations remain flagless only
 when neither a current manifest-authority marker nor an active audited redo
 exists. Verify redo uses the same scanner as normal
 verification, rechecks the requested finalized range, and persists the level
-reported by the phase. After Issue #411 enforcement lands, a partial redo will
-keep the weaker of the retained full-extent level and the level available from
-the current source roles; a full-extent redo can establish the current plan's
-level.
+reported by the phase. A partial redo keeps the weaker of the retained full-extent level and the level available from the current source roles; a full-extent redo can establish the current plan's level.
 Its source and Base seam preflight happens before redo state is created. A
 mismatch retains the resumable redo marker and its diagnosis;
 rerunning the same command after wipe-and-resync repair resumes the attempt.

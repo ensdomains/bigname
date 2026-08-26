@@ -190,7 +190,7 @@ and live-handoff markers; Verify requires matching current and target markers
 plus a verification level. The next accepted start repeats the checks for the
 retained completion and moves that row through `failed` to `completed`. Error
 text alone never authorizes that transition. This preserved evidence is
-diagnostic state, not permission to publish: provider-trusted Sepolia readiness
+diagnostic state, not permission to publish: policy-based Sepolia readiness
 requires both Ingest and Verify to remain completed.
 
 At runner startup, a `running` or `paused` Interpret, Project, or Verify row with no
@@ -474,7 +474,9 @@ pick up the new preimages through Project:
   Project walk; the first walk derives child names with the preimages present.
 - On a populated database, run the import and then redo Project over each
   chain's full retained range, for example
-  `phase-runner redo --chain ethereum-mainnet --phase project --from-block <first retained block> --to-block <head>`.
+  `phase-runner redo --chain ethereum-mainnet --source 'ethereum-mainnet:<key>:<kind>:<seed-basis>:<start>[:<role>]=<endpoint-env>' --phase project --from-block <first retained block> --to-block <head>`.
+  Repeat `--source` with the complete intake-capable descriptor set recorded by
+  that chain's Ingest cursors.
   A windowed or incremental Project run re-derives only its affected scope.
   Child-topology closure can add a connected component, but it does not cover
   older disconnected child edges; the full-range redo is the required
@@ -508,7 +510,7 @@ row resumes unless its current block and live handoff match its target. A
 completed Verify row resumes unless it has a matching current/target block pair
 and a [verification level](glossary.md#verification-level). Ingest already
 persists its summary and every configured source cursor in one transaction.
-After Issue #411 enforcement lands, that atomic set will contain only
+That atomic set contains only
 [intake-capable sources](glossary.md#source-role), so those completion markers
 cannot survive without the matching source progress. Recovery also clears the
 live handoff when it changes an active Ingest row to `completed`; this makes a
@@ -618,7 +620,7 @@ reached from its configured start through its persisted target; Live does not
 advance those source cursors. Before checking range coverage, the redo guard
 already requires the complete configured source-key set and each source's
 normalized kind, seed basis, and start block to match the persisted cursor
-identities. After Issue #411 enforcement lands, that same check will apply to
+identities. That same check applies to
 the configured intake-capable source set. A runtime
 start above the redo range does not bypass that identity check. The guard also
 requires exactly one readable

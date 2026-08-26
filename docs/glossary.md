@@ -107,15 +107,14 @@ lose the named-resource resolver hint and diverge from a fresh walk
 in as an ignored collision probe). See [interpretation
 replay](storage.md#interpretation-replay).
 
-Issue #411 note: the role-dependent verification statements below are the
-ratified contract whose enforcement lands in part 2; they do not describe the
-current binary, whose five-field descriptors have no role field.
+Issue #411 enforces the role-dependent contract below; five-field descriptors remain compatible and default to `both`.
 
 <a id="source-role"></a>
 **Source role** — whether a configured provider may serve `intake`, is
 `verification-only`, or may serve `both`. Intake-capable sources receive
 cursors and feed Ingest and Live; only verification-only sources can earn an
-independent [verification level](#verification-level).
+independent [verification level](#verification-level). Role tokens are exact;
+`verification_only` is not an alias for `verification-only`.
 
 **Stored-history verification** — the read-only phase that validates a chain's
 stored extent through a finalized block and, when the chain has an independent

@@ -42,6 +42,7 @@ mod state_settlement;
 mod supervisor;
 mod transitions;
 mod verify_compare;
+mod verify_level;
 pub mod verify_phase;
 mod verify_store;
 

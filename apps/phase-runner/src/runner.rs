@@ -48,16 +48,6 @@ pub enum RedoPhase {
     All,
 }
 
-impl RedoPhase {
-    pub const fn requires_ingest(self) -> bool {
-        matches!(self, Self::Phase(PhaseName::Ingest) | Self::All)
-    }
-
-    pub const fn requires_verify(self) -> bool {
-        matches!(self, Self::Phase(PhaseName::Verify) | Self::All)
-    }
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SupervisorReport {
     pub stopped_chains: Vec<(String, RunnerError)>,
@@ -74,6 +64,7 @@ pub struct PhaseRunner {
     watch_set_coverage_attestations: BTreeMap<String, String>,
     manifest_authority_audit_before_emit: Option<Arc<dyn Fn() + Send + Sync>>,
     before_redo_progress_write: Option<batch::BeforeRedoProgressWrite>,
+    before_phase_context: Option<context::BeforePhaseContext>,
     after_required_redo_catch_up: Option<live_follow::AfterRequiredRedoCatchUp>,
     loop_heartbeat: Option<RunnerLoopHeartbeat>,
 }
@@ -105,6 +96,7 @@ impl PhaseRunner {
             watch_set_coverage_attestations: BTreeMap::new(),
             manifest_authority_audit_before_emit: None,
             before_redo_progress_write: None,
+            before_phase_context: None,
             after_required_redo_catch_up: None,
             loop_heartbeat: None,
         })
@@ -306,7 +298,7 @@ impl PhaseRunner {
                     &chain.chain_id,
                     phase_name,
                     &mode,
-                    chain.sources.as_ref(),
+                    chain.intake_sources().as_ref(),
                     supplied_manifest_authority_generation.as_deref(),
                     &self.instance_id,
                 )
@@ -470,6 +462,7 @@ impl PhaseRunner {
             let context = self
                 .phase_context(chain, phase_name, mode.clone(), redo_attempt)
                 .await?;
+            let retained_verification_level = context.resume.verification_level;
             let outcome = phase_lock
                 .run_while_alive(self.timing.live_poll_interval, phase.run_batch(context))
                 .await;
@@ -490,7 +483,7 @@ impl PhaseRunner {
             }
             if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
                 ingest_progress::validate(
-                    &chain.sources,
+                    &chain.intake_sources(),
                     &progress,
                     matches!(&outcome, PhaseBatchOutcome::Complete(_)),
                 )?;
@@ -516,12 +509,19 @@ impl PhaseRunner {
             if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
                 phase_lock.check_alive().await?;
                 self.store
-                    .record_ingest_progress(&chain.chain_id, &chain.sources, &progress)
+                    .record_ingest_progress(&chain.chain_id, &chain.intake_sources(), &progress)
                     .await?;
             } else {
                 self.store
                     .record_progress(&chain.chain_id, phase_name, &mode, redo_attempt, &progress)
                     .await?;
+            }
+            if phase_name == PhaseName::Verify && matches!(mode, RunMode::Normal) {
+                crate::verify_level::warn_optional_downgrade(
+                    &chain.chain_id,
+                    retained_verification_level,
+                    progress.verification_level,
+                );
             }
             phase_lock.check_alive().await?;
             heartbeat

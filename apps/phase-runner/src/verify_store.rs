@@ -188,33 +188,6 @@ impl VerificationStore {
         })
     }
 
-    pub(crate) async fn ingest_start_for(
-        &self,
-        chain_id: &str,
-        source_key: &str,
-    ) -> RunnerResult<i64> {
-        let start: Option<i64> = sqlx::query_scalar(
-            "SELECT start_block_number
-             FROM ingest_cursors
-             WHERE chain_id = $1 AND source_key = $2",
-        )
-        .bind(chain_id)
-        .bind(source_key)
-        .fetch_optional(self.database.pool())
-        .await
-        .map_err(|error| {
-            RunnerError::database(
-                format!("failed to load durable ingest cursor {source_key} for chain {chain_id}"),
-                error,
-            )
-        })?;
-        start.ok_or_else(|| {
-            RunnerError::data_integrity(format!(
-                "chain {chain_id} has no durable ingest cursor for configured source {source_key}"
-            ))
-        })
-    }
-
     pub(crate) async fn require_provider_trusted_extent(
         &self,
         chain_id: &str,
@@ -377,15 +350,19 @@ impl VerificationStore {
         if range.from <= extent_from && range.to >= extent_to {
             return Ok(full_redo_level);
         }
-        match level.as_str() {
-            "quick_synced" => Ok(VerificationLevel::QuickSynced),
-            "cross_checked" => Ok(VerificationLevel::CrossChecked),
-            "node_checked" => Ok(VerificationLevel::NodeChecked),
+        let retained = match level.as_str() {
+            "quick_synced" => VerificationLevel::QuickSynced,
+            "cross_checked" => VerificationLevel::CrossChecked,
+            "node_checked" => VerificationLevel::NodeChecked,
             value => Err(RunnerError::data_integrity(format!(
                 "verify redo for chain {chain_id} found unknown retained verification level \
                  {value:?}"
-            ))),
-        }
+            )))?,
+        };
+        Ok(crate::verify_level::weakest_level(
+            retained,
+            full_redo_level,
+        ))
     }
 }
 

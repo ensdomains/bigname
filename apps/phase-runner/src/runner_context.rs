@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
     config::ChainConfig,
@@ -12,8 +12,27 @@ use crate::{
 
 use super::PhaseRunner;
 
+pub(super) type BeforePhaseContext =
+    Arc<dyn Fn(PhaseName) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 impl PhaseRunner {
-    pub(super) fn verify_before_live(chain: &ChainConfig) -> RunnerResult<bool> {
+    #[doc(hidden)]
+    pub fn with_before_phase_context<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn(PhaseName) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.before_phase_context = Some(Arc::new(move |phase| Box::pin(hook(phase))));
+        self
+    }
+
+    pub(super) async fn before_phase_context(&self, phase: PhaseName) {
+        if let Some(hook) = self.before_phase_context.as_deref() {
+            hook(phase).await;
+        }
+    }
+
+    pub(crate) fn verify_before_live(chain: &ChainConfig) -> RunnerResult<bool> {
         Ok(chain.verify_before_live
             || crate::verify_phase::provider_trusted_verify_required(
                 &chain.chain_id,
@@ -27,11 +46,11 @@ impl PhaseRunner {
         chain: &ChainConfig,
         mode: &RunMode,
     ) -> RunnerResult<()> {
-        if phase == PhaseName::Verify
-            && crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id)
-        {
+        let intake_sources = chain.intake_sources();
+        let production_verify = crate::verify_phase::production_verify_chain(&chain.chain_id);
+        if phase == PhaseName::Verify && production_verify {
             self.store
-                .validate_completed_ingest_sources(&chain.chain_id, &chain.sources)
+                .validate_completed_ingest_sources(&chain.chain_id, &intake_sources)
                 .await?;
         }
         if phase == PhaseName::Ingest {
@@ -49,18 +68,18 @@ impl PhaseRunner {
                         .await?);
             if validates_retained_completion {
                 self.store
-                    .validate_completed_ingest_sources(&chain.chain_id, &chain.sources)
+                    .validate_completed_ingest_sources(&chain.chain_id, &intake_sources)
                     .await?;
-                if crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id) {
+                if production_verify {
                     crate::verify_phase::provider_trusted_verify_required(
                         &chain.chain_id,
                         &chain.sources,
                     )?;
                 }
             } else {
-                if crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id) {
+                if production_verify {
                     self.store
-                        .validate_existing_ingest_sources(&chain.chain_id, &chain.sources)
+                        .validate_existing_ingest_sources(&chain.chain_id, &intake_sources)
                         .await?;
                     crate::verify_phase::provider_trusted_verify_required(
                         &chain.chain_id,
@@ -68,7 +87,7 @@ impl PhaseRunner {
                     )?;
                 }
                 self.store
-                    .ensure_ingest_sources(&chain.chain_id, &chain.sources)
+                    .ensure_ingest_sources(&chain.chain_id, &intake_sources)
                     .await?;
             }
         }
@@ -206,11 +225,18 @@ impl PhaseRunner {
                 .store
                 .phase_resume(&chain.chain_id, phase, &RunMode::Normal)
                 .await?;
-            crate::verify_phase::validate_reported_level(
-                &chain.chain_id,
-                &chain.sources,
-                resume.verification_level,
-            )?;
+            let provider_trusted_downgrade = resume.verification_level.is_some()
+                && crate::verify_phase::provider_trusted_verify_required(
+                    &chain.chain_id,
+                    &chain.sources,
+                )?;
+            if !provider_trusted_downgrade {
+                crate::verify_phase::validate_reported_level(
+                    &chain.chain_id,
+                    &chain.sources,
+                    resume.verification_level,
+                )?;
+            }
         }
         Ok(())
     }
@@ -225,6 +251,7 @@ impl PhaseRunner {
         let context = self
             .phase_context(chain, phase_name, RunMode::Normal, None)
             .await?;
+        let retained_verification_level = context.resume.verification_level;
         let progress = phase_lock
             .run_while_alive(
                 self.timing.live_poll_interval,
@@ -257,7 +284,15 @@ impl PhaseRunner {
                 None,
                 &progress,
             )
-            .await
+            .await?;
+        if phase_name == PhaseName::Verify {
+            crate::verify_level::warn_optional_downgrade(
+                &chain.chain_id,
+                retained_verification_level,
+                progress.verification_level,
+            );
+        }
+        Ok(())
     }
 
     pub(super) async fn phase_context(
@@ -267,6 +302,7 @@ impl PhaseRunner {
         mode: RunMode,
         redo_attempt: Option<RedoAttemptFence>,
     ) -> RunnerResult<PhaseContext> {
+        self.before_phase_context(phase).await;
         let available_heads = match mode.range() {
             Some(_) if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) => {
                 interpret_redo_heads(self.store.pool(), &chain.chain_id).await?
@@ -314,7 +350,11 @@ impl PhaseRunner {
             phase,
             mode,
             redo_attempt,
-            sources: Arc::clone(&chain.sources),
+            sources: if phase == PhaseName::Verify {
+                Arc::clone(&chain.sources)
+            } else {
+                chain.intake_sources()
+            },
             available_heads,
             live_handoff,
             resume,

@@ -723,9 +723,13 @@ This is why recovery re-derives evidence instead of editing the open interval.
      docker compose --env-file .env.server \
      <compose-files> run --rm --pull never phase-runner \
      phase-runner redo --chain ethereum-mainnet --phase project \
+     --source 'ethereum-mainnet:<key>:<kind>:<seed-basis>:<start>[:<role>]=<endpoint-env>' \
      --from-block <persisted-project-redo-from> \
      --to-block <persisted-project-redo-to>
    ```
+
+   Repeat `--source` with the complete intake-capable descriptor set recorded
+   by the chain's Ingest cursors.
 
    Project redo syntax is documented at
    [`docs/storage.md:431-439`](../storage.md#rainbow-table-preimage-import). Interpret completion

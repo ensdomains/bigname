@@ -1,5 +1,118 @@
 use super::*;
+use crate::config::{SeedBasis, SourceRole};
 
+const REDO_SOURCE_ENV: &str = "BIGNAME_TEST_REDO_SOURCE_ENDPOINT";
+const REDO_SOURCE: &str =
+    "ethereum-mainnet:reth:reth_db:ethereum_head:0=BIGNAME_TEST_REDO_SOURCE_ENDPOINT";
+
+fn configure_redo_source_endpoint() {
+    // SAFETY: every caller writes the same value to this test-only environment key.
+    unsafe { std::env::set_var(REDO_SOURCE_ENV, "/tmp/bigname-test-reth") };
+}
+
+#[test]
+fn source_descriptor_roles_are_backward_compatible_and_validated() {
+    const ENDPOINT_ENV: &str = "BIGNAME_TEST_SOURCE_ROLE_ENDPOINT";
+    // SAFETY: this test owns a unique environment key and never mutates it after parsing starts.
+    unsafe { std::env::set_var(ENDPOINT_ENV, "https://source-role.invalid") };
+    for (suffix, expected) in [
+        ("", SourceRole::Both),
+        (":intake", SourceRole::Intake),
+        (":verification-only", SourceRole::VerificationOnly),
+        (":both", SourceRole::Both),
+    ] {
+        let source = parse_source(&format!(
+            "ethereum-sepolia:source:drpc:ethereum_head:0{suffix}={ENDPOINT_ENV}"
+        ))
+        .expect("supported source role must parse");
+        assert_eq!(source.role, expected);
+    }
+    for role in ["", "reader", "verification_only"] {
+        let error = parse_source(&format!(
+            "ethereum-sepolia:source:drpc:ethereum_head:0:{role}={ENDPOINT_ENV}"
+        ))
+        .expect_err("empty and unknown source roles must fail");
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(error.to_string().contains("ethereum-sepolia:source"));
+        assert!(!error.to_string().contains("https://"), "{error}");
+    }
+    const EMPTY_ENDPOINT_ENV: &str = "BIGNAME_TEST_SOURCE_ROLE_EMPTY_ENDPOINT";
+    // SAFETY: this test owns a unique environment key and never mutates it after parsing starts.
+    unsafe { std::env::set_var(EMPTY_ENDPOINT_ENV, "") };
+    let error = parse_source(&format!(
+        "ethereum-sepolia:empty-source:drpc:ethereum_head:0={EMPTY_ENDPOINT_ENV}"
+    ))
+    .expect_err("an empty resolved endpoint must fail");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("ethereum-sepolia:empty-source"));
+}
+#[test]
+fn runnable_and_redo_source_role_validation_matrix() {
+    let source = |key, role| {
+        SourceConfig::new_with_role(
+            "ethereum-sepolia",
+            key,
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            role,
+            format!("https://{key}.invalid"),
+        )
+        .unwrap()
+    };
+    let verify_only = source("verify", SourceRole::VerificationOnly);
+    let verify_only_chain =
+        ChainConfig::new("ethereum-sepolia", vec![verify_only.clone()], false).unwrap();
+    let error = RuntimeConfig::new(
+        "role-matrix",
+        vec![verify_only_chain],
+        CapacityConfig::default(),
+        TimingConfig::default(),
+    )
+    .expect_err("a runnable chain with only verification sources must fail");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    for (phase, needs_intake) in [
+        (RedoPhase::Phase(PhaseName::Ingest), true),
+        (RedoPhase::Phase(PhaseName::Verify), true),
+        (RedoPhase::All, true),
+        (RedoPhase::Phase(PhaseName::Interpret), true),
+        (RedoPhase::Phase(PhaseName::Project), true),
+        (RedoPhase::RecomputeFlags, false),
+    ] {
+        assert_eq!(phase.requires_intake_sources(), needs_intake);
+        let sources = if needs_intake {
+            vec![verify_only.clone()]
+        } else {
+            Vec::new()
+        };
+        let result = resolve_explicit_redo_chains(
+            vec!["ethereum-sepolia".to_owned()],
+            sources,
+            needs_intake,
+        );
+        if phase == RedoPhase::Phase(PhaseName::Verify) {
+            assert!(result.as_ref().unwrap_err().to_string().contains("verify"));
+        }
+        assert_eq!(result.is_err(), needs_intake);
+    }
+
+    let intake = source("intake", SourceRole::Intake);
+    RuntimeConfig::new(
+        "role-matrix",
+        vec![
+            ChainConfig::new("ethereum-sepolia", vec![intake.clone(), verify_only], false).unwrap(),
+        ],
+        CapacityConfig::default(),
+        TimingConfig::default(),
+    )
+    .expect("a runnable mixed-role chain has intake");
+    ChainConfig::new(
+        "ethereum-sepolia",
+        vec![intake, source("intake", SourceRole::VerificationOnly)],
+        false,
+    )
+    .expect_err("duplicate source keys remain invalid across roles");
+}
 #[test]
 fn run_cli_accepts_a_metrics_listener_address() {
     let cli = Cli::try_parse_from([
@@ -50,6 +163,7 @@ fn run_cli_rejects_a_nonpositive_heartbeat_threshold() {
 
 #[test]
 fn redo_cli_carries_canonical_head_hydration_rpc() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -57,6 +171,8 @@ fn redo_cli_carries_canonical_head_hydration_rpc() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
         "--phase",
         "project",
         "--from-block",
@@ -83,6 +199,7 @@ fn redo_cli_carries_canonical_head_hydration_rpc() {
 
 #[test]
 fn redo_cli_carries_watch_set_coverage_attestation() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -90,6 +207,8 @@ fn redo_cli_carries_watch_set_coverage_attestation() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
         "--phase",
         "interpret",
         "--from-block",
@@ -121,6 +240,7 @@ fn redo_cli_carries_watch_set_coverage_attestation() {
 
 #[test]
 fn single_chain_redo_accepts_a_matching_chain_token_attestation() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -128,6 +248,8 @@ fn single_chain_redo_accepts_a_matching_chain_token_attestation() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
         "--phase",
         "interpret",
         "--from-block",
@@ -159,6 +281,7 @@ fn single_chain_redo_accepts_a_matching_chain_token_attestation() {
 
 #[test]
 fn single_chain_redo_rejects_a_mismatched_chain_token_attestation() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -166,6 +289,8 @@ fn single_chain_redo_rejects_a_mismatched_chain_token_attestation() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
         "--phase",
         "interpret",
         "--from-block",
@@ -187,6 +312,7 @@ fn single_chain_redo_rejects_a_mismatched_chain_token_attestation() {
 
 #[test]
 fn multi_chain_redo_requires_and_carries_per_chain_attestations() {
+    configure_redo_source_endpoint();
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -194,6 +320,10 @@ fn multi_chain_redo_requires_and_carries_per_chain_attestations() {
         "postgres://phase-runner.invalid/fresh",
         "--chain",
         "ethereum-mainnet,base-mainnet",
+        "--source",
+        REDO_SOURCE,
+        "--source",
+        "base-mainnet:coinbase:coinbase:ethereum_head:0=BIGNAME_TEST_REDO_SOURCE_ENDPOINT",
         "--phase",
         "interpret",
         "--from-block",
@@ -262,6 +392,8 @@ fn verify_redo_requires_a_separate_verification_database_url() {
         "ethereum-mainnet",
         "--phase",
         "verify",
+        "--source",
+        "ethereum-mainnet:reth:reth_db:ethereum_head:0=PATH",
         "--from-block",
         "42",
         "--to-block",
@@ -277,7 +409,7 @@ fn verify_redo_requires_a_separate_verification_database_url() {
 }
 
 #[test]
-fn all_phase_redo_requires_ingest_sources_before_dispatch() {
+fn verify_redo_names_its_intake_source_requirement() {
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -288,19 +420,19 @@ fn all_phase_redo_requires_ingest_sources_before_dispatch() {
         "--chain",
         "ethereum-mainnet",
         "--phase",
-        "all",
+        "verify",
         "--from-block",
         "42",
         "--to-block",
         "43",
     ])
-    .expect("all-phase redo must parse before source validation");
+    .expect("verify redo must parse before source validation");
     let error = match command.resolve() {
-        Ok(_) => panic!("all-phase redo must require ingest source configuration"),
+        Ok(_) => panic!("verify redo must require intake source configuration"),
         Err(error) => error,
     };
     assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert!(error.to_string().contains("all-phase redo requires"));
+    assert!(error.to_string().contains("verify"));
 }
 
 #[test]

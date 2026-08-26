@@ -131,8 +131,12 @@ async fn main() -> Result<()> {
             let chains = match chains {
                 RedoChains::Explicit(chains) => chains,
                 RedoChains::All { sources } => {
-                    resolve_all_redo_chains(database.pool(), sources, phase.requires_ingest())
-                        .await?
+                    resolve_all_redo_chains(
+                        database.pool(),
+                        sources,
+                        phase.requires_intake_sources(),
+                    )
+                    .await?
                 }
             };
             validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
