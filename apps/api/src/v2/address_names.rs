@@ -281,14 +281,26 @@ pub(crate) async fn get_address_names(
 }
 
 fn normalize_address_names_prefix(prefix: &str) -> V2Result<String> {
-    bigname_domain::normalization::normalize_name(prefix)
+    let (normalization_input, append_label_boundary) = prefix
+        .strip_suffix('.')
+        .filter(|prefix_without_dot| {
+            !prefix_without_dot.is_empty() && !prefix_without_dot.ends_with('.')
+        })
+        .map_or((prefix, false), |prefix_without_dot| {
+            (prefix_without_dot, true)
+        });
+    let mut normalized_prefix = bigname_domain::normalization::normalize_name(normalization_input)
         .map(|normalized| normalized.normalized_name)
         .map_err(|error| {
             V2Error::invalid_input(format!(
                 "q must be a valid ENSIP-15 name prefix: {}",
                 error.message()
             ))
-        })
+        })?;
+    if append_label_boundary {
+        normalized_prefix.push('.');
+    }
+    Ok(normalized_prefix)
 }
 
 async fn load_primary_names_by_namespace<'a>(

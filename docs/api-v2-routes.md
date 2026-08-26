@@ -715,10 +715,12 @@ Field ownership:
   same normalizer used for indexed names before comparing it directly with the
   stored normalized name. An empty `q` is treated as absent. A partial final
   label is accepted when it is valid as a standalone ENSIP-15 label, so `q=AL`
-  normalizes to `al`; an empty label within a nonempty `q`, including a trailing
-  dot such as `q=alice.`, or any other input rejected by bigname's name
-  validation atop ENSIP-15 returns `400 invalid_input`. This route does not
-  accept `match`.
+  normalizes to `al`. When `q` has exactly one trailing dot, the preceding
+  nonempty name is normalized and the dot is then restored, so
+  `q=ALICE.` matches `alice.eth` but not `alicex.eth`. An empty name before the
+  boundary marker, multiple trailing dots, an empty interior label, or any
+  other input rejected by bigname's name validation atop ENSIP-15 returns
+  `400 invalid_input`. This route does not accept `match`.
   `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `registrant`; `any` normalizes to all three values.
   Rows match when any listed relation matches. The storage relations map as
