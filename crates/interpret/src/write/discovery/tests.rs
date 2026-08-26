@@ -295,6 +295,135 @@ async fn replay_before_manifest_retirement_does_not_backdate_later_epoch() -> Te
 }
 
 #[tokio::test]
+async fn later_observation_backdates_active_epoch_without_mutating_retired_history() -> TestResult {
+    let database = TestDatabase::create(TestDatabaseConfig::new(
+        "interpret_discovery_backdates_later_epoch",
+    ))
+    .await?;
+    for sql in [
+        include_str!("../../../../../schema-v2/baseline/01_chain.sql"),
+        include_str!("../../../../../schema-v2/baseline/03_identity.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(database.pool()).await?;
+    }
+
+    let cases = [
+        (
+            Uuid::from_u128(553),
+            "0x0000000000000000000000000000000000000553",
+            15,
+            "manifest_declaration",
+        ),
+        (
+            Uuid::from_u128(554),
+            "0x0000000000000000000000000000000000000554",
+            10,
+            "manifest_declaration",
+        ),
+        (
+            Uuid::from_u128(555),
+            "0x0000000000000000000000000000000000000555",
+            5,
+            "raw_log",
+        ),
+    ];
+    for (instance_id, address, _, retired_source) in cases {
+        sqlx::query(
+            "INSERT INTO contract_instances (
+                 contract_instance_id, chain_id, contract_kind
+             ) VALUES ($1, 'backdate-test', 'contract')",
+        )
+        .bind(instance_id)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address,
+                 active_from_block_number, active_from_block_hash,
+                 active_to_block_number, active_to_block_hash,
+                 provenance, admitted_at, deactivated_at
+             ) VALUES
+                 ($1, 'backdate-test', $2, 2, 'retired-start', 9, 'retired-end',
+                  $3,
+                  now() - interval '2 hours', now() - interval '1 hour'),
+                 ($1, 'backdate-test', $2, 20, 'active-start', NULL, NULL,
+                  '{\"source\":\"raw_log\",\"block_number\":20}'::jsonb,
+                  now(), NULL)",
+        )
+        .bind(instance_id)
+        .bind(address)
+        .bind(json!({"source": retired_source}))
+        .execute(database.pool())
+        .await?;
+    }
+    let retired_before: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(address_row) FROM contract_instance_addresses address_row
+         WHERE chain_id = 'backdate-test' AND deactivated_at IS NOT NULL
+         ORDER BY contract_instance_address_id",
+    )
+    .fetch_all(database.pool())
+    .await?;
+
+    let output = BatchOutput {
+        contract_addresses: cases
+            .into_iter()
+            .map(|(instance_id, address, observation, _)| ContractAddress {
+                contract_instance_id: instance_id,
+                chain_id: "backdate-test".to_owned(),
+                address: address.to_owned(),
+                active_from_block_number: observation,
+                active_from_block_hash: format!("observed-block-{observation}"),
+                source_manifest_id: 553,
+                provenance: json!({"source": "raw_log", "block_number": observation}),
+            })
+            .collect(),
+        ..BatchOutput::default()
+    };
+    let mut transaction = database.pool().begin().await?;
+    write(&mut transaction, &output, false).await?;
+    transaction.commit().await?;
+
+    let active: Vec<(String, Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT lower(address), active_from_block_number, active_from_block_hash,
+                (provenance ->> 'block_number')::bigint
+         FROM contract_instance_addresses
+         WHERE chain_id = 'backdate-test' AND deactivated_at IS NULL
+         ORDER BY address",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        active,
+        [
+            (
+                cases[0].1.to_owned(),
+                Some(15),
+                Some("observed-block-15".to_owned()),
+                Some(15),
+            ),
+            (
+                cases[1].1.to_owned(),
+                Some(10),
+                Some("observed-block-10".to_owned()),
+                Some(10),
+            ),
+            (cases[2].1.to_owned(), Some(10), None, Some(5)),
+        ]
+    );
+    let retired_after: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(address_row) FROM contract_instance_addresses address_row
+         WHERE chain_id = 'backdate-test' AND deactivated_at IS NOT NULL
+         ORDER BY contract_instance_address_id",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(retired_after, retired_before);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn values_boundary_and_idempotent_replay_persist_every_contract_instance() -> TestResult {
     let database = TestDatabase::create(TestDatabaseConfig::new(
         "interpret_contract_instances_values_boundary",

@@ -847,11 +847,14 @@ event-derived discovery edge records the raw-log observation separately.
 Interpret redo preserves a finitely retired manifest-declared address row as
 coordination state. Replaying an observation at or before that row's close block
 may reproduce its discovery edge, but does not reopen the address range. A
-genuinely later discovery observation appends the normal bounded address range,
-so re-admission remains possible. Deprecating a manifest version or removing a
-declaration in place therefore cannot be undone by replay of the history that
-preceded retirement. An address admitted only through discovery keeps its event
-provenance and remains outside this retirement rule. Synchronization also
+genuinely later discovery observation either appends a bounded address range or
+backdates an existing later active range to the greater of the observation
+block and the greatest preceding address range's close plus one; it does not
+change any retired range. Re-admission therefore remains possible. Deprecating
+a manifest version or removing a declaration in place cannot be undone by
+replay of the history that preceded retirement. An address admitted only
+through discovery keeps its event provenance and remains outside this
+retirement rule. Synchronization also
 updates manifest-declared proxy edges. It does not run a full-source
 reconciliation over event-driven edges. An authority change invalidates the
 interpret and project phase content hashes. Complete the [mandatory historical

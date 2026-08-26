@@ -196,7 +196,9 @@ backfill, or manifest state.
 watched contract. Addresses are time-ranged attributes of an instance, a proxy
 keeps its instance across implementation changes, and re-admitting an old
 address through a manifest declaration or an observation after its prior
-retirement boundary reuses its instance with a new active range.
+retirement boundary reuses its instance. An observation creates a bounded
+active range when none exists, or backdates an existing later active range no
+earlier than the greatest preceding address range's close plus one.
 
 **Coverage frontier** (stored-lineage coverage frontier) — a schema-migration-era,
 revision-checked old-runtime proof of which watched block intervals had
@@ -299,9 +301,11 @@ declared start precedes the bounded new active range: the older shared address
 floor can still cause rejection. Full Interpret redo preserves the last
 finitely retired manifest-declared range as coordination state. Later manifest
 re-admission therefore retains its persisted floor, while a later event
-observation may append a bounded active range. A rule with no matching declaration contributes block zero, and an ENSv2 registry
-manifest with an active `registry_announcement` rule contributes a distinct
-block-zero, role-free emitter path even when an emitterless candidate or direct
+observation may append a bounded active range or backdate an existing later
+active range without changing retired history. A rule with no matching
+declaration contributes block zero, and an ENSv2 registry manifest with an
+active `registry_announcement` rule contributes a distinct block-zero,
+role-free emitter path even when an emitterless candidate or direct
 declarations already exist. Adding that path is widening because an
 announcement-admitted registry can emit `ResolverUpdated` and match the
 resolver rule.

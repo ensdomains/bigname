@@ -195,8 +195,10 @@ Before re-deriving a range, Interpret preserves a finitely retired
 manifest-declared contract-address row as coordination state. An event-derived
 observation at or before that row's close block may reproduce its discovery
 edge but cannot reopen its address range. An observation after the close block
-may append a new range bounded after the retired epoch. This preservation does
-not change raw facts, normalized-event identity, or projection ownership.
+may append a range or backdate an existing later active range to the greater of
+the observation block and the greatest preceding address range's close plus
+one. Retired ranges remain unchanged. This preservation does not change raw
+facts, normalized-event identity, or projection ownership.
 
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing

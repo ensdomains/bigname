@@ -762,8 +762,13 @@ batch boundaries fall. A finitely retired manifest-declared address range is
 the narrow history-bearing exception: manifest synchronization supplies its
 retirement boundary, Interpret redo preserves it, and a fresh database that
 starts after the declaration was removed need not contain that historical
-range. The exception cannot admit an address, alter normalized-event output,
-or change a projection. The batching guarantee is verified for the divergence classes
+range and produces the same output only when it also lacks the corresponding
+raw history. For in-place declaration removal while the discovery authority
+remains active, preserving the closed range is what keeps redo normalized-event
+output identical to the original interpretation pass. Deprecating the source
+manifest instead makes that admission inactive, so equality with the original
+pass is not claimed. The closed range cannot admit a new address or change a
+projection. The batching guarantee is verified for the divergence classes
 [#336](https://github.com/ensdomains/bigname/issues/336) identified on the
 ENSv1 path and [#348](https://github.com/ensdomains/bigname/issues/348)
 identified on the ENSv2 resolver path; the permutation lane's pinned
