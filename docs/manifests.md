@@ -286,12 +286,16 @@ it a migration.
 `exact_name_profile` [capability promotion](glossary.md) is deployment-profile-scoped: only `exact_name_profile = "supported"` on the active `ens_v2_registrar_l1` version in the `sepolia` root promotes `.eth` exact-name declared reads to supported, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The admitted ENSv1 registrar remains `shadow` because registrar-controller label coverage is absent, so the product namespace route aggregates the two declarations as `name_profile.completeness = "partial"`; this does not demote the ENSv2 family-level support. The capability promotion does not apply to mainnet, another deployment profile, or any runtime that has not selected `manifests/sepolia`. Active rollout, raw preimage observations, resolver admission, or backfill completion promote no other capability.
 
 Upstream events map to normalized adapter output: `TokenResource` →
-`TokenResourceLinked`; `TokenRegenerated` → `TokenRegenerated` and, only when
-an admitted noncanonical registry regenerates onto a token key occupied by
-another registration, the existing terminal and registry-path reconciliation
-kinds `SurfaceUnbound`, `RegistrationReleased`, `PreimageObserved`,
-`SurfaceBound`, `RegistrationGranted`, `AuthorityTransferred`, `ExpiryChanged`,
-`ResolverChanged`, and `SubregistryChanged`; each positive-value item in
+`TokenResourceLinked`; `TokenRegenerated` → `TokenRegenerated`, plus the
+existing terminal and registry-path reconciliation kinds `SurfaceUnbound`,
+`RegistrationReleased`, `PreimageObserved`, `SurfaceBound`,
+`RegistrationGranted`, `AuthorityTransferred`, `ExpiryChanged`,
+`ResolverChanged`, and `SubregistryChanged` — the displaced-registration
+closures only when an admitted noncanonical registry regenerates onto a token
+key occupied by another registration, and the name-refresh reconciliation
+kinds (reassertion `PreimageObserved`, expiry-crossing retirements) on any
+regeneration, because the passive-expiry refresh runs at every
+`TokenRegenerated`; each positive-value item in
 `TransferSingle` or `TransferBatch` with nonzero `from` and `to` →
 `TokenControlTransferred`; `SubregistryUpdated` → `SubregistryChanged`;
 `ParentUpdated` → `ParentChanged`; `AliasChanged` → `AliasChanged`;
