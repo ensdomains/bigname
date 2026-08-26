@@ -219,6 +219,43 @@ async fn v2_lookup_bare_reverse_discloses_a_redo_suppressed_request_chain() -> R
 }
 
 #[tokio::test]
+async fn v2_lookup_bare_reverse_returns_conflict_when_every_public_namespace_is_suppressed()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_public_authority(&database).await?;
+    for chain_id in ["ethereum-mainnet", "base-mainnet"] {
+        database
+            .simulate_interpret_redo_begin(chain_id, "recompute_flags")
+            .await?;
+    }
+
+    let response = app_router(AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    ))
+    .oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v2/lookup")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                    .expect("body must serialize"),
+            ))
+            .expect("lookup request must build"),
+    )
+    .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload:#}");
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_mixed_batch_keeps_reverse_suppression_disclosed() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -263,7 +300,21 @@ async fn v2_lookup_mixed_batch_keeps_reverse_suppression_disclosed() -> Result<(
             "unsupported_reason": "temporarily_unavailable"
         })
     );
-    assert!(payload["meta"]["as_of_token"].is_string());
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("mixed lookup must include an as_of_token");
+    let bigname_storage::SnapshotAt::ResolvedPositions(positions) =
+        crate::v2::decode_at_token(token).expect("mixed lookup token must decode")
+    else {
+        panic!("mixed lookup token must contain resolved positions");
+    };
+    assert!(
+        positions
+            .as_map()
+            .values()
+            .any(|position| position.chain_id == "base-mainnet"),
+        "the token must retain the suppressed chain position used by the forward input"
+    );
 
     database.cleanup().await
 }

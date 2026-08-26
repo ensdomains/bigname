@@ -123,13 +123,15 @@ pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<P
                 let read_token = load_request_scope_snapshot(&state.pool, &scope).await?;
                 request_scope.push(RequestScopeSnapshot {
                     scope: scope.clone(),
-                    selected: read_token.map(|token| token.selected),
+                    selected: read_token.as_ref().map(|token| token.selected.clone()),
                 });
-                deployments.push(PublicNamespaceDeployment {
-                    namespace: namespace.clone(),
-                    scope,
-                    read_token: None,
-                });
+                if let Some(read_token) = read_token {
+                    deployments.push(PublicNamespaceDeployment {
+                        namespace: namespace.clone(),
+                        scope,
+                        read_token: Some(read_token),
+                    });
+                }
             }
         }
         return Ok(PublicNamespaceSet::new(

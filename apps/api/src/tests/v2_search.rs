@@ -558,6 +558,65 @@ async fn v2_search_bare_request_narrows_when_a_publication_is_not_ready() -> Res
 }
 
 #[tokio::test]
+async fn v2_search_bare_request_returns_conflict_when_every_public_namespace_is_suppressed()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_v2_search_public_authority(&database).await?;
+    for chain_id in ["ethereum-mainnet", "base-mainnet"] {
+        database
+            .simulate_interpret_redo_begin(chain_id, "recompute_flags")
+            .await?;
+    }
+
+    let response = app_router(AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    ))
+    .oneshot(
+        Request::builder()
+            .uri("/v2/search?q=alpha")
+            .body(Body::empty())
+            .expect("bare search request must build"),
+    )
+    .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload:#}");
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_test_override_withholds_redo_suppressed_namespace_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    database
+        .simulate_interpret_redo_begin("base-mainnet", "recompute_flags")
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/search?q=alpha")
+                .body(Body::empty())
+                .expect("bare search request must build"),
+        )
+        .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert_eq!(
+        v2_search_names(payload["data"].as_array().expect("search data")),
+        vec!["alpha.eth"]
+    );
+    assert_search_meta_chains(&payload, &["1"], &["8453"]);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_bare_request_recovers_when_publication_becomes_ready() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
@@ -1367,6 +1426,12 @@ fn assert_search_meta_chains(payload: &Value, as_of: &[&str], suppressed: &[&str
     let mut expected_suppressed = suppressed.to_vec();
     expected_suppressed.sort_unstable();
     assert_eq!(actual_suppressed, expected_suppressed);
+    if suppressed.is_empty() {
+        assert!(
+            payload["meta"].get("as_of_completeness").is_none(),
+            "clean search metadata must omit as_of_completeness"
+        );
+    }
     for chain_id in suppressed {
         assert_eq!(
             payload["meta"]["as_of_completeness"][chain_id],

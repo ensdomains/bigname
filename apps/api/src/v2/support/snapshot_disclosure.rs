@@ -12,7 +12,6 @@ pub(crate) struct ExplicitNamespaceRequestScope {
 
 pub(crate) fn request_scope_meta(scopes: &[RequestScopeSnapshot]) -> V2Result<Meta> {
     let mut meta = Meta::default();
-    apply_request_scope_completeness(&mut meta, scopes)?;
     let as_of = scopes
         .iter()
         .filter_map(RequestScopeSnapshot::selected)
@@ -24,14 +23,7 @@ pub(crate) fn request_scope_meta(scopes: &[RequestScopeSnapshot]) -> V2Result<Me
     if !as_of.is_empty() {
         meta.as_of = Some(as_of);
     }
-    if let (Some(as_of), Some(completeness)) =
-        (meta.as_of.as_ref(), meta.as_of_completeness.as_mut())
-    {
-        completeness.retain(|chain_id, _| !as_of.contains_key(chain_id));
-        if completeness.is_empty() {
-            meta.as_of_completeness = None;
-        }
-    }
+    apply_request_scope_completeness(&mut meta, scopes)?;
     Ok(meta)
 }
 
@@ -39,7 +31,7 @@ pub(crate) fn apply_request_scope_completeness(
     meta: &mut Meta,
     scopes: &[RequestScopeSnapshot],
 ) -> V2Result<()> {
-    let mut suppressed = BTreeMap::new();
+    let mut suppressed = meta.as_of_completeness.take().unwrap_or_default();
     for scope in scopes.iter().filter(|scope| scope.selected().is_none()) {
         for position in scope.scope().required_positions() {
             let chain_id = crate::v2::slug_to_numeric(&position.chain_id).ok_or_else(|| {
@@ -137,4 +129,67 @@ pub(crate) async fn revalidate_explicit_namespace_request_scope(
         ));
     }
     Ok(expected.meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use bigname_storage::{
+        ChainPosition, ChainPositions, SelectedSnapshot, SnapshotConsistency,
+        SnapshotPositionRequirement, SnapshotSelectionScope,
+    };
+
+    use super::*;
+
+    fn ethereum_scope() -> SnapshotSelectionScope {
+        SnapshotSelectionScope::new(
+            vec![SnapshotPositionRequirement::new(
+                "ethereum",
+                "ethereum-mainnet",
+            )],
+            Some("ethereum".to_owned()),
+        )
+        .expect("test scope must be valid")
+    }
+
+    fn ethereum_snapshot() -> SelectedSnapshot {
+        SelectedSnapshot {
+            chain_positions: ChainPositions::new(BTreeMap::from([(
+                "ethereum".to_owned(),
+                ChainPosition {
+                    slot: "ethereum".to_owned(),
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    block_number: 100,
+                    block_hash: "0xoverlap".to_owned(),
+                    timestamp: parse_rfc3339_utc_timestamp("2026-08-26T00:00:00Z")
+                        .expect("test timestamp must parse"),
+                },
+            )])),
+            consistency: SnapshotConsistency::Head,
+        }
+    }
+
+    #[test]
+    fn request_scope_meta_gives_suppression_precedence_for_overlapping_chain_scopes() {
+        let meta = request_scope_meta(&[
+            RequestScopeSnapshot {
+                scope: ethereum_scope(),
+                selected: Some(ethereum_snapshot()),
+            },
+            RequestScopeSnapshot {
+                scope: ethereum_scope(),
+                selected: None,
+            },
+        ])
+        .expect("overlapping request scopes must produce metadata");
+
+        assert!(meta.as_of.is_none());
+        assert_eq!(
+            meta.as_of_completeness
+                .expect("suppressed chain must be disclosed")["1"],
+            AsOfCompleteness {
+                completeness: Completeness::Unsupported,
+                unsupported_reason: TEMPORARILY_UNAVAILABLE.to_owned(),
+            }
+        );
+    }
 }
