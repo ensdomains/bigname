@@ -172,6 +172,22 @@ async fn v2_get_address_names_normalizes_ascii_mixed_case_q_prefix() -> Result<(
 }
 
 #[tokio::test]
+async fn v2_get_address_names_treats_empty_q_as_absent() -> Result<()> {
+    let (database, unfiltered_payload) =
+        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names")).await?;
+    let empty_q_payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q="),
+    )
+    .await?;
+
+    assert_eq!(empty_q_payload, unfiltered_payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_address_names_rejects_q_with_a_trailing_empty_label() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
