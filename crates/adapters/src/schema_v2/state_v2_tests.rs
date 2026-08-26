@@ -192,6 +192,31 @@ fn v2_expiry_crossing_refreshes_descendants_without_a_token_event() {
     assert_v2_indexes_are_derived(&state);
 }
 #[test]
+fn v2_restore_consumes_crossed_expiries_before_retaining_the_boundary_clock() {
+    let mut state = nested_state(10);
+    state.link_v2_resource(CHILD, "0x02", "0x99".to_owned(), Uuid::from_u128(99), None);
+    state.refresh_dirty_v2_names(9);
+    let child_before = state
+        .v2_token(CHILD, "0x02")
+        .and_then(|token| token.name)
+        .expect("child is named before the parent label expires");
+
+    state.finish_prior_event_restore(Some(10));
+
+    assert_eq!(state.latest_v2_timestamp, Some(10));
+    assert!(
+        state
+            .v2_token(CHILD, "0x02")
+            .is_some_and(|token| token.name.is_none())
+    );
+    assert!(
+        !state
+            .active_resources
+            .contains_key(&child_before.logical_name_id)
+    );
+    assert_v2_indexes_are_derived(&state);
+}
+#[test]
 fn v2_reverse_indexes_resolve_hits_misses_regeneration_and_release() {
     let mut state = anchored_state();
     install_token(&mut state, ROOT, "0x01", b"alpha", 100);
