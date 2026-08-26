@@ -740,8 +740,27 @@ ENSv2 mappings:
   successor so the next explicit resolver update or terminal token event retires
   it unless another live token still uses or retains the same resolver
   `observation_key`. The normalized event's `resolver_discovery_aliases` records
-  the complete retained-key set so compacted restore preserves that protection. A
-  resolver key shared by the survivor and displaced registration is not closed
+  the complete retained-key set so compacted restore preserves that protection.
+
+  A resolver `observation_key` carries at most one live discovery edge: before
+  asserting an edge to a different target, discovery closes the existing edge
+  for the same contract instance, edge kind, and observation key; it deduplicates
+  a repeated assertion to the same target. The retained-key protection governs
+  retirement when the successor itself next updates its resolver or terminates,
+  and is also consulted when another token sharing the key terminates; it does
+  not make the shared key immune to an explicit resolver update or clear by a
+  different token whose ID matches after the low 32-bit version is cleared. Such
+  a collision requires a noncanonical emitter, because the canonical registry
+  derives the version-cleared token ID from the label and regeneration changes
+  only the low 32-bit version after burning the predecessor
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L423-L426 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528-L538 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L645-L647 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2@ccaeb58).
+  The collision therefore remains scoped to token state and discovery edges
+  keyed to the emitting registry address.
+
+  A resolver key shared by the survivor and displaced registration is not closed
   at the collision. Regeneration never reopens a resolver edge from retained
   state, so interpretation cannot claim historical address coverage that
   Ingest did not load. The
