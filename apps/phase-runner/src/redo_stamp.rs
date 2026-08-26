@@ -50,7 +50,7 @@ pub(crate) async fn stamp_orphaned_suffix(
     from: i64,
 ) -> RunnerResult<()> {
     let range = BlockRange::new(from, i64::MAX)?;
-    for phase in [PhaseName::Interpret, PhaseName::Project] {
+    for phase in [PhaseName::Interpret, PhaseName::Project, PhaseName::Verify] {
         stamp_required_in_transaction(
             transaction,
             chain_id,
@@ -70,7 +70,10 @@ pub(crate) async fn stamp_required_in_transaction(
     requested: BlockRange,
     reason: &str,
 ) -> RunnerResult<bool> {
-    if !matches!(phase, PhaseName::Interpret | PhaseName::Project) {
+    if !matches!(
+        phase,
+        PhaseName::Interpret | PhaseName::Project | PhaseName::Verify
+    ) {
         return Err(RunnerError::data_integrity(format!(
             "required downstream redo cannot target phase {phase}"
         )));

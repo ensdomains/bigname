@@ -1314,6 +1314,7 @@ readable raw facts. Durable raw facts and competing chain lineage preserve the
 audit trail instead of accumulating stale normalized derivations across
 interpreter versions.
 
+<a id="redo-marker-scope"></a>
 **Redo-marker scope** — a phase redo marker authorizes one exact chain, phase,
 and block range. It carries no logical-name or authority-arm selector. Separately,
 Interpret's normalized `PreimageObserved` replay evidence records the exact

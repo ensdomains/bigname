@@ -243,6 +243,16 @@ pub(crate) async fn begin(
             error,
         )
     })?;
+    if phase == PhaseName::Ingest {
+        crate::redo_stamp::stamp_required_in_transaction(
+            &mut transaction,
+            chain_id,
+            PhaseName::Verify,
+            execution_range,
+            "ingest redo may change the raw-fact extent",
+        )
+        .await?;
+    }
     transaction.commit().await.map_err(|error| {
         RunnerError::database(
             format!("failed to commit redo start for chain {chain_id} phase {phase}"),
