@@ -710,10 +710,15 @@ Field ownership:
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
-  `q` applies prefix matching to the dictionary `name` field case-insensitively:
-  the prefix is lowercased to match the normalized name, and full Unicode
-  normalization of partial prefixes is a follow-up. This route does not accept
-  `match`. `relation` accepts a comma-separated set of v2 vocabulary values
+  `q` applies prefix matching to the dictionary `name` field. The API treats
+  the complete `q` value as an ENSIP-15 name prefix and normalizes it with the
+  same normalizer used for indexed names before comparing it directly with the
+  stored normalized name. A partial final label is accepted when it is valid
+  as a standalone ENSIP-15 label, so `q=AL` normalizes to `al`; an empty label
+  within a nonempty `q`, including a trailing dot such as `q=alice.`, or any
+  other input rejected by ENSIP-15 returns `400 invalid_input`. This route does
+  not accept `match`.
+  `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `registrant`; `any` normalizes to all three values.
   Rows match when any listed relation matches. The storage relations map as
   token-holder -> `owner`, effective-controller -> `manager`, and

@@ -113,7 +113,11 @@ pub(crate) async fn get_address_names(
     let storage_dedupe = dedupe_to_storage(params.dedupe);
     let storage_sort = sort_to_storage(params.sort);
     let storage_order = order_to_storage(params.order);
-    let normalized_q = params.q.as_deref().map(str::to_lowercase);
+    let normalized_q = params
+        .q
+        .as_deref()
+        .map(normalize_address_names_prefix)
+        .transpose()?;
 
     let cursor_binding = AddressNamesCursorBinding {
         address: &normalized_address,
@@ -274,6 +278,17 @@ pub(crate) async fn get_address_names(
         }),
         meta,
     }))
+}
+
+fn normalize_address_names_prefix(prefix: &str) -> V2Result<String> {
+    bigname_domain::normalization::normalize_name(prefix)
+        .map(|normalized| normalized.normalized_name)
+        .map_err(|error| {
+            V2Error::invalid_input(format!(
+                "q must be a valid ENSIP-15 name prefix: {}",
+                error.message()
+            ))
+        })
 }
 
 async fn load_primary_names_by_namespace<'a>(
