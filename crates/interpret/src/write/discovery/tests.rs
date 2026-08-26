@@ -383,7 +383,8 @@ async fn later_observation_backdates_active_epoch_without_mutating_retired_histo
     write(&mut transaction, &output, false).await?;
     transaction.commit().await?;
 
-    let active: Vec<(String, Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
+    type ActiveEpochRow = (String, Option<i64>, Option<String>, Option<i64>);
+    let active: Vec<ActiveEpochRow> = sqlx::query_as(
         "SELECT lower(address), active_from_block_number, active_from_block_hash,
                 (provenance ->> 'block_number')::bigint
          FROM contract_instance_addresses
