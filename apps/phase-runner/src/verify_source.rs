@@ -212,9 +212,17 @@ fn rpc_endpoint_identity(source: &SourceConfig) -> RunnerResult<RpcEndpointIdent
         password: endpoint.password().map(normalize_percent_encoding),
         host: host.to_owned(),
         port: endpoint.port_or_known_default(),
-        path: normalize_percent_encoding(endpoint.path()),
+        path: normalize_rpc_path(endpoint.path()),
         query: endpoint.query().map(normalize_percent_encoding),
     })
+}
+
+fn normalize_rpc_path(path: &str) -> String {
+    let mut normalized = normalize_percent_encoding(path);
+    if normalized.ends_with('/') && normalized.bytes().any(|byte| byte != b'/') {
+        normalized.pop();
+    }
+    normalized
 }
 
 fn invalid_rpc_endpoint(source: &SourceConfig) -> RunnerError {

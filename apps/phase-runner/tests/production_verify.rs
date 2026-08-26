@@ -3637,6 +3637,16 @@ async fn verification_endpoint_trailing_slash_alias_is_rejected() -> Result<()> 
 }
 
 #[tokio::test]
+async fn verification_endpoint_non_root_trailing_slash_alias_is_rejected() -> Result<()> {
+    assert_endpoint_alias_rejected(
+        "production_verify_endpoint_non_root_trailing_alias",
+        "https://rpc.example/rpc",
+        "https://rpc.example/rpc/",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn verification_endpoint_default_port_alias_is_rejected() -> Result<()> {
     assert_endpoint_alias_rejected(
         "production_verify_endpoint_default_port_alias",
@@ -3652,6 +3662,36 @@ async fn verification_endpoint_case_and_percent_encoding_alias_is_rejected() -> 
         "production_verify_endpoint_percent_alias",
         "https://RPC.EXAMPLE/%7eservice",
         "https://rpc.example/~service",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_distinct_non_root_paths_remain_independent() -> Result<()> {
+    assert_endpoint_pair_is_independent(
+        "production_verify_endpoint_distinct_non_root_paths",
+        "https://rpc.example/rpc",
+        "https://rpc.example/rpc2",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_double_trailing_slash_remains_independent() -> Result<()> {
+    assert_endpoint_pair_is_independent(
+        "production_verify_endpoint_double_trailing_slash",
+        "https://rpc.example/rpc",
+        "https://rpc.example/rpc//",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_root_double_slash_remains_independent() -> Result<()> {
+    assert_endpoint_pair_is_independent(
+        "production_verify_endpoint_root_double_slash",
+        "https://rpc.example/",
+        "https://rpc.example//",
     )
     .await
 }
@@ -3679,6 +3719,28 @@ async fn assert_endpoint_alias_rejected(
     assert!(!error.to_string().contains(intake_endpoint));
     assert!(!error.to_string().contains(verification_endpoint));
     assert_eq!(reference.preflights(), 0);
+    drop(phase);
+    scratch.cleanup().await
+}
+
+async fn assert_endpoint_pair_is_independent(
+    database_name: &str,
+    intake_endpoint: &str,
+    verification_endpoint: &str,
+) -> Result<()> {
+    let scratch = ScratchDatabase::create(database_name).await?;
+    let reference = Arc::new(FixtureReferences::new([]));
+    let phase = VerifyPhase::with_reference_provider(
+        scratch.verification_database(2).await?,
+        reference.clone(),
+    );
+    let chain = sepolia_role_chain(intake_endpoint, verification_endpoint)?;
+
+    phase
+        .preflight(&chain.chain_id, &chain.sources, &RunMode::Normal)
+        .expect("genuinely different RPC paths must remain independent");
+
+    assert_eq!(reference.preflights(), 1);
     drop(phase);
     scratch.cleanup().await
 }
