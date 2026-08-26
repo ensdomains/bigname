@@ -3641,3 +3641,606 @@ fn manifest_marker_parts(marker: &str) -> Result<(&str, &str)> {
         .rsplit_once(':')
         .ok_or_else(|| anyhow::anyhow!("marker has no invalidation generation: {marker}"))
 }
+
+// Issue #553 regressions cover both supported manifest declaration-removal workflows and
+// the existing still-declared re-synchronization behavior.
+
+use bigname_interpret::{
+    BatchRequest as ProbeBatchRequest, Engine as ProbeEngine, RunMode as ProbeInterpretRunMode,
+};
+
+const PROBE_DECLARED_REGISTRY: &str = "0x0000000000000000000000000000000000000004";
+const PROBE_KEPT_CONTRACT: &str = "0x0000000000000000000000000000000000000006";
+const PROBE_CONTROL_CONTRACT: &str = "0x0000000000000000000000000000000000000007";
+const PROBE_NEXT_EPOCH_REGISTRY: &str = "0x000000000000000000000000000000000000000a";
+
+const PROBE_LABEL_REGISTERED_SIGNATURE: &[u8] =
+    b"LabelRegistered(uint256,bytes32,string,address,uint64,address)";
+
+fn probe_manifest_dir(fixture: &WatchManifestFixture) -> std::path::PathBuf {
+    fixture.root.join("test").join("ens_v2_registry_l1")
+}
+
+fn probe_initial_manifest(chain_id: &str) -> String {
+    format!(
+        r#"manifest_version = 1
+namespace = "test"
+source_family = "ens_v2_registry_l1"
+chain = "{chain_id}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+
+[capability_flags]
+
+[[contracts]]
+role = "source_a"
+address = "{PROBE_DECLARED_REGISTRY}"
+proxy_kind = "none"
+start_block = 0
+
+[[contracts]]
+role = "source_b"
+address = "{PROBE_KEPT_CONTRACT}"
+proxy_kind = "none"
+start_block = 0
+
+[[contracts]]
+role = "source_c"
+address = "{PROBE_CONTROL_CONTRACT}"
+proxy_kind = "none"
+start_block = 0
+
+[[discovery_rules]]
+edge_kind = "registry_announcement"
+from_role = "source_a"
+admission = "reachable_from_root"
+
+[[abi.events]]
+name = "RegistryCreated"
+fragment = "event RegistryCreated()"
+emitter_roles = ["source_a"]
+normalized_events = ["RegistryCreated"]
+status = "supported"
+
+[[abi.events]]
+name = "LabelRegistered"
+fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
+emitter_roles = ["source_a"]
+normalized_events = ["RegistrationGranted"]
+status = "supported"
+"#
+    )
+}
+
+/// (source, active_from, active_to, deactivated, source manifest) for the newest address epoch.
+async fn probe_address_state(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    address: &str,
+) -> Result<(
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    bool,
+    Option<i64>,
+    serde_json::Value,
+)> {
+    Ok(sqlx::query_as(
+        "SELECT provenance ->> 'source', active_from_block_number, active_to_block_number, \
+         deactivated_at IS NOT NULL, source_manifest_id, provenance \
+         FROM contract_instance_addresses \
+         WHERE chain_id = $1 AND lower(address) = lower($2) \
+         ORDER BY admitted_at DESC, contract_instance_address_id DESC LIMIT 1",
+    )
+    .bind(chain_id)
+    .bind(address)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Mirrors the address-join gate of the v2 subregistry-pointer topology read
+/// (crates/project/src/scope/topology.rs:133-140): any non-deactivated address row whose
+/// active interval covers the block keeps matching topology scope expansion.
+async fn probe_topology_address_gate(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    address: &str,
+    block: i64,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM contract_instance_addresses address \
+             WHERE address.chain_id = $1 \
+               AND lower(address.address) = lower($2) \
+               AND (address.active_from_block_number IS NULL \
+                    OR address.active_from_block_number <= $3) \
+               AND (address.active_to_block_number IS NULL \
+                    OR address.active_to_block_number > $3) \
+               AND address.deactivated_at IS NULL \
+         )",
+    )
+    .bind(chain_id)
+    .bind(address)
+    .bind(block)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn probe_seed_self_announcement(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    block: i64,
+) -> Result<()> {
+    let block_hash = format!("{chain_id}-manifest-sync-head-{block}");
+    let transaction_hash = format!("{chain_id}-probe-announcement-{block}");
+    sqlx::query(
+        "INSERT INTO raw_transactions ( \
+             chain_id, block_hash, block_number, transaction_hash, \
+             transaction_index, from_address, to_address \
+         ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
+    )
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block)
+    .bind(&transaction_hash)
+    .bind("0x0000000000000000000000000000000000000008")
+    .bind(PROBE_DECLARED_REGISTRY)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO raw_logs ( \
+             chain_id, block_hash, block_number, transaction_hash, \
+             transaction_index, log_index, emitting_address, topics \
+         ) VALUES ($1, $2, $3, $4, 0, 0, $5, $6)",
+    )
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block)
+    .bind(&transaction_hash)
+    .bind(PROBE_DECLARED_REGISTRY)
+    .bind(vec![registry_announcement_topic0()])
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn probe_interpret(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+    mode: ProbeInterpretRunMode,
+) -> Result<()> {
+    let outcome = ProbeEngine::new(scratch.pool().clone())
+        .run_batch(ProbeBatchRequest {
+            chain_id: chain_id.to_owned(),
+            from_block,
+            to_block,
+            resume_current: None,
+            mode,
+        })
+        .await?;
+    assert!(outcome.complete, "interpret batch did not complete");
+    Ok(())
+}
+
+async fn probe_interpret_output(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+    let events = sqlx::query_scalar(
+        "SELECT to_jsonb(event_row) - 'normalized_event_id' - 'observed_at'
+         FROM normalized_events event_row
+         WHERE chain_id = $1 AND block_number = 1 ORDER BY event_identity",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await?;
+    let edges = sqlx::query_scalar(
+        "SELECT to_jsonb(edge_row) - 'discovery_edge_id' - 'admitted_at'
+         FROM discovery_edges edge_row
+         WHERE chain_id = $1 AND edge_kind = 'registry_announcement'
+         ORDER BY active_from_block_number",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await?;
+    Ok((events, edges))
+}
+
+/// Declares and synchronizes an address, then interprets its self-announcement and
+/// verifies that declaration authority and the event-derived edge coexist.
+async fn probe_observe_declared_self_announcement(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+    fixture: &WatchManifestFixture,
+) -> Result<(i64, serde_json::Value)> {
+    fs::create_dir_all(probe_manifest_dir(fixture))?;
+    fs::write(
+        probe_manifest_dir(fixture).join("v1.toml"),
+        probe_initial_manifest(chain_id),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    let declared = probe_address_state(scratch.pool(), chain_id, PROBE_DECLARED_REGISTRY).await?;
+    assert_eq!(
+        declared.0.as_deref(),
+        Some("manifest_declaration"),
+        "declared row does not carry manifest provenance: {declared:?}"
+    );
+    assert!(!declared.3, "declared row is deactivated");
+
+    seed_completed_ingest_range(scratch, chain_id).await?;
+    probe_seed_self_announcement(scratch.pool(), chain_id, 1).await?;
+
+    probe_interpret(scratch, chain_id, 0, 1, ProbeInterpretRunMode::Normal).await?;
+
+    let observed = probe_address_state(scratch.pool(), chain_id, PROBE_DECLARED_REGISTRY).await?;
+    assert_eq!(
+        observed.0.as_deref(),
+        Some("manifest_declaration"),
+        "raw-log discovery overwrote the declared row's provenance: {observed:?}"
+    );
+    assert_eq!(observed.4, declared.4);
+    assert!(!observed.3);
+
+    let announcement_edges: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM discovery_edges \
+         WHERE chain_id = $1 AND edge_kind = 'registry_announcement' AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        announcement_edges, 1,
+        "expected exactly one announcement edge"
+    );
+    // Represent an address row written by a pre-fix interpreter. The first
+    // synchronization after upgrade must repair it without an earlier heal.
+    sqlx::query(
+        "UPDATE contract_instance_addresses
+         SET provenance = jsonb_build_object('source', 'raw_log'), source_manifest_id = NULL
+         WHERE chain_id = $1 AND lower(address) = lower($2)
+           AND deactivated_at IS NULL",
+    )
+    .bind(chain_id)
+    .bind(PROBE_DECLARED_REGISTRY)
+    .execute(scratch.pool())
+    .await?;
+    let legacy = probe_address_state(scratch.pool(), chain_id, PROBE_DECLARED_REGISTRY).await?;
+    assert_eq!(legacy.0.as_deref(), Some("raw_log"));
+    assert_eq!(legacy.4, None);
+    Ok((
+        declared.4.expect("declaration has a source manifest"),
+        declared.5,
+    ))
+}
+
+struct ProbeOutcome {
+    retired: (
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        bool,
+        Option<i64>,
+        serde_json::Value,
+    ),
+    control: (
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        bool,
+        Option<i64>,
+        serde_json::Value,
+    ),
+    retired_topology: bool,
+    control_topology: bool,
+    retired_watch: bool,
+    control_watch: bool,
+}
+
+async fn probe_observe(pool: &sqlx::PgPool, chain_id: &str) -> Result<ProbeOutcome> {
+    let label_topic = format!("{:#x}", keccak256(PROBE_LABEL_REGISTERED_SIGNATURE));
+    let filter = load_persisted_watch_filter(pool, chain_id, 0, 10).await?;
+    Ok(ProbeOutcome {
+        retired: probe_address_state(pool, chain_id, PROBE_DECLARED_REGISTRY).await?,
+        control: probe_address_state(pool, chain_id, PROBE_CONTROL_CONTRACT).await?,
+        retired_topology: probe_topology_address_gate(pool, chain_id, PROBE_DECLARED_REGISTRY, 5)
+            .await?,
+        control_topology: probe_topology_address_gate(pool, chain_id, PROBE_CONTROL_CONTRACT, 5)
+            .await?,
+        retired_watch: filter.includes(PROBE_DECLARED_REGISTRY, &label_topic, 5),
+        control_watch: filter.includes(PROBE_CONTROL_CONTRACT, &label_topic, 5),
+    })
+}
+
+fn probe_assert_retired(
+    variant: &str,
+    outcome: &ProbeOutcome,
+    declared_authority: &(i64, serde_json::Value),
+) {
+    eprintln!(
+        "PROBE 553 [{variant}] retired {:?} topology={} watch={} | control {:?} topology={} \
+         watch={}",
+        outcome.retired,
+        outcome.retired_topology,
+        outcome.retired_watch,
+        outcome.control,
+        outcome.control_topology,
+        outcome.control_watch,
+    );
+    assert!(
+        outcome.control.3,
+        "retirement did not run: {:?}",
+        outcome.control
+    );
+    assert!(
+        outcome.retired.3,
+        "removed declaration stayed active: {:?}",
+        outcome.retired
+    );
+    assert_eq!(
+        (&outcome.retired.5, outcome.retired.4),
+        (&declared_authority.1, Some(declared_authority.0)),
+        "retirement did not restore the exact declaration authority"
+    );
+    assert!(
+        !outcome.retired_topology,
+        "retired address still matches topology"
+    );
+    assert!(
+        !outcome.retired_watch,
+        "retired address remains in the ingest watch"
+    );
+    assert_eq!(
+        (outcome.control_topology, outcome.control_watch),
+        (false, false),
+        "retired control escaped a serving or ingest gate: {:?}",
+        outcome.control,
+    );
+}
+
+/// Variant A — deprecating a manifest version (the ens_v2_sepolia_dev precedent,
+/// manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v1.toml): the old version file stays
+/// in the repository with rollout_status = "deprecated" while a later deployment becomes
+/// active.
+#[tokio::test]
+async fn probe_553_epoch_transition_deprecation() -> Result<()> {
+    let scratch = ScratchDatabase::create("probe_553_epoch_transition").await?;
+    let chain_id = "probe-553-epoch";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
+    let declared_authority =
+        probe_observe_declared_self_announcement(&scratch, chain_id, &fixture).await?;
+
+    let v1_path = probe_manifest_dir(&fixture).join("v1.toml");
+    let deprecated = fs::read_to_string(&v1_path)?.replacen(
+        "rollout_status = \"active\"",
+        "rollout_status = \"deprecated\"",
+        1,
+    );
+    fs::write(&v1_path, deprecated)?;
+    fs::write(
+        probe_manifest_dir(&fixture).join("v2.toml"),
+        format!(
+            r#"manifest_version = 2
+namespace = "test"
+source_family = "ens_v2_registry_l1"
+chain = "{chain_id}"
+deployment_epoch = "fixture-next"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "source_a"
+address = "{PROBE_NEXT_EPOCH_REGISTRY}"
+proxy_kind = "none"
+start_block = 2
+
+[[abi.events]]
+name = "LabelRegistered"
+fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
+emitter_roles = ["source_a"]
+normalized_events = ["RegistrationGranted"]
+status = "supported"
+"#
+        ),
+    )?;
+    let sync = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let sync = match sync {
+        Ok(summary) => summary,
+        Err(error) => panic!(
+            "VARIANT A BLOCKED: the epoch-transition deprecation sync itself was rejected, so \
+             this workflow never reaches retirement: {error:#}"
+        ),
+    };
+    eprintln!("PROBE 553 [epoch-transition] sync summary: {sync:?}");
+
+    let outcome = probe_observe(scratch.pool(), chain_id).await?;
+    probe_assert_retired("epoch-transition", &outcome, &declared_authority);
+
+    scratch.cleanup().await
+}
+
+/// Variant B — in-place declaration removal: the same manifest version stays active but stops
+/// declaring the observed registry (plus the control contract), keeping one unrelated
+/// contract so the family remains loadable.
+#[tokio::test]
+async fn probe_553_in_place_dedeclaration() -> Result<()> {
+    let scratch = ScratchDatabase::create("probe_553_in_place").await?;
+    let chain_id = "probe-553-inplace";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
+    let declared_authority =
+        probe_observe_declared_self_announcement(&scratch, chain_id, &fixture).await?;
+    let output_before = probe_interpret_output(scratch.pool(), chain_id).await?;
+    assert!(
+        output_before
+            .0
+            .iter()
+            .any(|event| event["event_kind"] == "RegistryCreated")
+    );
+
+    fs::write(
+        probe_manifest_dir(&fixture).join("v1.toml"),
+        format!(
+            r#"manifest_version = 1
+namespace = "test"
+source_family = "ens_v2_registry_l1"
+chain = "{chain_id}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+
+[capability_flags]
+
+[[discovery_rules]]
+edge_kind = "registry_announcement"
+from_role = "source_b"
+admission = "reachable_from_root"
+
+[[contracts]]
+role = "source_b"
+address = "{PROBE_KEPT_CONTRACT}"
+proxy_kind = "none"
+start_block = 0
+
+[[abi.events]]
+name = "RegistryCreated"
+fragment = "event RegistryCreated()"
+emitter_roles = ["source_b"]
+normalized_events = ["RegistryCreated"]
+status = "supported"
+
+[[abi.events]]
+name = "LabelRegistered"
+fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
+emitter_roles = ["source_b"]
+normalized_events = ["RegistrationGranted"]
+status = "supported"
+"#
+        ),
+    )?;
+    let sync = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await;
+    let sync = match sync {
+        Ok(summary) => summary,
+        Err(error) => panic!(
+            "VARIANT B BLOCKED: the in-place declaration-removal sync itself was rejected, so this \
+             workflow never reaches retirement: {error:#}"
+        ),
+    };
+    eprintln!("PROBE 553 [in-place] sync summary: {sync:?}");
+
+    probe_interpret(&scratch, chain_id, 0, 1, ProbeInterpretRunMode::Redo).await?;
+    assert_eq!(
+        probe_interpret_output(scratch.pool(), chain_id).await?,
+        output_before
+    );
+
+    let outcome = probe_observe(scratch.pool(), chain_id).await?;
+    probe_assert_retired("in-place", &outcome, &declared_authority);
+    advance_chain_head(scratch.pool(), chain_id, 2).await?;
+    probe_seed_self_announcement(scratch.pool(), chain_id, 2).await?;
+    probe_interpret(&scratch, chain_id, 2, 2, ProbeInterpretRunMode::Normal).await?;
+    let epochs: (i64, i64, Option<i64>) = sqlx::query_as(
+        "SELECT count(*), count(DISTINCT contract_instance_id),
+                max(active_from_block_number) FILTER (WHERE deactivated_at IS NULL)
+         FROM contract_instance_addresses
+         WHERE chain_id = $1 AND lower(address) = lower($2)",
+    )
+    .bind(chain_id)
+    .bind(PROBE_DECLARED_REGISTRY)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(epochs, (2, 1, Some(2)));
+    let later_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 2 ORDER BY event_kind",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert!(later_kinds.iter().any(|kind| kind == "RegistryCreated"));
+    scratch.cleanup().await
+}
+
+/// Variant C — a routine re-sync while the address is still declared keeps manifest
+/// provenance authoritative, and subsequent deprecation retires the row.
+#[tokio::test]
+async fn probe_553_resync_while_declared_heals_then_deprecation_retires() -> Result<()> {
+    let scratch = ScratchDatabase::create("probe_553_heal").await?;
+    let chain_id = "probe-553-heal";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
+    let declared_authority =
+        probe_observe_declared_self_announcement(&scratch, chain_id, &fixture).await?;
+
+    // Routine re-sync of the unchanged, still-declaring repo.
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let healed = probe_address_state(scratch.pool(), chain_id, PROBE_DECLARED_REGISTRY).await?;
+    eprintln!("PROBE 553 [heal] after still-declared re-sync: {healed:?}");
+    assert_eq!(
+        healed.0.as_deref(),
+        Some("manifest_declaration"),
+        "still-declared re-sync did not preserve manifest provenance: {healed:?}"
+    );
+    assert_eq!(
+        (&healed.5, healed.4),
+        (&declared_authority.1, Some(declared_authority.0))
+    );
+
+    // Now deprecate the whole family version with a replacement epoch (variant A shape).
+    let v1_path = probe_manifest_dir(&fixture).join("v1.toml");
+    let deprecated = fs::read_to_string(&v1_path)?.replacen(
+        "rollout_status = \"active\"",
+        "rollout_status = \"deprecated\"",
+        1,
+    );
+    fs::write(&v1_path, deprecated)?;
+    fs::write(
+        probe_manifest_dir(&fixture).join("v2.toml"),
+        format!(
+            r#"manifest_version = 2
+namespace = "test"
+source_family = "ens_v2_registry_l1"
+chain = "{chain_id}"
+deployment_epoch = "fixture-next"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "source_a"
+address = "{PROBE_NEXT_EPOCH_REGISTRY}"
+proxy_kind = "none"
+start_block = 2
+
+[[abi.events]]
+name = "LabelRegistered"
+fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
+emitter_roles = ["source_a"]
+normalized_events = ["RegistrationGranted"]
+status = "supported"
+"#
+        ),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let retired = probe_address_state(scratch.pool(), chain_id, PROBE_DECLARED_REGISTRY).await?;
+    eprintln!("PROBE 553 [heal] after deprecation of healed row: {retired:?}");
+    assert!(
+        retired.3,
+        "manifest-provenance row was not retired by deprecation: {retired:?}"
+    );
+    assert_eq!(
+        (&retired.5, retired.4),
+        (&declared_authority.1, Some(declared_authority.0))
+    );
+    scratch.cleanup().await
+}
