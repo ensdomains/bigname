@@ -199,7 +199,18 @@ reset that removes the cursor and every durable Ingest output that may have come
 from the source, followed by a [full source
 re-walk](glossary.md#re-derivation-boundary); never relabel the row in place.
 Changing only the provider endpoint is allowed because endpoints are not part
-of persisted source identity. Retained raw facts, chain lineage, or header-audit rows block initialization of
+of persisted source identity and will not trigger the runtime reset guard.
+
+**Endpoint-rotation gate:** never reuse an endpoint that served intake during
+the retained walk as `verification-only`, even under a different key. The
+stronger level covers only facts retained since the last full source re-walk
+under the current endpoint-and-role configuration. A former intake endpoint
+requires the reviewed affected-chain reset and full source re-walk before it can
+serve as the independent reference; current endpoint inequality is not a
+substitute. Record and review endpoint-rotation history outside the database,
+because phase-runner does not persist it.
+
+Retained raw facts, chain lineage, or header-audit rows block initialization of
 any missing configured source row. Lineage and header rows can remain after a
 range with no watched transactions, receipts, or logs, and none of this output
 identifies its provider. The runner therefore cannot distinguish a safe source

@@ -305,6 +305,13 @@ indexes are additive; rollback may leave them in place.
    replays, complete them before the Sepolia reset and full
    Ingest-through-Verify walk. Use only the reviewed part-3 per-chain reset after
    the preceding release work succeeds; stop if that procedure is unavailable.
+   Before accepting any verification-only descriptor, review the deployment's
+   endpoint-rotation record. If that endpoint served intake at any time during
+   the retained walk—even under another key—stop and perform the reviewed
+   affected-chain reset and full source re-walk under the intended
+   endpoint-and-role configuration. Phase-runner does not persist endpoint
+   history, so distinct current descriptors and the same-endpoint check cannot
+   prove this temporal condition.
    Do not start the runner yet: deploy the part-2 binary and distinct secrets,
    validate the role-bearing configuration, perform the applicable reviewed
    reset, then run Sepolia through Verify before Live. Require

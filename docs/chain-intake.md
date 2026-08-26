@@ -149,10 +149,17 @@ an explicitly reviewed reset that removes the cursor and every durable Ingest
 output that may have come from that source, followed by a [full source
 re-walk](glossary.md#re-derivation-boundary); it is never an in-place cursor
 update. Changing only the provider endpoint is allowed because endpoints are
-not persisted source identity, but reusing a former intake endpoint as a
-verification-only reference against retained facts requires the same reset and
-full source re-walk. Independent evidence is earned only when the reference is
-excluded from intake for the complete affected-chain walk. Retained raw facts, chain lineage, or
+not persisted source identity and therefore do not trip the runtime identity
+guard. An independent level attests only that the current verification-only
+endpoint was excluded from intake for all facts retained since the last full
+source re-walk under that endpoint-and-role configuration; it does not prove
+independence across earlier endpoint values. Never assign an endpoint that
+served intake during the retained walk to `verification-only`, even under a new
+key. Doing so voids the `cross_checked` or `node_checked` claim despite the
+current descriptors being distinct. First apply the same reviewed reset and
+full source re-walk under the new configuration. The operator must preserve and
+check that endpoint-rotation history because the runner cannot reconstruct it.
+Retained raw facts, chain lineage, or
 header-audit rows block creation
 of any missing configured source row. The lineage and header rows remain even
 when a loaded range contains no watched transactions, receipts, or logs. The
