@@ -267,12 +267,9 @@ Field ownership:
   genuine phase completion or completed-state revalidation clears that marker.
   It reports `degraded` unless a stronger `stale` condition applies, such as a
   genuinely failed phase or an expired heartbeat.
-  Ethereum Sepolia is already ineligible for `ready` unless its `ingest` phase
+  Ethereum Sepolia is ineligible for `ready` unless its `ingest` phase
   remains `completed` and its [verification](glossary.md#verification-level)
-  phase is `completed` with exactly `quick_synced`. The Issue #411 enforcement
-  change will make that check ordering-based: every known level at or above the
-  `quick_synced` floor will qualify, while unknown stored levels will continue
-  to fail closed. A failed Ingest or Verify, or an ordinary completed Verify without that
+  phase is `completed` at a known level at or above the `quick_synced` floor; unknown stored levels fail closed. A failed Ingest or Verify, or an ordinary completed Verify without that
   evidence, is `stale`; an idle, running, paused, or missing Ingest or Verify is
   `degraded`. An expired runner heartbeat remains `stale` while either required
   phase is incomplete. Chains without this requirement omit those Ingest and
@@ -710,10 +707,18 @@ Field ownership:
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
-  `q` applies prefix matching to the dictionary `name` field case-insensitively:
-  the prefix is lowercased to match the normalized name, and full Unicode
-  normalization of partial prefixes is a follow-up. This route does not accept
-  `match`. `relation` accepts a comma-separated set of v2 vocabulary values
+  `q` applies prefix matching to the dictionary `name` field. The API treats
+  the complete `q` value as an ENSIP-15 name prefix and normalizes it with the
+  same normalizer used for indexed names before comparing it directly with the
+  stored normalized name. An empty `q` is treated as absent. A partial final
+  label is accepted when it is valid as a standalone ENSIP-15 label, so `q=AL`
+  normalizes to `al`. When `q` has exactly one trailing dot, the preceding
+  nonempty name is normalized and the dot is then restored, so
+  `q=ALICE.` matches `alice.eth` but not `alicex.eth`. An empty name before the
+  boundary marker, multiple trailing dots, an empty interior label, or any
+  other input rejected by bigname's name validation atop ENSIP-15 returns
+  `400 invalid_input`. This route does not accept `match`.
+  `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `registrant`; `any` normalizes to all three values.
   Rows match when any listed relation matches. The storage relations map as
   token-holder -> `owner`, effective-controller -> `manager`, and

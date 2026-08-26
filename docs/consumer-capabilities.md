@@ -260,22 +260,14 @@ must remain valid, although their non-snapshot remaining rows and fields may
 reflect those explicit activated deltas. Any other difference or cursor
 rejection blocks the `ethereum-sepolia` publication decision.
 
-The production Verify phase already validates `ethereum-sepolia`'s durable
-ingested extent through its finalized marker and records `quick_synced` for its
-single configured source. The Issue #411 enforcement change will add
-[source roles](glossary.md#source-role): a distinct verification-only dRPC will earn
-`cross_checked`; without one, the target-covering intake cursor will earn
-`quick_synced` and will never be selected as its own reference. The persisted
+The production Verify phase validates `ethereum-sepolia`'s durable ingested extent through its finalized marker. A distinct [verification-only](glossary.md#source-role) dRPC earns `cross_checked`; without one, the target-covering intake cursor earns `quick_synced` and is never selected as its own reference. The persisted
 intake cursor must match its key, kind, seed basis, and start block and cover that
 finalized marker. Project publishes before Verify in the
 pipeline sequence, but that publication remains unready and traffic-drained
-until Verify succeeds for the target. Existing fixtures prove the current
-Sepolia path reports `quick_synced` without calling a reference and rejects an
-unearned stronger level. Part-2 acceptance fixtures will additionally prove
+until Verify succeeds for the target. Acceptance fixtures prove
 that distinct intake and verification-only endpoints produce `cross_checked`,
 that the verification-only source receives no Ingest/Live requests or cursor,
-and that equal intake/reference endpoints fail before cursor initialization,
-provider construction or access, raw-fact writes, or redo-state publication.
+and that equal intake/reference endpoints fail before cursor initialization, provider construction or access, raw-fact writes, or [redo-marker](glossary.md#redo-marker-scope) publication.
 Base fixtures must keep Coinbase and dRPC intake-capable, use only an optional
 distinct verification-only dRPC for `cross_checked` through the ingest seam,
 and otherwise fall back to the target-covering intake dRPC's `quick_synced`.
@@ -285,15 +277,12 @@ verification-only reth and fall back to its intake reth's `quick_synced`; a
 manifest-widening Ingest redo must receive every intake-capable source and no
 verification-only source, while role-aware Verify and `all` redo must enforce
 the complete intake-capable key set before publication or provider access.
-Standalone Interpret redo must likewise ignore verification-only descriptors
-for cursor identity, require no cursor for them, and reject a missing or extra
-intake-capable key before replay.
+Standalone Interpret and Project redo require the complete intake-capable source descriptor set so persisted cursor identities can prove the range, but they perform no ingest-provider I/O. In `all` redo, Interpret receives only intake-capable descriptors after Ingest enforces the complete cursor-key set.
 An `--phase all` fixture must prove its Ingest and Interpret contexts receive
 only the complete intake-capable set while its Verify context still receives
 the optional verification-only reference; the reference must not leak into
 intake or cause Interpret cursor rejection.
-Configuration errors and logs must name source keys without exposing either
-resolved endpoint. A retained pre-#411 fixture must also prove that a role
+Endpoint-conflict and provider-construction errors must name source keys without exposing either resolved endpoint. A retained pre-#411 fixture must also prove that a role
 change which alters the intake-capable cursor-key set is rejected while raw
 facts remain, until the owner-approved reset and full re-walk occur.
 Five-field descriptors must remain accepted for normal run and redo, with the

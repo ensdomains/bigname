@@ -15,6 +15,8 @@ use super::{
     Envelope, Meta, NoQueryParams, OpsStatus, V2Error, V2Result, format_timestamp, slug_to_numeric,
 };
 
+mod readiness;
+use readiness::meets_floor;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct StatusData {
     pub(crate) status: OpsStatus,
@@ -192,7 +194,9 @@ fn phase_readiness(
             (Some("completed"), _) if row.verify_settled_while_unconfigured => {
                 (ingest_incomplete, true)
             }
-            (Some("completed"), Some("quick_synced")) => (ingest_incomplete, false),
+            (Some("completed"), level) if meets_floor(level, "quick_synced") => {
+                (ingest_incomplete, false)
+            }
             (Some("idle" | "running" | "paused") | None, _) => (ingest_incomplete, true),
             (Some("completed" | "failed"), _) | (Some(_), _) => {
                 return StatusReadiness::Stale;

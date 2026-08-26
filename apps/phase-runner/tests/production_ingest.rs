@@ -23,7 +23,10 @@ use bigname_ingest::{
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use phase_runner::{
     capacity::CapacityGuard,
-    config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
+    config::{
+        CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, SourceRole,
+        TimingConfig,
+    },
     error::{ErrorKind, RunnerError, RunnerResult},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
@@ -88,21 +91,34 @@ sol! {
 }
 
 #[tokio::test]
-async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Result<()> {
+async fn verification_only_source_never_reaches_finite_ingest_or_cursors() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_production_ingest").await?;
     let chain_id = "rpc-ingest-test";
     seed_watch_set(scratch.pool(), chain_id).await?;
     let (endpoint, server) = spawn_rpc(true, false).await?;
+    let (verify_endpoint, verify_server, verify_requests) = spawn_crash_window_rpc(false).await?;
     let configured_chain = ChainConfig::new(
         chain_id,
-        vec![SourceConfig::new(
-            chain_id,
-            "rpc",
-            "rpc",
-            SeedBasis::NewSignatureRange,
-            0,
-            endpoint,
-        )?],
+        vec![
+            SourceConfig::new_with_role(
+                chain_id,
+                "rpc",
+                "rpc",
+                SeedBasis::NewSignatureRange,
+                0,
+                SourceRole::Intake,
+                endpoint,
+            )?,
+            SourceConfig::new_with_role(
+                chain_id,
+                "verify",
+                "rpc",
+                SeedBasis::NewSignatureRange,
+                0,
+                SourceRole::VerificationOnly,
+                verify_endpoint,
+            )?,
+        ],
         false,
     )?;
     let database = scratch.runner();
@@ -163,6 +179,7 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
     cancellation.cancel();
     task.await??;
     server.abort();
+    verify_server.abort();
 
     let lineage_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM chain_lineage WHERE chain_id = $1")
@@ -206,6 +223,11 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
     .bind(chain_id)
     .fetch_one(scratch.pool())
     .await?;
+    let cursor_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
     let state: (Option<i64>, Option<i64>) = sqlx::query_as(
         "
         SELECT current_block_number, live_handoff_block_number
@@ -262,6 +284,7 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
     );
     assert_eq!(transaction, (vec![0xde, 0xad], "7".to_owned()));
     assert_eq!(cursor, (2, Some(1), Some(1)));
+    assert_eq!(cursor_count, 1);
     assert_eq!(state, (Some(1), Some(1)));
     assert_eq!(
         head,
@@ -275,6 +298,7 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
         )
     );
     assert_eq!(finalized_lineage_count, 2);
+    assert_eq!(verify_requests.load(Ordering::SeqCst), 0);
     scratch.cleanup().await
 }
 
@@ -2710,11 +2734,79 @@ async fn fresh_sepolia_rejects_invalid_intake_shape_before_raw_facts_are_written
     );
     let error = result.expect_err("invalid Sepolia intake must fail before Ingest");
     assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert!(
-        error
-            .to_string()
-            .contains("requires one dRPC intake source")
+    assert_eq!(
+        error.to_string(),
+        "chain ethereum-sepolia intake descriptors [ethereum-sepolia:intake] violate the required \
+         shape: exactly one dRPC intake-capable source with ethereum_head seed basis and start \
+         block 0"
     );
+    assert_eq!(observed_rpc_requests, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_sepolia_rejects_equal_role_endpoints_before_cursor_or_raw_fact_writes() -> Result<()>
+{
+    let scratch =
+        ScratchDatabase::create("production_ingest_fresh_sepolia_equal_endpoints").await?;
+    seed_watch_set(scratch.pool(), SEPOLIA).await?;
+    let (endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    let endpoint_alias = endpoint.trim_end_matches('/').to_owned();
+    let runner = crash_window_runner(&scratch, Arc::new(AtomicUsize::new(0)))?;
+    let chain = ChainConfig::new(
+        SEPOLIA,
+        vec![
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-intake",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::Intake,
+                endpoint.clone(),
+            )?,
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-verify",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                endpoint_alias.clone(),
+            )?,
+        ],
+        true,
+    )?;
+
+    let error = runner
+        .run_chain(&chain, CancellationToken::new())
+        .await
+        .expect_err("equal intake and verification endpoints must fail before Ingest");
+    let cursor_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
+            .bind(SEPOLIA)
+            .fetch_one(scratch.pool())
+            .await?;
+    let raw_fact_count: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM raw_logs WHERE chain_id = $1)
+              + (SELECT count(*) FROM raw_transactions WHERE chain_id = $1)
+              + (SELECT count(*) FROM raw_receipts WHERE chain_id = $1)",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    let observed_rpc_requests = rpc_requests.load(Ordering::SeqCst);
+
+    drop(runner);
+    rpc_server.abort();
+    scratch.cleanup().await?;
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("sepolia-intake"), "{error}");
+    assert!(error.to_string().contains("sepolia-verify"), "{error}");
+    assert!(!error.to_string().contains(&endpoint), "{error}");
+    assert!(!error.to_string().contains(&endpoint_alias), "{error}");
+    assert_eq!(cursor_count, 0);
+    assert_eq!(raw_fact_count, 0);
     assert_eq!(observed_rpc_requests, 0);
     Ok(())
 }

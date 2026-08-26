@@ -2881,6 +2881,44 @@ async fn recompute_resumes_its_own_queued_project_refresh() -> Result<()> {
 }
 
 #[tokio::test]
+async fn source_free_recompute_flags_runs_its_internal_project_refresh() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_source_free_recompute").await?;
+    let chain = "interpret-source-free-recompute";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = false,
+             normalization_error = 'stale flag'
+         WHERE decoded_label = 'alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let source_free_chain = ChainConfig::new(chain, Vec::new(), false)?;
+
+    recompute_runner(&scratch, chain, "interpret-source-free-recompute-runner")?
+        .redo(
+            &source_free_chain,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
+    let repaired: (String, bool) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version
+         FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(repaired, (NORMALIZER.into(), true));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn failed_recompute_project_refresh_retains_ownership_and_resumes() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_flags_failed_refresh").await?;
     let chain = "interpret-flags-failed-refresh";

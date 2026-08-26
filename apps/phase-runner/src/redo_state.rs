@@ -125,6 +125,10 @@ pub(crate) async fn begin(
     } else {
         None
     };
+    if phase == PhaseName::Project && !stage_project_refresh_on_completion {
+        crate::ingest_cursor_config::validate_completed_tx(&mut transaction, chain_id, sources)
+            .await?;
+    }
     require_interrupted_redo_coverage(chain_id, phase, mode, &previous, execution_range)?;
     if !status.can_transition_to(PhaseStatus::Running, true) {
         return Err(invalid_transition(
@@ -378,6 +382,8 @@ pub(crate) async fn finish(
         }
     };
     crate::state_persistence::validate_progress(phase, progress, true)?;
+    let retained_verification_level = session.previous.verification_level.clone();
+    let persisted_verification_level = progress.verification_level;
     let verification_level = if phase == PhaseName::Verify {
         progress
             .verification_level
@@ -582,6 +588,13 @@ pub(crate) async fn finish(
             error,
         )
     })?;
+    if phase == PhaseName::Verify {
+        crate::verify_level::warn_persisted_downgrade(
+            chain_id,
+            retained_verification_level.as_deref(),
+            persisted_verification_level,
+        );
+    }
     crate::redo_recompute::report(chain_id, recompute_summary, &stamped_ranges);
     Ok(())
 }

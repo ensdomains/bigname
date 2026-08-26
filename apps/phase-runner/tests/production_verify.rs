@@ -3,6 +3,7 @@ mod support;
 
 use std::{
     collections::BTreeMap,
+    io::{self, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -25,13 +26,17 @@ use bigname_ingest::{
 };
 use phase_runner::{
     capacity::CapacityGuard,
-    config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
+    config::{
+        CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, SourceRole,
+        TimingConfig,
+    },
     database::VerificationDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::{BlockMarker, HeadMarkers},
     phase::{
         BlockRange, IngestCursor, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext,
-        PhaseFuture, PhaseName, PhaseProgress, PhaseSet, SourceProgress, VerificationLevel,
+        PhaseFuture, PhaseName, PhaseProgress, PhaseSet, RunMode, SourceProgress,
+        VerificationLevel,
     },
     phase_lock::PhaseLock,
     runner::{PhaseRunner, RedoPhase},
@@ -44,6 +49,8 @@ use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tokio::{net::TcpListener, sync::Notify};
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
 use support::ScratchDatabase;
@@ -55,6 +62,58 @@ const CONTRACT: &str = "0x00000000000000000000000000000000000000aa";
 const MULTI_BATCH_VERIFY_TARGET: i64 = 131_073;
 const FIRST_VERIFY_BATCH_END: i64 = 131_071;
 type FailedVerifyState = (String, Option<i64>, Option<i64>, Option<String>);
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8(
+            self.0
+                .lock()
+                .expect("captured log lock must not be poisoned")
+                .clone(),
+        )
+        .expect("structured logs must be UTF-8")
+    }
+}
+
+impl<'a> MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogWriter(Arc::clone(&self.0))
+    }
+}
+
+impl Write for CapturedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("captured log lock must not be poisoned")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn assert_role_downgrade_log(logs: &str, chain_id: &str, old_level: &str, new_level: &str) {
+    for expected in [
+        "\"level\":\"WARN\"".to_owned(),
+        "\"event\":\"verification_level_downgraded\"".to_owned(),
+        format!("\"chain_id\":\"{chain_id}\""),
+        format!("\"old_verification_level\":\"{old_level}\""),
+        format!("\"new_verification_level\":\"{new_level}\""),
+        "\"cause\":\"current_source_role_configuration\"".to_owned(),
+    ] {
+        assert!(logs.contains(&expected), "missing {expected} in {logs}");
+    }
+}
 
 #[tokio::test]
 async fn verifier_rejects_a_database_role_with_write_privileges() -> Result<()> {
@@ -145,31 +204,33 @@ async fn verifier_rejects_a_reader_connected_to_a_different_database() -> Result
 }
 
 #[tokio::test]
-async fn clean_sweeps_advance_finalized_extents_for_drpc_and_reth() -> Result<()> {
+async fn sepolia_verification_only_reference_records_cross_checked() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_clean").await?;
-    for chain in [BASE, ETHEREUM] {
+    for chain in [BASE, ETHEREUM, SEPOLIA] {
         seed_chain(scratch.pool(), chain, 8, 7, 5, 1).await?;
     }
     let reference = Arc::new(FixtureReferences::new([
         reference_log(BASE, 1),
         reference_log(ETHEREUM, 1),
+        reference_log(SEPOLIA, 1),
     ]));
     let runner = verifier_runner(&scratch, reference.clone(), Arc::new(CompleteLivePhase)).await?;
-
-    runner
-        .run_chain(&base_chain(true)?, CancellationToken::new())
-        .await?;
+    let base = base_chain(true)?;
+    assert_eq!(base.intake_sources().len(), 2);
+    runner.run_chain(&base, CancellationToken::new()).await?;
     runner
         .run_chain(&ethereum_chain()?, CancellationToken::new())
         .await?;
-
+    runner
+        .run_chain(&sepolia_independent_chain()?, CancellationToken::new())
+        .await?;
     let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
         "SELECT chain_id, verification_level, current_block_number, target_block_number
          FROM chain_phase_state
          WHERE chain_id = ANY($1) AND phase_name = 'verify'
          ORDER BY chain_id",
     )
-    .bind(vec![BASE, ETHEREUM])
+    .bind(vec![BASE, ETHEREUM, SEPOLIA])
     .fetch_all(scratch.pool())
     .await?;
     assert_eq!(
@@ -177,6 +238,7 @@ async fn clean_sweeps_advance_finalized_extents_for_drpc_and_reth() -> Result<()
         vec![
             (BASE.to_owned(), "cross_checked".to_owned(), 5, 5),
             (ETHEREUM.to_owned(), "node_checked".to_owned(), 5, 5),
+            (SEPOLIA.to_owned(), "cross_checked".to_owned(), 5, 5),
         ]
     );
     assert_eq!(
@@ -184,6 +246,7 @@ async fn clean_sweeps_advance_finalized_extents_for_drpc_and_reth() -> Result<()
         vec![
             ReferenceCall {
                 chain_id: BASE.to_owned(),
+                source_key: "drpc-reference".to_owned(),
                 provider_kind: VerificationProviderKind::IndependentRpc,
                 level: VerificationLevel::CrossChecked,
                 from: 0,
@@ -191,25 +254,84 @@ async fn clean_sweeps_advance_finalized_extents_for_drpc_and_reth() -> Result<()
             },
             ReferenceCall {
                 chain_id: ETHEREUM.to_owned(),
+                source_key: "reth-reference".to_owned(),
                 provider_kind: VerificationProviderKind::LocalReth,
                 level: VerificationLevel::NodeChecked,
                 from: 0,
                 to: 5,
             },
+            ReferenceCall {
+                chain_id: SEPOLIA.to_owned(),
+                source_key: "sepolia-verify".to_owned(),
+                provider_kind: VerificationProviderKind::IndependentRpc,
+                level: VerificationLevel::CrossChecked,
+                from: 0,
+                to: 5,
+            },
         ]
     );
-
     drop(runner);
     scratch.cleanup().await
 }
 
 #[tokio::test]
-async fn sepolia_provider_trusted_verify_reports_quick_synced_without_reference_calls() -> Result<()>
+async fn mainnet_without_reference_records_quick_synced() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_provider_trusted").await?;
+    seed_chain(scratch.pool(), ETHEREUM, 8, 7, 5, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors SET next_block_number = 9, target_block_number = 8,
+                last_processed_block_number = 8, last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'reth-intake'",
+    )
+    .bind(ETHEREUM)
+    .bind(block_hash(ETHEREUM, 8))
+    .execute(scratch.pool())
+    .await?;
+    let runner = verifier_runner(
+        &scratch,
+        Arc::new(UnexpectedReferences),
+        Arc::new(CompleteLivePhase),
+    )
+    .await?;
+    let configured = ethereum_chain()?;
+    let intake_only = ChainConfig::new(
+        configured.chain_id.clone(),
+        configured.intake_sources().to_vec(),
+        configured.verify_before_live,
+    )?;
+    runner
+        .run_chain(&intake_only, CancellationToken::new())
+        .await?;
+    let level: String = sqlx::query_scalar(
+        "SELECT verification_level FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(ETHEREUM)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(level, "quick_synced");
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_stronger_level_downgrades_under_roleless_provider_trusted_config() -> Result<()>
 {
     let scratch = ScratchDatabase::create("production_verify_sepolia").await?;
     seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
     seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
     seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'completed',
+             verification_level = 'cross_checked', current_block_number = 5,
+             current_block_hash = $2, target_block_number = 5, target_block_hash = $2,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 5))
+    .execute(scratch.pool())
+    .await?;
     let live_calls = Arc::new(AtomicUsize::new(0));
     let phases = PhaseSet::new([
         Arc::new(UnexpectedPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
@@ -230,9 +352,15 @@ async fn sepolia_provider_trusted_verify_reports_quick_synced_without_reference_
         "production-verify-sepolia-positive",
         test_timing(),
     )?;
-
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
     runner
         .run_chain(&sepolia_chain()?, CancellationToken::new())
+        .with_subscriber(subscriber)
         .await?;
     let state: (String, String, i64, i64) = sqlx::query_as(
         "SELECT phase_status, verification_level,
@@ -248,7 +376,7 @@ async fn sepolia_provider_trusted_verify_reports_quick_synced_without_reference_
         ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
     );
     assert_eq!(live_calls.load(Ordering::SeqCst), 1);
-
+    assert_role_downgrade_log(&logs.text(), SEPOLIA, "cross_checked", "quick_synced");
     drop(runner);
     scratch.cleanup().await
 }
@@ -313,6 +441,134 @@ async fn sepolia_provider_trusted_verify_finishes_before_live_when_serial_flag_i
         "Live started while provider-trusted Verify was still running"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn base_provider_trusted_verify_freezes_before_live_publishes_new_finality() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_base_provider_trusted_serial").await?;
+    let target = BASE_COINBASE_SEAM_BLOCK;
+    let chain = base_provider_trusted_race_chain()?;
+    seed_completed_spine_prerequisites(scratch.pool(), BASE, target).await?;
+    seed_single_finalized_head(scratch.pool(), BASE, target).await?;
+    for source in chain.intake_sources().iter() {
+        let covers_target = source.source_key == "drpc-intake";
+        sqlx::query(
+            "INSERT INTO ingest_cursors (
+                 chain_id, source_key, source_kind, seed_basis,
+                 start_block_number, next_block_number, target_block_number,
+                 last_processed_block_number, last_processed_block_hash
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)",
+        )
+        .bind(BASE)
+        .bind(&source.source_key)
+        .bind(&source.source_kind)
+        .bind(source.seed_basis.as_str())
+        .bind(source.start_block_number)
+        .bind(if covers_target {
+            target + 1
+        } else {
+            source.start_block_number
+        })
+        .bind(covers_target.then_some(target))
+        .bind(covers_target.then(|| block_hash(BASE, target)))
+        .execute(scratch.pool())
+        .await?;
+    }
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::new([
+        Arc::new(UnexpectedPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(UnexpectedPhase::new(PhaseName::Interpret)),
+        Arc::new(UnexpectedPhase::new(PhaseName::Project)),
+        Arc::new(VerifyPhase::with_reference_provider(
+            scratch.verification_database(2).await?,
+            Arc::new(UnexpectedReferences),
+        )),
+        Arc::new(PublishingFinalizedLivePhase {
+            pool: scratch.pool().clone(),
+            chain_id: BASE,
+            through: target + 1,
+            calls: Arc::clone(&live_calls),
+        }),
+    ])?;
+    let verify_gate = VerificationGate::default();
+    let verify_hook_calls = Arc::new(AtomicUsize::new(0));
+    let runner = Arc::new(
+        PhaseRunner::new(
+            scratch.runner(),
+            phases,
+            CapacityGuard::system(CapacityConfig::default()),
+            "production-verify-base-provider-trusted-serial",
+            test_timing(),
+        )?
+        .with_before_phase_context({
+            let gate = verify_gate.clone();
+            let calls = Arc::clone(&verify_hook_calls);
+            move |phase| {
+                let gate = gate.clone();
+                let calls = Arc::clone(&calls);
+                async move {
+                    if phase == PhaseName::Verify && calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                }
+            }
+        }),
+    );
+    let cancellation = CancellationToken::new();
+    let task = {
+        let runner = Arc::clone(&runner);
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move { runner.run_chain(&chain, cancellation).await })
+    };
+
+    tokio::time::timeout(Duration::from_secs(5), verify_gate.entered.notified()).await?;
+    let live_published_while_verify_was_blocked = tokio::time::timeout(
+        Duration::from_millis(250),
+        wait_for_finalized_head(scratch.pool(), BASE, target + 1),
+    )
+    .await
+    .is_ok();
+    verify_gate.release.notify_one();
+    if live_published_while_verify_was_blocked {
+        let error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await??
+            .expect_err("the paired provider-trusted race must reject the newer target");
+        assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+        assert!(error.to_string().contains("finalized block"), "{error}");
+        panic!(
+            "Live published newer finality before provider-trusted Verify froze its target: {error}"
+        );
+    }
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_finalized_head(scratch.pool(), BASE, target + 1),
+    )
+    .await??;
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task).await???;
+    assert!(live_calls.load(Ordering::SeqCst) > 0);
+    let verify: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT phase_status, verification_level, current_block_number, target_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        verify,
+        (
+            "completed".to_owned(),
+            "quick_synced".to_owned(),
+            target,
+            target
+        )
+    );
+
+    drop(runner);
+    scratch.cleanup().await
 }
 
 #[tokio::test]
@@ -1544,9 +1800,11 @@ async fn completed_sepolia_ingest_rejects_unreviewed_source_shape_before_interpr
     drop(runner);
     scratch.cleanup().await?;
     assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert!(
-        error.to_string().contains("one dRPC intake source"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "chain ethereum-sepolia intake descriptors [ethereum-sepolia:rpc-intake] violate the \
+         required shape: exactly one dRPC intake-capable source with ethereum_head seed basis \
+         and start block 0"
     );
     assert_eq!(
         observed_calls,
@@ -2013,6 +2271,37 @@ async fn sepolia_rejects_unreviewed_intake_source_shapes_before_verification() -
             .expect_err(label);
         assert_eq!(error.kind(), ErrorKind::Configuration, "{label}");
     }
+
+    let sources = vec![
+        SourceConfig::new_with_role(
+            SEPOLIA,
+            "drpc-intake",
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            SourceRole::Intake,
+            "https://intake.invalid",
+        )?,
+        SourceConfig::new_with_role(
+            SEPOLIA,
+            "drpc-verify",
+            "drpc",
+            SeedBasis::EthereumHead,
+            1,
+            SourceRole::VerificationOnly,
+            "https://verify.invalid",
+        )?,
+    ];
+    let error = phase
+        .preflight(SEPOLIA, &sources, &phase_runner::phase::RunMode::Normal)
+        .expect_err("invalid verification-only shape must be labeled as verification-only");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "chain ethereum-sepolia verification-only descriptors [ethereum-sepolia:drpc-verify] \
+         violate the required shape: exactly one dRPC verification-only source with \
+         ethereum_head seed basis and start block 0"
+    );
     drop(phase);
     scratch.cleanup().await
 }
@@ -2065,6 +2354,7 @@ async fn resumed_normal_verification_retains_the_weaker_extent_level() -> Result
         reference.calls(),
         vec![ReferenceCall {
             chain_id: BASE.to_owned(),
+            source_key: "drpc-reference".to_owned(),
             provider_kind: VerificationProviderKind::IndependentRpc,
             level: VerificationLevel::CrossChecked,
             from: 3,
@@ -2596,6 +2886,7 @@ async fn verify_redo_rechecks_the_requested_range_and_persists_its_level() -> Re
         vec![
             ReferenceCall {
                 chain_id: BASE.to_owned(),
+                source_key: "drpc-reference".to_owned(),
                 provider_kind: VerificationProviderKind::IndependentRpc,
                 level: VerificationLevel::CrossChecked,
                 from: 2,
@@ -2603,6 +2894,7 @@ async fn verify_redo_rechecks_the_requested_range_and_persists_its_level() -> Re
             },
             ReferenceCall {
                 chain_id: BASE.to_owned(),
+                source_key: "drpc-reference".to_owned(),
                 provider_kind: VerificationProviderKind::IndependentRpc,
                 level: VerificationLevel::CrossChecked,
                 from: 2,
@@ -3082,7 +3374,192 @@ async fn full_verify_redo_updates_the_full_extent_level() -> Result<()> {
 }
 
 #[tokio::test]
-async fn base_reth_reference_is_rejected_before_verify_redo_begins() -> Result<()> {
+async fn partial_verify_redo_persists_the_weaker_current_role_level() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_partial_redo_weaker_level").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'completed',
+             verification_level = 'cross_checked', current_block_number = 5,
+             current_block_hash = $2, target_block_number = 5, target_block_hash = $2,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 5))
+    .execute(scratch.pool())
+    .await?;
+    let runner = sepolia_verifier_runner(&scratch, Arc::new(AtomicUsize::new(0))).await?;
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+    runner
+        .redo(
+            &sepolia_chain()?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 4)?,
+            CancellationToken::new(),
+        )
+        .with_subscriber(subscriber)
+        .await?;
+
+    let level: String = sqlx::query_scalar(
+        "SELECT verification_level FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(level, "quick_synced");
+    assert_role_downgrade_log(&logs.text(), SEPOLIA, "cross_checked", "quick_synced");
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn failed_partial_verify_redo_does_not_log_an_unpersisted_downgrade() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_failed_partial_redo_level").await?;
+    seed_sparse_verify_boundaries(scratch.pool()).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'finalized')",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, FIRST_VERIFY_BATCH_END + 1))
+    .bind(block_hash(SEPOLIA, FIRST_VERIFY_BATCH_END))
+    .bind(FIRST_VERIFY_BATCH_END + 1)
+    .execute(scratch.pool())
+    .await?;
+    seed_ingest_cursor(
+        scratch.pool(),
+        SEPOLIA,
+        "drpc-intake",
+        MULTI_BATCH_VERIFY_TARGET + 1,
+    )
+    .await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, MULTI_BATCH_VERIFY_TARGET).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'completed',
+             verification_level = 'cross_checked', current_block_number = $2,
+             current_block_hash = $3, target_block_number = $2, target_block_hash = $3,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(MULTI_BATCH_VERIFY_TARGET)
+    .bind(block_hash(SEPOLIA, MULTI_BATCH_VERIFY_TARGET))
+    .execute(scratch.pool())
+    .await?;
+    let cancellation = CancellationToken::new();
+    let hook_cancellation = cancellation.clone();
+    let runner = sepolia_verifier_runner(&scratch, Arc::new(AtomicUsize::new(0)))
+        .await?
+        .with_before_redo_progress_write(move || {
+            let hook_cancellation = hook_cancellation.clone();
+            async move {
+                hook_cancellation.cancel();
+            }
+        });
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+
+    let error = runner
+        .redo(
+            &sepolia_chain()?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, FIRST_VERIFY_BATCH_END + 1)?,
+            cancellation,
+        )
+        .with_subscriber(subscriber)
+        .await
+        .expect_err("cancellation after the first batch must leave the partial redo incomplete");
+    let level: String = sqlx::query_scalar(
+        "SELECT verification_level FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+    assert_eq!(level, "cross_checked");
+    assert!(!logs.text().contains("verification_level_downgraded"));
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn more_than_one_verification_only_source_is_rejected_loudly() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_multiple_references").await?;
+    let reference = Arc::new(FixtureReferences::new([]));
+    let phase = VerifyPhase::with_reference_provider(
+        scratch.verification_database(2).await?,
+        reference.clone(),
+    );
+    let chain = ChainConfig::new(
+        SEPOLIA,
+        vec![
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-intake",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::Intake,
+                "https://sepolia-intake.invalid",
+            )?,
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-verify-a",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                "https://sepolia-verify-a.invalid",
+            )?,
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-verify-b",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                "https://sepolia-verify-b.invalid",
+            )?,
+        ],
+        true,
+    )?;
+
+    let error = phase
+        .preflight(&chain.chain_id, &chain.sources, &RunMode::Normal)
+        .expect_err("multiple verification-only sources must fail before provider preflight");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "chain ethereum-sepolia configures more than one verification-only source: \
+         sepolia-verify-a, sepolia-verify-b"
+    );
+    assert_eq!(reference.preflights(), 0);
+
+    drop(phase);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verification_only_endpoint_equal_to_intake_is_rejected() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_base_reth_unsupported").await?;
     seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
     let reference = Arc::new(FixtureReferences::new([reference_log(BASE, 1)]));
@@ -3091,7 +3568,7 @@ async fn base_reth_reference_is_rejected_before_verify_redo_begins() -> Result<(
         .run_chain(&base_chain(true)?, CancellationToken::new())
         .await?;
     reference.clear_calls();
-
+    reference.clear_preflights();
     let error = runner
         .redo(
             &base_chain_with_reth_reference()?,
@@ -3123,8 +3600,262 @@ async fn base_reth_reference_is_rejected_before_verify_redo_begins() -> Result<(
         state,
         ("completed".to_owned(), "cross_checked".to_owned(), false)
     );
-
+    let shared_endpoint = "https://shared-secret.invalid";
+    let error = runner
+        .redo(
+            &sepolia_role_chain(shared_endpoint, shared_endpoint)?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("same-endpoint source roles must fail before Verify redo state");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("drpc-intake"));
+    assert!(error.to_string().contains("sepolia-verify"));
+    assert!(!error.to_string().contains(shared_endpoint));
+    assert_eq!(reference.preflights(), 0);
+    assert!(reference.calls().is_empty());
+    let state_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM chain_phase_state WHERE chain_id = $1")
+            .bind(SEPOLIA)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(state_rows, 0);
     drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verification_endpoint_trailing_slash_alias_is_rejected() -> Result<()> {
+    assert_endpoint_alias_rejected(
+        "production_verify_endpoint_trailing_slash_alias",
+        "https://rpc.example",
+        "https://rpc.example/",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_non_root_trailing_slash_alias_is_rejected() -> Result<()> {
+    assert_endpoint_alias_rejected(
+        "production_verify_endpoint_non_root_trailing_alias",
+        "https://rpc.example/rpc",
+        "https://rpc.example/rpc/",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_default_port_alias_is_rejected() -> Result<()> {
+    assert_endpoint_alias_rejected(
+        "production_verify_endpoint_default_port_alias",
+        "https://rpc.example:443/",
+        "https://rpc.example/",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_case_and_percent_encoding_alias_is_rejected() -> Result<()> {
+    assert_endpoint_alias_rejected(
+        "production_verify_endpoint_percent_alias",
+        "https://RPC.EXAMPLE/%7eservice",
+        "https://rpc.example/~service",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_distinct_non_root_paths_remain_independent() -> Result<()> {
+    assert_endpoint_pair_is_independent(
+        "production_verify_endpoint_distinct_non_root_paths",
+        "https://rpc.example/rpc",
+        "https://rpc.example/rpc2",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_double_trailing_slash_remains_independent() -> Result<()> {
+    assert_endpoint_pair_is_independent(
+        "production_verify_endpoint_double_trailing_slash",
+        "https://rpc.example/rpc",
+        "https://rpc.example/rpc//",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_endpoint_root_double_slash_remains_independent() -> Result<()> {
+    assert_endpoint_pair_is_independent(
+        "production_verify_endpoint_root_double_slash",
+        "https://rpc.example/",
+        "https://rpc.example//",
+    )
+    .await
+}
+
+async fn assert_endpoint_alias_rejected(
+    database_name: &str,
+    intake_endpoint: &str,
+    verification_endpoint: &str,
+) -> Result<()> {
+    let scratch = ScratchDatabase::create(database_name).await?;
+    let reference = Arc::new(FixtureReferences::new([]));
+    let phase = VerifyPhase::with_reference_provider(
+        scratch.verification_database(2).await?,
+        reference.clone(),
+    );
+    let chain = sepolia_role_chain(intake_endpoint, verification_endpoint)?;
+
+    let error = phase
+        .preflight(&chain.chain_id, &chain.sources, &RunMode::Normal)
+        .expect_err("parsed aliases of one RPC endpoint must fail independence validation");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("drpc-intake"));
+    assert!(error.to_string().contains("sepolia-verify"));
+    assert!(!error.to_string().contains(intake_endpoint));
+    assert!(!error.to_string().contains(verification_endpoint));
+    assert_eq!(reference.preflights(), 0);
+    drop(phase);
+    scratch.cleanup().await
+}
+
+async fn assert_endpoint_pair_is_independent(
+    database_name: &str,
+    intake_endpoint: &str,
+    verification_endpoint: &str,
+) -> Result<()> {
+    let scratch = ScratchDatabase::create(database_name).await?;
+    let reference = Arc::new(FixtureReferences::new([]));
+    let phase = VerifyPhase::with_reference_provider(
+        scratch.verification_database(2).await?,
+        reference.clone(),
+    );
+    let chain = sepolia_role_chain(intake_endpoint, verification_endpoint)?;
+
+    phase
+        .preflight(&chain.chain_id, &chain.sources, &RunMode::Normal)
+        .expect("genuinely different RPC paths must remain independent");
+
+    assert_eq!(reference.preflights(), 1);
+    drop(phase);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verification_reth_dot_segment_alias_is_rejected() -> Result<()> {
+    assert_reth_path_alias_rejected(
+        "production_verify_reth_dot_segment_alias",
+        "/data/reth",
+        "/data/./reth",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_reth_trailing_separator_alias_is_rejected() -> Result<()> {
+    assert_reth_path_alias_rejected(
+        "production_verify_reth_trailing_separator_alias",
+        "/data/reth",
+        "/data/reth/",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_reth_parent_segment_alias_is_rejected() -> Result<()> {
+    assert_reth_path_alias_rejected(
+        "production_verify_reth_parent_segment_alias",
+        "/data/reth",
+        "/data/unused/../reth",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn verification_reth_relative_alias_is_rejected() -> Result<()> {
+    let relative = "target/reth-alias-fixture";
+    let absolute = std::env::current_dir()?.join(relative);
+    assert_reth_path_alias_rejected(
+        "production_verify_reth_relative_alias",
+        absolute.to_string_lossy().as_ref(),
+        relative,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verification_reth_symlink_alias_is_rejected() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("bigname-reth-alias-{}", Uuid::new_v4()));
+    let datadir = root.join("reth");
+    let alias = root.join("reth-link");
+    std::fs::create_dir_all(&datadir)?;
+    std::os::unix::fs::symlink(&datadir, &alias)?;
+    let result = assert_reth_path_alias_rejected(
+        "production_verify_reth_symlink_alias",
+        datadir.to_string_lossy().as_ref(),
+        alias.to_string_lossy().as_ref(),
+    )
+    .await;
+    std::fs::remove_dir_all(root)?;
+    result
+}
+
+async fn assert_reth_path_alias_rejected(
+    database_name: &str,
+    intake_path: &str,
+    verification_path: &str,
+) -> Result<()> {
+    let scratch = ScratchDatabase::create(database_name).await?;
+    let reference = Arc::new(FixtureReferences::new([]));
+    let phase = VerifyPhase::with_reference_provider(
+        scratch.verification_database(2).await?,
+        reference.clone(),
+    );
+    let chain = ChainConfig::new(
+        ETHEREUM,
+        vec![
+            SourceConfig::new_with_role(
+                ETHEREUM,
+                "reth-intake",
+                "reth_db",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::Intake,
+                intake_path,
+            )?,
+            SourceConfig::new_with_role(
+                ETHEREUM,
+                "reth-reference",
+                "reth_db",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                verification_path,
+            )?,
+        ],
+        false,
+    )?;
+
+    let error = phase
+        .preflight(&chain.chain_id, &chain.sources, &RunMode::Normal)
+        .expect_err("filesystem aliases of one reth datadir must fail independence validation");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "verification-only source ethereum-mainnet:reth-reference opened object configured \
+         datadir resolves to the same provider location as intake source \
+         ethereum-mainnet:reth-intake opened object configured datadir"
+    );
+    assert!(!error.to_string().contains(intake_path));
+    assert!(!error.to_string().contains(verification_path));
+    assert_eq!(reference.preflights(), 0);
+    drop(phase);
     scratch.cleanup().await
 }
 
@@ -3149,10 +3880,11 @@ async fn verify_stays_at_finality_while_live_advances_to_head() -> Result<()> {
         .await?,
     );
     let cancellation = CancellationToken::new();
+    let chain = base_chain(false)?;
     let task = {
         let runner = Arc::clone(&runner);
         let cancellation = cancellation.clone();
-        tokio::spawn(async move { runner.run_chain(&base_chain(false)?, cancellation).await })
+        tokio::spawn(async move { runner.run_chain(&chain, cancellation).await })
     };
 
     tokio::time::timeout(Duration::from_secs(5), gate.entered.notified()).await?;
@@ -3197,6 +3929,7 @@ async fn verify_stays_at_finality_while_live_advances_to_head() -> Result<()> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReferenceCall {
     chain_id: String,
+    source_key: String,
     provider_kind: VerificationProviderKind,
     level: VerificationLevel,
     from: i64,
@@ -3212,6 +3945,7 @@ struct VerificationGate {
 #[derive(Default)]
 struct FixtureState {
     logs: BTreeMap<String, Vec<VerificationLog>>,
+    preflights: usize,
     calls: Vec<ReferenceCall>,
 }
 
@@ -3251,10 +3985,16 @@ impl FixtureReferences {
         self.state.lock().expect("fixture state lock").calls.clone()
     }
 
+    fn preflights(&self) -> usize {
+        self.state.lock().expect("fixture state lock").preflights
+    }
     fn clear_calls(&self) {
         self.state.lock().expect("fixture state lock").calls.clear();
     }
 
+    fn clear_preflights(&self) {
+        self.state.lock().expect("fixture state lock").preflights = 0;
+    }
     fn set_log_data(&self, chain_id: &str, data: u8) {
         for log in self
             .state
@@ -3271,6 +4011,7 @@ impl FixtureReferences {
 
 impl VerificationReferenceProvider for FixtureReferences {
     fn preflight(&self, source: &VerificationSource) -> RunnerResult<()> {
+        self.state.lock().expect("fixture state lock").preflights += 1;
         match (source.provider_kind(), source.verification_level()) {
             (VerificationProviderKind::IndependentRpc, VerificationLevel::CrossChecked)
             | (VerificationProviderKind::LocalReth, VerificationLevel::NodeChecked) => Ok(()),
@@ -3292,6 +4033,7 @@ impl VerificationReferenceProvider for FixtureReferences {
             let mut state = self.state.lock().expect("fixture state lock");
             state.calls.push(ReferenceCall {
                 chain_id: chain_id.clone(),
+                source_key: source.source_key().to_owned(),
                 provider_kind: source.provider_kind(),
                 level: source.verification_level(),
                 from: from_block,
@@ -3529,6 +4271,54 @@ struct AdvancingLivePhase {
     from: i64,
     through: i64,
     calls: Arc<AtomicUsize>,
+}
+
+struct PublishingFinalizedLivePhase {
+    pool: sqlx::PgPool,
+    chain_id: &'static str,
+    through: i64,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Phase for PublishingFinalizedLivePhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Live
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            sqlx::query(
+                "INSERT INTO chain_lineage (
+                     chain_id, block_hash, parent_hash, block_number,
+                     block_timestamp, canonicality_state
+                 ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'observed')
+                 ON CONFLICT (chain_id, block_hash) DO NOTHING",
+            )
+            .bind(self.chain_id)
+            .bind(block_hash(self.chain_id, self.through))
+            .bind(block_hash(self.chain_id, self.through - 1))
+            .bind(self.through)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                RunnerError::data_integrity(format!(
+                    "live fixture failed to store finalized lineage: {error}"
+                ))
+            })?;
+            let marker = BlockMarker::new(self.through, block_hash(self.chain_id, self.through))?;
+            Ok(PhaseBatchOutcome::Idle(PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker.clone()),
+                heads: Some(HeadMarkers {
+                    latest: marker.clone(),
+                    safe: Some(marker.clone()),
+                    finalized: Some(marker),
+                }),
+                ..PhaseProgress::default()
+            }))
+        })
+    }
 }
 
 impl Phase for AdvancingLivePhase {
@@ -3827,6 +4617,33 @@ fn base_chain(verify_before_live: bool) -> RunnerResult<ChainConfig> {
     base_chain_with_drpc_start(verify_before_live, BASE_COINBASE_SEAM_BLOCK)
 }
 
+fn base_provider_trusted_race_chain() -> RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        BASE,
+        vec![
+            SourceConfig::new_with_role(
+                BASE,
+                "coinbase-history",
+                "coinbase_sql",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
+                "https://coinbase.invalid",
+            )?,
+            SourceConfig::new_with_role(
+                BASE,
+                "drpc-intake",
+                "drpc",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
+                "https://drpc-intake.invalid",
+            )?,
+        ],
+        false,
+    )
+}
+
 fn base_chain_with_drpc_start(
     verify_before_live: bool,
     drpc_start: i64,
@@ -3834,20 +4651,31 @@ fn base_chain_with_drpc_start(
     ChainConfig::new(
         BASE,
         vec![
-            SourceConfig::new(
+            SourceConfig::new_with_role(
                 BASE,
                 "coinbase-history",
                 "coinbase_sql",
                 SeedBasis::BaseSeam,
                 0,
+                SourceRole::Intake,
                 "https://coinbase.invalid",
             )?,
-            SourceConfig::new(
+            SourceConfig::new_with_role(
+                BASE,
+                "drpc-intake",
+                "drpc",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
+                "https://drpc-intake.invalid",
+            )?,
+            SourceConfig::new_with_role(
                 BASE,
                 "drpc-reference",
                 "drpc",
                 SeedBasis::BaseSeam,
                 drpc_start,
+                SourceRole::VerificationOnly,
                 "https://drpc.invalid",
             )?,
         ],
@@ -3859,20 +4687,31 @@ fn base_chain_with_endpoints() -> RunnerResult<ChainConfig> {
     ChainConfig::new(
         BASE,
         vec![
-            SourceConfig::new(
+            SourceConfig::new_with_role(
                 BASE,
                 "coinbase-history",
                 "coinbase_sql",
                 SeedBasis::BaseSeam,
                 0,
+                SourceRole::Intake,
                 "https://rotated-coinbase.invalid",
             )?,
-            SourceConfig::new(
+            SourceConfig::new_with_role(
+                BASE,
+                "drpc-intake",
+                "drpc",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
+                "https://rotated-drpc-intake.invalid",
+            )?,
+            SourceConfig::new_with_role(
                 BASE,
                 "drpc-reference",
                 "drpc",
                 SeedBasis::BaseSeam,
                 BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::VerificationOnly,
                 "https://rotated-drpc.invalid",
             )?,
         ],
@@ -3884,20 +4723,31 @@ fn base_chain_with_reth_reference() -> RunnerResult<ChainConfig> {
     ChainConfig::new(
         BASE,
         vec![
-            SourceConfig::new(
+            SourceConfig::new_with_role(
                 BASE,
                 "coinbase-history",
                 "coinbase_sql",
                 SeedBasis::BaseSeam,
                 0,
+                SourceRole::Intake,
                 "https://coinbase.invalid",
             )?,
-            SourceConfig::new(
+            SourceConfig::new_with_role(
+                BASE,
+                "drpc-intake",
+                "drpc",
+                SeedBasis::BaseSeam,
+                BASE_COINBASE_SEAM_BLOCK,
+                SourceRole::Intake,
+                "https://drpc-intake.invalid",
+            )?,
+            SourceConfig::new_with_role(
                 BASE,
                 "reth-reference",
                 "reth_db",
                 SeedBasis::BaseSeam,
                 0,
+                SourceRole::VerificationOnly,
                 "/fixture/reth",
             )?,
         ],
@@ -3912,14 +4762,26 @@ fn ethereum_chain() -> RunnerResult<ChainConfig> {
 fn ethereum_chain_with_start(start: i64) -> RunnerResult<ChainConfig> {
     ChainConfig::new(
         ETHEREUM,
-        vec![SourceConfig::new(
-            ETHEREUM,
-            "reth-reference",
-            "reth_db",
-            SeedBasis::EthereumHead,
-            start,
-            "/fixture/reth",
-        )?],
+        vec![
+            SourceConfig::new_with_role(
+                ETHEREUM,
+                "reth-intake",
+                "reth_db",
+                SeedBasis::EthereumHead,
+                start,
+                SourceRole::Intake,
+                "/fixture/reth-intake",
+            )?,
+            SourceConfig::new_with_role(
+                ETHEREUM,
+                "reth-reference",
+                "reth_db",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                "/fixture/reth-reference",
+            )?,
+        ],
         false,
     )
 }
@@ -3928,6 +4790,38 @@ fn sepolia_chain() -> RunnerResult<ChainConfig> {
     sepolia_chain_with_key("drpc-intake")
 }
 
+fn sepolia_independent_chain() -> RunnerResult<ChainConfig> {
+    sepolia_role_chain(
+        "https://sepolia-intake.invalid",
+        "https://sepolia-verify.invalid",
+    )
+}
+fn sepolia_role_chain(intake_endpoint: &str, verify_endpoint: &str) -> RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        SEPOLIA,
+        vec![
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "drpc-intake",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::Intake,
+                intake_endpoint,
+            )?,
+            SourceConfig::new_with_role(
+                SEPOLIA,
+                "sepolia-verify",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                SourceRole::VerificationOnly,
+                verify_endpoint,
+            )?,
+        ],
+        true,
+    )
+}
 fn sepolia_chain_with_key(source_key: &str) -> RunnerResult<ChainConfig> {
     sepolia_chain_with_kind(source_key, "drpc")
 }
@@ -4201,14 +5095,10 @@ async fn seed_ingest_identities(pool: &sqlx::PgPool, chain_id: &str) -> Result<(
     let sources = match chain_id {
         BASE => vec![
             ("coinbase-history", "coinbase_sql", "base_seam", 0),
-            (
-                "drpc-reference",
-                "drpc",
-                "base_seam",
-                BASE_COINBASE_SEAM_BLOCK,
-            ),
+            ("drpc-intake", "drpc", "base_seam", BASE_COINBASE_SEAM_BLOCK),
         ],
-        ETHEREUM => vec![("reth-reference", "reth_db", "ethereum_head", 0)],
+        ETHEREUM => vec![("reth-intake", "reth_db", "ethereum_head", 0)],
+        SEPOLIA => vec![("drpc-intake", "drpc", "ethereum_head", 0)],
         _ => Vec::new(),
     };
     for (source_key, source_kind, seed_basis, start) in sources {
@@ -4277,6 +5167,55 @@ async fn seed_lineage_and_heads(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn seed_single_finalized_head(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    number: i64,
+) -> Result<()> {
+    let hash = block_hash(chain_id, number);
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'finalized')",
+    )
+    .bind(chain_id)
+    .bind(&hash)
+    .bind(block_hash(chain_id, number - 1))
+    .bind(number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (
+             chain_id, latest_block_hash, latest_block_number,
+             safe_block_hash, safe_block_number,
+             finalized_block_hash, finalized_block_number
+         ) VALUES ($1, $2, $3, $2, $3, $2, $3)",
+    )
+    .bind(chain_id)
+    .bind(hash)
+    .bind(number)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn wait_for_finalized_head(pool: &sqlx::PgPool, chain_id: &str, expected: i64) -> Result<()> {
+    loop {
+        let finalized: Option<i64> = sqlx::query_scalar(
+            "SELECT finalized_block_number FROM chain_heads WHERE chain_id = $1",
+        )
+        .bind(chain_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+        if finalized.is_some_and(|number| number >= expected) {
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 async fn seed_watch_manifest(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {

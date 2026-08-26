@@ -7,6 +7,7 @@ use phase_runner::{
     cli::{
         Cli, RedoChains, ResolvedCommand, resolve_all_redo_chains, validate_redo_attestation_chains,
     },
+    config::{COMPILED_CHAIN_NAMESPACES, validate_deployment_table_set},
     database::{RunnerDatabase, VerificationDatabase},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
@@ -52,12 +53,24 @@ async fn main() -> Result<()> {
             runtime,
             hydration_rpc_urls,
         } => {
+            let (manifest_repository, manifest_profile) =
+                load_hashed_manifest_repository(&manifests_root)?;
+            validate_deployment_table_set(
+                &runtime.chains,
+                COMPILED_CHAIN_NAMESPACES.iter().copied(),
+            )?;
             let connections = u32::try_from(runtime.chains.len())
                 .unwrap_or(u32::MAX)
                 .saturating_mul(2)
                 .max(4);
             let database = RunnerDatabase::connect(&database_url, connections).await?;
-            sync_manifests(database.pool(), &manifests_root).await?;
+            sync_loaded_manifests(
+                database.pool(),
+                &manifests_root,
+                &manifest_repository,
+                manifest_profile,
+            )
+            .await?;
             let loop_heartbeat = phase_runner::metrics::RunnerLoopHeartbeat::default();
             for chain in runtime.chains.iter() {
                 loop_heartbeat.record_progress(&chain.chain_id);
@@ -127,14 +140,19 @@ async fn main() -> Result<()> {
             hydration_rpc_urls,
         } => {
             let database = RunnerDatabase::connect(&database_url, 4).await?;
-            sync_manifests(database.pool(), &manifests_root).await?;
             let chains = match chains {
                 RedoChains::Explicit(chains) => chains,
                 RedoChains::All { sources } => {
-                    resolve_all_redo_chains(database.pool(), sources, phase.requires_ingest())
-                        .await?
+                    resolve_all_redo_chains(
+                        database.pool(),
+                        sources,
+                        phase.requires_intake_sources(),
+                    )
+                    .await?
                 }
             };
+            validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
+            sync_manifests(database.pool(), &manifests_root).await?;
             validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
             let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
@@ -212,7 +230,16 @@ async fn main() -> Result<()> {
 
 async fn sync_manifests(pool: &sqlx::PgPool, root: &std::path::Path) -> Result<()> {
     let (repository, profile) = load_hashed_manifest_repository(root)?;
-    let summary = bigname_manifests::sync_schema_v2_repository(pool, &repository).await?;
+    sync_loaded_manifests(pool, root, &repository, profile).await
+}
+
+async fn sync_loaded_manifests(
+    pool: &sqlx::PgPool,
+    root: &std::path::Path,
+    repository: &bigname_manifests::ManifestRepository,
+    profile: &str,
+) -> Result<()> {
+    let summary = bigname_manifests::sync_schema_v2_repository(pool, repository).await?;
     tracing::info!(
         manifests_root = %root.display(),
         manifest_profile = profile,
@@ -274,7 +301,10 @@ fn require_clean_supervisor_exit(report: SupervisorReport) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use phase_runner::error::RunnerError;
+    use phase_runner::{
+        config::{ChainConfig, SeedBasis, SourceConfig},
+        error::RunnerError,
+    };
 
     use super::*;
 
@@ -350,6 +380,21 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_profiles_identify_two_configured_ens_chains() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("manifests/mainnet");
+        load_hashed_manifest_repository(&root).expect("mainnet manifest profile must be covered");
+        let chains = [
+            configured_chain("ethereum-mainnet"),
+            configured_chain("ethereum-sepolia"),
+        ];
+
+        validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())
+            .expect_err("the checked-in profiles must identify both configured ENS chains");
+    }
+
+    #[test]
     fn partial_runtime_manifest_tree_is_rejected_by_the_hash_gate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -359,5 +404,24 @@ mod tests {
 
         assert!(error.to_string().contains("not covered"));
         assert!(error.to_string().contains("interpreter content hash"));
+    }
+
+    fn configured_chain(chain_id: &str) -> ChainConfig {
+        ChainConfig::new(
+            chain_id,
+            vec![
+                SourceConfig::new(
+                    chain_id,
+                    "rpc",
+                    "rpc",
+                    SeedBasis::BaseSeam,
+                    0,
+                    "http://rpc.invalid",
+                )
+                .unwrap(),
+            ],
+            false,
+        )
+        .unwrap()
     }
 }

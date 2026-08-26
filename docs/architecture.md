@@ -498,9 +498,7 @@ Phases per chain:
    projections, one-transaction publication for the affected scope, and
    canonical-head [hydration](glossary.md#hydration) after publication
 4. `verify` — read-only [stored-history verification](glossary.md#stored-history-verification)
-   through a finalized boundary; today Base and Ethereum Mainnet select a
-   reference by kind from the same undifferentiated source set used for intake, while
-   Sepolia records `quick_synced`. With the Issue #411 enforcement change, Base
+   through a finalized boundary; Base
    can compare its Coinbase-loaded range with a distinct dRPC through the ingest
    seam, Ethereum Mainnet can compare with a distinct local reth, and Ethereum
    Sepolia can compare with a distinct [verification-only](glossary.md#source-role)
@@ -527,15 +525,14 @@ cannot advance past the ingested boundary.
 The checked-in phase runner contains real `ingest`, `interpret`, `project`,
 `verify`, and `live` implementations. Reference-comparison verification reads
 canonical selected raw logs and the manifest-derived watch set through a
-separately credentialed, SELECT-only database handle. The Issue #411
-enforcement change will generalize provider-trusted verification to require the
+separately credentialed, SELECT-only database handle. Provider-trusted verification requires the
 chain-policy-selected intake cursor to cover the finalized target. Startup requires the reader login to be directly
 authenticated (the session user and active role must match) and rejects one that has
 application-relation write privileges, schema/database creation authority,
 elevated role attributes, or another role membership; the verifier never
 receives the phase runner's writer pool. The reader and writer connections must
 also report the same PostgreSQL system identifier, database OID, and database
-name. With the Issue #411 enforcement change and a distinct verification-only
+name. With a distinct verification-only
 Base dRPC, Verify compares the Coinbase-loaded range through the fixed block
 `48,428,000` ingest seam and records `cross_checked`; the later dRPC-ingested
 suffix does not inherit that level. Without that reference, Base records
@@ -553,7 +550,7 @@ verification-only local reth and `quick_synced` from its intake reth without
 one. Ethereum Sepolia records `cross_checked` when a distinct verification-only
 dRPC compares its durable ingested extent through the finalized marker. Without
 that source it records `quick_synced` from the target-covering intake cursor and
-never compares the intake provider with itself. The enforcement binary rejects a verification
+never compares the intake provider with itself. The runner rejects a verification
 level stronger than the chain-specific verification path can earn before persisting
 the level or proceeding to Live. On a reference-comparison path, a
 mismatch records its block, field, stored value, and reference value, then stops

@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        CapacityConfig, ChainConfig, RuntimeConfig, SourceConfig, TimingConfig, group_sources,
+        COMPILED_CHAIN_NAMESPACES, CapacityConfig, ChainConfig, RuntimeConfig, SourceConfig,
+        TimingConfig, group_sources, validate_deployment_table_set,
     },
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName},
@@ -173,7 +174,7 @@ struct RunArgs {
         long = "source",
         env = "BIGNAME_PHASE_RUNNER_SOURCES",
         value_delimiter = ',',
-        help = "CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV"
+        help = "CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV"
     )]
     sources: Vec<String>,
 
@@ -249,7 +250,7 @@ struct RedoArgs {
         long = "source",
         env = "BIGNAME_PHASE_RUNNER_SOURCES",
         value_delimiter = ',',
-        help = "CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV"
+        help = "CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK[:ROLE]=URL_ENV"
     )]
     sources: Vec<String>,
 
@@ -410,10 +411,11 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         .iter()
         .map(|source| parse_source(source))
         .collect::<RunnerResult<Vec<_>>>()?;
-    if phase.requires_ingest() && sources.is_empty() {
+    if phase.requires_intake_sources() && sources.is_empty() {
         return Err(RunnerError::new(
             ErrorKind::Configuration,
-            "ingest or all-phase redo requires at least one --source",
+            "ingest, interpret, project, verify, or all-phase redo requires at least one \
+             intake-capable --source",
         ));
     }
     if phase.requires_verify() && args.verification_database_url.is_none() {
@@ -428,9 +430,12 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         RedoChains::Explicit(resolve_explicit_redo_chains(
             args.chains,
             sources,
-            phase.requires_ingest(),
+            phase.requires_intake_sources(),
         )?)
     };
+    if let RedoChains::Explicit(chains) = &chains {
+        validate_deployment_table_set(chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
+    }
     Ok(ResolvedCommand::Redo {
         database_url: args.connection.database_url,
         verification_database_url: args.verification_database_url,
@@ -536,13 +541,11 @@ fn resolve_explicit_redo_chains(
         .into_iter()
         .map(|chain_id| {
             let sources = by_chain.remove(&chain_id).unwrap_or_default();
-            if require_sources && sources.is_empty() {
-                return Err(RunnerError::new(
-                    ErrorKind::Configuration,
-                    format!("ingest or all-phase redo requires a source for chain {chain_id}"),
-                ));
+            let chain = ChainConfig::new(chain_id, sources, false)?;
+            if require_sources {
+                chain.require_intake_sources()?;
             }
-            ChainConfig::new(chain_id, sources, false)
+            Ok(chain)
         })
         .collect()
 }

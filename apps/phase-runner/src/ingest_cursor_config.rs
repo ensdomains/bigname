@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     config::{SourceConfig, normalized_source_kind},
@@ -39,6 +39,54 @@ pub(crate) async fn validate_completed(
         validate(source, stored)?;
     }
     validate_persisted_source_keys(pool, chain_id, sources, false).await
+}
+
+pub(crate) async fn validate_completed_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    sources: &[SourceConfig],
+) -> RunnerResult<()> {
+    for source in sources {
+        let stored = sqlx::query_as::<_, StoredSourceConfig>(
+            "SELECT source_kind, seed_basis, start_block_number
+             FROM ingest_cursors
+             WHERE chain_id = $1 AND source_key = $2",
+        )
+        .bind(&source.chain_id)
+        .bind(&source.source_key)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!(
+                    "failed to load ingest cursor {} for chain {}",
+                    source.source_key, source.chain_id
+                ),
+                error,
+            )
+        })?
+        .ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "completed Ingest source {} on chain {} has no matching cursor; retained ingest \
+                 data requires an explicit reset before the source configuration can change",
+                source.source_key, source.chain_id
+            ))
+        })?;
+        validate(source, stored)?;
+    }
+    let persisted: Vec<String> = sqlx::query_scalar(
+        "SELECT source_key FROM ingest_cursors WHERE chain_id = $1 ORDER BY source_key",
+    )
+    .bind(chain_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to load persisted ingest source keys for chain {chain_id}"),
+            error,
+        )
+    })?;
+    validate_source_keys(chain_id, sources, &persisted)
 }
 
 pub(crate) async fn validate_existing(
