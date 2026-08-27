@@ -81,7 +81,7 @@ async fn manifest_change_counter_migrates_existing_history_with_baseline_parity(
     .await?;
 
     let migration =
-        include_str!("../../../migrations/20260826120000_manifest_applied_change_count.sql");
+        include_str!("../../../migrations/20260826120100_manifest_applied_change_count.sql");
     sqlx::raw_sql(migration).execute(migrated.pool()).await?;
     sqlx::raw_sql(migration).execute(migrated.pool()).await?;
     let applied_change_count: i64 = sqlx::query_scalar(
