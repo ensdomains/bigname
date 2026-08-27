@@ -233,6 +233,11 @@ async fn create_scoped_event_ids(
             WHERE event.chain_id = $1 AND event.block_number <= $2
               AND event.resource_id IS NOT NULL AND event.logical_name_id IS NOT NULL
               AND event.event_kind = 'ResolverChanged' AND event.consumer_visibility = 'activated'
+              AND event.source_family IN (
+                  'ens_v1_registry_l1',
+                  'ens_v1_registrar_l1',
+                  'ens_v1_wrapper_l1'
+              )
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized') AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         ) pointer USING (logical_name_id)
         JOIN normalized_events record ON record.chain_id = $1 AND record.logical_name_id IS NULL

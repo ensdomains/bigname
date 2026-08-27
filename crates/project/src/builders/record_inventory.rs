@@ -17,6 +17,7 @@ pub(super) async fn build(
             SELECT DISTINCT ON (event.resource_id)
                    event.resource_id,
                    event.logical_name_id,
+                   event.source_family AS pointer_source_family,
                    lower(surface.namehash) AS namehash,
                    lower(event.after_state ->> 'resolver') AS resolver_address,
                    event.manifest_version AS pointer_manifest_version,
@@ -68,6 +69,11 @@ pub(super) async fn build(
                     NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
                  )) = pointer.resolver_address
             WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+              AND pointer.pointer_source_family IN (
+                  'ens_v1_registry_l1',
+                  'ens_v1_registrar_l1',
+                  'ens_v1_wrapper_l1'
+              )
         ),
         ranked_versions AS (
             SELECT event.*,

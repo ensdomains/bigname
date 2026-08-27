@@ -123,10 +123,10 @@ pub(super) async fn include_resource_pointers(
     target_block: i64,
 ) -> Result<()> {
     // A resource slice rebuild embeds its selected resolver classification in record inventory.
-    // Scope both the projected pointer and every readable linked pointer. Redo needs the former
-    // to retract losing output, while the latter set lets inventory classify whichever pointer's
-    // name has the first staged readable surface. Unchanged resolver summaries can be republished
-    // without staging their unrelated history.
+    // Scope both the projected pointer and every readable ResolverChanged resolver of a scoped
+    // resource. Redo needs the former to retract losing output, while the latter set lets
+    // inventory classify whichever pointer's name has the first staged readable surface.
+    // Unchanged resolver summaries can be republished without staging their unrelated history.
     sqlx::query("ANALYZE project_scope_resources")
         .execute(&mut **transaction)
         .await

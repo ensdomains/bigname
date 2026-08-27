@@ -5973,6 +5973,107 @@ async fn pre_surface_attribution_isolated_by_node_and_resolver_in_project_db_fix
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn ens_v2_pointer_does_not_claim_unlinked_ens_v1_pre_surface_records() -> Result<()> {
+    const ENS_V2_RESOURCE: &str = "00000000-0000-0000-0000-0000000000e2";
+    let incremental = ScratchDatabase::create("project_cross_family_incremental").await?;
+    let full = ScratchDatabase::create("project_cross_family_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+               AND logical_name_id = 'ens:0xalice'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 1, 'canonical')",
+        )
+        .bind(Uuid::parse_str(ENS_V2_RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            3,
+            Some("ens:0xalice"),
+            Some(ENS_V2_RESOURCE),
+            "ResolverChanged",
+            "ens_v2_registry_l1",
+            json!({"resolver":RESOLVER}),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node":"0xalice",
+                "resolver":RESOLVER,
+                "record_key":"text:ens-v1-only",
+                "record_family":"text",
+                "selector_key":"ens-v1-only",
+                "value_retained":true,
+                "value":"ens-v1-value"
+            }),
+            json!({"emitting_address":RESOLVER}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 2).await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(CHAIN, 2),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+
+    assert_eq!(
+        record_entry_pairs(incremental.pool(), RESOURCE).await?,
+        vec![("text:ens-v1-only".into(), "ens-v1-value".into())],
+        "the ENSv1 pointer must retain node-based pre-surface attribution"
+    );
+    for pool in [incremental.pool(), full.pool()] {
+        assert!(
+            record_inventory_snapshot(pool, ENS_V2_RESOURCE)
+                .await?
+                .is_some(),
+            "the ENSv2 pointer must retain an explicitly empty inventory row"
+        );
+        assert_eq!(
+            record_entry_pairs(pool, ENS_V2_RESOURCE).await?,
+            Vec::<(String, String)>::new(),
+            "an ENSv2 pointer must not claim NULL-linked ENSv1 resolver records"
+        );
+    }
+    assert_eq!(
+        record_inventory_snapshot(incremental.pool(), ENS_V2_RESOURCE).await?,
+        record_inventory_snapshot(full.pool(), ENS_V2_RESOURCE).await?,
+        "incremental cross-family isolation diverged from a fresh rebuild"
+    );
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
 async fn seed_pre_surface_wrapper_boundary_fixture(pool: &PgPool) -> Result<()> {
     seed_project_fixture(pool).await?;
     sqlx::query(
