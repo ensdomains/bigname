@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{LoadedManifest, ManifestLoadStatus, ManifestRepository};
