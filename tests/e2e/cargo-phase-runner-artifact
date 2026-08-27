@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${BIGNAME_E2E_REAL_CARGO:?cargo phase-runner artifact bridge: BIGNAME_E2E_REAL_CARGO is required}"
+: "${BIGNAME_E2E_CANONICAL_PHASE_RUNNER:?cargo phase-runner artifact bridge: BIGNAME_E2E_CANONICAL_PHASE_RUNNER is required}"
+
+if [ ! -x "$BIGNAME_E2E_REAL_CARGO" ]; then
+    printf 'cargo phase-runner artifact bridge: real Cargo is not executable: %s\n' \
+        "$BIGNAME_E2E_REAL_CARGO" >&2
+    exit 66
+fi
+
+bridge_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+if [ "${1:-}" = "--run-test" ]; then
+    shift
+    if [ "$#" -eq 0 ] || [ ! -x "$1" ]; then
+        printf 'cargo phase-runner artifact bridge: Cargo runner omitted an executable test binary\n' >&2
+        exit 64
+    fi
+    export CARGO="$bridge_path"
+    exec "$@"
+fi
+
+required_args=(
+    build
+    --locked
+    --message-format=json-render-diagnostics
+    --package
+    phase-runner
+    --bin
+    phase-runner
+)
+actual_args=("$@")
+
+if [ "$#" -ne "${#required_args[@]}" ]; then
+    printf 'cargo phase-runner artifact bridge: unexpected argument count: %s\n' "$#" >&2
+    printf 'received:' >&2
+    printf ' %q' "$@" >&2
+    printf '\n' >&2
+    exit 64
+fi
+
+for index in "${!required_args[@]}"; do
+    if [ "${actual_args[$index]}" != "${required_args[$index]}" ]; then
+        printf 'cargo phase-runner artifact bridge: unexpected argument vector\n' >&2
+        printf 'received:' >&2
+        printf ' %q' "$@" >&2
+        printf '\n' >&2
+        exit 64
+    fi
+done
+
+if [ -n "${BIGNAME_E2E_MANIFEST_PROFILE_ROOT:-}" ]; then
+    export CARGO="$BIGNAME_E2E_REAL_CARGO"
+    exec "$BIGNAME_E2E_REAL_CARGO" "$@"
+fi
+
+if [ ! -x "$BIGNAME_E2E_CANONICAL_PHASE_RUNNER" ]; then
+    printf 'cargo phase-runner artifact bridge: canonical executable is missing or not executable: %s\n' \
+        "$BIGNAME_E2E_CANONICAL_PHASE_RUNNER" >&2
+    exit 66
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+manifest_path="$repo_root/apps/phase-runner/Cargo.toml"
+canonical_path="$(realpath -- "$BIGNAME_E2E_CANONICAL_PHASE_RUNNER")"
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "$value"
+}
+
+printf '{"reason":"compiler-artifact","target":{"name":"phase-runner","kind":["bin"]},"manifest_path":"%s","executable":"%s"}\n' \
+    "$(json_escape "$manifest_path")" "$(json_escape "$canonical_path")"

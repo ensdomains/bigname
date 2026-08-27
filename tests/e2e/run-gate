@@ -1,31 +1,333 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# Keep the inventory counts and assignments together. Test-list changes should
+# require edits only in this block; the checks below reject every other drift.
+expected_total=82
+expected_runnable=79
+expected_ignored=3
+expected_shard_1_runnable=40
+expected_shard_1_ignored=2
+expected_shard_1_filtered=40
+expected_shard_1_predicted_seconds=2500.472
+expected_shard_2_runnable=39
+expected_shard_2_ignored=1
+expected_shard_2_filtered=42
+expected_shard_2_predicted_seconds=2516.283
+
+expected_ignored_tests=(
+    "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
+    "scenarios::provider_faults::transient_get_code_retries_primary_without_using_configured_fallback"
+    "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
+)
+
+shard_1_tests=(
+    "harness::db::tests::concurrent_harness_databases_clone_the_migrated_template"
+    "harness::db::tests::migration_template_identity_is_stable_and_identifier_sized"
+    "harness::fault_proxy::tests::clean_eof_before_complete_request_is_a_client_disconnect"
+    "harness::fault_proxy::tests::ordered_one_shot_faults_advance_one_response_at_a_time"
+    "harness::fault_proxy::tests::pruned_code_rule_targets_only_one_address_and_block_hash"
+    "harness::perturb::tests::normalized_event_parity_includes_transaction_index"
+    "harness::pipeline::tests::one_shot_command_deadline_stops_and_reaps_the_child"
+    "harness::pipeline::tests::one_shot_command_deadline_terminates_descendants"
+    "harness::pipeline::tests::process_log_files_are_unique_for_repeated_labels"
+    "harness::pipeline::tests::profile_runner_binary_and_build_lock_have_scoped_lifetimes"
+    "harness::pipeline::tests::stop_reports_a_child_that_crashed_after_readiness"
+    "harness::tests::local_server_start_lock_serializes_waiters"
+    "scenarios::basenames::basenames_declared_state_matrix_end_to_end"
+    "scenarios::basenames_lifecycle::l2_resolver_records_clear_and_contenthash_gap"
+    "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_outputs"
+    "scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage"
+    "scenarios::ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow"
+    "scenarios::ens_v2_lifecycle::resolver_and_subregistry_edges_follow_set_change_zero"
+    "scenarios::ens_v2_live_poll::ens_v2_registry_lifecycle_survives_successive_fixture_replays"
+    "scenarios::lifecycle::expire_without_reregistration_releases_and_unlists_registration"
+    "scenarios::lifecycle::expiry_grace_and_reregistration_rotate_identity"
+    "scenarios::lifecycle::renew_and_transfer_keep_identity"
+    "scenarios::perturbations::rich_chain_rpc_ingest_normalized_events_match_upfront_facts"
+    "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
+    "scenarios::provider_faults::transient_get_code_retries_primary_without_using_configured_fallback"
+    "scenarios::provider_faults::transient_provider_faults_and_partial_receipts_recover_to_control"
+    "scenarios::record_families::pubkey_write_on_admitted_resolver_stays_raw_only"
+    "scenarios::register_eth_name::register_eth_name_end_to_end"
+    "scenarios::registration_burst::registration_with_records_reverse_and_referrer_derives_single_burst"
+    "scenarios::registry_driven_reads::registry_driven_reads"
+    "scenarios::registry_driven_reads::same_label_under_two_parents_keeps_children_distinct"
+    "scenarios::registry_driven_reads::zero_owner_subname_leaves_default_children_listing"
+    "scenarios::registry_migration::registry_migration_legacy_to_current_semantics"
+    "scenarios::resolver_records::records_route_values_and_version_boundaries_follow_current_resolver"
+    "scenarios::reverse_primary::generic_name_record_set_changed_then_cleared_stays_unadmitted"
+    "scenarios::reverse_primary::reverse_claim_invalid_name_surfaces_raw_claim"
+    "scenarios::reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted"
+    "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
+    "scenarios::wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity"
+    "scenarios::wrapper_registration::born_wrapped_registration_retains_wrapper_authority"
+    "scenarios::wrapper_renewal_and_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity"
+    "scenarios::wrapper_renewal_and_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event"
+)
+
+shard_2_tests=(
+    "harness::db::tests::dropped_harness_database_is_removed_after_early_return"
+    "harness::db::tests::replace_database_preserves_query_parameters"
+    "harness::db::tests::replace_database_rejects_missing_database_path"
+    "harness::pipeline::tests::expired_readiness_deadline_bounds_a_pending_probe"
+    "harness::pipeline::tests::stop_reports_a_child_that_crashes_between_status_check_and_kill"
+    "harness::pipeline::tests::supervised_readiness_timeout_stops_and_reaps_child"
+    "harness::pipeline::tests::timeout_configuration_requires_positive_integer_seconds"
+    "harness::responses::tests::pointer_preserves_explicit_null"
+    "harness::responses::tests::pointer_rejects_missing_path"
+    "scenarios::basenames_lifecycle::basenames_subnames_list_preimages_placeholders_and_tombstones"
+    "scenarios::basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only"
+    "scenarios::basenames_lifecycle::renew_release_and_premium_reregistration_rotate_lineage"
+    "scenarios::basenames_lifecycle::third_party_controller_registration_degrades_without_label_events"
+    "scenarios::basenames_lifecycle::upgradeable_controller_proxy_registers_and_renews"
+    "scenarios::catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity"
+    "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_wrapper_reverse_outputs"
+    "scenarios::cross_protocol::base_reorg_leaves_ethereum_canonicality_untouched"
+    "scenarios::ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage"
+    "scenarios::ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale"
+    "scenarios::ens_v2_lifecycle::root_apex_attach_and_root_scope_roles"
+    "scenarios::lifecycle::register_without_resolver_keeps_declared_resolver_empty"
+    "scenarios::lifecycle_divergence::transfer_without_reclaim_keeps_registry_owner_divergent"
+    "scenarios::perturbations::rich_chain_live_reorg_converges_to_winning_branch"
+    "scenarios::perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable"
+    "scenarios::perturbations::rich_chain_successive_fixture_replays_match_single_pass"
+    "scenarios::provider_faults::silently_short_logs_are_accepted_until_explicit_refetch_matches_control"
+    "scenarios::record_families::remaining_record_families_derive_normalized_but_stay_unenumerated"
+    "scenarios::registry_driven_reads::deep_registry_hierarchy_lists_direct_children_only"
+    "scenarios::registry_preimages::label_preimage_revealed_later_upgrades_child_listing"
+    "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
+    "scenarios::resolver_authorization::operator_delegate_writes_match_owner_authorship"
+    "scenarios::resolver_records::resolver_changes_follow_registry_and_zero_releases"
+    "scenarios::resolver_records::shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported"
+    "scenarios::reverse_primary_claims::authorised_third_party_generic_name_record_does_not_key_claim"
+    "scenarios::reverse_primary_claims::claim_without_name_record_keeps_candidate_absent"
+    "scenarios::reverse_primary_claims::unadmitted_reverse_resolver_keeps_candidate_absent"
+    "scenarios::support::tests::canonical_event_readiness_adds_only_requested_record_key"
+    "scenarios::unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only"
+    "scenarios::wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry"
+    "scenarios::wrapper_registration::wrap_existing_registry_subname_rotates_child_only"
+)
+
+shard="${BIGNAME_E2E_SHARD:-all}"
+case "$shard" in
+    all | 1 | 2) ;;
+    *)
+        printf 'e2e gate: BIGNAME_E2E_SHARD must be 1 or 2 (or unset for all); got %q\n' \
+            "$shard" >&2
+        exit 64
+        ;;
+esac
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-result_log="$(mktemp "${TMPDIR:-/tmp}/bigname-e2e-gate.XXXXXX")"
+real_cargo="${BIGNAME_E2E_REAL_CARGO:-$(command -v cargo)}"
+bridge="$repo_root/tests/e2e/cargo-phase-runner-artifact"
+if [ ! -x "$real_cargo" ]; then
+    printf 'e2e gate: real Cargo is not executable: %s\n' "$real_cargo" >&2
+    exit 66
+fi
+if [ -n "${BIGNAME_E2E_CANONICAL_PHASE_RUNNER:-}" ]; then
+    export BIGNAME_E2E_REAL_CARGO="$real_cargo"
+    export BIGNAME_E2E_CANONICAL_PHASE_RUNNER
+    host_triple="$("$real_cargo" -vV | sed -n 's/^host: //p')"
+    if [ -z "$host_triple" ]; then
+        printf 'e2e gate: Cargo did not report its host target triple\n' >&2
+        exit 1
+    fi
+    runner_env="CARGO_TARGET_${host_triple^^}_RUNNER"
+    runner_env="${runner_env//-/_}"
+    printf -v "$runner_env" '%s --run-test' "$bridge"
+    export "$runner_env"
+fi
+
+gate_temp="$(mktemp -d "${TMPDIR:-/tmp}/bigname-e2e-gate.XXXXXX")"
+result_log="$gate_temp/result.log"
 profile_binary_parent="$repo_root/target/bigname-e2e-profile-binaries"
 mkdir -p "$profile_binary_parent"
 profile_binary_dir="$(mktemp -d "$profile_binary_parent/run.XXXXXX")"
 
 cleanup() {
-    rm -f -- "$result_log"
-    rm -rf -- "$profile_binary_dir"
+    rm -rf -- "$gate_temp" "$profile_binary_dir"
 }
 trap cleanup EXIT
 export BIGNAME_E2E_PROFILE_BINARY_DIR="$profile_binary_dir"
 
-expected_passed=79
-expected_failed=0
-expected_ignored=3
-test_threads="${BIGNAME_E2E_TEST_THREADS:-8}"
+discovered_raw="$gate_temp/discovered.raw"
+ignored_raw="$gate_temp/ignored.raw"
+discovered_names="$gate_temp/discovered.names"
+ignored_names="$gate_temp/ignored.names"
+expected_ignored_names="$gate_temp/expected-ignored.names"
+shard_1_names="$gate_temp/shard-1.names"
+shard_2_names="$gate_temp/shard-2.names"
+union_names="$gate_temp/union.names"
+intersection_names="$gate_temp/intersection.names"
 
 cd "$repo_root"
-cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads="$test_threads" \
-    2>&1 | tee "$result_log"
+compile_started="$(date +%s)"
+if ! "$real_cargo" test --manifest-path tests/e2e/Cargo.toml --locked -- --list \
+    >"$discovered_raw"; then
+    printf 'e2e gate: test discovery failed\n' >&2
+    exit 1
+fi
+compile_finished="$(date +%s)"
+if ! "$real_cargo" test --manifest-path tests/e2e/Cargo.toml --locked -- --ignored --list \
+    >"$ignored_raw"; then
+    printf 'e2e gate: ignored-test discovery failed\n' >&2
+    exit 1
+fi
+
+sed -n 's/: test$//p' "$discovered_raw" | LC_ALL=C sort >"$discovered_names"
+sed -n 's/: test$//p' "$ignored_raw" | LC_ALL=C sort >"$ignored_names"
+printf '%s\n' "${expected_ignored_tests[@]}" | LC_ALL=C sort >"$expected_ignored_names"
+printf '%s\n' "${shard_1_tests[@]}" | LC_ALL=C sort >"$shard_1_names"
+printf '%s\n' "${shard_2_tests[@]}" | LC_ALL=C sort >"$shard_2_names"
+LC_ALL=C sort -u "$shard_1_names" "$shard_2_names" >"$union_names"
+LC_ALL=C comm -12 "$shard_1_names" "$shard_2_names" >"$intersection_names"
+
+count_lines() {
+    wc -l <"$1" | tr -d ' '
+}
+
+discovered_total="$(count_lines "$discovered_names")"
+ignored_total="$(count_lines "$ignored_names")"
+runnable_total="$((discovered_total - ignored_total))"
+union_total="$(count_lines "$union_names")"
+intersection_total="$(count_lines "$intersection_names")"
+shard_1_total="${#shard_1_tests[@]}"
+shard_2_total="${#shard_2_tests[@]}"
+shard_1_ignored="$(LC_ALL=C comm -12 "$shard_1_names" "$ignored_names" | wc -l | tr -d ' ')"
+shard_2_ignored="$(LC_ALL=C comm -12 "$shard_2_names" "$ignored_names" | wc -l | tr -d ' ')"
+shard_1_runnable="$((shard_1_total - shard_1_ignored))"
+shard_2_runnable="$((shard_2_total - shard_2_ignored))"
+
+duplicates_1="$(uniq -d "$shard_1_names")"
+duplicates_2="$(uniq -d "$shard_2_names")"
+duplicates_expected_ignored="$(uniq -d "$expected_ignored_names")"
+missing_assignments="$(LC_ALL=C comm -23 "$discovered_names" "$union_names")"
+unexpected_assignments="$(LC_ALL=C comm -13 "$discovered_names" "$union_names")"
+missing_ignored_status="$(LC_ALL=C comm -23 "$expected_ignored_names" "$ignored_names")"
+unexpected_ignored_status="$(LC_ALL=C comm -13 "$expected_ignored_names" "$ignored_names")"
+
+identity_failed=0
+if [ -n "$duplicates_1" ]; then
+    printf 'e2e gate: duplicate shard 1 assignments:\n%s\n' "$duplicates_1" >&2
+    identity_failed=1
+fi
+if [ -n "$duplicates_2" ]; then
+    printf 'e2e gate: duplicate shard 2 assignments:\n%s\n' "$duplicates_2" >&2
+    identity_failed=1
+fi
+if [ -n "$duplicates_expected_ignored" ]; then
+    printf 'e2e gate: duplicate expected ignored tests:\n%s\n' \
+        "$duplicates_expected_ignored" >&2
+    identity_failed=1
+fi
+if [ -s "$intersection_names" ]; then
+    printf 'e2e gate: tests assigned to both shards:\n' >&2
+    sed 's/^/  /' "$intersection_names" >&2
+    identity_failed=1
+fi
+if [ -n "$missing_assignments" ]; then
+    printf 'e2e gate: discovered tests missing from assignments:\n%s\n' \
+        "$missing_assignments" >&2
+    identity_failed=1
+fi
+if [ -n "$unexpected_assignments" ]; then
+    printf 'e2e gate: assigned tests not discovered:\n%s\n' \
+        "$unexpected_assignments" >&2
+    identity_failed=1
+fi
+if [ -n "$missing_ignored_status" ]; then
+    printf 'e2e gate: expected ignored tests now runnable or missing:\n%s\n' \
+        "$missing_ignored_status" >&2
+    identity_failed=1
+fi
+if [ -n "$unexpected_ignored_status" ]; then
+    printf 'e2e gate: tests unexpectedly marked ignored:\n%s\n' \
+        "$unexpected_ignored_status" >&2
+    identity_failed=1
+fi
+
+if [ "$discovered_total" -ne "$expected_total" ] ||
+   [ "$runnable_total" -ne "$expected_runnable" ] ||
+   [ "$ignored_total" -ne "$expected_ignored" ] ||
+   [ "$intersection_total" -ne 0 ] ||
+   [ "$union_total" -ne "$expected_total" ] ||
+   [ "$shard_1_runnable" -ne "$expected_shard_1_runnable" ] ||
+   [ "$shard_1_ignored" -ne "$expected_shard_1_ignored" ] ||
+   [ "$shard_2_runnable" -ne "$expected_shard_2_runnable" ] ||
+   [ "$shard_2_ignored" -ne "$expected_shard_2_ignored" ]; then
+    printf 'e2e gate: inventory or shard count mismatch\n' >&2
+    identity_failed=1
+fi
+
+for name in "${shard_1_tests[@]}" "${shard_2_tests[@]}"; do
+    matches="$(grep -Fxc -- "$name" "$discovered_names" || true)"
+    if [ "$matches" -ne 1 ]; then
+        printf 'e2e gate: skip identity must resolve exactly once: %s (matches=%s)\n' \
+            "$name" "$matches" >&2
+        identity_failed=1
+    fi
+done
+
+discovered_hash="$(sha256sum "$discovered_names" | cut -d' ' -f1)"
+shard_1_hash="$(sha256sum "$shard_1_names" | cut -d' ' -f1)"
+shard_2_hash="$(sha256sum "$shard_2_names" | cut -d' ' -f1)"
+printf 'e2e gate identity:\n'
+printf '  discovered:   %s\n' "$discovered_total"
+printf '  runnable:     %s\n' "$runnable_total"
+printf '  ignored:      %s\n' "$ignored_total"
+printf '  intersection: %s\n' "$intersection_total"
+printf '  union:        %s\n' "$union_total"
+printf '  discovered SHA-256: %s\n' "$discovered_hash"
+printf '  shard 1 SHA-256:    %s (predicted %ss)\n' \
+    "$shard_1_hash" "$expected_shard_1_predicted_seconds"
+printf '  shard 2 SHA-256:    %s (predicted %ss)\n' \
+    "$shard_2_hash" "$expected_shard_2_predicted_seconds"
+
+if [ "$identity_failed" -ne 0 ]; then
+    exit 1
+fi
+
+test_threads="${BIGNAME_E2E_TEST_THREADS:-8}"
+test_args=(test --manifest-path tests/e2e/Cargo.toml --locked --)
+case "$shard" in
+    all)
+        expected_passed="$expected_runnable"
+        expected_failed=0
+        expected_selected_ignored="$expected_ignored"
+        expected_filtered=0
+        ;;
+    1)
+        expected_passed="$expected_shard_1_runnable"
+        expected_failed=0
+        expected_selected_ignored="$expected_shard_1_ignored"
+        expected_filtered="$expected_shard_1_filtered"
+        test_args+=(--exact)
+        for name in "${shard_2_tests[@]}"; do
+            test_args+=(--skip "$name")
+        done
+        ;;
+    2)
+        expected_passed="$expected_shard_2_runnable"
+        expected_failed=0
+        expected_selected_ignored="$expected_shard_2_ignored"
+        expected_filtered="$expected_shard_2_filtered"
+        test_args+=(--exact)
+        for name in "${shard_1_tests[@]}"; do
+            test_args+=(--skip "$name")
+        done
+        ;;
+esac
+test_args+=(--test-threads="$test_threads")
+
+scenario_started="$(date +%s)"
+"$real_cargo" "${test_args[@]}" 2>&1 | tee "$result_log"
 cargo_status="${PIPESTATUS[0]}"
+scenario_finished="$(date +%s)"
 
 summary="$(grep -m1 '^test result:' "$result_log" || true)"
-expected_prefix="test result: ok. ${expected_passed} passed; ${expected_failed} failed; ${expected_ignored} ignored; 0 measured; 0 filtered out;"
+expected_prefix="test result: ok. ${expected_passed} passed; ${expected_failed} failed; ${expected_selected_ignored} ignored; 0 measured; ${expected_filtered} filtered out;"
 
 if [ "$cargo_status" -ne 0 ]; then
     printf 'e2e gate: cargo test failed with status %s\n' "$cargo_status" >&2
@@ -41,5 +343,27 @@ case "$summary" in
         ;;
 esac
 
-printf 'e2e gate: %s passed; %s failed; %s ignored\n' \
-    "$expected_passed" "$expected_failed" "$expected_ignored"
+compile_seconds="$((compile_finished - compile_started))"
+scenario_seconds="$((scenario_finished - scenario_started))"
+printf 'e2e gate: shard %s; %s passed; %s failed; %s ignored; %s filtered\n' \
+    "$shard" "$expected_passed" "$expected_failed" "$expected_selected_ignored" \
+    "$expected_filtered"
+printf 'e2e gate timing: harness compile/discovery %ss; scenario execution %ss\n' \
+    "$compile_seconds" "$scenario_seconds"
+
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    case "$shard" in
+        all) summary_assignment_hash="$discovered_hash" ;;
+        1) summary_assignment_hash="$shard_1_hash" ;;
+        2) summary_assignment_hash="$shard_2_hash" ;;
+    esac
+    {
+        printf '### e2e shard %s\n\n' "$shard"
+        printf -- '- Harness compile/discovery: %ss\n' "$compile_seconds"
+        printf -- '- Scenario execution: %ss\n' "$scenario_seconds"
+        printf -- '- Summary: `%s`\n' "$summary"
+        printf -- '- Discovered: %s (%s runnable, %s ignored)\n' \
+            "$discovered_total" "$runnable_total" "$ignored_total"
+        printf -- '- Assignment SHA-256: `%s`\n' "$summary_assignment_hash"
+    } >>"$GITHUB_STEP_SUMMARY"
+fi

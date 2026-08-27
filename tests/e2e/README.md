@@ -26,10 +26,12 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The gate requires the exact library-test summary `79 passed; 0 failed; 3
-ignored`. It checks both Cargo's exit status and the passed/failed/ignored
-counts, so a prematurely successful process or an accidentally filtered suite
-cannot satisfy CI.
+The default gate requires the exact library-test summary `79 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shard 1 requires `40 passed; 0 failed; 2
+ignored; 40 filtered out`, and shard 2 requires `39 passed; 0 failed; 1
+ignored; 42 filtered out`. The gate checks both Cargo's exit status and every
+summary count, so a prematurely successful process or an incorrectly filtered
+suite cannot satisfy CI.
 
 ## Harness design
 
@@ -81,10 +83,62 @@ runnable e2e scenario claims deleted checkpoint or completeness semantics.
 
 ## CI shape
 
-The `e2e` job in `.github/workflows/ci.yml` keeps PostgreSQL and Foundry,
-syncs and verifies `.refs`, prebuilds the shared `phase-runner` binary, and
-runs `tests/e2e/run-gate` with eight test threads. The aggregate `test` job
-continues to require the e2e job.
+The e2e builder in `.github/workflows/ci.yml` builds one shared
+`phase-runner` artifact. Two explicit scenario shards independently provision
+PostgreSQL and Foundry, verify that artifact, and run `tests/e2e/run-gate` with
+eight test threads. A result-only `test (e2e)` job rejects any builder or shard
+result other than success, and the aggregate `test` job continues to require
+that result.
+
+## Shard assignment and refresh
+
+`tests/e2e/run-gate` checks in two duration-balanced lists of full test names.
+Before executing scenarios, each shard discovers the complete library-test set
+and ignored subset, then proves that the two lists have no duplicates or
+intersection and that their union exactly equals discovery. Any added, removed,
+renamed, or newly ignored test therefore fails closed before scenario execution.
+
+To refresh the lists, provision PostgreSQL and Foundry as above, then discover
+and time the runnable names from the repository root:
+
+```sh
+scripts/test-db -- bash -euo pipefail -c '
+  cargo build --locked --package phase-runner --bin phase-runner
+  cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --list |
+    sed -n "s/: test$//p" | LC_ALL=C sort > /tmp/e2e-all.names
+  cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --ignored --list |
+    sed -n "s/: test$//p" | LC_ALL=C sort > /tmp/e2e-ignored.names
+  LC_ALL=C comm -23 /tmp/e2e-all.names /tmp/e2e-ignored.names \
+    > /tmp/e2e-runnable.names
+  : > /tmp/e2e-durations.tsv
+  while IFS= read -r name; do
+    start=$(date +%s%N)
+    cargo test --manifest-path tests/e2e/Cargo.toml --locked "$name" -- \
+      --exact --test-threads=1
+    end=$(date +%s%N)
+    awk -v name="$name" -v start="$start" -v end="$end" \
+      "BEGIN { printf \"%s\\t%.3f\\n\", name, (end-start)/1000000000 }" \
+      >> /tmp/e2e-durations.tsv
+  done < /tmp/e2e-runnable.names
+'
+```
+
+Sort durations descending, seed shard 1 with
+`scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
+and shard 2 with the second-slowest scenario, then assign each remaining name
+to the lower predicted load subject to the required final capacities. The
+post-#612 runnable split is 42 on shard 1 and 41 on shard 2. Break equal-duration
+or equal-load ties by full test name, keep at most five of the measured top ten
+on either shard, and keep two ignored tests on shard 1 and one on shard 2.
+Update the lists, expected ignored-name set, counts, and predicted totals
+together in the block at the top of `run-gate`, then run its default, shard 1,
+and shard 2 modes. The explicit root-workspace build above removes a one-time
+canonical `phase-runner` compile from the first measured scenario while leaving
+scenario-specific generated builds in the timing sample.
+
+PR #612 adds four runnable scenarios, changing the inventory from 79/3 to
+83/3. Whichever PR merges second must perform this refresh; the set-equality
+gate deliberately fails closed if the inventory changes first.
 
 ## Coverage ledger
 
