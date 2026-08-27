@@ -4996,6 +4996,937 @@ async fn event_free_wrapper_boundary_refreshes_resolver_permission_summary() -> 
 }
 
 #[tokio::test]
+async fn lapsed_binding_wrapper_boundary_inventory_matches_full_rebuild() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_lapsed_binding_wrapper_incremental").await?;
+    let full = ScratchDatabase::create("project_lapsed_binding_wrapper_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_pre_surface_wrapper_boundary_fixture(pool).await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    assert!(
+        record_inventory_snapshot(incremental.pool(), RESOURCE)
+            .await?
+            .is_some(),
+        "the pre-boundary build must retain the surfaced inventory"
+    );
+    for pool in [incremental.pool(), full.pool()] {
+        lapse_alice_binding(pool).await?;
+    }
+    assert_lapsed_surface_without_replacement(incremental.pool()).await?;
+    let boundary_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 5",
+    )
+    .bind(CHAIN)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        boundary_events, 0,
+        "the wrapper transition must be event-free"
+    );
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    assert_eq!(
+        record_inventory_snapshot(incremental.pool(), RESOURCE).await?,
+        record_inventory_snapshot(full.pool(), RESOURCE).await?,
+        "a resource-only wrapper boundary dropped inventory retained by a full rebuild"
+    );
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn pointer_name_scope_closes_over_a_successor_resource() -> Result<()> {
+    const SUCCESSOR_RESOURCE: &str = "00000000-0000-0000-0000-0000000000e1";
+    const SUCCESSOR_BINDING: &str = "00000000-0000-0000-0000-0000000000e2";
+    const SUCCESSOR_LINEAGE: &str = "00000000-0000-0000-0000-0000000000e3";
+    const SECOND_SUCCESSOR_RESOURCE: &str = "00000000-0000-0000-0000-0000000000e4";
+    const SECOND_SUCCESSOR_BINDING: &str = "00000000-0000-0000-0000-0000000000e5";
+    const SECOND_SUCCESSOR_LINEAGE: &str = "00000000-0000-0000-0000-0000000000e6";
+    const HISTORICAL_SECOND_BINDING: &str = "00000000-0000-0000-0000-0000000000e7";
+
+    let incremental = ScratchDatabase::create("project_pointer_successor_incremental").await?;
+    let full = ScratchDatabase::create("project_pointer_successor_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_pre_surface_wrapper_boundary_fixture(pool).await?;
+        sqlx::query(
+            "UPDATE surface_bindings SET active_to = to_timestamp(7776002)
+             WHERE surface_binding_id = $1",
+        )
+        .bind(Uuid::parse_str(SURFACE_BINDING)?)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO token_lineages (
+                 token_lineage_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 4, 'canonical')",
+        )
+        .bind(Uuid::parse_str(SUCCESSOR_LINEAGE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 'ens:0xbob', 'ens', 'bob.eth', ARRAY['bob', 'eth'],
+                 decode('00', 'hex'), '0xbob', ARRAY['0xbob-label', '0xeth'], $1,
+                 'active', $2, $3, 4, 'canonical'
+             )",
+        )
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO token_lineages (
+                 token_lineage_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 4, 'canonical')",
+        )
+        .bind(Uuid::parse_str(SECOND_SUCCESSOR_LINEAGE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, token_lineage_id, chain_id, block_hash,
+                 block_number, canonicality_state
+             ) VALUES ($1, $2, $3, $4, 4, 'canonical')",
+        )
+        .bind(Uuid::parse_str(SECOND_SUCCESSOR_RESOURCE)?)
+        .bind(Uuid::parse_str(SECOND_SUCCESSOR_LINEAGE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, chain_id, block_hash,
+                 block_number, canonicality_state
+             ) VALUES (
+                 $1, 'ens:0xbob', $2, 'declared_registry_path', 'ens_v1',
+                 to_timestamp(7776003), $3, $4, 4, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(SECOND_SUCCESSOR_BINDING)?)
+        .bind(Uuid::parse_str(SECOND_SUCCESSOR_RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, token_lineage_id, chain_id, block_hash,
+                 block_number, canonicality_state
+             ) VALUES ($1, $2, $3, $4, 4, 'canonical')",
+        )
+        .bind(Uuid::parse_str(SUCCESSOR_RESOURCE)?)
+        .bind(Uuid::parse_str(SUCCESSOR_LINEAGE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, active_to, chain_id, block_hash,
+                 block_number, canonicality_state
+             ) VALUES (
+                 $1, 'ens:0xbob', $2, 'declared_registry_path', 'ens_v1',
+                 to_timestamp(7776001), to_timestamp(7776003),
+                 $3, $4, 4, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(HISTORICAL_SECOND_BINDING)?)
+        .bind(Uuid::parse_str(SUCCESSOR_RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, chain_id, block_hash,
+                 block_number, canonicality_state
+             ) VALUES (
+                 $1, 'ens:0xalice', $2, 'declared_registry_path', 'ens_v1',
+                 to_timestamp(7776002), $3, $4, 4, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(SUCCESSOR_BINDING)?)
+        .bind(Uuid::parse_str(SUCCESSOR_RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            4,
+            Some("ens:0xbob"),
+            Some(SUCCESSOR_RESOURCE),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({"resolver":RESOLVER}),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 5",
+    )
+    .bind(CHAIN)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(event_count, 0, "the resource boundary must be event-free");
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    let incremental_identity: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT resource_id, token_lineage_id FROM name_current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    let full_identity: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT resource_id, token_lineage_id FROM name_current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(full.pool())
+    .await?;
+    assert_eq!(
+        incremental_identity, full_identity,
+        "pointer-name expansion failed to stage the name's active successor resource"
+    );
+    assert_eq!(
+        full_identity,
+        (
+            Some(Uuid::parse_str(SUCCESSOR_RESOURCE)?),
+            Some(Uuid::parse_str(SUCCESSOR_LINEAGE)?),
+        )
+    );
+    let incremental_second: (Option<Uuid>, Option<Uuid>, Option<i64>) = sqlx::query_as(
+        "SELECT resource_id, token_lineage_id,
+                (canonicality_summary ->> 'target_block_number')::bigint
+         FROM name_current WHERE logical_name_id = 'ens:0xbob'",
+    )
+    .fetch_one(incremental.pool())
+    .await?;
+    let full_second: (Option<Uuid>, Option<Uuid>, Option<i64>) = sqlx::query_as(
+        "SELECT resource_id, token_lineage_id,
+                (canonicality_summary ->> 'target_block_number')::bigint
+         FROM name_current WHERE logical_name_id = 'ens:0xbob'",
+    )
+    .fetch_one(full.pool())
+    .await?;
+    assert_eq!(
+        incremental_second, full_second,
+        "scope closure stopped before the second pointer-name/resource hop"
+    );
+    assert_eq!(
+        full_second,
+        (
+            Some(Uuid::parse_str(SECOND_SUCCESSOR_RESOURCE)?),
+            Some(Uuid::parse_str(SECOND_SUCCESSOR_LINEAGE)?),
+            Some(5),
+        )
+    );
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn lapsed_binding_record_retraction_inventory_matches_full_rebuild() -> Result<()> {
+    let incremental =
+        ScratchDatabase::create("project_lapsed_binding_retraction_incremental").await?;
+    let full = ScratchDatabase::create("project_lapsed_binding_retraction_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_pre_surface_wrapper_boundary_fixture(pool).await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    assert!(
+        record_inventory_snapshot(incremental.pool(), RESOURCE)
+            .await?
+            .is_some(),
+        "the first build must retain inventory citing the record event"
+    );
+    for pool in [incremental.pool(), full.pool()] {
+        lapse_alice_binding(pool).await?;
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND block_number = 1
+               AND event_kind = 'RecordChanged'
+               AND logical_name_id IS NULL
+               AND after_state ->> 'record_key' = 'text:before-surface'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+    assert_lapsed_surface_without_replacement(incremental.pool()).await?;
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Redo,
+        1,
+        1,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+
+    assert_eq!(
+        record_inventory_snapshot(incremental.pool(), RESOURCE).await?,
+        record_inventory_snapshot(full.pool(), RESOURCE).await?,
+        "redo resource scope dropped pointer inventory retained by a full rebuild"
+    );
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn retracted_pointer_selects_another_surface_of_the_same_resource() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_shared_resource_redo_incremental").await?;
+    let full = ScratchDatabase::create("project_shared_resource_redo_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 'ens:0xbob', 'ens', 'bob.eth', ARRAY['bob', 'eth'],
+                 decode('00', 'hex'), '0xbob', ARRAY['0xbob-label', '0xeth'], $1,
+                 'active', $2, $3, 1, 'canonical'
+             )",
+        )
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, active_to, chain_id, block_hash,
+                 block_number, canonicality_state
+             ) VALUES (
+                 $1, 'ens:0xbob', $2, 'declared_registry_path', 'ens_v1',
+                 to_timestamp(1), to_timestamp(2), $3, $4, 1, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(EQUIVALENCE_BOB_BINDING)?)
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some("ens:0xbob"),
+            Some(RESOURCE),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({"resolver":RESOLVER}),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node":"0xbob",
+                "resolver":RESOLVER,
+                "record_key":"text:shared-resource",
+                "record_family":"text",
+                "selector_key":"shared-resource",
+                "value_retained":true,
+                "value":"bob-survives"
+            }),
+            json!({"emitting_address":RESOLVER}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let initial_name: String = sqlx::query_scalar(
+        "SELECT provenance ->> 'logical_name_id'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(initial_name, "ens:0xalice");
+
+    for pool in [incremental.pool(), full.pool()] {
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND block_number = 2
+               AND logical_name_id = 'ens:0xalice'
+               AND event_kind = 'ResolverChanged'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+
+    let full_name: String = sqlx::query_scalar(
+        "SELECT provenance ->> 'logical_name_id'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .fetch_one(full.pool())
+    .await?;
+    assert_eq!(full_name, "ens:0xbob");
+    assert_eq!(
+        record_inventory_snapshot(incremental.pool(), RESOURCE).await?,
+        record_inventory_snapshot(full.pool(), RESOURCE).await?,
+        "redo failed to stage the surviving surface and its pre-surface record"
+    );
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn name_only_scope_closes_over_the_resources_latest_surface() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_name_resource_surface_incremental").await?;
+    let full = ScratchDatabase::create("project_name_resource_surface_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 'ens:0xbob', 'ens', 'bob.eth', ARRAY['bob', 'eth'],
+                 decode('00', 'hex'), '0xbob', ARRAY['0xbob-label', '0xeth'], $1,
+                 'active', $2, $3, 1, 'canonical'
+             )",
+        )
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, active_to, chain_id, block_hash,
+                 block_number, canonicality_state
+             ) VALUES (
+                 $1, 'ens:0xbob', $2, 'declared_registry_path', 'ens_v1',
+                 to_timestamp(1), to_timestamp(4), $3, $4, 1, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(EQUIVALENCE_BOB_BINDING)?)
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            3,
+            Some("ens:0xbob"),
+            Some(RESOURCE),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({"resolver":RESOLVER}),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node":"0xbob",
+                "resolver":RESOLVER,
+                "record_key":"text:name-only-closure",
+                "record_family":"text",
+                "selector_key":"name-only-closure",
+                "value_retained":true,
+                "value":"bob-remains-current"
+            }),
+            json!({"emitting_address":RESOLVER}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            4,
+            Some("ens:0xalice"),
+            None,
+            "PreimageObserved",
+            "ens_v1_registry_l1",
+            json!({"labelhash":"0xalice-label","raw_labels_hex":["616c696365"]}),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let initial_name: String = sqlx::query_scalar(
+        "SELECT provenance ->> 'logical_name_id'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(initial_name, "ens:0xbob");
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+
+    assert_eq!(
+        record_inventory_snapshot(incremental.pool(), RESOURCE).await?,
+        record_inventory_snapshot(full.pool(), RESOURCE).await?,
+        "name-to-resource scope failed to stage the resource's latest lapsed surface"
+    );
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn children_only_scope_stages_pre_surface_record_history() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_children_only_record_incremental").await?;
+    let full = ScratchDatabase::create("project_children_only_record_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_pre_surface_wrapper_boundary_fixture(pool).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            5,
+            Some("ens:0xeth"),
+            None,
+            "PreimageObserved",
+            "ens_v1_registry_l1",
+            json!({"labelhash":"0xeth","raw_labels_hex":["657468"]}),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    for pool in [incremental.pool(), full.pool()] {
+        lapse_alice_binding(pool).await?;
+    }
+    assert_lapsed_surface_without_replacement(incremental.pool()).await?;
+    let child_events_at_target: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 5
+           AND logical_name_id = 'ens:0xalice'",
+    )
+    .bind(CHAIN)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        child_events_at_target, 0,
+        "the child must be topology-scoped only"
+    );
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    assert_eq!(
+        record_inventory_snapshot(incremental.pool(), RESOURCE).await?,
+        record_inventory_snapshot(full.pool(), RESOURCE).await?,
+        "children-only surface scope omitted pre-surface record history"
+    );
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn pre_surface_attribution_isolated_by_node_and_resolver_in_project_db_fixture() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("project_pre_surface_node_resolver_isolation").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+           AND logical_name_id = 'ens:0xalice'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    let second_resolver = json!([{
+        "role":"public_resolver",
+        "address":EQUIVALENCE_V2_RESOLVER,
+        "proxy_kind":"none"
+    }]);
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = jsonb_set(
+             manifest_payload, '{contracts}',
+             COALESCE(manifest_payload -> 'contracts', '[]'::jsonb) || $1::jsonb
+         )
+         WHERE chain_id = $2 AND source_family = 'ens_v1_resolver_l1'",
+    )
+    .bind(&second_resolver)
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = jsonb_set(
+             after_state, '{manifest_payload,contracts}',
+             COALESCE(after_state #> '{manifest_payload,contracts}', '[]'::jsonb)
+                 || $1::jsonb
+         )
+         WHERE chain_id = $2 AND source_family = 'ens_v1_resolver_l1'
+           AND event_kind = 'SourceManifestUpdated'",
+    )
+    .bind(&second_resolver)
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 1, 'canonical')",
+    )
+    .bind(Uuid::parse_str(EQUIVALENCE_BOB_RESOURCE)?)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version,
+             visibility_state, chain_id, block_hash, block_number,
+             canonicality_state
+         ) VALUES (
+             'ens:0xbob', 'ens', 'bob.eth', ARRAY['bob', 'eth'],
+             decode('00', 'hex'), '0xbob', ARRAY['0xbob-label', '0xeth'], $1,
+             'active', $2, $3, 1, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, chain_id, block_hash, block_number,
+             canonicality_state
+         ) VALUES ($1, 'ens:0xbob', $2, 'declared_registry_path',
+                   'ens_v1', to_timestamp(1), $3, $4, 1, 'canonical')",
+    )
+    .bind(Uuid::parse_str(EQUIVALENCE_BOB_BINDING)?)
+    .bind(Uuid::parse_str(EQUIVALENCE_BOB_RESOURCE)?)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xbob"),
+        Some(EQUIVALENCE_BOB_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        json!({"resolver":EQUIVALENCE_V2_RESOLVER}),
+        json!({}),
+    )
+    .await?;
+    for (node, resolver, key, value) in [
+        ("0xalice", RESOLVER, "text:alice", "alice-current"),
+        (
+            "0xalice",
+            EQUIVALENCE_V2_RESOLVER,
+            "text:alice-wrong-resolver",
+            "alice-wrong-resolver",
+        ),
+        ("0xbob", EQUIVALENCE_V2_RESOLVER, "text:bob", "bob-current"),
+        (
+            "0xbob",
+            RESOLVER,
+            "text:bob-wrong-resolver",
+            "bob-wrong-resolver",
+        ),
+    ] {
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            1,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node":node,
+                "resolver":resolver,
+                "record_key":key,
+                "record_family":"text",
+                "selector_key":key.trim_start_matches("text:"),
+                "value_retained":true,
+                "value":value
+            }),
+            json!({"emitting_address":resolver}),
+        )
+        .await?;
+    }
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    assert_eq!(
+        record_entry_pairs(scratch.pool(), RESOURCE).await?,
+        vec![("text:alice".into(), "alice-current".into())]
+    );
+    assert_eq!(
+        record_entry_pairs(scratch.pool(), EQUIVALENCE_BOB_RESOURCE).await?,
+        vec![("text:bob".into(), "bob-current".into())]
+    );
+    scratch.cleanup().await
+}
+
+async fn seed_pre_surface_wrapper_boundary_fixture(pool: &PgPool) -> Result<()> {
+    seed_project_fixture(pool).await?;
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+           AND logical_name_id = 'ens:0xalice'",
+    )
+    .bind(CHAIN)
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        json!({
+            "node":"0xalice",
+            "resolver":RESOLVER,
+            "record_key":"text:before-surface",
+            "record_family":"text",
+            "selector_key":"before-surface",
+            "value_retained":true,
+            "value":"retained-before-surface"
+        }),
+        json!({"emitting_address":RESOLVER}),
+    )
+    .await?;
+    for (block, timestamp) in [(4, 7_776_001), (5, 7_776_004)] {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($5), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, block))
+        .bind(block_hash(CHAIN, block - 1))
+        .bind(block)
+        .bind(timestamp)
+        .execute(pool)
+        .await?;
+    }
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v1_wrapper_l1",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":["resource_control","resolver_control"],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"NameRenewed",
+            "authority_kind":"wrapper",
+            "expiry":7_776_003
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":196_608,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn lapse_alice_binding(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(4)
+         WHERE chain_id = $1 AND logical_name_id = 'ens:0xalice'",
+    )
+    .bind(CHAIN)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn assert_lapsed_surface_without_replacement(pool: &PgPool) -> Result<()> {
+    let fixture: (bool, i64) = sqlx::query_as(
+        "SELECT EXISTS (
+             SELECT 1 FROM name_surfaces
+             WHERE chain_id = $1 AND logical_name_id = 'ens:0xalice'
+         ), (
+             SELECT count(*) FROM surface_bindings
+             WHERE chain_id = $1 AND logical_name_id = 'ens:0xalice'
+               AND active_to IS NULL
+         )",
+    )
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(fixture, (true, 0));
+    Ok(())
+}
+
+async fn record_inventory_snapshot(pool: &PgPool, resource_id: &str) -> Result<Option<Value>> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_jsonb(row) - 'inserted_at' - 'last_recomputed_at'
+         FROM record_inventory_current row WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(resource_id)?)
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn record_entry_pairs(pool: &PgPool, resource_id: &str) -> Result<Vec<(String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT entry ->> 'record_key', entry ->> 'value'
+         FROM record_inventory_current inventory
+         CROSS JOIN LATERAL jsonb_array_elements(inventory.entries) entry
+         WHERE inventory.resource_id = $1
+         ORDER BY entry ->> 'record_key'",
+    )
+    .bind(Uuid::parse_str(resource_id)?)
+    .fetch_all(pool)
+    .await?)
+}
+
+#[tokio::test]
 async fn event_free_wrapper_boundary_scopes_permission_named_resolver() -> Result<()> {
     let incremental =
         ScratchDatabase::create("production_project_permission_only_resolver_scope").await?;

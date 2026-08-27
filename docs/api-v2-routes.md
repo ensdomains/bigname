@@ -472,9 +472,13 @@ Field ownership:
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
   and the resolver's version-, node-, and key-scoped text storage
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
-  A key's absence from that inventory is therefore absence from the retained
-  attributable history, rather than an interpretation-time linking gap or
-  unfinished build. The row's
+  Once that inventory exists, a key's absence is therefore absence from the
+  retained attributable history rather than an unfinished build. The known
+  case documented in [`projections.md`](projections.md#resolver-and-records),
+  where resolver selection predates the
+  [name surface](glossary.md#surface-name-surface) and is never repeated,
+  produces no inventory instead of treating an interpretation-time linking gap
+  as authoritative absence. The row's
   `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
   which is a weaker statement than `full` and does not weaken this admission.
   An inventory in any other coverage state is not authoritative, and the
@@ -516,6 +520,12 @@ Field ownership:
   documented behavior: the response has no resolver values and reports each
   requested or inventory-derived key as `status=unsupported`
   with `inventory_not_available`.
+  When current authority is projected but inventory is missing because resolver
+  selection predates the [name surface](glossary.md#surface-name-surface) and
+  was never repeated, `source=indexed` reports requested keys as
+  `status=unsupported` with `inventory_not_available`. `source=auto` follows
+  its ordinary verified-lookup fallback rules when that execution path is
+  available.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 

@@ -215,7 +215,11 @@ async fn create_scoped_event_ids(
         WHERE event.chain_id = $1 AND event.block_number <= $2
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
-        SELECT record.normalized_event_id FROM project_scope_names scope
+        SELECT record.normalized_event_id FROM (
+            SELECT logical_name_id FROM project_scope_names
+            UNION
+            SELECT logical_name_id FROM project_scope_children
+        ) scope
         JOIN name_surfaces surface USING (logical_name_id)
         JOIN chain_lineage surface_lineage ON surface_lineage.chain_id = surface.chain_id
          AND (surface_lineage.block_number, surface_lineage.block_hash) = (surface.block_number, surface.block_hash)

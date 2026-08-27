@@ -325,6 +325,10 @@ follows the registry resolver lookup
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
 and the resolver's version-, node-, and key-scoped text storage
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
+A known model limitation remains: if a resolver was selected only before the
+[name surface](glossary.md#surface-name-surface) existed and was never selected
+again afterward, Project has no linked resolver pointer for that name and does
+not serve its retained records.
 A resource-less record event cannot create a binding, and name and record reads
 expose the inventory only when the name's current readable `resource_id` selects
 it. Resolver-local events are accepted only under the manifest and
