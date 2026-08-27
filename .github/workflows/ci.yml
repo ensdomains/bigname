@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches:
       - main
@@ -54,9 +55,13 @@ jobs:
 
       - name: Rust source size ratchet
         env:
-          BASE_REF: ${{ github.base_ref }}
+          # merge_group.base_ref keeps the allowance ratchet enforced at the
+          # queue's final gate, where strict up-to-date no longer forces a
+          # fresh pull_request run against merge-time main.
+          BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
+          BASE_REF="${BASE_REF#refs/heads/}"
+          if { [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$GITHUB_EVENT_NAME" = "merge_group" ]; } && [ -n "$BASE_REF" ]; then
             git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
             ./scripts/check-rust-file-size --base-ref "refs/remotes/origin/${BASE_REF}"
           else
@@ -386,7 +391,11 @@ jobs:
     # branches and on every push to main, so a fork-merged regression is
     # caught on main immediately. (Skipped jobs satisfy required checks, so
     # making this check required would not block external contributors.)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # merge_group runs are skipped for the same reason: a queued fork PR's
+    # unmerged code would otherwise execute with the private-repo token before
+    # any merge happens. Same-repo changes were checked at PR time; queued
+    # fork changes stay covered by the post-merge run on main, unchanged.
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - name: Checkout bigname
         uses: actions/checkout@v4
