@@ -3,7 +3,8 @@
 
 The verifier deliberately reads carrier files from Git objects.  A frozen base
 therefore remains reviewable after the worktree has been edited, and every
-baseline occurrence keeps a stable byte-offset identity.
+baseline occurrence keeps a stable byte-offset identity. Final fingerprint
+reports require a committed head; ``WORKTREE`` is accepted only when clean.
 """
 
 from __future__ import annotations
@@ -43,8 +44,11 @@ LOOSE_CITATION_RE = re.compile(
     rb"(?P<path>[^:\r\n)]+)"
     rb":L(?P<start>[1-9][0-9]*)"
     rb"(?:-L?(?P<end>[1-9][0-9]*))?"
-    rb"\s+@\s+(?P=key)@(?P<short>[0-9a-f]{7,40})"
+    rb"\s+@\s+(?P=key)@(?P<short>[^\s)]*)"
     rb"\)"
+)
+GOVERNED_CITATION_MARKER_RE = re.compile(
+    rb"\(upstream\s*:\s*\.refs/(?P<key>[A-Za-z0-9_.-]+)/"
 )
 HUNK_RE = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"
@@ -101,6 +105,11 @@ def run(
 
 def resolve_revision(revision: str) -> str:
     return run(["git", "rev-parse", revision]).stdout.strip()
+
+
+def report_revision(revision: str) -> str:
+    """Return the immutable commit recorded in generated reports."""
+    return resolve_revision("HEAD" if revision == "WORKTREE" else revision)
 
 
 def tracked_paths(revision: str) -> list[str]:
@@ -228,6 +237,16 @@ def parse_citations(data: bytes, *, loose: bool) -> list[Citation]:
     return citations
 
 
+def byte_lines(data: bytes) -> list[bytes]:
+    """Split bytes using Git's LF-only line convention, without terminators."""
+    if not data:
+        return []
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return lines
+
+
 def citation_claim_contexts(
     data: bytes, citations: list[Citation]
 ) -> dict[int, str]:
@@ -237,8 +256,8 @@ def citation_claim_contexts(
         for index in range(candidate.begin, candidate.finish):
             if masked[index] not in b"\r\n":
                 masked[index] = ord(" ")
-    lines = bytes(masked).splitlines()
-    original_lines = data.splitlines()
+    lines = byte_lines(bytes(masked))
+    original_lines = byte_lines(data)
 
     contexts: dict[int, str] = {}
     for citation in citations:
@@ -276,6 +295,42 @@ def citation_claim_bindings(
     return bindings
 
 
+def citation_line_bindings(
+    data: bytes, citations: list[Citation]
+) -> dict[int, tuple[str, int]]:
+    """Bind citations to their physical claim line, independent of line number."""
+    masked = bytearray(data)
+    for citation in citations:
+        for index in range(citation.begin, citation.finish):
+            if masked[index] not in b"\r\n":
+                masked[index] = ord(" ")
+    lines = byte_lines(bytes(masked))
+    ordinals: Counter[str] = Counter()
+    bindings: dict[int, tuple[str, int]] = {}
+    for citation in citations:
+        site = citation.carrier_line - 1
+        line = lines[site]
+        context_lines = [line]
+        if re.search(rb"[A-Za-z0-9_]", line) is None:
+            before = next(
+                (lines[index] for index in range(site - 1, -1, -1) if lines[index].strip()),
+                b"",
+            )
+            after = next(
+                (
+                    lines[index]
+                    for index in range(site + 1, len(lines))
+                    if lines[index].strip()
+                ),
+                b"",
+            )
+            context_lines = [before, line, after]
+        context = sha256(re.sub(rb"\s+", b" ", b"\n".join(context_lines)).strip())
+        bindings[citation.begin] = (context, ordinals[context])
+        ordinals[context] += 1
+    return bindings
+
+
 def load_spec(path: Path) -> dict[str, Any]:
     with path.open("rb") as handle:
         spec = tomllib.load(handle)
@@ -298,9 +353,73 @@ def load_spec(path: Path) -> dict[str, Any]:
     return spec
 
 
-def manifest_refs(revision: str = "WORKTREE") -> dict[str, dict[str, Any]]:
+def manifest_document(revision: str = "WORKTREE") -> dict[str, Any]:
     data = worktree_or_blob(revision, ".refs/MANIFEST.toml")
-    return tomllib.loads(data.decode())["refs"]
+    return tomllib.loads(data.decode())
+
+
+def manifest_refs(revision: str = "WORKTREE") -> dict[str, dict[str, Any]]:
+    return manifest_document(revision)["refs"]
+
+
+def manifest_top_level_errors(
+    base_manifest: dict[str, Any], head_manifest: dict[str, Any]
+) -> list[str]:
+    """Reject manifest metadata changes outside the reference table."""
+    base_top = {key: value for key, value in base_manifest.items() if key != "refs"}
+    head_top = {key: value for key, value in head_manifest.items() if key != "refs"}
+    if base_top == head_top:
+        return []
+    return ["head manifest top-level metadata differs from the frozen base"]
+
+
+def manifest_pin_errors(
+    refs: dict[str, dict[str, Any]], spec: dict[str, Any]
+) -> list[str]:
+    expected = {
+        spec["key"]: spec["new_commit"],
+        "ens_v2_sepolia_20260629": spec["old_commit"],
+    }
+    errors: list[str] = []
+    for key, commit in expected.items():
+        actual = refs.get(key, {}).get("commit")
+        if actual != commit:
+            errors.append(
+                f"head manifest pin mismatch for {key}: {actual!r} != {commit!r}"
+            )
+    return errors
+
+
+def manifest_metadata_errors(
+    base_refs: dict[str, dict[str, Any]],
+    head_refs: dict[str, dict[str, Any]],
+    spec: dict[str, Any],
+) -> list[str]:
+    """Allow only the historical evidence entry added by this rotation."""
+    expected = {key: dict(value) for key, value in base_refs.items()}
+    if "ens_v2_sepolia_20260629" not in expected:
+        expected["ens_v2_sepolia_20260629"] = {
+            "repo": base_refs[spec["key"]]["repo"],
+            "commit": spec["old_commit"],
+            "purpose": (
+                "Historical Solidity source evidence for the admitted 2026-06-29 "
+                "old-model Sepolia deployment; claims cite it because #565 owns "
+                "deprecation of that deployment's old contract behavior, regardless "
+                "of whether individual lines survive in the current ENSv2 source "
+                "tree, and it is not authority for future ENSv2 deployments or "
+                "current-model admission."
+            ),
+            "authoritative_for": [
+                "Historical implementation behavior of the admitted 2026-06-29 "
+                "old-model Sepolia families, only where archived ABI artifacts do "
+                "not directly prove the claim"
+            ],
+        }
+    errors: list[str] = []
+    for key in sorted(expected.keys() | head_refs.keys()):
+        if head_refs.get(key) != expected.get(key):
+            errors.append(f"head reference metadata mismatch for {key}")
+    return errors
 
 
 def git_file(commit: str, path: str) -> bytes:
@@ -312,27 +431,21 @@ def git_file(commit: str, path: str) -> bytes:
 
 def git_file_for_key(key: str, commit: str, path: str) -> bytes:
     result = run(
-        ["git", "show", f"{commit}:{path}"],
-        cwd=ROOT / ".refs" / key,
-        text=False,
-        check=False,
+        ["git", "show", f"{commit}:{path}"], cwd=ROOT / ".refs" / key, text=False
     )
-    if result.returncode == 0:
-        return result.stdout
-    checkout_path = ROOT / ".refs" / key / path
-    if checkout_path.is_file():
-        return checkout_path.read_bytes()
-    stderr = result.stderr.decode(errors="replace")
-    raise RotationError(f"command failed (git show {commit}:{path}):\n{stderr}")
+    return result.stdout
 
 
 def excerpt(data: bytes, start: int, end: int) -> bytes:
-    lines = data.splitlines(keepends=True)
+    lines = byte_lines(data)
     if start < 1 or end < start or end > len(lines):
         raise RotationError(
             f"invalid one-based line range L{start}-L{end} for {len(lines)}-line file"
         )
-    return b"".join(lines[start - 1 : end])
+    selected = b"\n".join(lines[start - 1 : end])
+    if end < len(lines) or data.endswith(b"\n"):
+        selected += b"\n"
+    return selected
 
 
 def sha256(data: bytes) -> str:
@@ -402,8 +515,8 @@ def equal_line_map_from_hunks(
 
 
 def git_equal_line_map(old_commit: str, new_commit: str, path: str) -> dict[int, int]:
-    old_line_count = len(git_file(old_commit, path).splitlines())
-    new_line_count = len(git_file(new_commit, path).splitlines())
+    old_line_count = len(byte_lines(git_file(old_commit, path)))
+    new_line_count = len(byte_lines(git_file(new_commit, path)))
     result = run(
         [
             "git",
@@ -645,6 +758,7 @@ def write_review_reports(
     dispositions: list[dict[str, Any]],
     semantics: dict[str, dict[str, Any]],
     spec: dict[str, Any],
+    head: str,
 ) -> None:
     by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in dispositions:
@@ -679,7 +793,7 @@ def write_review_reports(
             if new is None:
                 handle.write("Final upstream: deleted claim\n\n")
             else:
-                refs = manifest_refs()
+                refs = manifest_refs(head)
                 commit = refs[new["key"]]["commit"]
                 new_data = git_file_for_key(new["key"], commit, new["path"])
                 new_excerpt = excerpt(new_data, new["start"], new["end"])
@@ -761,7 +875,9 @@ def expected_counts(baseline: Baseline, spec: dict[str, Any]) -> None:
 def summary_text(
     baseline: Baseline,
     head: str,
+    spec: dict[str, Any],
     final_checks: dict[str, int] | None = None,
+    final_accounting: dict[str, int] | None = None,
 ) -> str:
     counts = Counter(row["disposition"] for row in baseline.rows)
     changed = (
@@ -770,7 +886,7 @@ def summary_text(
         + counts["tier3_semantic"]
     )
     lines = [
-        "ENSv2 citation rotation: ccaeb58 -> a971bd64",
+        f"ENSv2 citation rotation: {spec['old_commit'][:7]} -> {spec['new_commit'][:8]}",
         "",
         f"baseline commit:      {baseline.commit}",
         f"head commit:          {head}",
@@ -795,6 +911,28 @@ def summary_text(
     ]
     if final_checks is not None:
         lines.extend(["", *(f"{label}: {value}" for label, value in final_checks.items())])
+    if final_accounting is not None:
+        current = spec["key"]
+        historical = "ens_v2_sepolia_20260629"
+        lines.extend(
+            [
+                "",
+                "final governed citations:",
+                f"  {current}@{spec['new_commit'][:8]}: {final_accounting['current_total']}",
+                "    tag/line/archive disposition targets: "
+                f"{final_accounting['rotated_targets']}",
+                "    reviewed targets retaining archived deployment evidence: "
+                f"{final_accounting['archive_evidence_targets']}",
+                f"    pre-existing at base: {final_accounting['current_preexisting']}",
+                f"  {historical}@{spec['old_commit'][:7]}: "
+                f"{final_accounting['historical_total']}",
+                "    reviewed targets retaining historical old-model source evidence: "
+                f"{final_accounting['historical_source_targets']}",
+                f"    pre-existing at base: {final_accounting['historical_preexisting']}",
+                "  pre-existing citation documenting the pin: "
+                f"{final_accounting['pin_manifest_authority']}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1027,9 +1165,18 @@ def validate_final_citations(
     for carrier in revision_paths(revision):
         data = worktree_or_blob(revision, carrier)
         parsed = parse_citations(data, loose=False)
-        loose = parse_citations(data, loose=True)
-        if any(not citation.strict and citation.key in governed_keys for citation in loose):
-            errors.append(f"{carrier}: contains noncanonical upstream citation syntax")
+        strict_starts = {citation.begin for citation in parsed}
+        # This file intentionally constructs one citation fixture from an
+        # f-string. It is source text for the verifier, not an evidence claim.
+        if carrier != "scripts/test-check-upstream-rotation":
+            for marker in GOVERNED_CITATION_MARKER_RE.finditer(data):
+                key = marker.group("key").decode()
+                if key in governed_keys and marker.start() not in strict_starts:
+                    line = data.count(b"\n", 0, marker.start()) + 1
+                    errors.append(
+                        f"{carrier}:L{line}: contains noncanonical upstream "
+                        "citation syntax"
+                    )
         for citation in parsed:
             citation = dataclasses.replace(citation, ordinal=len(citations))
             citations.append(citation)
@@ -1053,6 +1200,159 @@ def validate_final_citations(
             except RotationError as error:
                 errors.append(f"{carrier}: {error}")
     return citations, errors
+
+
+def citation_target(citation: Citation) -> tuple[str, str, int, int, str]:
+    return (
+        citation.key,
+        citation.path,
+        citation.start,
+        citation.end,
+        citation.short,
+    )
+
+
+def final_citation_accounting(
+    base: str,
+    spec: dict[str, Any],
+    semantics: dict[str, dict[str, Any]],
+    dispositions: list[dict[str, Any]],
+    final_data: dict[str, bytes],
+    final_by_carrier: dict[str, list[Citation]],
+    used_final: dict[str, set[int]],
+    excluded_carriers: list[str],
+) -> tuple[dict[str, int], list[str]]:
+    """Bind every governed final citation to a disposition or the frozen base."""
+    current_key = spec["key"]
+    historical_key = "ens_v2_sepolia_20260629"
+    governed_pins = {
+        current_key: spec["new_commit"],
+        historical_key: spec["old_commit"],
+    }
+    for entry in semantics.values():
+        final_key = entry.get("final_key")
+        final_commit = entry.get("final_commit")
+        if final_key and final_commit:
+            governed_pins[final_key] = final_commit
+
+    def excluded(carrier: str) -> bool:
+        return path_matches(carrier, excluded_carriers)
+
+    def pin_manifest_authority(carrier: str, citation: Citation) -> bool:
+        # This exact pre-existing citation proves the pin used by the census. It
+        # is outside the rotation dispositions, but no other manifest citation is.
+        return carrier == ".refs/MANIFEST.toml" and citation_target(citation) == (
+            current_key,
+            spec["archive_deployment_prefix"] + ".deployment.json",
+            4,
+            4,
+            spec["new_commit"][:8],
+        )
+
+    base_current: dict[
+        str, Counter[tuple[tuple[str, int], tuple[str, str, int, int, str]]]
+    ] = defaultdict(Counter)
+    pin_manifest_base: Counter[
+        tuple[tuple[str, int], tuple[str, str, int, int, str]]
+    ] = Counter()
+    for carrier in tracked_paths(base):
+        if excluded(carrier):
+            continue
+        data = blob(base, carrier)
+        citations = parse_citations(data, loose=False)
+        bindings = citation_line_bindings(data, citations)
+        for citation in citations:
+            if pin_manifest_authority(carrier, citation):
+                pin_manifest_base[
+                    (bindings[citation.begin], citation_target(citation))
+                ] += 1
+                continue
+            pin = governed_pins.get(citation.key)
+            if pin is None or not pin.startswith(citation.short):
+                continue
+            base_current[carrier][
+                (bindings[citation.begin], citation_target(citation))
+            ] += 1
+
+    accounting = {
+        "current_total": 0,
+        "rotated_targets": 0,
+        "archive_evidence_targets": 0,
+        "current_preexisting": 0,
+        "historical_total": 0,
+        "historical_source_targets": 0,
+        "historical_preexisting": 0,
+        "pin_manifest_authority": 0,
+    }
+    for row in dispositions:
+        final = row["new"]
+        if final is None:
+            continue
+        if row["disposition"] != "tier3_semantic":
+            accounting["rotated_targets"] += 1
+            continue
+        action = semantics[row["id"]]["action"]
+        if action == "deprecated_archive_evidence":
+            accounting["archive_evidence_targets"] += 1
+        elif action == "deprecated_historical_source":
+            accounting["historical_source_targets"] += 1
+
+    errors: list[str] = []
+    for carrier, citations in final_by_carrier.items():
+        if excluded(carrier):
+            continue
+        bindings = citation_line_bindings(final_data[carrier], citations)
+        for index, citation in enumerate(citations):
+            if pin_manifest_authority(carrier, citation):
+                occurrence = (bindings[citation.begin], citation_target(citation))
+                if pin_manifest_base[occurrence]:
+                    pin_manifest_base[occurrence] -= 1
+                    accounting["pin_manifest_authority"] += 1
+                else:
+                    errors.append(
+                        f"{carrier}:L{citation.carrier_line}: undispositioned "
+                        f"citation documenting the pin: "
+                        f"{citation.raw.decode(errors='replace')}"
+                    )
+                continue
+            if citation.key not in governed_pins:
+                continue
+            if citation.key == current_key:
+                accounting["current_total"] += 1
+            elif citation.key == historical_key:
+                accounting["historical_total"] += 1
+            if index in used_final.get(carrier, set()):
+                continue
+            occurrence = (bindings[citation.begin], citation_target(citation))
+            if base_current[carrier][occurrence]:
+                base_current[carrier][occurrence] -= 1
+                if citation.key == current_key:
+                    accounting["current_preexisting"] += 1
+                elif citation.key == historical_key:
+                    accounting["historical_preexisting"] += 1
+                continue
+            errors.append(
+                f"{carrier}:L{citation.carrier_line}: undispositioned governed "
+                f"citation: {citation.raw.decode(errors='replace')}"
+            )
+    for carrier, occurrences in sorted(base_current.items()):
+        for (_, target), count in occurrences.items():
+            if count:
+                key, path, start, end, short = target
+                errors.append(
+                    f"{carrier}: {count} pre-existing governed citation(s) "
+                    f"missing from final tree: .refs/{key}/{path}:L{start}-L{end} "
+                    f"@ {key}@{short}"
+                )
+    for (_, target), count in pin_manifest_base.items():
+        if count:
+            key, path, start, end, short = target
+            errors.append(
+                f".refs/MANIFEST.toml: {count} pre-existing citation(s) "
+                f"documenting the pin missing from final tree: "
+                f".refs/{key}/{path}:L{start}-L{end} @ {key}@{short}"
+            )
+    return accounting, errors
 
 
 def rust_without_comments_and_space(data: bytes) -> bytes:
@@ -1262,6 +1562,12 @@ def changed_paths(base: str, head: str) -> list[str]:
 
 
 def production_delta_errors(base: str, head: str) -> tuple[list[str], list[str]]:
+    """Reject production changes outside citations and manifest comments.
+
+    Repository tooling under scripts/ and Markdown content are exempt because
+    human review covers those changes; .refs/MANIFEST.toml comments are likewise
+    metadata, while parsed production manifest values remain protected below.
+    """
     errors: list[str] = []
     hashed_carriers: list[str] = []
     base_paths = set(tracked_paths(base))
@@ -1331,24 +1637,28 @@ def build_hashes(repo: Path, target: Path) -> tuple[str, dict[str, str]]:
 
 
 def fingerprint_report(base: str, head: str, hashed_carriers: list[str]) -> str:
-    # Always build both revisions in fresh target directories. A report directory
-    # can outlive worktree edits, so generated constants stored there are not a
-    # sound cache key for a WORKTREE verification.
+    # Always build both committed revisions in fresh target directories. A report
+    # directory can outlive worktree edits, so generated constants stored there
+    # are not a sound cache key.
+    if head == "WORKTREE":
+        dirty = run(["git", "status", "--porcelain", "--untracked-files=all"]).stdout
+        if dirty:
+            raise RotationError(
+                "fingerprint after-state requires a committed head; worktree is dirty"
+            )
+        head = report_revision(head)
     with tempfile.TemporaryDirectory(prefix="bigname-rotation-") as temporary:
         temp = Path(temporary)
         base_tree = temp / "base"
         run(["git", "worktree", "add", "--detach", str(base_tree), base])
         try:
             before = build_hashes(base_tree, temp / "target-before")
-            if head == "WORKTREE" or resolve_revision("HEAD") == head:
-                after = build_hashes(ROOT, temp / "target-after")
-            else:
-                head_tree = temp / "head"
-                run(["git", "worktree", "add", "--detach", str(head_tree), head])
-                try:
-                    after = build_hashes(head_tree, temp / "target-after")
-                finally:
-                    run(["git", "worktree", "remove", "--force", str(head_tree)])
+            head_tree = temp / "head"
+            run(["git", "worktree", "add", "--detach", str(head_tree), head])
+            try:
+                after = build_hashes(head_tree, temp / "target-after")
+            finally:
+                run(["git", "worktree", "remove", "--force", str(head_tree)])
         finally:
             run(["git", "worktree", "remove", "--force", str(base_tree)])
     before_interpreter, before_profiles = before
@@ -1408,7 +1718,13 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
         )
 
     dispositions: list[dict[str, Any]] = []
-    errors: list[str] = []
+    base_manifest = manifest_document(base)
+    head_manifest = manifest_document(head)
+    base_refs = base_manifest["refs"]
+    head_refs = head_manifest["refs"]
+    errors = manifest_pin_errors(head_refs, spec)
+    errors.extend(manifest_top_level_errors(base_manifest, head_manifest))
+    errors.extend(manifest_metadata_errors(base_refs, head_refs, spec))
     used_final: dict[str, set[int]] = defaultdict(set)
     for row in sorted(
         baseline.rows,
@@ -1537,6 +1853,17 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
         head, governed_keys, excluded_carriers
     )
     errors.extend(citation_errors)
+    accounting, accounting_errors = final_citation_accounting(
+        base,
+        spec,
+        semantics,
+        dispositions,
+        final_data,
+        final_by_carrier,
+        used_final,
+        excluded_carriers,
+    )
+    errors.extend(accounting_errors)
     old_tag = f"{spec['key']}@{spec['old_commit'][:7]}".encode()
     final_raw = sum(data.count(old_tag) for data in final_data.values())
     final_canonical_old = sum(
@@ -1599,11 +1926,15 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
     if errors:
         raise RotationError("verification failed:\n  " + "\n  ".join(errors[:50]))
 
+    immutable_head = report_revision(head)
+    fingerprint_text = fingerprint_report(base, head, hashed_carriers)
     report_dir.mkdir(parents=True, exist_ok=True)
     write_reports(report_dir, baseline, spec)
     disposition_text = "".join(json_line(row) + "\n" for row in sorted(dispositions, key=lambda row: row["id"]))
     (report_dir / "dispositions.jsonl").write_text(disposition_text, encoding="utf-8")
-    write_review_reports(report_dir, baseline, dispositions, semantics, spec)
+    write_review_reports(
+        report_dir, baseline, dispositions, semantics, spec, immutable_head
+    )
     (report_dir / "after.jsonl").write_text(
         "".join(
             json_line(
@@ -1628,7 +1959,7 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
         encoding="utf-8",
     )
     (report_dir / "fingerprint-delta.txt").write_text(
-        fingerprint_report(base, head, hashed_carriers),
+        fingerprint_text,
         encoding="utf-8",
     )
     checks = {
@@ -1641,7 +1972,13 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
         "invalid paths/ranges": 0,
         "forbidden live-deployment cites": forbidden_live,
     }
-    text = summary_text(baseline, resolve_revision(head) if head != "WORKTREE" else "WORKTREE", checks)
+    text = summary_text(
+        baseline,
+        immutable_head,
+        spec,
+        checks,
+        accounting,
+    )
     (report_dir / "summary.txt").write_text(text, encoding="utf-8")
     return text
 
@@ -1655,12 +1992,20 @@ def parse_args() -> argparse.Namespace:
     snapshot.add_argument("--report-dir", type=Path, required=True)
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("--base", required=True)
-    verify_parser.add_argument("--head", required=True)
+    verify_parser.add_argument(
+        "--head",
+        required=True,
+        help="committed revision; WORKTREE is accepted only when the tree is clean",
+    )
     verify_parser.add_argument("--spec", type=Path, required=True)
     verify_parser.add_argument("--report-dir", type=Path, required=True)
     verify_pr = subparsers.add_parser("verify-pr")
     verify_pr.add_argument("--base", required=True)
-    verify_pr.add_argument("--head", default="HEAD")
+    verify_pr.add_argument(
+        "--head",
+        default="HEAD",
+        help="committed revision; WORKTREE is accepted only when the tree is clean",
+    )
     verify_pr.add_argument("--spec", type=Path, required=True)
     verify_pr.add_argument(
         "--report-dir",
@@ -1691,7 +2036,7 @@ def main() -> int:
             baseline = build_baseline(base, spec)
             expected_counts(baseline, spec)
             write_reports(args.report_dir, baseline, spec)
-            text = summary_text(baseline, base)
+            text = summary_text(baseline, base, spec)
             (args.report_dir / "summary.txt").write_text(text, encoding="utf-8")
             print(text, end="")
         else:

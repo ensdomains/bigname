@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.dont_write_bytecode = True
 
@@ -33,6 +36,13 @@ class CitationParserTests(unittest.TestCase):
         data = cite("a.sol") + b" " + cite("b.sol", "L2-L4")
         parsed = rotation.parse_citations(data, loose=False)
         self.assertEqual([(row.start, row.end) for row in parsed], [(1, 1), (2, 4)])
+        unusual = b"one\x0bstill-one\ntwo\r\nthree"
+        self.assertEqual(
+            rotation.byte_lines(unusual),
+            [b"one\x0bstill-one", b"two\r", b"three"],
+        )
+        self.assertEqual(rotation.excerpt(unusual, 1, 1), b"one\x0bstill-one\n")
+        self.assertEqual(rotation.excerpt(unusual, 2, 2), b"two\r\n")
 
     def test_worktree_inventory_includes_untracked_verifier_deliverables(self) -> None:
         self.assertIn(
@@ -52,6 +62,30 @@ class CitationParserTests(unittest.TestCase):
         loose = rotation.parse_citations(data, loose=True)
         self.assertEqual(len(loose), 1)
         self.assertFalse(loose[0].strict)
+
+        for malformed_tag in ("A971BD64", "not-a-sha", "", "z" * 65):
+            malformed = cite("contracts/src/Foo.sol", tag=malformed_tag)
+            self.assertEqual(rotation.parse_citations(malformed, loose=False), [])
+            recovered = rotation.parse_citations(malformed, loose=True)
+            self.assertEqual(len(recovered), 1)
+            self.assertFalse(recovered[0].strict)
+
+        malformed_markers = (
+            cite("contracts/src/Foo.sol", tag="a971 bd64"),
+            cite("contracts/src/Foo.sol").replace(b"@ ens_v2@", b"@ ens-v2@"),
+        )
+        for malformed in malformed_markers:
+            with mock.patch.object(
+                rotation, "manifest_refs", return_value={"ens_v2": {"commit": "x"}}
+            ), mock.patch.object(
+                rotation, "revision_paths", return_value=["docs/malformed.md"]
+            ), mock.patch.object(
+                rotation, "worktree_or_blob", return_value=malformed
+            ):
+                _, errors = rotation.validate_final_citations(
+                    "WORKTREE", {"ens_v2"}, []
+                )
+            self.assertTrue(errors)
 
     def test_historical_ref_is_canonical(self) -> None:
         data = (
@@ -230,10 +264,271 @@ class ProductionDeltaTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_final_validation_rejects_untracked_path_absent_at_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / ".refs" / "ens_v2"
+            checkout.mkdir(parents=True)
+            subprocess.run(["git", "init", "--quiet"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "fixture@example.com"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Fixture"], cwd=checkout, check=True
+            )
+            (checkout / "tracked.sol").write_bytes(b"tracked\n")
+            subprocess.run(["git", "add", "tracked.sol"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "fixture"],
+                cwd=checkout,
+                check=True,
+            )
+            pin = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            (checkout / "untracked.sol").write_bytes(b"not committed\n")
+
+            with mock.patch.object(rotation, "ROOT", root):
+                with self.assertRaises(rotation.RotationError):
+                    rotation.git_file_for_key("ens_v2", pin, "untracked.sol")
+
+        dirty = subprocess.CompletedProcess(
+            args=["git", "status"], returncode=0, stdout=" M file\n", stderr=""
+        )
+        with mock.patch.object(rotation, "run", return_value=dirty):
+            with self.assertRaisesRegex(
+                rotation.RotationError, "requires a committed head"
+            ):
+                rotation.fingerprint_report("base", "WORKTREE", [])
+        with mock.patch.object(
+            rotation, "resolve_revision", return_value="resolved-head"
+        ):
+            self.assertEqual(rotation.report_revision("WORKTREE"), "resolved-head")
+
+    def test_verify_rejects_extra_undispositioned_governed_citation(self) -> None:
+        base_citation = b"value == zero " + cite("tracked.sol")
+        extra = b"value != zero " + cite("tracked.sol")
+        parsed = rotation.parse_citations(extra, loose=False)
+        baseline = rotation.Baseline(
+            commit="base",
+            rows=[],
+            raw_count=0,
+            exact_count=0,
+            parsed_count=0,
+            noncanonical_count=0,
+        )
+        spec = {
+            "key": "ens_v2",
+            "old_commit": "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92",
+            "new_commit": "a971bd6449154045e2b26ff13d0e56027452f407",
+            "expected_old_tag_occurrences": 0,
+            "expected_same_line_tag_refreshes": 0,
+            "expected_changed_occurrences": 0,
+            "old_deployment_prefix": "contracts/deployments/sepolia/",
+            "archive_deployment_prefix": "contracts/deployments/archive/",
+        }
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.multiple(
+            rotation,
+            build_baseline=mock.DEFAULT,
+            revision_paths=mock.DEFAULT,
+            worktree_or_blob=mock.DEFAULT,
+            manifest_document=mock.DEFAULT,
+            manifest_refs=mock.DEFAULT,
+            validate_final_citations=mock.DEFAULT,
+            production_delta_errors=mock.DEFAULT,
+            tracked_paths=mock.DEFAULT,
+            blob=mock.DEFAULT,
+            write_reports=mock.DEFAULT,
+            write_review_reports=mock.DEFAULT,
+            fingerprint_report=mock.DEFAULT,
+        ) as patched:
+            patched["build_baseline"].return_value = baseline
+            patched["revision_paths"].return_value = ["docs/extra.md"]
+            patched["worktree_or_blob"].return_value = extra
+            patched["manifest_refs"].return_value = {
+                "ens_v2": {"commit": spec["new_commit"]},
+                "ens_v2_sepolia_20260629": {"commit": spec["old_commit"]},
+            }
+            patched["manifest_document"].return_value = {
+                "schema_version": 1,
+                "refs": patched["manifest_refs"].return_value,
+            }
+            patched["validate_final_citations"].return_value = (parsed, [])
+            patched["production_delta_errors"].return_value = ([], [])
+            patched["tracked_paths"].return_value = ["docs/extra.md"]
+            patched["blob"].return_value = base_citation
+            patched["fingerprint_report"].return_value = "unchanged\n"
+            with self.assertRaises(rotation.RotationError):
+                rotation.verify("base", "WORKTREE", spec, Path(temporary))
+
+        citation_only_base = b"first claim\n" + cite("tracked.sol")
+        citation_only_final = b"different claim\n" + cite("tracked.sol")
+        citation_only_parsed = rotation.parse_citations(
+            citation_only_final, loose=False
+        )
+        with mock.patch.object(
+            rotation, "tracked_paths", return_value=["docs/citation-only.md"]
+        ), mock.patch.object(rotation, "blob", return_value=citation_only_base):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {"docs/citation-only.md": citation_only_final},
+                {"docs/citation-only.md": citation_only_parsed},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+        historical = (
+            b"historical claim (upstream: .refs/"
+            b"ens_v2_sepolia_20260629/contracts/src/Legacy.sol:L1 "
+            b"@ ens_v2_sepolia_20260629@ccaeb58)"
+        )
+        historical_citations = rotation.parse_citations(historical, loose=False)
+        with mock.patch.object(rotation, "tracked_paths", return_value=[]):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {"docs/historical.md": historical},
+                {"docs/historical.md": historical_citations},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+        deleted_base = b"retained claim " + cite("tracked.sol")
+        with mock.patch.object(
+            rotation, "tracked_paths", return_value=["docs/deleted.md"]
+        ), mock.patch.object(rotation, "blob", return_value=deleted_base):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {"docs/deleted.md": b"retained claim without evidence"},
+                {"docs/deleted.md": []},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+        authority = cite(
+            "contracts/deployments/archive/.deployment.json", "L4"
+        )
+        duplicate_authority = authority + b"\n" + authority
+        duplicate_parsed = rotation.parse_citations(
+            duplicate_authority, loose=False
+        )
+        with mock.patch.object(rotation, "tracked_paths", return_value=[]):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {".refs/MANIFEST.toml": duplicate_authority},
+                {".refs/MANIFEST.toml": duplicate_parsed},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+        manifest_extra = b"extra authority " + cite("tracked.sol")
+        manifest_parsed = rotation.parse_citations(manifest_extra, loose=False)
+        with mock.patch.object(rotation, "tracked_paths", return_value=[]):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {".refs/MANIFEST.toml": manifest_extra},
+                {".refs/MANIFEST.toml": manifest_parsed},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
     def test_manifest_tag_mismatch(self) -> None:
         commit = "a971bd6449154045e2b26ff13d0e56027452f407"
         self.assertTrue(commit.startswith("a971bd64"))
         self.assertFalse(commit.startswith("ccaeb58"))
+        rotation_spec = {
+            "key": "ens_v2",
+            "new_commit": commit,
+            "old_commit": "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92",
+        }
+        mismatched_refs = {
+            "ens_v2": {"commit": commit[:8] + "f" * 32},
+            "ens_v2_sepolia_20260629": {
+                "commit": rotation_spec["old_commit"]
+            },
+        }
+        self.assertTrue(rotation.manifest_pin_errors(mismatched_refs, rotation_spec))
+        base_refs = {
+            "ens_v2": {
+                "repo": "https://github.com/ensdomains/contracts-v2",
+                "commit": commit,
+                "purpose": "current",
+                "authoritative_for": ["current"],
+            }
+        }
+        drifted_refs = {
+            **base_refs,
+            "ens_v2": {**base_refs["ens_v2"], "repo": "https://example.invalid"},
+        }
+        self.assertTrue(
+            rotation.manifest_metadata_errors(base_refs, drifted_refs, rotation_spec)
+        )
+        self.assertTrue(
+            rotation.manifest_top_level_errors(
+                {"schema_version": 1, "refs": base_refs},
+                {"schema_version": 999, "refs": base_refs},
+            )
+        )
+
+        row = {
+            "id": "0" * 64,
+            "carrier_path": "docs/example.md",
+            "carrier_line": 1,
+            "disposition": "archive_repoint",
+            "evidence_relation": "direct",
+            "old": {"path": "old.sol", "start": 1, "end": 1},
+            "new": {
+                "key": "ens_v2",
+                "commit": "a971bd64",
+                "path": "new.sol",
+                "start": 1,
+                "end": 1,
+            },
+        }
+        baseline = rotation.Baseline("base", [row], 1, 1, 1, 0)
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            rotation, "git_file", return_value=b"line\n"
+        ), mock.patch.object(
+            rotation, "git_file_for_key", return_value=b"line\n"
+        ), mock.patch.object(
+            rotation,
+            "manifest_refs",
+            return_value={"ens_v2": {"commit": commit}},
+        ) as refs:
+            rotation.write_review_reports(
+                Path(temporary),
+                baseline,
+                [row],
+                {},
+                {"old_commit": "old", "new_commit": commit},
+                "head",
+            )
+        refs.assert_called_with("head")
 
     def test_live_deployment_citation_outside_allowlist(self) -> None:
         allowed = {
