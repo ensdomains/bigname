@@ -205,7 +205,7 @@ than 3 minutes after the third confirmed pinned completion. The age path
 pages no later than 13 minutes after the second. A single long-running batch
 still belongs to the heartbeat alert. Preserve the 13-minute two-batch bound by
 configuring `--heartbeat-stale-after-secs` (or
-`BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`) to at least about 750 seconds;
+`BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`) to at least 900 seconds;
 a lower expiry can clear that evidence before the age-based rule holds, leaving
 the three-batch path as the remaining non-progress page.
 

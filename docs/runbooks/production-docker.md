@@ -43,8 +43,8 @@ Do not start the walk until all of these checks pass:
 4. The host rule list contains `BignamePhaseRunnerPhaseNonProgress` and
    `BignamePhaseRunnerProgressMetricsMissing`.
 5. The host retains the checked-in 15-second rule-group evaluation interval and
-   configures `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` to at least about
-   750 seconds so the 13-minute two-batch bound remains valid.
+   configures `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` to at least 900
+   seconds so the 13-minute two-batch bound remains valid.
 6. The existing `severity=page` route passes the deployment's standard
    notification-path check.
 7. Operators have the [manual halt procedure](pipeline-monitoring.md#phase-cursor-non-progress-response)
