@@ -11,9 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::warn;
-#[path = "progress_monitor_cursor.rs"]
-mod cursor;
-use cursor::{completion_reports_advance, elapsed_seconds};
 const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(900);
 #[derive(Clone)]
 pub struct RunnerPhaseProgress {
@@ -46,12 +43,11 @@ struct IngestCursorIdentity {
 struct PendingBatch {
     starting_cursor: CursorIdentity,
     committed_at: Instant,
-    quiet_until_confirmed: bool,
 }
 #[derive(Default)]
 struct ProgressState {
     epoch: Option<BlockRange>,
-    reported_advance_pinned: bool,
+    cursor: Option<CursorIdentity>,
     pending: Option<PendingBatch>,
     confirmed: i64,
     first_pinned_commit: Option<Instant>,
@@ -79,7 +75,6 @@ impl RunnerPhaseProgress {
         assert!(!stale_after.is_zero(), "progress expiry must be positive");
         Self::with_clock(stale_after, Arc::new(Instant::now))
     }
-
     fn with_clock(stale_after: Duration, now: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -112,7 +107,6 @@ impl RunnerPhaseProgress {
             .map(|sample| (sample.batches, sample.age_seconds))
             .unwrap_or((0, 0))
     }
-
     pub(crate) fn begin_batch(&self, context: &PhaseContext) -> ProgressToken {
         let now = self.now();
         let key = ProgressKey {
@@ -131,9 +125,13 @@ impl RunnerPhaseProgress {
                 state.epoch = epoch;
             }
             state.expire(now, self.inner.stale_after);
+            if state.cursor.as_ref().is_some_and(|last| last != &cursor) {
+                state.reset();
+                state.epoch = epoch;
+            }
+            state.cursor = Some(cursor.clone());
             if let Some(pending) = state.pending.take() {
                 if cursor == pending.starting_cursor {
-                    state.reported_advance_pinned |= pending.quiet_until_confirmed;
                     state.confirmed = state.confirmed.saturating_add(1);
                     state
                         .first_pinned_commit
@@ -168,24 +166,20 @@ impl RunnerPhaseProgress {
             starting_cursor: cursor,
         }
     }
-
     pub(crate) fn record_committed(&self, token: ProgressToken, outcome: &PhaseBatchOutcome) {
         let now = self.now();
         let work_bearing = is_work_bearing(&token, outcome);
-        let reports_advance = matches!(outcome, PhaseBatchOutcome::Complete(progress)
-            if completion_reports_advance(&token, progress));
         let mut states = self.states();
         let state = states.entry(token.key).or_default();
         if state.epoch != token.epoch {
             state.reset();
             state.epoch = token.epoch;
         }
-        let quiet_until_confirmed = reports_advance && !state.reported_advance_pinned;
+        state.expire(now, self.inner.stale_after);
         if work_bearing {
             state.pending = Some(PendingBatch {
                 starting_cursor: token.starting_cursor,
                 committed_at: now,
-                quiet_until_confirmed,
             });
             state.last_successful_commit = Some(now);
         } else {
@@ -193,7 +187,6 @@ impl RunnerPhaseProgress {
             state.epoch = token.epoch;
         }
     }
-
     pub(crate) fn clear_phase(&self, chain: &str, phase: PhaseName) {
         for (key, state) in self.states().iter_mut() {
             if key.chain == chain && key.phase == phase {
@@ -203,7 +196,6 @@ impl RunnerPhaseProgress {
             }
         }
     }
-
     pub(crate) fn snapshot(&self) -> Vec<ProgressSnapshot> {
         let now = self.now();
         self.states()
@@ -220,11 +212,9 @@ impl RunnerPhaseProgress {
             })
             .collect()
     }
-
     fn now(&self) -> Instant {
         (self.inner.now)()
     }
-
     fn states(&self) -> std::sync::MutexGuard<'_, BTreeMap<ProgressKey, ProgressState>> {
         self.inner
             .states
@@ -232,16 +222,14 @@ impl RunnerPhaseProgress {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
-
 impl ProgressState {
     fn reset(&mut self) {
-        self.reported_advance_pinned = false;
+        self.cursor = None;
         self.pending = None;
         self.confirmed = 0;
         self.first_pinned_commit = None;
         self.last_successful_commit = None;
     }
-
     fn expire(&mut self, now: Instant, stale_after: Duration) {
         if self
             .last_successful_commit
@@ -253,7 +241,6 @@ impl ProgressState {
         }
     }
 }
-
 impl CursorIdentity {
     fn from_context(context: &PhaseContext) -> Self {
         let mut ingest = if context.phase == PhaseName::Ingest {
@@ -273,7 +260,6 @@ impl CursorIdentity {
         }
     }
 }
-
 impl From<&IngestCursor> for IngestCursorIdentity {
     fn from(cursor: &IngestCursor) -> Self {
         Self {
@@ -284,11 +270,16 @@ impl From<&IngestCursor> for IngestCursorIdentity {
         }
     }
 }
-
 fn marker_tuple(marker: Option<&BlockMarker>) -> Option<(i64, String)> {
     marker.map(|marker| (marker.number, marker.hash.clone()))
 }
-
+fn elapsed_seconds(since: Option<Instant>, now: Instant) -> i64 {
+    since
+        .map(|since| {
+            i64::try_from(now.saturating_duration_since(since).as_secs()).unwrap_or(i64::MAX)
+        })
+        .unwrap_or(0)
+}
 fn is_work_bearing(token: &ProgressToken, outcome: &PhaseBatchOutcome) -> bool {
     match outcome {
         PhaseBatchOutcome::Continue(_) => true,
@@ -297,11 +288,11 @@ fn is_work_bearing(token: &ProgressToken, outcome: &PhaseBatchOutcome) -> bool {
             !(progress_is_empty(progress)
                 || token.key.phase == PhaseName::Live
                     && token.key.mode == "normal"
-                    && progress.current == progress.target)
+                    && progress.current == progress.target
+                    && progress.current == token.starting_cursor.current)
         }
     }
 }
-
 fn progress_is_empty(progress: &PhaseProgress) -> bool {
     progress.current.is_none()
         && progress
@@ -309,12 +300,10 @@ fn progress_is_empty(progress: &PhaseProgress) -> bool {
             .iter()
             .all(|source| source.current.is_none() && source.redo_loaded_boundary.is_none())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::phase::{BlockRange, PhaseResume, RedoAttemptFence, SourceProgress};
-
     #[derive(Clone)]
     struct Clock(Arc<Mutex<Instant>>);
     impl Clock {
@@ -375,7 +364,6 @@ mod tests {
         let pinned = context(PhaseName::Interpret, RunMode::Normal, None);
         commit(&tracker, &pinned, work(Some(marker(9, "reported-advance"))));
         assert_eq!(observed(&tracker, &pinned), (0, 0));
-
         for expected in 1..=3 {
             commit(&tracker, &pinned, work(None));
             assert_eq!(observed(&tracker, &pinned).0, expected);
@@ -391,8 +379,12 @@ mod tests {
         pinned.resume.target = Some(marker(10, "target-a"));
         let token = tracker.begin_batch(&pinned);
         assert_eq!(observed(&tracker, &pinned).0, 1);
-        tracker.record_committed(token, &work(pinned.resume.current.clone()));
-
+        drop(token);
+        pinned.resume.current = Some(marker(6, "advanced"));
+        tracker.begin_batch(&pinned);
+        assert_eq!(observed(&tracker, &pinned), (0, 0));
+        pinned.resume.current = Some(marker(5, "a"));
+        commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         for moved in [marker(5, "b"), marker(4, "older"), marker(6, "newer")] {
             pinned.resume.current = Some(moved);
             tracker.begin_batch(&pinned);
@@ -427,7 +419,6 @@ mod tests {
         commit(&tracker, &ingest, work(ingest.resume.current.clone()));
         commit(&tracker, &ingest, work(ingest.resume.current.clone()));
         assert_eq!(observed(&tracker, &ingest).0, 1);
-
         Arc::make_mut(&mut ingest.resume.ingest_cursors)[0].next_block_number = 3;
         tracker.begin_batch(&ingest);
         assert_eq!(observed(&tracker, &ingest), (0, 0));
@@ -437,7 +428,6 @@ mod tests {
         tracker.begin_batch(&ingest);
         assert_eq!(observed(&tracker, &ingest), (0, 0));
     }
-
     #[test]
     fn redo_retries_keep_evidence_but_a_different_execution_range_clears() {
         let tracker = tracker(&Clock::new());
@@ -460,7 +450,6 @@ mod tests {
         tracker.begin_batch(&redo);
         assert_eq!(observed(&tracker, &redo), (0, 0));
     }
-
     #[test]
     fn empty_idle_and_caught_up_live_outcomes_clear_evidence() {
         let tracker = tracker(&Clock::new());
@@ -468,7 +457,6 @@ mod tests {
         commit(&tracker, &live, work(live.resume.current.clone()));
         commit(&tracker, &live, work(live.resume.current.clone()));
         assert_eq!(observed(&tracker, &live).0, 1);
-
         for outcome in [
             PhaseBatchOutcome::Idle(PhaseProgress::default()),
             PhaseBatchOutcome::Complete(PhaseProgress::default()),
@@ -484,18 +472,19 @@ mod tests {
             commit(&tracker, &live, work(live.resume.current.clone()));
             commit(&tracker, &live, work(live.resume.current.clone()));
         }
-        commit(
-            &tracker,
-            &live,
-            PhaseBatchOutcome::Complete(PhaseProgress {
-                current: live.resume.current.clone(),
-                target: Some(marker(6, "six")),
-                ..PhaseProgress::default()
-            }),
-        );
-        assert!(observed(&tracker, &live).0 >= 1);
+        for target in [marker(6, "six"), marker(7, "seven")] {
+            commit(
+                &tracker,
+                &live,
+                PhaseBatchOutcome::Complete(PhaseProgress {
+                    current: Some(marker(6, "six")),
+                    target: Some(target),
+                    ..PhaseProgress::default()
+                }),
+            );
+            assert!(observed(&tracker, &live).0 >= 1);
+        }
     }
-
     #[test]
     fn capacity_clear_expiry_and_error_without_commit_do_not_accumulate() {
         let clock = Clock::new();
@@ -507,16 +496,16 @@ mod tests {
         drop(unused_error_token);
         tracker.begin_batch(&pinned);
         assert_eq!(observed(&tracker, &pinned).0, 1);
-
         commit(&tracker, &pinned, work(pinned.resume.current.clone()));
+        let late_commit = tracker.begin_batch(&pinned);
         clock.advance(Duration::from_secs(901));
-        assert_eq!(observed(&tracker, &pinned), (0, 0));
-        commit(&tracker, &pinned, work(pinned.resume.current.clone()));
+        tracker.record_committed(late_commit, &work(pinned.resume.current.clone()));
+        tracker.begin_batch(&pinned);
+        assert_eq!(observed(&tracker, &pinned).0, 1);
         commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         tracker.clear_phase("chain", PhaseName::Verify);
         assert_eq!(observed(&tracker, &pinned), (0, 0));
     }
-
     #[test]
     fn source_progress_makes_an_ingest_completion_work_bearing() {
         let tracker = tracker(&Clock::new());
@@ -538,7 +527,6 @@ mod tests {
         assert_eq!(observed(&tracker, &ingest).0, 1);
     }
 }
-
 #[cfg(test)]
 #[path = "progress_monitor_completion_tests.rs"]
 mod completion_tests;

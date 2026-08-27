@@ -18,7 +18,7 @@ fn context(phase: PhaseName, current: BlockMarker) -> PhaseContext {
         },
     }
 }
-fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhaseProgress) {
+fn assert_confirmed_evidence_remains_exported(pinned: &PhaseContext, progress: PhaseProgress) {
     let now = Arc::new(Mutex::new(Instant::now()));
     let clock = Arc::clone(&now);
     let tracker = RunnerPhaseProgress::with_clock(
@@ -28,10 +28,8 @@ fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhasePr
     let observed = || tracker.observation("chain", pinned.phase, &RunMode::Normal);
     for _ in 0..2 {
         let token = tracker.begin_batch(pinned);
-        tracker.record_committed(
-            token,
-            &PhaseBatchOutcome::Continue(PhaseProgress::default()),
-        );
+        let outcome = PhaseBatchOutcome::Continue(PhaseProgress::default());
+        tracker.record_committed(token, &outcome);
     }
     let token = tracker.begin_batch(pinned);
     *now.lock().unwrap() += Duration::from_secs(7);
@@ -43,9 +41,9 @@ fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhasePr
     assert_eq!(observed().0, 3);
 }
 #[test]
-fn advancing_final_completion_is_quiet_until_durable_confirmation() {
+fn confirmed_evidence_remains_exported_while_final_completion_awaits_confirmation() {
     let pinned = context(PhaseName::Project, marker(1, "one"));
-    assert_advancing_completion_is_quiet(
+    assert_confirmed_evidence_remains_exported(
         &pinned,
         PhaseProgress {
             current: Some(marker(2, "two")),
@@ -54,7 +52,7 @@ fn advancing_final_completion_is_quiet_until_durable_confirmation() {
     );
 }
 #[test]
-fn final_ingest_next_block_progress_is_quiet_when_markers_stay_pinned() {
+fn pinned_durable_markers_count_a_final_ingest_completion() {
     let mut pinned = context(PhaseName::Ingest, marker(9, "summary"));
     pinned.resume.ingest_cursors = Arc::from([IngestCursor {
         source_key: "source".into(),
@@ -63,7 +61,7 @@ fn final_ingest_next_block_progress_is_quiet_when_markers_stay_pinned() {
         last_processed: Some(marker(1, "one")),
         redo_loaded_boundary: None,
     }]);
-    assert_advancing_completion_is_quiet(
+    assert_confirmed_evidence_remains_exported(
         &pinned,
         PhaseProgress {
             current: pinned.resume.current.clone(),

@@ -130,7 +130,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Seconds since each phase last completed a heartbeat opportunity and since the runner loop for each configured chain last made progress. The configured paging threshold is plotted alongside the ages and must be set above the slowest expected batch; -1 means no phase heartbeat exists yet.",
+      "description": "Seconds since each phase last completed a heartbeat opportunity and since each supervised or active one-shot repair chain last made loop progress. The configured paging threshold is plotted alongside the ages and must be set above the slowest expected batch; -1 means no phase heartbeat exists yet.",
       "fieldConfig": {
         "defaults": {
           "color": {

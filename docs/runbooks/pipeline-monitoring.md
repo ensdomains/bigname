@@ -103,6 +103,11 @@ The result must contain one sample per runner target. Prometheus keeps the
 target's `job` and `instance` labels stable across container replacements, so
 each new process-start value is observable as a change on the same time series.
 No cAdvisor or additional scrape configuration is needed for this rule.
+When planned Ingest, Interpret, and Project one-shot repairs precede a supervisor
+restart inside ten minutes, schedule a maintenance silence scoped only to
+`alertname="BignamePhaseRunnerContainerRestarting"`, `job="bigname-phase-runner"`,
+and the maintained target's exact `instance`;
+keep every other alert active and end the silence after the restarted supervisor is healthy.
 
 Validate the fully assembled host files before reloading Prometheus:
 
@@ -139,7 +144,7 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | --- | --- |
 | Phase lifecycle state | The current `idle`, `running`, `paused`, `completed`, or `failed` row for every chain phase. A value of `1` is the active state. |
 | Phase progress | The latest processed block and current target. `-1` means the runner has not recorded that position. |
-| Heartbeat age | Seconds since the newest heartbeat for the chain phase, plus the in-process age since the runner loop for each configured chain last crossed a phase or batch boundary. A phase value of `-1` means no database heartbeat exists. Compare both with the configured stale threshold, which defaults to 900 seconds and must exceed the slowest healthy batch or inter-phase transition. |
+| Heartbeat age | Seconds since the newest heartbeat for the chain phase, plus the in-process age since each supervised or active one-shot repair chain last crossed a phase or batch boundary. A phase value of `-1` means no database heartbeat exists. Compare both with the configured stale threshold, which defaults to 900 seconds and must exceed the slowest healthy batch or inter-phase transition. |
 | Head lag in blocks | Observed provider target minus the phase's processed block. For Live, the target is the provider head observed at the start of its latest batch. The paging rule applies to Live because historical phases can be far behind during an expected rebuild. |
 | Verification level | The stored `quick_synced`, `cross_checked`, or `node_checked` result. A value of `1` identifies the recorded level. |
 | Repair and reinterpretation state | The active marker and progress for unfinished repair work, plus whether Interpret still needs a repair run because its stored [interpreter content hash](../glossary.md#interpreter-content-hash) differs. Starting the required repair adopts the new hash and clears the requirement gauge; `phase_runner_redo_in_progress` stays at `1` until that work finishes. |
@@ -157,7 +162,7 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | `BignamePhaseRunnerHeartbeatThresholdMissing` | The configured heartbeat-threshold series is absent for 2 minutes. | The runner image and rules are incompatible, so the age-based alerts cannot be evaluated safely. |
 | `BignamePhaseRunnerLoopHeartbeatMissing` | The runner is scrapeable and exports the heartbeat threshold, but its runner-loop heartbeat series is absent for 2 minutes. | The runner image predates the loop-liveness rule, so between-phase stalls cannot be evaluated safely. |
 | `BignamePhaseRunnerHeartbeatStale` | An active phase has no database liveness heartbeat, or exceeds `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` (900 seconds by default), for 2 minutes. | The runner stopped refreshing phase liveness. Capacity waits keep this heartbeat fresh and instead page through `BignamePhaseRunnerCapacityPaused` after 15 minutes. |
-| `BignamePhaseRunnerLoopStale` | The runner loop for a configured chain crosses no phase or batch boundary for the heartbeat threshold, plus 2 minutes. | The process is scrapeable, but work for that chain may be wedged while every phase row rests. |
+| `BignamePhaseRunnerLoopStale` | A supervised or active one-shot repair chain crosses no phase or batch boundary for the heartbeat threshold, plus 2 minutes. | The process is scrapeable, but work for that chain may be wedged while every supervised phase row rests. |
 | `BignamePhaseRunnerHeadLagHigh` | Live lag exceeds 30 blocks and Live is observed running at least once in every 2-minute window for 10 minutes. | The chain is persistently falling behind new blocks; brief completed-state zeroes do not reset the alert, while a failed or resting phase does not keep it active without new running samples. |
 | `BignamePhaseRunnerMetricsRefreshStale` | The database read fails, or the last successful refresh becomes older than 60 seconds, for 2 minutes. | The endpoint is reachable but is serving an old view of pipeline state. |
 | `BignamePhaseRunnerPhaseNonProgress` | Three confirmed unchanged-cursor work batches, or two whose sequence is at least 10 minutes old, remain present for 2 minutes. | The named phase and mode is repeatedly committing work without changing its durable resume position. It does not require the phase to be sampled as `running`; a failed phase remains owned by `BignamePhaseFailed`. |
@@ -199,6 +204,7 @@ An idle poll clears earlier evidence, so pinned commits separated by idle polls
 do not accumulate; this is accepted because an idle poll reports no indexing or
 repair work. Evidence expires after the configured heartbeat-stale interval
 without another successful work-bearing commit.
+In-process retries of the same requested repair range retain accumulated evidence across attempt restarts; a different range or a process restart starts fresh.
 
 With the checked-in 15-second rule interval, the two-minute hold pages no later
 than 3 minutes after the third confirmed pinned completion. The age path

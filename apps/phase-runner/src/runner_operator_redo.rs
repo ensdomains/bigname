@@ -392,10 +392,16 @@ impl PhaseRunner {
         let mut report = SupervisorReport::default();
         let mut generation_tokens = Vec::with_capacity(chains.len());
         for chain in chains {
-            match self
+            if let Some(heartbeat) = &self.loop_heartbeat {
+                heartbeat.record_progress(&chain.chain_id);
+            }
+            let preflight = self
                 .preflight_watch_set_coverage_attestation(chain, selection)
-                .await
-            {
+                .await;
+            if let Some(heartbeat) = &self.loop_heartbeat {
+                heartbeat.remove_progress(&chain.chain_id);
+            }
+            match preflight {
                 Ok(generation_token) => generation_tokens.push(generation_token),
                 Err(error) => report.stopped_chains.push((chain.chain_id.clone(), error)),
             }
@@ -404,6 +410,9 @@ impl PhaseRunner {
             return Ok(report);
         }
         for (chain, generation_token) in chains.iter().zip(generation_tokens) {
+            if let Some(heartbeat) = &self.loop_heartbeat {
+                heartbeat.record_progress(&chain.chain_id);
+            }
             let result = self
                 .scope_manifest_attestation(
                     &chain.chain_id,

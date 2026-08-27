@@ -160,7 +160,7 @@ impl PipelineMetrics {
             .set(heartbeat_stale_after_secs);
         let loop_heartbeat_age_seconds = registry.int_gauge_vec(
             "phase_runner_loop_heartbeat_age_seconds",
-            "Seconds since the runner loop for a configured chain last made observable progress.",
+            "Seconds since a supervised or active repair chain last made loop progress.",
             &["chain"],
         )?;
         let verification_level = registry.int_gauge_vec(
