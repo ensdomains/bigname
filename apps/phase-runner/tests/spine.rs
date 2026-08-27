@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::Result;
 use phase_runner::{
+    RunnerPhaseProgress,
     capacity::{CapacityFuture, CapacityGuard, CapacityMeasurement, CapacityProbe},
     cli::resolve_all_redo_chains,
     config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
@@ -489,6 +490,157 @@ async fn runner_loop_heartbeat_refreshes_across_completed_live_follow_passes() -
 }
 
 #[tokio::test]
+async fn repeated_batches_with_a_pinned_durable_cursor_are_observable_for_every_phase() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("phase_runner_pinned_interpret").await?;
+    let chain_id = "pinned-interpret-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    let calls = PhaseName::ALL.map(|_| Arc::new(AtomicUsize::new(0)));
+    let phase_progress = RunnerPhaseProgress::default();
+    let head = BlockMarker::new(1, format!("{chain_id}-block-1"))?;
+    let phases = PhaseName::ALL.map(|phase| {
+        Arc::new(FunctionPhase {
+            name: phase,
+            handler: {
+                let calls = Arc::clone(&calls[phase as usize]);
+                let head = head.clone();
+                let phase_progress = phase_progress.clone();
+                Arc::new(move |_| {
+                    let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    if call == 4 {
+                        let (count, age) =
+                            phase_progress.observation(chain_id, phase, &RunMode::Normal);
+                        assert_eq!(count, 3);
+                        assert_eq!(age, age.max(0));
+                    }
+                    let current = (call >= 4).then(|| head.clone());
+                    let progress = PhaseProgress {
+                        current: current.clone(),
+                        target: current.clone(),
+                        live_handoff: (phase == PhaseName::Ingest)
+                            .then_some(current.clone())
+                            .flatten(),
+                        heads: (phase == PhaseName::Ingest && call >= 4).then(|| HeadMarkers {
+                            latest: head.clone(),
+                            safe: None,
+                            finalized: None,
+                        }),
+                        verification_level: (phase == PhaseName::Verify && call == 4)
+                            .then_some(VerificationLevel::QuickSynced),
+                        ..PhaseProgress::default()
+                    };
+                    Ok(if call < 4 {
+                        PhaseBatchOutcome::Continue(progress)
+                    } else {
+                        PhaseBatchOutcome::Complete(progress)
+                    })
+                })
+            },
+        }) as Arc<dyn Phase>
+    });
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "pinned-interpret-runner",
+    )?
+    .with_phase_progress(phase_progress.clone());
+
+    runner
+        .run_chain(&chain(chain_id)?, CancellationToken::new())
+        .await?;
+    for (phase, calls) in PhaseName::ALL.into_iter().zip(calls) {
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            phase_progress.observation(chain_id, phase, &RunMode::Normal),
+            (0, 0)
+        );
+    }
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn pinned_completions_accumulate_across_completed_phase_restarts() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_pinned_completion_restart").await?;
+    let chain_id = "pinned-completion-restart-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 2).await?;
+    let head = BlockMarker::new(2, format!("{chain_id}-block-2"))?;
+    runner(
+        scratch.runner(),
+        complete_phase_set(Some(HeadMarkers {
+            latest: head.clone(),
+            safe: None,
+            finalized: None,
+        })),
+        available_capacity(),
+        "pinned-completion-setup",
+    )?
+    .run_chain(&chain(chain_id)?, CancellationToken::new())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 1,
+             current_block_hash = $2,
+             target_block_number = 2,
+             target_block_hash = $3
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-1"))
+    .bind(&head.hash)
+    .execute(scratch.pool())
+    .await?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let phase_progress = RunnerPhaseProgress::default();
+    let interpret = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: {
+            let calls = Arc::clone(&calls);
+            let phase_progress = phase_progress.clone();
+            Arc::new(move |_| {
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call == 4 {
+                    let (count, age) = phase_progress.observation(
+                        chain_id,
+                        PhaseName::Interpret,
+                        &RunMode::Normal,
+                    );
+                    assert_eq!(count, 3);
+                    assert_eq!(age, age.max(0));
+                }
+                Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                    current: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+                    target: Some(BlockMarker::new(2, format!("{chain_id}-block-2"))?),
+                    ..PhaseProgress::default()
+                }))
+            })
+        },
+    });
+    let phases = PhaseName::ALL.map(|phase| {
+        if phase == PhaseName::Interpret {
+            Arc::clone(&interpret) as Arc<dyn Phase>
+        } else {
+            complete_phase(phase, None)
+        }
+    });
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "pinned-completion-runner",
+    )?
+    .with_phase_progress(phase_progress);
+    for _ in 0..2 {
+        runner
+            .run_chain(&chain(chain_id)?, CancellationToken::new())
+            .await?;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_capacity").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
@@ -617,14 +769,27 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
     .await?;
     mark_completed(scratch.pool(), "restart-chain", PhaseName::Verify, None).await?;
     let calls = Arc::new(AtomicUsize::new(0));
+    let phase_progress = RunnerPhaseProgress::default();
     let flaky = Arc::new(FunctionPhase {
         name: PhaseName::Verify,
         handler: {
             let calls = Arc::clone(&calls);
+            let phase_progress = phase_progress.clone();
             Arc::new(move |_| {
-                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call <= 2 {
+                    Ok(PhaseBatchOutcome::Continue(PhaseProgress::default()))
+                } else if call == 3 {
                     Err(RunnerError::transient("temporary provider outage"))
                 } else {
+                    assert_eq!(
+                        phase_progress.observation(
+                            "restart-chain",
+                            PhaseName::Verify,
+                            &RunMode::Redo(BlockRange::new(0, 0)?),
+                        ),
+                        (2, 0)
+                    );
                     Ok(PhaseBatchOutcome::Complete(PhaseProgress {
                         verification_level: Some(VerificationLevel::QuickSynced),
                         ..PhaseProgress::default()
@@ -638,7 +803,8 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
         phase_set_replacing(PhaseName::Verify, flaky)?,
         available_capacity(),
         "restart-runner",
-    )?;
+    )?
+    .with_phase_progress(phase_progress);
     runner
         .redo(
             &chain("restart-chain")?,
@@ -647,7 +813,7 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
             CancellationToken::new(),
         )
         .await?;
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     scratch.cleanup().await
 }
 
@@ -1870,12 +2036,14 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
             fail_chain: (name == PhaseName::Interpret).then(|| failed_chain.to_owned()),
         }) as Arc<dyn Phase>
     });
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
     let phase_runner = runner(
         scratch.runner(),
         PhaseSet::new(phases)?,
         available_capacity(),
         "redo-all-phases-runner",
-    )?;
+    )?
+    .with_loop_heartbeat(loop_heartbeat.clone());
     let mut sources = chain(completed_chain)?.sources.to_vec();
     let mut reference = sources[0].clone();
     reference.source_key = "reference".into();
@@ -1892,6 +2060,8 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         .await?;
 
     assert_eq!(report.stopped_chains.len(), 1);
+    assert_eq!(loop_heartbeat.age_seconds(failed_chain), None);
+    assert_eq!(loop_heartbeat.age_seconds(completed_chain), None);
     assert_eq!(report.stopped_chains[0].0, failed_chain);
     assert!(
         report.stopped_chains[0]

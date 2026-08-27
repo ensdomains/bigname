@@ -10,6 +10,8 @@ use bigname_metrics::{BuildInfo, IntGauge, IntGaugeVec, MetricsRegistry, Metrics
 use sqlx::{FromRow, PgPool};
 use tokio_util::sync::CancellationToken;
 
+use crate::progress_monitor::RunnerPhaseProgress;
+
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const PHASE_STATUSES: [&str; 5] = ["idle", "running", "paused", "completed", "failed"];
 const VERIFICATION_LEVELS: [&str; 3] = ["quick_synced", "cross_checked", "node_checked"];
@@ -34,6 +36,13 @@ impl RunnerLoopHeartbeat {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(chain)
             .map(elapsed_seconds)
+    }
+
+    pub fn remove_progress(&self, chain: &str) {
+        self.last_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(chain);
     }
 
     fn ages_seconds(&self) -> BTreeMap<String, i64> {
@@ -68,9 +77,12 @@ struct PipelineMetrics {
     reinterpretation_required: IntGaugeVec,
     chain_head_block: IntGaugeVec,
     head_lag_blocks: IntGaugeVec,
+    batches_since_cursor_advance: IntGaugeVec,
+    cursor_stall_age_seconds: IntGaugeVec,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
     loop_heartbeat: RunnerLoopHeartbeat,
+    phase_progress: RunnerPhaseProgress,
     known: Arc<Mutex<KnownLabels>>,
 }
 
@@ -99,7 +111,11 @@ struct PhaseMetricRow {
 }
 
 impl PipelineMetrics {
-    fn new(heartbeat_stale_after_secs: i64, loop_heartbeat: RunnerLoopHeartbeat) -> Result<Self> {
+    fn new(
+        heartbeat_stale_after_secs: i64,
+        loop_heartbeat: RunnerLoopHeartbeat,
+        phase_progress: RunnerPhaseProgress,
+    ) -> Result<Self> {
         ensure!(
             heartbeat_stale_after_secs > 0,
             "heartbeat stale threshold must be positive"
@@ -144,7 +160,7 @@ impl PipelineMetrics {
             .set(heartbeat_stale_after_secs);
         let loop_heartbeat_age_seconds = registry.int_gauge_vec(
             "phase_runner_loop_heartbeat_age_seconds",
-            "Seconds since the runner loop for a configured chain last made observable progress.",
+            "Seconds since a supervised or active repair chain last made loop progress.",
             &["chain"],
         )?;
         let verification_level = registry.int_gauge_vec(
@@ -187,6 +203,16 @@ impl PipelineMetrics {
             "Observed provider target minus processed phase progress in blocks, or -1 when unavailable.",
             &["chain", "phase"],
         )?;
+        let batches_since_cursor_advance = registry.int_gauge_vec(
+            "phase_runner_phase_batches_since_cursor_advance",
+            "Consecutive successful work-bearing phase batch commits confirmed not to have changed the durable composite cursor.",
+            &["chain", "phase", "mode"],
+        )?;
+        let cursor_stall_age_seconds = registry.int_gauge_vec(
+            "phase_runner_phase_cursor_stall_age_seconds",
+            "Seconds since the first confirmed unchanged-cursor batch commit in the current consecutive sequence, or zero when no sequence is active.",
+            &["chain", "phase", "mode"],
+        )?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
             "Whether the latest database refresh succeeded.",
@@ -210,14 +236,18 @@ impl PipelineMetrics {
             reinterpretation_required,
             chain_head_block,
             head_lag_blocks,
+            batches_since_cursor_advance,
+            cursor_stall_age_seconds,
             refresh_success,
             last_refresh_timestamp_seconds,
             loop_heartbeat,
+            phase_progress,
             known: Arc::new(Mutex::new(KnownLabels::default())),
         })
     }
 
     async fn refresh(&self, pool: &PgPool) -> Result<()> {
+        self.apply_phase_progress();
         let rows = match load_rows(pool).await {
             Ok(rows) => rows,
             Err(error) => {
@@ -239,6 +269,18 @@ impl PipelineMetrics {
         self.last_refresh_timestamp_seconds.set(timestamp);
         self.refresh_success.set(1);
         Ok(())
+    }
+
+    fn apply_phase_progress(&self) {
+        for sample in self.phase_progress.snapshot() {
+            let labels = &[sample.chain.as_str(), sample.phase.as_str(), sample.mode];
+            self.batches_since_cursor_advance
+                .with_label_values(labels)
+                .set(sample.batches);
+            self.cursor_stall_age_seconds
+                .with_label_values(labels)
+                .set(sample.age_seconds);
+        }
     }
 
     fn apply_rows(&self, rows: &[PhaseMetricRow]) -> Result<()> {
@@ -368,8 +410,9 @@ pub async fn start(
     cancellation: CancellationToken,
     heartbeat_stale_after_secs: i64,
     loop_heartbeat: RunnerLoopHeartbeat,
+    phase_progress: RunnerPhaseProgress,
 ) -> Result<SocketAddr> {
-    let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat)?;
+    let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat, phase_progress)?;
     metrics.refresh(&pool).await?;
     let server = MetricsServer::bind(bind_addr, metrics.registry.clone()).await?;
     let local_addr = server.local_addr()?;

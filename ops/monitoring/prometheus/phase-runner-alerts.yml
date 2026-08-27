@@ -1,5 +1,6 @@
 groups:
   - name: bigname-phase-runner
+    interval: 15s
     rules:
       - alert: BignamePhaseFailed
         expr: phase_runner_phase_status{job="bigname-phase-runner",status="failed"} == 1
@@ -172,3 +173,65 @@ groups:
         annotations:
           threshold: "The metrics database read fails, or no successful refresh occurs for 60 seconds, for 2 minutes."
           meaning: "The endpoint is reachable but its view of pipeline state is no longer current."
+
+      - alert: BignamePhaseRunnerPhaseNonProgress
+        expr: |
+          (
+            (
+              phase_runner_phase_batches_since_cursor_advance{
+                job="bigname-phase-runner"
+              } >= 3
+              or
+              (
+                phase_runner_phase_batches_since_cursor_advance{
+                  job="bigname-phase-runner"
+                } >= 2
+                and on (job, instance, chain, phase, mode)
+                phase_runner_phase_cursor_stall_age_seconds{
+                  job="bigname-phase-runner"
+                } >= 600
+              )
+            )
+            and on (job, instance)
+            up{job="bigname-phase-runner"} == 1
+          )
+          unless on (job, instance, chain, phase)
+          phase_runner_phase_status{
+            job="bigname-phase-runner",
+            status="failed"
+          } == 1
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          threshold: "Three committed work-bearing batches, or two with 10 minutes elapsed since the first pinned commit, leave the durable cursor unchanged for 2 minutes."
+          meaning: "The named phase and mode are repeating provider/database work without durable cursor progress; provider quota or database capacity may be burning."
+      - alert: BignamePhaseRunnerProgressMetricsMissing
+        expr: |
+          (
+            (
+              up{job="bigname-phase-runner"} == 1
+              unless on (job, instance)
+              phase_runner_phase_batches_since_cursor_advance{
+                job="bigname-phase-runner"
+              }
+            )
+            or
+            (
+              up{job="bigname-phase-runner"} == 1
+              unless on (job, instance)
+              phase_runner_phase_cursor_stall_age_seconds{
+                job="bigname-phase-runner"
+              }
+            )
+          )
+          and on (job, instance)
+          phase_runner_heartbeat_stale_threshold_seconds{
+            job="bigname-phase-runner"
+          }
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          threshold: "One or both phase cursor non-progress metric families are absent for 2 minutes."
+          meaning: "The runner image and alert rules are incompatible, so phase livelock paging cannot be evaluated safely."

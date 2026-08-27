@@ -340,6 +340,11 @@ retained coverage without a reproducible desired rule, while a
 loudly and recoverably on `ResolverUpdated`; an empty rebuild can likewise
 clear the preceding invalidation first.
 
+<a id="durable-composite-cursor"></a>
+**Durable composite cursor** — the persisted resume position used to decide
+whether a phase advanced. It includes block number and hash and, for Ingest,
+the sorted per-source resume fields needed to distinguish real source progress.
+
 **Migration edge** (`migration`) — the fifth discovery edge kind. It is
 [reserved surface](#reserved-surface): the schema-v2 baseline accepts the
 value, and three manifest views explicitly exclude it from watch-plan,
@@ -1576,6 +1581,14 @@ addresses do not provide its event coverage. Topology-only edges, including
 ENSv2 subregistry edges, do not add targets. A *watched tuple* is one such
 entry; its *watched window* is the active block range. Addresses are derived
 watch targets, never the durable identity.
+
+<a id="work-bearing-batch"></a>
+**Work-bearing batch** — a successfully persisted phase batch that reports
+completed indexing or repair work, excluding idle polls, empty completions,
+caught-up Live polls that report no movement from the starting durable cursor,
+and completed-phase revalidation. A one-shot repair's non-progress counters are
+process-local and are scrapeable only while that redo process has a reachable
+metrics listener; its durable redo state remains in PostgreSQL.
 
 **Wrapped NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
 a name whose wrapper token has a nonzero owner and whose registry owner is the

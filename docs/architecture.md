@@ -1369,9 +1369,9 @@ API metrics remain available. The phase runner also exposes a read-only metrics
 endpoint built from its phase state, heartbeat, chain-head, verification, and
 redo records. These metrics include each phase's current and target block and
 the live phase's lag behind the latest provider head it observed and stored as
-that phase's target. A per-chain in-process heartbeat also records when the
-runner loop for each configured chain last crossed a phase or batch boundary,
-including periods when every phase row is resting. The endpoint does not write
+that phase's target. An in-process heartbeat records when each supervised or
+active one-shot repair chain last crossed a phase or batch boundary, including
+periods when every supervised phase row is resting. The endpoint does not write
 additional operating state. Dedicated reorg metrics remain deferred.
 
 The phase runner owns the current schema-v2 operator tools. None expose public

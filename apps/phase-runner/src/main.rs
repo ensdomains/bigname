@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
@@ -71,26 +71,15 @@ async fn main() -> Result<()> {
                 manifest_profile,
             )
             .await?;
-            let loop_heartbeat = phase_runner::metrics::RunnerLoopHeartbeat::default();
-            for chain in runtime.chains.iter() {
-                loop_heartbeat.record_progress(&chain.chain_id);
-            }
-            let bound_metrics_addr = phase_runner::metrics::start(
+            let (loop_heartbeat, phase_progress) = start_metrics(
                 metrics_bind_addr,
-                database.pool().clone(),
-                cancellation.clone(),
+                &database,
+                &cancellation,
                 heartbeat_stale_after_secs,
-                loop_heartbeat.clone(),
+                runtime.chains.iter().map(|chain| chain.chain_id.as_str()),
+                true,
             )
             .await?;
-            tracing::info!(
-                service = "phase-runner",
-                metrics_bind_addr = %bound_metrics_addr,
-                version = phase_runner::SOFTWARE_VERSION,
-                build_sha = phase_runner::BUILD_SHA,
-                interpreter_content_hash = phase_runner::INTERPRETER_CONTENT_HASH,
-                "phase-runner metrics listener started"
-            );
             let verification_database = VerificationDatabase::connect(
                 &verification_database_url,
                 &database,
@@ -121,7 +110,8 @@ async fn main() -> Result<()> {
                     runtime.instance_id.clone(),
                     runtime.timing.clone(),
                 )?
-                .with_loop_heartbeat(loop_heartbeat),
+                .with_loop_heartbeat(loop_heartbeat)
+                .with_phase_progress(phase_progress),
             );
             let report = runner.run(&runtime, cancellation).await?;
             require_clean_supervisor_exit(report)?;
@@ -129,6 +119,8 @@ async fn main() -> Result<()> {
         ResolvedCommand::Redo {
             database_url,
             verification_database_url,
+            metrics_bind_addr,
+            heartbeat_stale_after_secs,
             manifests_root,
             instance_id,
             chains,
@@ -154,6 +146,15 @@ async fn main() -> Result<()> {
             validate_deployment_table_set(&chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
             sync_manifests(database.pool(), &manifests_root).await?;
             validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
+            let (loop_heartbeat, phase_progress) = start_metrics(
+                metrics_bind_addr,
+                &database,
+                &cancellation,
+                heartbeat_stale_after_secs,
+                chains.iter().map(|chain| chain.chain_id.as_str()),
+                false,
+            )
+            .await?;
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
             let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
             let interpret = Arc::new(InterpretPhase::with_state_cache_capacity(
@@ -189,7 +190,9 @@ async fn main() -> Result<()> {
                 instance_id,
                 timing,
             )?
-            .with_watch_set_coverage_attestations(watch_set_coverage_attestations);
+            .with_watch_set_coverage_attestations(watch_set_coverage_attestations)
+            .with_loop_heartbeat(loop_heartbeat)
+            .with_phase_progress(phase_progress);
             let report = runner
                 .redo_chains(&chains, phase, range, cancellation)
                 .await?;
@@ -226,6 +229,49 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn start_metrics<'a>(
+    bind_addr: SocketAddr,
+    database: &RunnerDatabase,
+    cancellation: &CancellationToken,
+    heartbeat_stale_after_secs: i64,
+    chain_ids: impl IntoIterator<Item = &'a str>,
+    seed_loop_heartbeats: bool,
+) -> Result<(
+    phase_runner::metrics::RunnerLoopHeartbeat,
+    phase_runner::RunnerPhaseProgress,
+)> {
+    let loop_heartbeat = phase_runner::metrics::RunnerLoopHeartbeat::default();
+    let phase_progress = phase_runner::RunnerPhaseProgress::new(Duration::from_secs(
+        heartbeat_stale_after_secs
+            .try_into()
+            .expect("validated threshold"),
+    ));
+    for chain_id in chain_ids {
+        if seed_loop_heartbeats {
+            loop_heartbeat.record_progress(chain_id);
+        }
+        phase_progress.seed_chain(chain_id);
+    }
+    let bound_addr = phase_runner::metrics::start(
+        bind_addr,
+        database.pool().clone(),
+        cancellation.clone(),
+        heartbeat_stale_after_secs,
+        loop_heartbeat.clone(),
+        phase_progress.clone(),
+    )
+    .await?;
+    tracing::info!(
+        service = "phase-runner",
+        metrics_bind_addr = %bound_addr,
+        version = phase_runner::SOFTWARE_VERSION,
+        build_sha = phase_runner::BUILD_SHA,
+        interpreter_content_hash = phase_runner::INTERPRETER_CONTENT_HASH,
+        "phase-runner metrics listener started"
+    );
+    Ok((loop_heartbeat, phase_progress))
 }
 
 async fn sync_manifests(pool: &sqlx::PgPool, root: &std::path::Path) -> Result<()> {

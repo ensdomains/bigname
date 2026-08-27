@@ -134,8 +134,11 @@ fn run_cli_accepts_a_metrics_listener_address() {
     let Command::Run(args) = cli.command else {
         panic!("expected run command");
     };
-    assert_eq!(args.metrics_bind_addr, "0.0.0.0:19465".parse().unwrap());
-    assert_eq!(args.heartbeat_stale_after_secs, 1200);
+    assert_eq!(
+        args.monitoring.metrics_bind_addr,
+        "0.0.0.0:19465".parse().unwrap()
+    );
+    assert_eq!(args.monitoring.heartbeat.heartbeat_stale_after_secs, 1200);
 }
 
 #[test]
@@ -159,6 +162,132 @@ fn run_cli_rejects_a_nonpositive_heartbeat_threshold() {
         .expect("zero threshold must be rejected");
     assert_eq!(error.kind(), ErrorKind::Configuration);
     assert!(error.to_string().contains("threshold must be positive"));
+}
+
+#[test]
+fn redo_cli_carries_progress_metrics_configuration() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--all-chains",
+        "--phase",
+        "recompute-flags",
+        "--from-block",
+        "42",
+        "--to-block",
+        "42",
+        "--metrics-bind-addr",
+        "0.0.0.0:19466",
+        "--heartbeat-stale-after-secs",
+        "1200",
+    ])
+    .expect("redo progress metrics options must parse")
+    .resolve()
+    .expect("redo progress metrics options must resolve");
+
+    let ResolvedCommand::Redo {
+        metrics_bind_addr,
+        heartbeat_stale_after_secs,
+        ..
+    } = command
+    else {
+        panic!("expected redo command");
+    };
+    assert_eq!(metrics_bind_addr, "0.0.0.0:19466".parse().unwrap());
+    assert_eq!(heartbeat_stale_after_secs, 1200);
+}
+
+#[test]
+fn redo_default_metrics_listener_ignores_an_occupied_supervisor_address() {
+    const CHILD: &str = "BIGNAME_TEST_REDO_METRICS_CHILD";
+    let redo = || {
+        Cli::try_parse_from([
+            "phase-runner",
+            "redo",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "42",
+            "--to-block",
+            "42",
+        ])
+        .expect("redo command must parse")
+        .resolve()
+        .expect("redo command must resolve")
+    };
+    if std::env::var_os(CHILD).is_some() {
+        let ResolvedCommand::Redo {
+            metrics_bind_addr, ..
+        } = redo()
+        else {
+            panic!("expected redo command");
+        };
+        std::net::TcpListener::bind(metrics_bind_addr)
+            .expect("redo metrics must bind beside the supervisor");
+        assert_eq!(metrics_bind_addr, "127.0.0.1:0".parse().unwrap());
+        return;
+    }
+    let supervisor = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("test must occupy a supervisor metrics address");
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("cli::tests::redo_default_metrics_listener_ignores_an_occupied_supervisor_address")
+        .arg("--exact")
+        .env(CHILD, "1")
+        .env(
+            "BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR",
+            supervisor.local_addr().unwrap().to_string(),
+        )
+        .env_remove("BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR")
+        .status()
+        .expect("redo metrics child must run");
+    assert!(status.success(), "redo metrics child failed: {status}");
+}
+
+#[test]
+fn redo_metrics_listener_honors_its_dedicated_environment_key() {
+    const CHILD: &str = "BIGNAME_TEST_REDO_METRICS_ENV_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let command = Cli::try_parse_from([
+            "phase-runner",
+            "redo",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--all-chains",
+            "--phase",
+            "recompute-flags",
+            "--from-block",
+            "42",
+            "--to-block",
+            "42",
+        ])
+        .unwrap()
+        .resolve()
+        .unwrap();
+        let ResolvedCommand::Redo {
+            metrics_bind_addr, ..
+        } = command
+        else {
+            panic!("expected redo command");
+        };
+        assert_eq!(metrics_bind_addr, "127.0.0.1:17777".parse().unwrap());
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("cli::tests::redo_metrics_listener_honors_its_dedicated_environment_key")
+        .arg("--exact")
+        .env(CHILD, "1")
+        .env(
+            "BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR",
+            "127.0.0.1:17777",
+        )
+        .status()
+        .expect("redo metrics environment child must run");
+    assert!(status.success(), "redo metrics child failed: {status}");
 }
 
 #[test]

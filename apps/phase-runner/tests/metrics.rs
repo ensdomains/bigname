@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use phase_runner::RunnerPhaseProgress;
 use phase_runner::metrics::RunnerLoopHeartbeat;
 use phase_runner::state::PhaseStore;
 use tokio_util::sync::CancellationToken;
@@ -25,12 +26,15 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
     let cancellation = CancellationToken::new();
     let loop_heartbeat = RunnerLoopHeartbeat::default();
     loop_heartbeat.record_progress(chain);
+    let phase_progress = RunnerPhaseProgress::default();
+    phase_progress.seed_chain(chain);
     let address = phase_runner::metrics::start(
         "127.0.0.1:0".parse()?,
         scratch.pool().clone(),
         cancellation.clone(),
         900,
         loop_heartbeat,
+        phase_progress,
     )
     .await?;
     let response = tokio::task::spawn_blocking(move || scrape(address))
@@ -143,6 +147,33 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
         )?,
         900.0
     );
+    for phase in ["ingest", "interpret", "project", "verify", "live"] {
+        for mode in ["normal", "redo", "recompute_flags"] {
+            for metric in [
+                "phase_runner_phase_batches_since_cursor_advance",
+                "phase_runner_phase_cursor_stall_age_seconds",
+            ] {
+                assert_eq!(
+                    sample(
+                        body,
+                        metric,
+                        &[
+                            "chain=\"ethereum-mainnet\"",
+                            &format!("phase=\"{phase}\""),
+                            &format!("mode=\"{mode}\""),
+                        ],
+                    )?,
+                    0.0
+                );
+            }
+        }
+    }
+    for line in body
+        .lines()
+        .filter(|line| line.starts_with("phase_runner_phase_cursor_stall"))
+    {
+        ensure!(!line.contains("hash=") && !line.contains("source="));
+    }
     ensure!(body.contains("build_info{"));
 
     cancellation.cancel();

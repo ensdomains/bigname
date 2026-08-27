@@ -28,6 +28,43 @@ The reth overlay attaches the API and phase runner to the external
 `RETH_DATA_DIR` into the phase runner read-only. Create or start that network
 and make the canonical reth database path readable before using the overlay.
 
+## Before a from-zero or full-source walk
+
+Do not start the walk until all of these checks pass:
+
+1. The release commit has green cursor non-progress integration tests for all
+   five phase names and valid repair-mode behavior.
+2. `promtool test rules` proves the three-batch path, the two-batch/ten-minute
+   path, and the legitimate exclusions.
+3. The deployed metrics endpoint exposes
+   `phase_runner_phase_batches_since_cursor_advance` and
+   `phase_runner_phase_cursor_stall_age_seconds` for every configured chain and
+   phase.
+4. The host rule list contains `BignamePhaseRunnerPhaseNonProgress` and
+   `BignamePhaseRunnerProgressMetricsMissing`.
+5. The host retains the checked-in 15-second rule-group evaluation interval and
+   configures `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` to at least 900
+   seconds so the 13-minute two-batch bound remains valid.
+6. The existing `severity=page` route passes the deployment's standard
+   notification-path check.
+7. Operators have the [manual halt procedure](pipeline-monitoring.md#phase-cursor-non-progress-response)
+   open and know every active Compose overlay.
+8. Record this acceptance statement in the walk log:
+
+> **Phase livelock paging verified:** with the checked-in 15-second Prometheus
+> rule interval, every executable phase/mode combination pages through the
+> existing `severity=page` route no later than 13 minutes after its second
+> committed [work-bearing batch](../glossary.md#work-bearing-batch) is confirmed
+> at an unchanged [durable composite cursor](../glossary.md#durable-composite-cursor);
+> a third pinned completion pages within 3 minutes. Intentional rescan
+> and no-work shapes remain non-paging.
+
+The equivalent operational acceptance is that livelock in any executable
+phase/mode pages within 13 minutes after the second confirmed pinned completion,
+or within 3 minutes after the third. Normal Ingest source movement, one Project
+boundary replay, caught-up Live polling that reports no movement from the
+starting durable cursor, no-head completion, capacity pause, and completed Verify revalidation do not page.
+
 ## Planned migration and fingerprint boundary
 
 The image has no generic `migrate` command, so migrations are an operator step
@@ -283,10 +320,15 @@ indexes are additive; rollback may leave them in place.
    Ingest redo over every widened range; otherwise skip this step. The command
    requires the full argument set or it is rejected before fetching anything:
    `phase-runner redo --chain <chain-id> --phase ingest --from-block <from>
-   --to-block <to> --source <source>`. Repeat `--source` for every configured
-   intake-capable source key; the exact persisted cursor-key set is required.
+   --to-block <to> --source <source> --metrics-bind-addr 0.0.0.0:9465`. Repeat
+   `--source` for every configured intake-capable source key; the exact persisted
+   cursor-key set is required.
    The CLI refuses an ingest redo without a source, and every redo requires the
-   explicit block range;
+   explicit block range. These recovery commands override redo's ephemeral
+   metrics default with `0.0.0.0:9465` so the stopped supervisor's existing
+   Prometheus target observes repair-mode progress. Use that fixed address only
+   while the supervisor is stopped; another simultaneous redo needs its own
+   stable target or the logged ephemeral default;
 7. after any required Ingest redo succeeds, resume an already-audited Interpret
    redo with its existing token and exact active chain and range. Otherwise,
    invoke the exact required full-history Interpret redo without an attestation
@@ -296,8 +338,9 @@ indexes are additive; rollback may leave them in place.
    watch plan, or complete the required review proving that the watch plan did
    not widen, then rerun the same chain and block range with
    `--attest-watch-set-coverage <token>`. If no marker exists, let the unflagged
-   redo complete. Never invent a token, reuse one after completion, or use one
-   for another redo. Do not use the unattended `run` path for an attestation;
+   redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
+   matching Project redo. Never invent a token, reuse one after completion, or
+   use one for another redo. Do not use the unattended `run` path for an attestation;
 8. complete the matching full-history Project redo while the supervisor remains
    stopped;
 9. start the long-running phase runner only after those one-shot redos succeed.
@@ -518,9 +561,10 @@ error while another chain continues running.
    ```sh
    BIGNAME_IMAGE=<recovery-image> \
      docker compose --env-file .env.server \
-     <compose-files> run --rm --pull never phase-runner \
+     <compose-files> run --rm --pull never --use-aliases --service-ports phase-runner \
      phase-runner redo --chain <chain-id> --phase interpret \
      --from-block <from> --to-block <recorded-interpret-head> \
+     --metrics-bind-addr 0.0.0.0:9465 \
      --source <affected-chain-source> \
      [--source <additional-affected-chain-source> ...]
    ```

@@ -111,6 +111,20 @@ pub enum RunMode {
 }
 
 impl RunMode {
+    pub const ALL: [Self; 3] = [
+        Self::Normal,
+        Self::Redo(BlockRange { from: 0, to: 0 }),
+        Self::RecomputeFlags(BlockRange { from: 0, to: 0 }),
+    ];
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Redo(_) => "redo",
+            Self::RecomputeFlags(_) => "recompute_flags",
+        }
+    }
+
     pub const fn is_redo(&self) -> bool {
         !matches!(self, Self::Normal)
     }

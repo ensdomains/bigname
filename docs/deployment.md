@@ -89,6 +89,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_INSTANCE_ID`
 - `BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES`
 - `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
+- `BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`
 - `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
 
 `BIGNAME_DATABASE_URL` is the writer credential. Supervised `run` and a
@@ -116,11 +117,16 @@ a directly launched runner and defaults to `127.0.0.1:9465`. The server Compose
 file fixes the container listener at `0.0.0.0:9465` and publishes it on host
 loopback by default; `BIGNAME_PHASE_RUNNER_METRICS_HOST` and
 `BIGNAME_PHASE_RUNNER_METRICS_PORT` change only that Compose port mapping. The
+redo command deliberately ignores that runner variable: its separate
+`BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR` defaults to the ephemeral
+`127.0.0.1:0`. Its info-level startup event records the selected port; set
+`RUST_LOG=info` to display it. Set the redo variable or pass
+`--metrics-bind-addr` when a stable, unique repair target will be scraped. Each
 listener serves `GET /metrics`. Every five seconds it reads phase progress,
 heartbeats, verification, unfinished repair work, and the published chain head
 from the runner-owned tables. It also reports an in-process heartbeat for the
-runner loop of each configured chain so a stall between phases remains
-observable, plus the process-start timestamp used to detect repeated restarts.
+runner loop of each supervised chain or the active one-shot repair chain, plus
+the process-start timestamp used to detect repeated restarts.
 It does not write metric state to PostgreSQL. Missing block positions and phase
 heartbeats are exported as `-1`, rather than being silently omitted. See the
 [pipeline monitoring runbook](runbooks/pipeline-monitoring.md) for the checked-in

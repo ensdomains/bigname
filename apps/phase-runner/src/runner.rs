@@ -13,9 +13,9 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult, VERIFICATION_MISMATCH_PREFIX},
     heads::publish_heads,
     ingest_progress,
-    metrics::RunnerLoopHeartbeat,
     phase::{Phase, PhaseBatchOutcome, PhaseName, PhaseSet, RunMode},
     phase_lock::PhaseLock,
+    progress_monitor::RunnerPhaseProgress,
     runner_support::{
         Backoff, HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error,
         finish_failed_redo_start, record_live_mismatch_with_lock, redo_outcome,
@@ -66,7 +66,8 @@ pub struct PhaseRunner {
     before_redo_progress_write: Option<batch::BeforeRedoProgressWrite>,
     before_phase_context: Option<context::BeforePhaseContext>,
     after_required_redo_catch_up: Option<live_follow::AfterRequiredRedoCatchUp>,
-    loop_heartbeat: Option<RunnerLoopHeartbeat>,
+    loop_heartbeat: Option<crate::metrics::RunnerLoopHeartbeat>,
+    phase_progress: RunnerPhaseProgress,
 }
 
 impl PhaseRunner {
@@ -99,18 +100,8 @@ impl PhaseRunner {
             before_phase_context: None,
             after_required_redo_catch_up: None,
             loop_heartbeat: None,
+            phase_progress: RunnerPhaseProgress::default(),
         })
-    }
-
-    pub fn with_loop_heartbeat(mut self, heartbeat: RunnerLoopHeartbeat) -> Self {
-        self.loop_heartbeat = Some(heartbeat);
-        self
-    }
-
-    fn record_loop_progress(&self, chain_id: &str) {
-        if let Some(heartbeat) = &self.loop_heartbeat {
-            heartbeat.record_progress(chain_id);
-        }
     }
 
     pub fn with_watch_set_coverage_attestations(
@@ -462,9 +453,11 @@ impl PhaseRunner {
             let context = self
                 .phase_context(chain, phase_name, mode.clone(), redo_attempt)
                 .await?;
+            let progress_token = self.phase_progress.begin_batch(&context);
             let retained_verification_level = context.resume.verification_level;
+            let batch = phase.run_batch(context.clone());
             let outcome = phase_lock
-                .run_while_alive(self.timing.live_poll_interval, phase.run_batch(context))
+                .run_while_alive(self.timing.live_poll_interval, batch)
                 .await;
             phase_lock.check_alive().await?;
             let outcome = outcome?;
@@ -515,6 +508,11 @@ impl PhaseRunner {
                 self.store
                     .record_progress(&chain.chain_id, phase_name, &mode, redo_attempt, &progress)
                     .await?;
+            }
+            self.phase_progress
+                .record_committed(progress_token, &outcome);
+            if matches!(outcome, PhaseBatchOutcome::Complete(_)) {
+                self.confirm_progress(context).await?;
             }
             if phase_name == PhaseName::Verify && matches!(mode, RunMode::Normal) {
                 crate::verify_level::warn_optional_downgrade(
@@ -575,6 +573,7 @@ impl PhaseRunner {
             if !paused {
                 phase_lock.check_alive().await?;
                 self.store.pause_phase(&chain.chain_id, phase).await?;
+                self.phase_progress.clear_phase(&chain.chain_id, phase);
                 paused = true;
             }
             warn!(
