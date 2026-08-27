@@ -16,7 +16,7 @@ use crate::{
 
 #[path = "progress_monitor_cursor.rs"]
 mod cursor;
-use cursor::completion_reports_advance;
+use cursor::{completion_reports_advance, elapsed_seconds};
 
 const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(900);
 
@@ -335,14 +335,6 @@ fn progress_is_empty(progress: &PhaseProgress) -> bool {
             .all(|source| source.current.is_none() && source.redo_loaded_boundary.is_none())
 }
 
-fn elapsed_seconds(since: Option<Instant>, now: Instant) -> i64 {
-    since
-        .map(|since| {
-            i64::try_from(now.saturating_duration_since(since).as_secs()).unwrap_or(i64::MAX)
-        })
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,7 +405,8 @@ mod tests {
 
     #[test]
     fn unchanged_commits_are_confirmed_one_batch_late() {
-        let tracker = tracker(&Clock::new());
+        let clock = Clock::new();
+        let tracker = tracker(&clock);
         let pinned = context(PhaseName::Interpret, RunMode::Normal, None);
         commit(&tracker, &pinned, work(Some(marker(9, "reported-advance"))));
         assert_eq!(
@@ -428,6 +421,11 @@ mod tests {
                 expected
             );
         }
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(
+            observed(&tracker, PhaseName::Interpret, &RunMode::Normal).1,
+            1
+        );
     }
 
     #[test]

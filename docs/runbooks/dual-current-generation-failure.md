@@ -108,8 +108,8 @@ and API signatures in items 2–4. Determine item 1 from how the redo was invoke
    call the normal supervisor's structured-log helper
    ([`apps/phase-runner/src/runner_operator_redo.rs:384-425`](../../apps/phase-runner/src/runner_operator_redo.rs#L384-L425)).
    The CLI turns that report into the aggregate error after the redo returns
-   ([`apps/phase-runner/src/main.rs:175-178`](../../apps/phase-runner/src/main.rs#L175-L178),
-   [`apps/phase-runner/src/main.rs:259-272`](../../apps/phase-runner/src/main.rs#L259-L272)).
+   ([`apps/phase-runner/src/main.rs:196-199`](../../apps/phase-runner/src/main.rs#L196-L199),
+   [`apps/phase-runner/src/main.rs:332-346`](../../apps/phase-runner/src/main.rs#L332-L346)).
    Do not require a `chain supervisor stopped after a terminal error` log entry
    for this mode; that message belongs to normal supervised execution
    ([`apps/phase-runner/src/supervisor.rs:58-69`](../../apps/phase-runner/src/supervisor.rs#L58-L69)).
@@ -133,8 +133,8 @@ and API signatures in items 2–4. Determine item 1 from how the redo was invoke
    indefinitely
    ([`apps/phase-runner/src/supervisor.rs:13-49`](../../apps/phase-runner/src/supervisor.rs#L13-L49),
    [`apps/phase-runner/src/supervisor.rs:58-69`](../../apps/phase-runner/src/supervisor.rs#L58-L69),
-   [`apps/phase-runner/src/main.rs:103-114`](../../apps/phase-runner/src/main.rs#L103-L114),
-   [`apps/phase-runner/src/main.rs:259-272`](../../apps/phase-runner/src/main.rs#L259-L272)).
+   [`apps/phase-runner/src/main.rs:105-117`](../../apps/phase-runner/src/main.rs#L105-L117),
+   [`apps/phase-runner/src/main.rs:332-346`](../../apps/phase-runner/src/main.rs#L332-L346)).
 2. The Project phase row remains `phase_status = 'running'` with
    `redo_in_progress = true`, `redo_mode = 'redo'`, and the active
    `redo_from_block_number`/`redo_to_block_number`. Redo start writes that shape,
@@ -204,7 +204,7 @@ restart, deploy, or code change, attach all of the following to the incident:
 - the phase-runner startup metadata log containing the build SHA and
   [interpreter content hash](../glossary.md#interpreter-content-hash), plus the
   immutable container image ID. The startup log emits those fields at
-  [`apps/phase-runner/src/main.rs:73-79`](../../apps/phase-runner/src/main.rs#L73-L79);
+  [`apps/phase-runner/src/main.rs:266-272`](../../apps/phase-runner/src/main.rs#L266-L272);
 - both the Interpret and Project phase rows, including their recorded heads,
   redo ranges, redo modes, `last_error`, and timestamps, plus any active
   [manifest-authority marker](../glossary.md#manifest-authority-marker)
@@ -685,8 +685,8 @@ This is why recovery re-derives evidence instead of editing the open interval.
    traffic, record the exact Compose file set, capture the immutable running
    image as `<recovery-image>`, and stop the long-running phase runner. A missing
    deployment-specific drain procedure is a stop condition
-   ([`docs/runbooks/production-docker.md:396-411`](production-docker.md#recovery-plays),
-   [`docs/runbooks/production-docker.md:419-434`](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
+   ([production recovery plays](production-docker.md#recovery-plays),
+   [interpreter-mismatch escalation](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 2. If an Interpret redo is already recorded, resume **that exact chain and
    persisted range**. Do not create a new range. If the evidence query returns
    an `active_redo_invalidation_token`, require the already-reviewed historical
@@ -793,7 +793,7 @@ This is why recovery re-derives evidence instead of editing the open interval.
    `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` value, or its exact
    `--hydration-rpc` equivalent, because the automatic Project cascade may need
    it. The canonical command and descriptor format are documented at
-   [`docs/runbooks/production-docker.md:477-496`](production-docker.md#stop-and-escalate-an-interpreter-mismatch).
+   [production interpreter-mismatch procedure](production-docker.md#stop-and-escalate-an-interpreter-mismatch).
    If a newly started scoped, unflagged redo is fenced by a
    [manifest-authority marker](../glossary.md#manifest-authority-marker), its
    first error is `ContentHashMismatch`: it prints the exact demanded full range
@@ -815,7 +815,7 @@ This is why recovery re-derives evidence instead of editing the open interval.
    required review proving no widening, then rerun that same full range with
    `--attest-watch-set-coverage <token>`. The production rule and its
    no-invention/no-reuse constraints are at
-   [`docs/runbooks/production-docker.md:272-282`](production-docker.md#planned-migration-and-fingerprint-boundary).
+   [planned re-derivation boundary](production-docker.md#planned-migration-and-fingerprint-boundary).
    There is no `--arm` option. The redo uses each closing event's recorded arm
    and refuses to guess one when evidence is missing
    ([`crates/adapters/src/schema_v2/seam.rs:71-99`](../../crates/adapters/src/schema_v2/seam.rs#L71-L99)).
@@ -866,7 +866,7 @@ If the audit insert failed or the complete new key cannot be established,
 file-and-hold under the audit-write exception. Never use the Project-only
 handoff continuation after an observed Project failure. The same-fingerprint
 boundary route matches the existing runner instruction
-([`docs/runbooks/production-docker.md:498-516`](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
+([production interpreter-mismatch procedure](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 
 ### Indexing defect: file, fix, then re-derive
 
@@ -905,7 +905,7 @@ cannot be proved, an interpreter content hash changed, source admission or the
 reproduces the failure. This
 runbook does not authorize an improvised reset. Hand the evidence to the release,
 Interpret, manifest, and storage owners and follow
-[`docs/runbooks/production-docker.md:31-304`](production-docker.md#planned-migration-and-fingerprint-boundary),
+[planned production re-derivation boundary](production-docker.md#planned-migration-and-fingerprint-boundary),
 including its fixed image, backup, historical fetch, full Interpret/Project walk,
 Verify, and readiness gates.
 
@@ -930,7 +930,7 @@ and Project is the sole projection writer
 ([`docs/glossary.md:1183-1189`](../glossary.md#glossary)). The existing
 production recovery rules also prohibit hand-editing identity and normalized
 event rows
-([`docs/runbooks/production-docker.md:524-525`](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
+([production interpreter-mismatch procedure](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 
 ## Sepolia carve-out
 

@@ -416,6 +416,9 @@ impl PhaseRunner {
                     ),
                 )
                 .await;
+            if let Some(heartbeat) = &self.loop_heartbeat {
+                heartbeat.remove_progress(&chain.chain_id);
+            }
             if let Err(error) = result {
                 report.stopped_chains.push((chain.chain_id.clone(), error));
             }

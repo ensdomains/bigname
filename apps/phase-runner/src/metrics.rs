@@ -38,6 +38,13 @@ impl RunnerLoopHeartbeat {
             .map(elapsed_seconds)
     }
 
+    pub fn remove_progress(&self, chain: &str) {
+        self.last_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(chain);
+    }
+
     fn ages_seconds(&self) -> BTreeMap<String, i64> {
         let last_progress = self
             .last_progress

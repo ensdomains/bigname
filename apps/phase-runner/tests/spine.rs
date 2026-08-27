@@ -2024,12 +2024,14 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
             fail_chain: (name == PhaseName::Interpret).then(|| failed_chain.to_owned()),
         }) as Arc<dyn Phase>
     });
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
     let phase_runner = runner(
         scratch.runner(),
         PhaseSet::new(phases)?,
         available_capacity(),
         "redo-all-phases-runner",
-    )?;
+    )?
+    .with_loop_heartbeat(loop_heartbeat.clone());
     let mut sources = chain(completed_chain)?.sources.to_vec();
     let mut reference = sources[0].clone();
     reference.source_key = "reference".into();
@@ -2046,6 +2048,8 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         .await?;
 
     assert_eq!(report.stopped_chains.len(), 1);
+    assert_eq!(loop_heartbeat.age_seconds(failed_chain), None);
+    assert_eq!(loop_heartbeat.age_seconds(completed_chain), None);
     assert_eq!(report.stopped_chains[0].0, failed_chain);
     assert!(
         report.stopped_chains[0]

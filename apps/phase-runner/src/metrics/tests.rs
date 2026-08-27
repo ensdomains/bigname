@@ -156,6 +156,7 @@ fn head_lag_uses_the_observed_provider_target() {
 fn configured_chain_loop_heartbeat_does_not_require_phase_rows() -> Result<()> {
     let loop_heartbeat = RunnerLoopHeartbeat::default();
     loop_heartbeat.record_progress("new-chain");
+    loop_heartbeat.record_progress("queued-chain");
     let metrics = PipelineMetrics::new(900, loop_heartbeat, RunnerPhaseProgress::default())?;
 
     metrics.apply_rows(&[])?;
@@ -167,6 +168,9 @@ fn configured_chain_loop_heartbeat_does_not_require_phase_rows() -> Result<()> {
             .get(),
         0
     );
+    metrics.loop_heartbeat.remove_progress("new-chain");
+    assert_eq!(metrics.loop_heartbeat.age_seconds("new-chain"), None);
+    assert_eq!(metrics.loop_heartbeat.age_seconds("queued-chain"), Some(0));
     Ok(())
 }
 

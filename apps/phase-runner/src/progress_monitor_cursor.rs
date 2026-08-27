@@ -12,3 +12,11 @@ pub(super) fn completion_reports_advance(token: &ProgressToken, progress: &Phase
                 })
             })
 }
+
+pub(super) fn elapsed_seconds(since: Option<Instant>, now: Instant) -> i64 {
+    since
+        .map(|since| {
+            i64::try_from(now.saturating_duration_since(since).as_secs()).unwrap_or(i64::MAX)
+        })
+        .unwrap_or(0)
+}

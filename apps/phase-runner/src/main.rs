@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
                 &cancellation,
                 heartbeat_stale_after_secs,
                 runtime.chains.iter().map(|chain| chain.chain_id.as_str()),
+                true,
             )
             .await?;
             let verification_database = VerificationDatabase::connect(
@@ -151,6 +152,7 @@ async fn main() -> Result<()> {
                 &cancellation,
                 heartbeat_stale_after_secs,
                 chains.iter().map(|chain| chain.chain_id.as_str()),
+                false,
             )
             .await?;
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
@@ -235,6 +237,7 @@ async fn start_metrics<'a>(
     cancellation: &CancellationToken,
     heartbeat_stale_after_secs: i64,
     chain_ids: impl IntoIterator<Item = &'a str>,
+    seed_loop_heartbeats: bool,
 ) -> Result<(
     phase_runner::metrics::RunnerLoopHeartbeat,
     phase_runner::RunnerPhaseProgress,
@@ -246,7 +249,9 @@ async fn start_metrics<'a>(
             .expect("validated threshold"),
     ));
     for chain_id in chain_ids {
-        loop_heartbeat.record_progress(chain_id);
+        if seed_loop_heartbeats {
+            loop_heartbeat.record_progress(chain_id);
+        }
         phase_progress.seed_chain(chain_id);
     }
     let bound_addr = phase_runner::metrics::start(
