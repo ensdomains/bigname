@@ -32,8 +32,8 @@ and make the canonical reth database path readable before using the overlay.
 
 Do not start the walk until all of these checks pass:
 
-1. The release commit has green pinned-cursor integration tests for all five
-   phase names and valid repair-mode behavior.
+1. The release commit has green cursor non-progress integration tests for all
+   five phase names and valid repair-mode behavior.
 2. `promtool test rules` proves the three-batch path, the two-batch/ten-minute
    path, and the legitimate exclusions.
 3. The deployed metrics endpoint exposes
@@ -52,8 +52,9 @@ Do not start the walk until all of these checks pass:
 > **Phase livelock paging verified:** with Prometheus rule evaluation no slower
 > than one minute, every executable phase/mode combination pages through the
 > existing `severity=page` route no later than 13 minutes after its second
-> committed work-bearing batch is confirmed at an unchanged durable composite
-> cursor; a third pinned completion pages within 3 minutes. Intentional rescan
+> committed [work-bearing batch](../glossary.md#work-bearing-batch) is confirmed
+> at an unchanged [durable composite cursor](../glossary.md#durable-composite-cursor);
+> a third pinned completion pages within 3 minutes. Intentional rescan
 > and no-work shapes remain non-paging.
 
 The equivalent operational acceptance is that livelock in any executable
@@ -552,9 +553,10 @@ error while another chain continues running.
    ```sh
    BIGNAME_IMAGE=<recovery-image> \
      docker compose --env-file .env.server \
-     <compose-files> run --rm --pull never phase-runner \
+     <compose-files> run --rm --pull never --use-aliases --service-ports phase-runner \
      phase-runner redo --chain <chain-id> --phase interpret \
      --from-block <from> --to-block <recorded-interpret-head> \
+     --metrics-bind-addr 0.0.0.0:9465 \
      --source <affected-chain-source> \
      [--source <additional-affected-chain-source> ...]
    ```

@@ -14,6 +14,10 @@ use crate::{
     },
 };
 
+#[path = "progress_monitor_cursor.rs"]
+mod cursor;
+use cursor::completion_reports_advance;
+
 const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(900);
 
 #[derive(Clone)]
@@ -185,6 +189,8 @@ impl RunnerPhaseProgress {
     pub(crate) fn record_committed(&self, token: ProgressToken, outcome: &PhaseBatchOutcome) {
         let now = self.now();
         let work_bearing = is_work_bearing(&token, outcome);
+        let quiet_until_confirmed = matches!(outcome, PhaseBatchOutcome::Complete(progress)
+            if completion_reports_advance(&token, progress));
         let mut states = self.states();
         let state = states.entry(token.key).or_default();
         if state.epoch != token.epoch {
@@ -192,8 +198,6 @@ impl RunnerPhaseProgress {
             state.epoch = token.epoch;
         }
         if work_bearing {
-            let quiet_until_confirmed = matches!(outcome, PhaseBatchOutcome::Complete(progress)
-                if progress.current != token.starting_cursor.current);
             state.pending = Some(PendingBatch {
                 starting_cursor: token.starting_cursor,
                 committed_at: now,
