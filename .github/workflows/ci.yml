@@ -55,9 +55,13 @@ jobs:
 
       - name: Rust source size ratchet
         env:
-          BASE_REF: ${{ github.base_ref }}
+          # merge_group.base_ref keeps the allowance ratchet enforced at the
+          # queue's final gate, where strict up-to-date no longer forces a
+          # fresh pull_request run against merge-time main.
+          BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
+          BASE_REF="${BASE_REF#refs/heads/}"
+          if { [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$GITHUB_EVENT_NAME" = "merge_group" ]; } && [ -n "$BASE_REF" ]; then
             git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
             ./scripts/check-rust-file-size --base-ref "refs/remotes/origin/${BASE_REF}"
           else
