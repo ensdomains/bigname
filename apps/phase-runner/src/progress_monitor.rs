@@ -52,6 +52,7 @@ struct IngestCursorIdentity {
 struct PendingBatch {
     starting_cursor: CursorIdentity,
     committed_at: Instant,
+    quiet_until_confirmed: bool,
 }
 
 #[derive(Default)]
@@ -191,9 +192,12 @@ impl RunnerPhaseProgress {
             state.epoch = token.epoch;
         }
         if work_bearing {
+            let quiet_until_confirmed = matches!(outcome, PhaseBatchOutcome::Complete(progress)
+                if progress.current != token.starting_cursor.current);
             state.pending = Some(PendingBatch {
                 starting_cursor: token.starting_cursor,
                 committed_at: now,
+                quiet_until_confirmed,
             });
             state.last_successful_commit = Some(now);
         } else {
@@ -218,12 +222,20 @@ impl RunnerPhaseProgress {
             .iter_mut()
             .map(|(key, state)| {
                 state.expire(now, self.inner.stale_after);
+                let quiet = state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.quiet_until_confirmed);
                 ProgressSnapshot {
                     chain: key.chain.clone(),
                     phase: key.phase,
                     mode: key.mode,
-                    batches: state.confirmed,
-                    age_seconds: elapsed_seconds(state.first_pinned_commit, now),
+                    batches: if quiet { 0 } else { state.confirmed },
+                    age_seconds: if quiet {
+                        0
+                    } else {
+                        elapsed_seconds(state.first_pinned_commit, now)
+                    },
                 }
             })
             .collect()
@@ -573,3 +585,7 @@ mod tests {
         assert_eq!(observed(&tracker, PhaseName::Ingest, &RunMode::Normal).0, 1);
     }
 }
+
+#[cfg(test)]
+#[path = "progress_monitor_completion_tests.rs"]
+mod completion_tests;

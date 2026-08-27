@@ -134,8 +134,11 @@ fn run_cli_accepts_a_metrics_listener_address() {
     let Command::Run(args) = cli.command else {
         panic!("expected run command");
     };
-    assert_eq!(args.metrics_bind_addr, "0.0.0.0:19465".parse().unwrap());
-    assert_eq!(args.heartbeat_stale_after_secs, 1200);
+    assert_eq!(
+        args.monitoring.metrics_bind_addr,
+        "0.0.0.0:19465".parse().unwrap()
+    );
+    assert_eq!(args.monitoring.heartbeat_stale_after_secs, 1200);
 }
 
 #[test]
@@ -159,6 +162,41 @@ fn run_cli_rejects_a_nonpositive_heartbeat_threshold() {
         .expect("zero threshold must be rejected");
     assert_eq!(error.kind(), ErrorKind::Configuration);
     assert!(error.to_string().contains("threshold must be positive"));
+}
+
+#[test]
+fn redo_cli_carries_progress_metrics_configuration() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--all-chains",
+        "--phase",
+        "recompute-flags",
+        "--from-block",
+        "42",
+        "--to-block",
+        "42",
+        "--metrics-bind-addr",
+        "0.0.0.0:19466",
+        "--heartbeat-stale-after-secs",
+        "1200",
+    ])
+    .expect("redo progress metrics options must parse")
+    .resolve()
+    .expect("redo progress metrics options must resolve");
+
+    let ResolvedCommand::Redo {
+        metrics_bind_addr,
+        heartbeat_stale_after_secs,
+        ..
+    } = command
+    else {
+        panic!("expected redo command");
+    };
+    assert_eq!(metrics_bind_addr, "0.0.0.0:19466".parse().unwrap());
+    assert_eq!(heartbeat_stale_after_secs, 1200);
 }
 
 #[test]

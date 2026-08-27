@@ -132,14 +132,8 @@ struct ManifestArgs {
     manifests_root: PathBuf,
 }
 
-#[derive(Debug, Args)]
-struct RunArgs {
-    #[command(flatten)]
-    connection: ConnectionArgs,
-
-    #[arg(long, env = "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")]
-    verification_database_url: String,
-
+#[derive(Clone, Debug, Args)]
+struct MonitoringArgs {
     #[arg(
         long,
         env = "BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR",
@@ -153,6 +147,18 @@ struct RunArgs {
         default_value_t = 900
     )]
     heartbeat_stale_after_secs: i64,
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
+    #[command(flatten)]
+    connection: ConnectionArgs,
+
+    #[arg(long, env = "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")]
+    verification_database_url: String,
+
+    #[command(flatten)]
+    monitoring: MonitoringArgs,
 
     #[command(flatten)]
     capacity: CapacityArgs,
@@ -201,6 +207,9 @@ struct RedoArgs {
 
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")]
     verification_database_url: Option<String>,
+
+    #[command(flatten)]
+    monitoring: MonitoringArgs,
 
     #[command(flatten)]
     capacity: CapacityArgs,
@@ -294,6 +303,8 @@ pub enum ResolvedCommand {
     Redo {
         database_url: String,
         verification_database_url: Option<String>,
+        metrics_bind_addr: SocketAddr,
+        heartbeat_stale_after_secs: i64,
         manifests_root: PathBuf,
         instance_id: String,
         chains: RedoChains,
@@ -361,12 +372,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
             "at least one --chain must be configured",
         ));
     }
-    if args.heartbeat_stale_after_secs <= 0 {
-        return Err(RunnerError::new(
-            ErrorKind::Configuration,
-            "heartbeat stale threshold must be positive",
-        ));
-    }
+    validate_monitoring(&args.monitoring)?;
     let sources = args
         .sources
         .iter()
@@ -390,8 +396,8 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
     Ok(ResolvedCommand::Run {
         database_url: args.connection.database_url,
         verification_database_url: args.verification_database_url,
-        metrics_bind_addr: args.metrics_bind_addr,
-        heartbeat_stale_after_secs: args.heartbeat_stale_after_secs,
+        metrics_bind_addr: args.monitoring.metrics_bind_addr,
+        heartbeat_stale_after_secs: args.monitoring.heartbeat_stale_after_secs,
         manifests_root: args.manifests.manifests_root,
         runtime,
         hydration_rpc_urls,
@@ -399,6 +405,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
 }
 
 fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
+    validate_monitoring(&args.monitoring)?;
     let phase = parse_redo_phase(&args.phase)?;
     let range = BlockRange::new(args.from_block, args.to_block)?;
     let watch_set_coverage_attestations = watch_set_attestation::resolve(
@@ -439,6 +446,8 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
     Ok(ResolvedCommand::Redo {
         database_url: args.connection.database_url,
         verification_database_url: args.verification_database_url,
+        metrics_bind_addr: args.monitoring.metrics_bind_addr,
+        heartbeat_stale_after_secs: args.monitoring.heartbeat_stale_after_secs,
         manifests_root: args.manifests.manifests_root,
         instance_id: resolve_instance_id(args.connection.instance_id)?,
         chains,
@@ -449,6 +458,16 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         watch_set_coverage_attestations,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
     })
+}
+
+fn validate_monitoring(args: &MonitoringArgs) -> RunnerResult<()> {
+    if args.heartbeat_stale_after_secs <= 0 {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "heartbeat stale threshold must be positive",
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_hydration_rpc_urls(entries: &[String]) -> RunnerResult<bigname_lookup::ChainRpcUrls> {

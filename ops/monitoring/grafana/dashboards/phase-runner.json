@@ -438,106 +438,9 @@
       "title": "Exporter health",
       "type": "stat"
     },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 35
-      },
-      "id": 8,
-      "panels": [],
-      "title": "Phase cursor non-progress",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 3
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 36
-      },
-      "id": 9,
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "phase_runner_phase_batches_since_cursor_advance{job=\"bigname-phase-runner\",chain=~\"$chain\"}",
-          "legendFormat": "{{chain}} / {{phase}} / {{mode}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Pinned committed batches",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 600
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 36
-      },
-      "id": 10,
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "phase_runner_phase_cursor_stall_age_seconds{job=\"bigname-phase-runner\",chain=~\"$chain\"}",
-          "legendFormat": "{{chain}} / {{phase}} / {{mode}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Pinned cursor age",
-      "type": "timeseries"
-    }
+    {"collapsed": false, "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35}, "id": 8, "panels": [], "title": "Phase cursor non-progress", "type": "row"},
+    {"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "fieldConfig": {"defaults": {"decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 3}]}}, "overrides": []}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36}, "id": 9, "targets": [{"editorMode": "code", "expr": "phase_runner_phase_batches_since_cursor_advance{job=\"bigname-phase-runner\",chain=~\"$chain\"}", "legendFormat": "{{chain}} / {{phase}} / {{mode}}", "range": true, "refId": "A"}], "title": "Pinned committed batches", "type": "timeseries"},
+    {"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "fieldConfig": {"defaults": {"decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 600}]}, "unit": "s"}, "overrides": []}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36}, "id": 10, "targets": [{"editorMode": "code", "expr": "phase_runner_phase_cursor_stall_age_seconds{job=\"bigname-phase-runner\",chain=~\"$chain\"}", "legendFormat": "{{chain}} / {{phase}} / {{mode}}", "range": true, "refId": "A"}], "title": "Pinned cursor age", "type": "timeseries"}
   ],
   "refresh": "15s",
   "schemaVersion": 39,
@@ -548,30 +451,7 @@
   ],
   "templating": {
     "list": [
-      {
-        "allValue": ".*",
-        "current": {},
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
-        },
-        "definition": "label_values(phase_runner_phase_status{job=\"bigname-phase-runner\"}, chain)",
-        "hide": 0,
-        "includeAll": true,
-        "label": "Chain",
-        "multi": false,
-        "name": "chain",
-        "options": [],
-        "query": {
-          "query": "label_values(phase_runner_phase_status{job=\"bigname-phase-runner\"}, chain)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 1,
-        "regex": "",
-        "skipUrlSync": false,
-        "sort": 1,
-        "type": "query"
-      },
+      {"allValue": ".*", "current": {}, "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "definition": "label_values(phase_runner_phase_status{job=\"bigname-phase-runner\"}, chain)", "hide": 0, "includeAll": true, "label": "Chain", "multi": false, "name": "chain", "options": [], "query": {"query": "label_values(phase_runner_phase_status{job=\"bigname-phase-runner\"}, chain)", "refId": "PrometheusVariableQueryEditor-VariableQuery"}, "refresh": 1, "regex": "", "skipUrlSync": false, "sort": 1, "type": "query"},
       {
         "current": {},
         "hide": 0,
