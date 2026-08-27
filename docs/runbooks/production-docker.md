@@ -28,6 +28,40 @@ The reth overlay attaches the API and phase runner to the external
 `RETH_DATA_DIR` into the phase runner read-only. Create or start that network
 and make the canonical reth database path readable before using the overlay.
 
+## Before a from-zero or full-source walk
+
+Do not start the walk until all of these checks pass:
+
+1. The release commit has green pinned-cursor integration tests for all five
+   phase names and valid repair-mode behavior.
+2. `promtool test rules` proves the three-batch path, the two-batch/ten-minute
+   path, and the legitimate exclusions.
+3. The deployed metrics endpoint exposes
+   `phase_runner_phase_batches_since_cursor_advance` and
+   `phase_runner_phase_cursor_stall_age_seconds` for every configured chain and
+   phase.
+4. The host rule list contains `BignamePhaseRunnerPhaseNonProgress` and
+   `BignamePhaseRunnerProgressMetricsMissing`.
+5. The host evaluates rules at least once per minute.
+6. The existing `severity=page` route passes the deployment's standard
+   notification-path check.
+7. Operators have the [manual halt procedure](pipeline-monitoring.md#phase-cursor-non-progress-response)
+   open and know every active Compose overlay.
+8. Record this acceptance statement in the walk log:
+
+> **Phase livelock paging verified:** with Prometheus rule evaluation no slower
+> than one minute, every executable phase/mode combination pages through the
+> existing `severity=page` route no later than 13 minutes after its second
+> committed work-bearing batch is confirmed at an unchanged durable composite
+> cursor; a third pinned completion pages within 3 minutes. Intentional rescan
+> and no-work shapes remain non-paging.
+
+The equivalent operational acceptance is that livelock in any executable
+phase/mode pages within 13 minutes after the second confirmed pinned completion,
+or within 3 minutes after the third. Normal Ingest source movement, one Project
+boundary replay, caught-up Live polling, no-head completion, capacity pause,
+and completed Verify revalidation do not page.
+
 ## Planned migration and fingerprint boundary
 
 The image has no generic `migrate` command, so migrations are an operator step

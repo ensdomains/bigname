@@ -143,6 +143,7 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | Head lag in blocks | Observed provider target minus the phase's processed block. For Live, the target is the provider head observed at the start of its latest batch. The paging rule applies to Live because historical phases can be far behind during an expected rebuild. |
 | Verification level | The stored `quick_synced`, `cross_checked`, or `node_checked` result. A value of `1` identifies the recorded level. |
 | Repair and reinterpretation state | The active marker and progress for unfinished repair work, plus whether Interpret still needs a repair run because its stored [interpreter content hash](../glossary.md#interpreter-content-hash) differs. Starting the required repair adopts the new hash and clears the requirement gauge; `phase_runner_redo_in_progress` stays at `1` until that work finishes. |
+| Phase cursor non-progress | Committed work-bearing batches confirmed at the next durable resume to have left the phase cursor unchanged, and the age of that sequence. Normal, redo, and recompute-flags work remain separate. |
 | Exporter health | Whether Prometheus can scrape the runner and whether the latest read of PostgreSQL state succeeded. |
 
 ## Alerts
@@ -159,6 +160,8 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | `BignamePhaseRunnerLoopStale` | The runner loop for a configured chain crosses no phase or batch boundary for the heartbeat threshold, plus 2 minutes. | The process is scrapeable, but work for that chain may be wedged while every phase row rests. |
 | `BignamePhaseRunnerHeadLagHigh` | Live lag exceeds 30 blocks and Live is observed running at least once in every 2-minute window for 10 minutes. | The chain is persistently falling behind new blocks; brief completed-state zeroes do not reset the alert, while a failed or resting phase does not keep it active without new running samples. |
 | `BignamePhaseRunnerMetricsRefreshStale` | The database read fails, or the last successful refresh becomes older than 60 seconds, for 2 minutes. | The endpoint is reachable but is serving an old view of pipeline state. |
+| `BignamePhaseRunnerPhaseNonProgress` | Three confirmed unchanged-cursor work batches, or two whose sequence is at least 10 minutes old, remain present for 2 minutes. | The named phase and mode is repeatedly committing work without changing its durable resume position. It does not require the phase to be sampled as `running`; a failed phase remains owned by `BignamePhaseFailed`. |
+| `BignamePhaseRunnerProgressMetricsMissing` | Either non-progress metric family is absent from a scrapeable runner that exports the heartbeat threshold for 2 minutes. | The runner image and rules are incompatible, so cursor-progress paging fails closed. |
 
 The two hand-detected failure cases from issue #327 map directly to paging: a
 terminal phase error triggers `BignamePhaseFailed` while the runner remains
@@ -175,9 +178,62 @@ longer, each outage lasts less than two minutes, and no phase failure has yet
 been stored; one concrete case is a fresh deployment that is OOM-killed several
 minutes into every startup.
 
-A non-Live phase that repeatedly completes batches without advancing its
-cursor keeps its heartbeats fresh and is not yet detected; progress-delta
-alerting is tracked in [issue #429](https://github.com/ensdomains/bigname/issues/429).
+## Phase cursor non-progress response
+
+`phase_runner_phase_batches_since_cursor_advance` counts consecutive successful
+work-bearing commits that the next durable resume confirms left the cursor
+unchanged. `phase_runner_phase_cursor_stall_age_seconds` measures from the first
+such commit. Both gauges use only `chain`, `phase`, and `mode`; `mode` is
+`normal`, `redo`, or `recompute_flags`. Normal progress uses
+`phase_runner_phase_current_block`; repair work uses
+`phase_runner_redo_current_block` and `phase_runner_redo_mode`.
+
+The cursor comparison includes block hashes. Ingest additionally compares its
+sorted per-source next block, last processed block, and loaded redo boundary.
+Thus a reorg, a hash replacement, or one Ingest source moving resets the
+sequence even when the displayed summary block is unchanged. Target/head
+movement does not reset it. A single Project boundary replay can reach count
+`1` but cannot page. Caught-up Live polls, no-head/empty completions, idle polls,
+capacity pauses, and completed Verify revalidation clear or bypass the detector.
+Evidence expires after the configured heartbeat-stale interval without another
+successful work-bearing commit.
+
+With rule evaluation no slower than one minute, the two-minute hold pages no
+later than 3 minutes after the third confirmed pinned completion. The age path
+pages no later than 13 minutes after the second. A single long-running batch
+still belongs to the heartbeat alert.
+
+When `BignamePhaseRunnerPhaseNonProgress` fires:
+
+1. Record the alert's `chain`, `phase`, and `mode`.
+2. Inspect both non-progress gauges, the applicable normal or repair current
+   block, the target, recent phase logs, and provider quota/database use.
+3. Confirm that the count is increasing or already at threshold while the
+   durable cursor remains pinned.
+4. If quota or database budget is at risk, stop only the phase runner with the
+   exact Compose overlays deployed on the host:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     stop phase-runner
+   ```
+
+   Preserve every additional deployed `-f` overlay in the real command.
+5. Do not edit `chain_phase_state`, repair fields, or Ingest cursors to silence
+   the alert. Capture cursor/target hashes from logs, count, age, image SHA, and
+   provider/database evidence before remediation.
+6. After deploying the corrective change, resume with the same image and
+   overlays:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     up -d phase-runner
+   ```
+
+7. Confirm both gauges return to zero and the applicable normal or repair
+   cursor advances.
 
 ## Removing a configured chain
 
@@ -211,7 +267,7 @@ Keep diagnosis read-only until the failure is understood:
 
 ```sh
 curl -fsS http://127.0.0.1:9465/metrics | \
-  grep -E 'phase_runner_(phase_status|heartbeat_age_seconds|loop_heartbeat_age_seconds|head_lag_blocks)'
+  grep -E 'phase_runner_(phase_status|heartbeat_age_seconds|loop_heartbeat_age_seconds|head_lag_blocks|phase_batches_since_cursor_advance|phase_cursor_stall_age_seconds)'
 
 docker compose --env-file .env.server \
   -f docker-compose.server.yml \
