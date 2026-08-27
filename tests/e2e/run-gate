@@ -326,6 +326,11 @@ printf 'e2e gate timing: harness compile/discovery %ss; scenario execution %ss\n
     "$compile_seconds" "$scenario_seconds"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    case "$shard" in
+        all) summary_assignment_hash="$discovered_hash" ;;
+        1) summary_assignment_hash="$shard_1_hash" ;;
+        2) summary_assignment_hash="$shard_2_hash" ;;
+    esac
     {
         printf '### e2e shard %s\n\n' "$shard"
         printf -- '- Harness compile/discovery: %ss\n' "$compile_seconds"
@@ -333,7 +338,6 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         printf -- '- Summary: `%s`\n' "$summary"
         printf -- '- Discovered: %s (%s runnable, %s ignored)\n' \
             "$discovered_total" "$runnable_total" "$ignored_total"
-        printf -- '- Assignment SHA-256: `%s`\n' \
-            "$([ "$shard" = 1 ] && printf '%s' "$shard_1_hash" || printf '%s' "$shard_2_hash")"
+        printf -- '- Assignment SHA-256: `%s`\n' "$summary_assignment_hash"
     } >>"$GITHUB_STEP_SUMMARY"
 fi
