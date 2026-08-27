@@ -595,10 +595,7 @@ tests:
       - {series: 'phase_runner_phase_cursor_stall_age_seconds{job="bigname-phase-runner",instance="runner:9465",chain="ethereum-mainnet",phase="interpret",mode="normal"}', values: '599x12'}
       - {series: 'phase_runner_phase_batches_since_cursor_advance{job="bigname-phase-runner",instance="runner:9465",chain="ethereum-mainnet",phase="verify",mode="normal"}', values: '3x4 0x8'}
       - {series: 'phase_runner_phase_cursor_stall_age_seconds{job="bigname-phase-runner",instance="runner:9465",chain="ethereum-mainnet",phase="verify",mode="normal"}', values: '30x4 0x8'}
-    alert_rule_test:
-      - eval_time: 2m
-        alertname: BignamePhaseRunnerPhaseNonProgress
-        exp_alerts: []
+    alert_rule_test: [{eval_time: 2m, alertname: BignamePhaseRunnerPhaseNonProgress, exp_alerts: []}]
 
   - name: failed phases and down runners leave other pages authoritative
     interval: 15s
@@ -608,10 +605,7 @@ tests:
       - {series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="failed:9465",chain="ethereum-mainnet",phase="interpret",status="failed"}', values: '1x12'}
       - {series: 'up{job="bigname-phase-runner",instance="down:9465"}', values: '0x12'}
       - {series: 'phase_runner_phase_batches_since_cursor_advance{job="bigname-phase-runner",instance="down:9465",chain="base-mainnet",phase="live",mode="normal"}', values: '3x12'}
-    alert_rule_test:
-      - eval_time: 2m
-        alertname: BignamePhaseRunnerPhaseNonProgress
-        exp_alerts: []
+    alert_rule_test: [{eval_time: 2m, alertname: BignamePhaseRunnerPhaseNonProgress, exp_alerts: []}]
 
   - name: progress metric compatibility fails closed per runner instance
     interval: 15s
@@ -638,10 +632,7 @@ tests:
       - {series: 'phase_runner_phase_batches_since_cursor_advance{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="interpret",mode="normal"}', values: '2x12'}
       - {series: 'phase_runner_phase_cursor_stall_age_seconds{job="bigname-phase-runner",instance="runner-b:9465",chain="ethereum-mainnet",phase="interpret",mode="normal"}', values: '600x12'}
       - {series: 'phase_runner_phase_cursor_stall_age_seconds{job="bigname-phase-runner",instance="runner-a:9465",chain="ethereum-mainnet",phase="interpret",mode="redo"}', values: '600x12'}
-    alert_rule_test:
-      - eval_time: 2m
-        alertname: BignamePhaseRunnerPhaseNonProgress
-        exp_alerts: []
+    alert_rule_test: [{eval_time: 2m, alertname: BignamePhaseRunnerPhaseNonProgress, exp_alerts: []}]
 
   - name: failed database refresh pages even when the last success is current
     interval: 30s

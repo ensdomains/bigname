@@ -62,7 +62,7 @@ struct PendingBatch {
 #[derive(Default)]
 struct ProgressState {
     epoch: Option<RedoAttemptFence>,
-    last_cursor: Option<CursorIdentity>,
+    reported_advance_pinned: bool,
     pending: Option<PendingBatch>,
     confirmed: i64,
     first_pinned_commit: Option<Instant>,
@@ -150,6 +150,7 @@ impl RunnerPhaseProgress {
             state.expire(now, self.inner.stale_after);
             if let Some(pending) = state.pending.take() {
                 if cursor == pending.starting_cursor {
+                    state.reported_advance_pinned |= pending.quiet_until_confirmed;
                     state.confirmed = state.confirmed.saturating_add(1);
                     state
                         .first_pinned_commit
@@ -166,7 +167,6 @@ impl RunnerPhaseProgress {
                     state.epoch = epoch;
                 }
             }
-            state.last_cursor = Some(cursor.clone());
         }
         if let Some((batches, age, cursor_summary)) = warning {
             warn!(
@@ -189,7 +189,7 @@ impl RunnerPhaseProgress {
     pub(crate) fn record_committed(&self, token: ProgressToken, outcome: &PhaseBatchOutcome) {
         let now = self.now();
         let work_bearing = is_work_bearing(&token, outcome);
-        let quiet_until_confirmed = matches!(outcome, PhaseBatchOutcome::Complete(progress)
+        let reports_advance = matches!(outcome, PhaseBatchOutcome::Complete(progress)
             if completion_reports_advance(&token, progress));
         let mut states = self.states();
         let state = states.entry(token.key).or_default();
@@ -197,6 +197,7 @@ impl RunnerPhaseProgress {
             state.reset();
             state.epoch = token.epoch;
         }
+        let quiet_until_confirmed = reports_advance && !state.reported_advance_pinned;
         if work_bearing {
             state.pending = Some(PendingBatch {
                 starting_cursor: token.starting_cursor,
@@ -259,7 +260,7 @@ impl RunnerPhaseProgress {
 
 impl ProgressState {
     fn reset(&mut self) {
-        self.last_cursor = None;
+        self.reported_advance_pinned = false;
         self.pending = None;
         self.confirmed = 0;
         self.first_pinned_commit = None;

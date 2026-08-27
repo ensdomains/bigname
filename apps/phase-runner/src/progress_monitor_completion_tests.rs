@@ -31,12 +31,19 @@ fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhasePr
         );
     }
     let token = tracker.begin_batch(pinned);
-    tracker.record_committed(token, &PhaseBatchOutcome::Complete(progress));
+    tracker.record_committed(token, &PhaseBatchOutcome::Complete(progress.clone()));
     assert_eq!(
         tracker.observation("chain", pinned.phase, &RunMode::Normal),
         (0, 0)
     );
-    tracker.begin_batch(pinned);
+    let token = tracker.begin_batch(pinned);
+    assert_eq!(
+        tracker
+            .observation("chain", pinned.phase, &RunMode::Normal)
+            .0,
+        3
+    );
+    tracker.record_committed(token, &PhaseBatchOutcome::Complete(progress));
     assert_eq!(
         tracker
             .observation("chain", pinned.phase, &RunMode::Normal)
