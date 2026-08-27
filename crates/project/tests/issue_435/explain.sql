@@ -1,0 +1,7 @@
+EXPLAIN (
+    ANALYZE, BUFFERS,
+    WAL,
+    SETTINGS,
+    VERBOSE,
+    FORMAT JSON
+)

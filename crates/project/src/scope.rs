@@ -319,14 +319,7 @@ async fn include_topology_scope(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    loop {
-        let inserted = topology::include_current_edges(transaction, chain_id).await?
-            + topology::include_event_edges(transaction, chain_id, target_block).await?;
-        if inserted == 0 {
-            break;
-        }
-    }
-    Ok(())
+    topology::close(transaction, chain_id, target_block).await
 }
 
 async fn include_classification_scope(
