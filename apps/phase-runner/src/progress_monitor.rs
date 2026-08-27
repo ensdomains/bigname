@@ -9,7 +9,7 @@ use tracing::warn;
 use crate::{
     heads::BlockMarker,
     phase::{
-        IngestCursor, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseProgress, RedoAttemptFence,
+        BlockRange, IngestCursor, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseProgress,
         RunMode,
     },
 };
@@ -61,7 +61,7 @@ struct PendingBatch {
 
 #[derive(Default)]
 struct ProgressState {
-    epoch: Option<RedoAttemptFence>,
+    epoch: Option<BlockRange>,
     reported_advance_pinned: bool,
     pending: Option<PendingBatch>,
     confirmed: i64,
@@ -71,7 +71,7 @@ struct ProgressState {
 
 pub(crate) struct ProgressToken {
     key: ProgressKey,
-    epoch: Option<RedoAttemptFence>,
+    epoch: Option<BlockRange>,
     starting_cursor: CursorIdentity,
 }
 
@@ -108,12 +108,12 @@ impl RunnerPhaseProgress {
     pub fn seed_chain(&self, chain: &str) {
         let mut states = self.states();
         for phase in PhaseName::ALL {
-            for mode in ["normal", "redo", "recompute_flags"] {
+            for mode in RunMode::ALL {
                 states
                     .entry(ProgressKey {
                         chain: chain.to_owned(),
                         phase,
-                        mode,
+                        mode: mode.as_str(),
                     })
                     .or_default();
             }
@@ -137,7 +137,7 @@ impl RunnerPhaseProgress {
             phase: context.phase,
             mode: context.mode.as_str(),
         };
-        let epoch = context.redo_attempt;
+        let epoch = context.redo_attempt.map(|attempt| attempt.execution_range);
         let cursor = CursorIdentity::from_context(context);
         let mut warning = None;
         {
@@ -227,20 +227,12 @@ impl RunnerPhaseProgress {
             .iter_mut()
             .map(|(key, state)| {
                 state.expire(now, self.inner.stale_after);
-                let quiet = state
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.quiet_until_confirmed);
                 ProgressSnapshot {
                     chain: key.chain.clone(),
                     phase: key.phase,
                     mode: key.mode,
-                    batches: if quiet { 0 } else { state.confirmed },
-                    age_seconds: if quiet {
-                        0
-                    } else {
-                        elapsed_seconds(state.first_pinned_commit, now)
-                    },
+                    batches: state.confirmed,
+                    age_seconds: elapsed_seconds(state.first_pinned_commit, now),
                 }
             })
             .collect()
@@ -338,7 +330,7 @@ fn progress_is_empty(progress: &PhaseProgress) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::phase::{BlockRange, PhaseResume, SourceProgress};
+    use crate::phase::{BlockRange, PhaseResume, RedoAttemptFence, SourceProgress};
 
     #[derive(Clone)]
     struct Clock(Arc<Mutex<Instant>>);
@@ -399,8 +391,8 @@ mod tests {
         tracker.record_committed(token, &outcome);
     }
 
-    fn observed(tracker: &RunnerPhaseProgress, phase: PhaseName, mode: &RunMode) -> (i64, i64) {
-        tracker.observation("chain", phase, mode)
+    fn observed(tracker: &RunnerPhaseProgress, context: &PhaseContext) -> (i64, i64) {
+        tracker.observation("chain", context.phase, &context.mode)
     }
 
     #[test]
@@ -409,23 +401,14 @@ mod tests {
         let tracker = tracker(&clock);
         let pinned = context(PhaseName::Interpret, RunMode::Normal, None);
         commit(&tracker, &pinned, work(Some(marker(9, "reported-advance"))));
-        assert_eq!(
-            observed(&tracker, PhaseName::Interpret, &RunMode::Normal),
-            (0, 0)
-        );
+        assert_eq!(observed(&tracker, &pinned), (0, 0));
 
         for expected in 1..=3 {
             commit(&tracker, &pinned, work(None));
-            assert_eq!(
-                observed(&tracker, PhaseName::Interpret, &RunMode::Normal).0,
-                expected
-            );
+            assert_eq!(observed(&tracker, &pinned).0, expected);
         }
         clock.advance(Duration::from_secs(1));
-        assert_eq!(
-            observed(&tracker, PhaseName::Interpret, &RunMode::Normal).1,
-            1
-        );
+        assert_eq!(observed(&tracker, &pinned).1, 1);
     }
 
     #[test]
@@ -435,56 +418,53 @@ mod tests {
         commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         pinned.resume.target = Some(marker(10, "target-a"));
         let token = tracker.begin_batch(&pinned);
-        assert_eq!(
-            observed(&tracker, PhaseName::Project, &RunMode::Normal).0,
-            1
-        );
+        assert_eq!(observed(&tracker, &pinned).0, 1);
         tracker.record_committed(token, &work(pinned.resume.current.clone()));
 
         for moved in [marker(5, "b"), marker(4, "older"), marker(6, "newer")] {
             pinned.resume.current = Some(moved);
             tracker.begin_batch(&pinned);
-            assert_eq!(
-                observed(&tracker, PhaseName::Project, &RunMode::Normal),
-                (0, 0)
-            );
+            assert_eq!(observed(&tracker, &pinned), (0, 0));
             commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         }
     }
 
     #[test]
-    fn ingest_source_and_redo_boundary_movement_reset_a_pinned_summary() {
+    fn one_ingest_source_or_redo_boundary_movement_resets_a_pinned_summary() {
         let tracker = tracker(&Clock::new());
         let mut ingest = context(
             PhaseName::Ingest,
             RunMode::Normal,
             Some(marker(7, "summary")),
         );
-        ingest.resume.ingest_cursors = Arc::from([IngestCursor {
-            source_key: "source".into(),
-            next_block_number: 2,
-            target_block_number: Some(10),
-            last_processed: Some(marker(1, "one")),
-            redo_loaded_boundary: None,
-        }]);
+        ingest.resume.ingest_cursors = Arc::from([
+            IngestCursor {
+                source_key: "a".into(),
+                next_block_number: 2,
+                target_block_number: Some(10),
+                last_processed: Some(marker(1, "one")),
+                redo_loaded_boundary: None,
+            },
+            IngestCursor {
+                source_key: "b".into(),
+                next_block_number: 2,
+                target_block_number: Some(10),
+                last_processed: Some(marker(1, "one")),
+                redo_loaded_boundary: None,
+            },
+        ]);
         commit(&tracker, &ingest, work(ingest.resume.current.clone()));
         commit(&tracker, &ingest, work(ingest.resume.current.clone()));
-        assert_eq!(observed(&tracker, PhaseName::Ingest, &RunMode::Normal).0, 1);
+        assert_eq!(observed(&tracker, &ingest).0, 1);
 
         Arc::make_mut(&mut ingest.resume.ingest_cursors)[0].next_block_number = 3;
         tracker.begin_batch(&ingest);
-        assert_eq!(
-            observed(&tracker, PhaseName::Ingest, &RunMode::Normal),
-            (0, 0)
-        );
+        assert_eq!(observed(&tracker, &ingest), (0, 0));
         commit(&tracker, &ingest, work(ingest.resume.current.clone()));
         Arc::make_mut(&mut ingest.resume.ingest_cursors)[0].redo_loaded_boundary =
             Some(marker(2, "boundary"));
         tracker.begin_batch(&ingest);
-        assert_eq!(
-            observed(&tracker, PhaseName::Ingest, &RunMode::Normal),
-            (0, 0)
-        );
+        assert_eq!(observed(&tracker, &ingest), (0, 0));
     }
 
     #[test]
@@ -497,26 +477,26 @@ mod tests {
         );
         commit(&tracker, &redo, work(redo.resume.current.clone()));
         commit(&tracker, &redo, work(redo.resume.current.clone()));
-        assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode).0, 1);
+        assert_eq!(observed(&tracker, &redo).0, 1);
         redo.redo_attempt.as_mut().unwrap().generation = 2;
         let token = tracker.begin_batch(&redo);
-        assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode).0, 2);
+        assert_eq!(observed(&tracker, &redo).0, 2);
         tracker.record_committed(token, &work(redo.resume.current.clone()));
         redo.redo_attempt.as_mut().unwrap().generation = 3;
         tracker.begin_batch(&redo);
-        assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode).0, 3);
+        assert_eq!(observed(&tracker, &redo).0, 3);
         redo.redo_attempt.as_mut().unwrap().execution_range = BlockRange::new(2, 9).unwrap();
         tracker.begin_batch(&redo);
-        assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode), (0, 0));
+        assert_eq!(observed(&tracker, &redo), (0, 0));
     }
 
     #[test]
     fn empty_idle_and_caught_up_live_outcomes_clear_evidence() {
         let tracker = tracker(&Clock::new());
-        let mut live = context(PhaseName::Live, RunMode::Normal, Some(marker(5, "five")));
+        let live = context(PhaseName::Live, RunMode::Normal, Some(marker(5, "five")));
         commit(&tracker, &live, work(live.resume.current.clone()));
         commit(&tracker, &live, work(live.resume.current.clone()));
-        assert_eq!(observed(&tracker, PhaseName::Live, &RunMode::Normal).0, 1);
+        assert_eq!(observed(&tracker, &live).0, 1);
 
         for outcome in [
             PhaseBatchOutcome::Idle(PhaseProgress::default()),
@@ -529,16 +509,20 @@ mod tests {
         ] {
             let token = tracker.begin_batch(&live);
             tracker.record_committed(token, &outcome);
-            assert_eq!(
-                observed(&tracker, PhaseName::Live, &RunMode::Normal),
-                (0, 0)
-            );
+            assert_eq!(observed(&tracker, &live), (0, 0));
             commit(&tracker, &live, work(live.resume.current.clone()));
             commit(&tracker, &live, work(live.resume.current.clone()));
         }
-        live.resume.target = Some(marker(6, "six"));
-        commit(&tracker, &live, work(live.resume.current.clone()));
-        assert!(observed(&tracker, PhaseName::Live, &RunMode::Normal).0 >= 1);
+        commit(
+            &tracker,
+            &live,
+            PhaseBatchOutcome::Complete(PhaseProgress {
+                current: live.resume.current.clone(),
+                target: Some(marker(6, "six")),
+                ..PhaseProgress::default()
+            }),
+        );
+        assert!(observed(&tracker, &live).0 >= 1);
     }
 
     #[test]
@@ -548,24 +532,18 @@ mod tests {
         let pinned = context(PhaseName::Verify, RunMode::Normal, Some(marker(1, "one")));
         commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         let unused_error_token = tracker.begin_batch(&pinned);
-        assert_eq!(observed(&tracker, PhaseName::Verify, &RunMode::Normal).0, 1);
+        assert_eq!(observed(&tracker, &pinned).0, 1);
         drop(unused_error_token);
         tracker.begin_batch(&pinned);
-        assert_eq!(observed(&tracker, PhaseName::Verify, &RunMode::Normal).0, 1);
+        assert_eq!(observed(&tracker, &pinned).0, 1);
 
         commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         clock.advance(Duration::from_secs(901));
-        assert_eq!(
-            observed(&tracker, PhaseName::Verify, &RunMode::Normal),
-            (0, 0)
-        );
+        assert_eq!(observed(&tracker, &pinned), (0, 0));
         commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         tracker.clear_phase("chain", PhaseName::Verify);
-        assert_eq!(
-            observed(&tracker, PhaseName::Verify, &RunMode::Normal),
-            (0, 0)
-        );
+        assert_eq!(observed(&tracker, &pinned), (0, 0));
     }
 
     #[test]
@@ -586,7 +564,7 @@ mod tests {
             }),
         );
         tracker.begin_batch(&ingest);
-        assert_eq!(observed(&tracker, PhaseName::Ingest, &RunMode::Normal).0, 1);
+        assert_eq!(observed(&tracker, &ingest).0, 1);
     }
 }
 

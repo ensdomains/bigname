@@ -28,6 +28,7 @@ fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhasePr
         DEFAULT_STALE_AFTER,
         Arc::new(move || *clock.lock().unwrap()),
     );
+    let observed = || tracker.observation("chain", pinned.phase, &RunMode::Normal);
     for _ in 0..2 {
         let token = tracker.begin_batch(pinned);
         tracker.record_committed(
@@ -38,24 +39,11 @@ fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhasePr
     let token = tracker.begin_batch(pinned);
     *now.lock().unwrap() += Duration::from_secs(7);
     tracker.record_committed(token, &PhaseBatchOutcome::Complete(progress.clone()));
-    assert_eq!(
-        tracker.observation("chain", pinned.phase, &RunMode::Normal),
-        (2, 7)
-    );
+    assert_eq!(observed(), (2, 7));
     let token = tracker.begin_batch(pinned);
-    assert_eq!(
-        tracker
-            .observation("chain", pinned.phase, &RunMode::Normal)
-            .0,
-        3
-    );
+    assert_eq!(observed().0, 3);
     tracker.record_committed(token, &PhaseBatchOutcome::Complete(progress));
-    assert_eq!(
-        tracker
-            .observation("chain", pinned.phase, &RunMode::Normal)
-            .0,
-        3
-    );
+    assert_eq!(observed().0, 3);
 }
 
 #[test]
@@ -71,11 +59,11 @@ fn advancing_final_completion_is_quiet_until_durable_confirmation() {
 }
 
 #[test]
-fn final_ingest_source_progress_is_quiet_when_summary_stays_pinned() {
+fn final_ingest_next_block_progress_is_quiet_when_markers_stay_pinned() {
     let mut pinned = context(PhaseName::Ingest, marker(9, "summary"));
     pinned.resume.ingest_cursors = Arc::from([IngestCursor {
         source_key: "source".into(),
-        next_block_number: 2,
+        next_block_number: 1,
         target_block_number: Some(2),
         last_processed: Some(marker(1, "one")),
         redo_loaded_boundary: None,
@@ -86,8 +74,8 @@ fn final_ingest_source_progress_is_quiet_when_summary_stays_pinned() {
             current: pinned.resume.current.clone(),
             source_progress: vec![SourceProgress {
                 source_key: "source".into(),
-                current: Some(marker(2, "two")),
-                target: Some(marker(2, "two")),
+                current: Some(marker(1, "one")),
+                target: Some(marker(1, "one")),
                 redo_loaded_boundary: None,
             }],
             ..PhaseProgress::default()

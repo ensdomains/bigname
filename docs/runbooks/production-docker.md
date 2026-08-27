@@ -42,7 +42,9 @@ Do not start the walk until all of these checks pass:
    phase.
 4. The host rule list contains `BignamePhaseRunnerPhaseNonProgress` and
    `BignamePhaseRunnerProgressMetricsMissing`.
-5. The host retains the checked-in 15-second rule-group evaluation interval.
+5. The host retains the checked-in 15-second rule-group evaluation interval and
+   configures `heartbeat-stale-after` to at least about 750 seconds so the
+   13-minute two-batch bound remains valid.
 6. The existing `severity=page` route passes the deployment's standard
    notification-path check.
 7. Operators have the [manual halt procedure](pipeline-monitoring.md#phase-cursor-non-progress-response)
@@ -318,8 +320,9 @@ indexes are additive; rollback may leave them in place.
    Ingest redo over every widened range; otherwise skip this step. The command
    requires the full argument set or it is rejected before fetching anything:
    `phase-runner redo --chain <chain-id> --phase ingest --from-block <from>
-   --to-block <to> --source <source>`. Repeat `--source` for every configured
-   intake-capable source key; the exact persisted cursor-key set is required.
+   --to-block <to> --source <source> --metrics-bind-addr 0.0.0.0:9465`. Repeat
+   `--source` for every configured intake-capable source key; the exact persisted
+   cursor-key set is required.
    The CLI refuses an ingest redo without a source, and every redo requires the
    explicit block range;
 7. after any required Ingest redo succeeds, resume an already-audited Interpret
@@ -331,8 +334,9 @@ indexes are additive; rollback may leave them in place.
    watch plan, or complete the required review proving that the watch plan did
    not widen, then rerun the same chain and block range with
    `--attest-watch-set-coverage <token>`. If no marker exists, let the unflagged
-   redo complete. Never invent a token, reuse one after completion, or use one
-   for another redo. Do not use the unattended `run` path for an attestation;
+   redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
+   matching Project redo. Never invent a token, reuse one after completion, or
+   use one for another redo. Do not use the unattended `run` path for an attestation;
 8. complete the matching full-history Project redo while the supervisor remains
    stopped;
 9. start the long-running phase runner only after those one-shot redos succeed.

@@ -340,6 +340,7 @@ retained coverage without a reproducible desired rule, while a
 loudly and recoverably on `ResolverUpdated`; an empty rebuild can likewise
 clear the preceding invalidation first.
 
+<a id="durable-composite-cursor"></a>
 **Durable composite cursor** — the persisted resume position used to decide
 whether a phase advanced. It includes block number and hash and, for Ingest,
 the sorted per-source resume fields needed to distinguish real source progress.
@@ -1568,6 +1569,7 @@ ENSv2 subregistry edges, do not add targets. A *watched tuple* is one such
 entry; its *watched window* is the active block range. Addresses are derived
 watch targets, never the durable identity.
 
+<a id="work-bearing-batch"></a>
 **Work-bearing batch** — a successfully persisted phase batch that reports
 completed indexing or repair work, excluding idle polls, empty completions,
 caught-up Live polls, and completed-phase revalidation.

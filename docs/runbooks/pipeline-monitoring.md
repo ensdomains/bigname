@@ -195,13 +195,18 @@ sequence even when the displayed summary block is unchanged. Target/head
 movement does not reset it. A single Project boundary replay can reach count
 `1` but cannot page. Caught-up Live polls, no-head/empty completions, idle polls,
 capacity pauses, and completed Verify revalidation clear or bypass the detector.
-Evidence expires after the configured heartbeat-stale interval without another
-successful work-bearing commit.
+An idle poll clears earlier evidence, so pinned commits separated by idle polls
+do not accumulate; this is accepted because an idle poll consumes no provider
+or database work. Evidence expires after the configured heartbeat-stale interval
+without another successful work-bearing commit.
 
 With the checked-in 15-second rule interval, the two-minute hold pages no later
 than 3 minutes after the third confirmed pinned completion. The age path
 pages no later than 13 minutes after the second. A single long-running batch
-still belongs to the heartbeat alert.
+still belongs to the heartbeat alert. Preserve the 13-minute two-batch bound by
+configuring `heartbeat-stale-after` to at least about 750 seconds; a lower expiry
+can clear that evidence before the age-based rule holds, leaving the three-batch
+path as the remaining non-progress page.
 
 When `BignamePhaseRunnerPhaseNonProgress` fires:
 
