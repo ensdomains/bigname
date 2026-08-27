@@ -50,6 +50,9 @@ mod v2_index;
 #[path = "state_v2_refresh.rs"]
 mod v2_refresh;
 
+#[path = "state_v2_pointers.rs"]
+mod v2_pointers;
+
 #[cfg(test)]
 #[path = "state_v2_tests.rs"]
 mod v2_tests;
@@ -96,6 +99,9 @@ pub(super) struct State {
     restoring_state_key: Option<String>,
     active_resources: OrdMap<String, Uuid>,
     v2_tokens: OrdMap<String, V2TokenState>,
+    v2_subregistry_tokens_by_observation: OrdMap<(String, String), OrdSet<String>>,
+    v2_resolver_tokens_by_observation: OrdMap<(String, String), OrdSet<String>>,
+    v2_resolver_aliases_by_observation: OrdMap<(String, String), OrdSet<(String, String)>>,
     v2_expiries: OrdSet<(u64, String)>,
     v2_dirty_tokens: OrdSet<String>,
     v2_dirty_registries: OrdSet<String>,

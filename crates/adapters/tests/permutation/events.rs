@@ -102,6 +102,13 @@ sol! {
             uint64 expiry,
             address indexed sender
         );
+        event LabelReserved(
+            uint256 indexed tokenId,
+            bytes32 indexed labelHash,
+            string label,
+            uint64 expiry,
+            address indexed sender
+        );
         event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
         event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
         event SubregistryUpdated(

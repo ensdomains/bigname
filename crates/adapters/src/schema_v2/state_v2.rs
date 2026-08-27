@@ -1,7 +1,9 @@
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::State;
+use super::{State, v2_pointers::same_resolver_observation};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::schema_v2) struct V2NameState {
@@ -30,6 +32,7 @@ pub(in crate::schema_v2) struct V2TokenState {
     pub resource_id: Option<Uuid>,
     pub token_lineage_id: Option<Uuid>,
     pub resolver: Option<String>,
+    pub resolver_discovery_aliases: BTreeSet<String>,
     pub subregistry: Option<String>,
 }
 
@@ -99,6 +102,10 @@ impl State {
         let token_lineage_id =
             retained_reservation_resource.and_then(|previous| previous.token_lineage_id);
         if let Some(previous) = previous.as_ref() {
+            if previous.resolver.is_some() {
+                self.set_v2_resolver_token_index(&emitter, token_id, false);
+            }
+            self.set_v2_token_resolver_alias_index(&emitter, token_id, previous, false);
             self.replace_v2_token_indexes(&token_key, Some(previous), None);
             self.replace_v2_expiry_index(&token_key, previous.expiry, None);
             self.remove_v2_current_surface(previous);
@@ -121,16 +128,20 @@ impl State {
             && replaced_key != token_key
             && let Some(displaced) = self.v2_tokens.remove(&replaced_key)
         {
+            let displaced_token = replaced_key
+                .rsplit_once(':')
+                .map(|(_, token)| token.to_owned())
+                .unwrap_or_else(|| replaced_key.clone());
+            if displaced.resolver.is_some() {
+                self.set_v2_resolver_token_index(&emitter, &displaced_token, false);
+            }
+            self.set_v2_token_resolver_alias_index(&emitter, &displaced_token, &displaced, false);
             self.replace_v2_token_indexes(&replaced_key, Some(&displaced), None);
             self.replace_v2_expiry_index(&replaced_key, displaced.expiry, None);
             self.remove_v2_current_surface(&displaced);
             if let Some(subregistry) = displaced.subregistry.as_deref() {
                 self.mark_v2_registry_dirty(subregistry);
             }
-            let displaced_token = replaced_key
-                .rsplit_once(':')
-                .map(|(_, token)| token.to_owned())
-                .unwrap_or(replaced_key);
             replaced.push((displaced_token, displaced));
         }
         let current = V2TokenState {
@@ -175,14 +186,7 @@ impl State {
                 .insert((emitter.clone(), raw_label.to_vec()), token_key.clone())
                 && displaced_key != token_key
             {
-                if let Some(displaced) = self.v2_tokens.remove(&displaced_key) {
-                    self.replace_v2_token_indexes(&displaced_key, Some(&displaced), None);
-                    self.replace_v2_expiry_index(&displaced_key, displaced.expiry, None);
-                    self.remove_v2_current_name(&displaced);
-                    if let Some(subregistry) = displaced.subregistry.as_deref() {
-                        self.mark_v2_registry_dirty(subregistry);
-                    }
-                }
+                self.remove_v2_displaced_restored_token(&emitter, &displaced_key);
             }
             let previous_expiry;
             {
@@ -214,8 +218,7 @@ impl State {
             registration,
         );
         // Live interpretation preserves the historical one-shot behavior while producing the
-        // batch. A retained-event restore has no displaced token to refresh at the end, so clear
-        // only the opaque restored state here after the output boundary.
+        // batch; restore clears only opaque displaced state after the output boundary.
         for (_, displaced) in &replaced {
             self.remove_v2_active_resource(displaced);
         }
@@ -434,63 +437,59 @@ impl State {
         ))
     }
 
-    pub(in crate::schema_v2) fn set_v2_resolver(
-        &mut self,
-        emitter: &str,
-        token_id: &str,
-        resolver: Option<String>,
-    ) {
-        let key = v2_key(emitter, token_id);
-        self.v2_tokens.entry(key.clone()).or_default().resolver = resolver;
-        self.mark_v2_token_dirty(key);
-    }
-
-    pub(in crate::schema_v2) fn set_v2_subregistry(
-        &mut self,
-        emitter: &str,
-        token_id: &str,
-        subregistry: Option<String>,
-    ) {
-        let key = v2_key(emitter, token_id);
-        let previous = self
-            .v2_tokens
-            .get(&key)
-            .and_then(|token| token.subregistry.clone());
-        self.v2_tokens.entry(key.clone()).or_default().subregistry = subregistry.clone();
-        self.mark_v2_token_dirty(key);
-        for registry in previous.into_iter().chain(subregistry) {
-            self.mark_v2_registry_dirty(&registry);
-        }
-    }
-
     pub(in crate::schema_v2) fn regenerate_v2_token(
         &mut self,
         emitter: &str,
         old_token_id: &str,
         new_token_id: &str,
-    ) -> Option<V2TokenState> {
+    ) -> Option<(V2TokenState, Option<V2TokenState>)> {
         let old_key = v2_key(emitter, old_token_id);
-        let state = self.v2_tokens.remove(&old_key)?;
+        let mut state = self.v2_tokens.remove(&old_key)?;
+        if state.resolver.is_some() {
+            self.set_v2_resolver_token_index(emitter, old_token_id, false);
+        }
+        self.set_v2_token_resolver_alias_index(emitter, old_token_id, &state, false);
         self.replace_v2_token_indexes(&old_key, Some(&state), None);
         self.replace_v2_expiry_index(&old_key, state.expiry, None);
         let new_key = v2_key(emitter, new_token_id);
+        if state.resolver.is_some() && !same_resolver_observation(old_token_id, new_token_id) {
+            state
+                .resolver_discovery_aliases
+                .insert(old_token_id.to_owned());
+        }
         if let Some(label) = state.raw_label.as_ref() {
             self.v2_entry_by_parent_label.insert(
                 (emitter.to_ascii_lowercase(), label.clone()),
                 new_key.clone(),
             );
         }
-        if let Some(displaced) = self.v2_tokens.insert(new_key.clone(), state.clone()) {
-            self.replace_v2_token_indexes(&new_key, Some(&displaced), None);
+        let displaced = self.v2_tokens.insert(new_key.clone(), state.clone());
+        if let Some(displaced) = displaced.as_ref() {
+            if displaced.resolver.is_some() {
+                self.set_v2_resolver_token_index(emitter, new_token_id, false);
+            }
+            self.set_v2_token_resolver_alias_index(emitter, new_token_id, displaced, false);
+            self.replace_v2_token_indexes(&new_key, Some(displaced), None);
             self.replace_v2_expiry_index(&new_key, displaced.expiry, None);
+            self.remove_v2_current_name(displaced);
             if let Some(subregistry) = displaced.subregistry.as_deref() {
                 self.mark_v2_registry_dirty(subregistry);
             }
+            if displaced.raw_label != state.raw_label
+                && let Some(label) = displaced.raw_label.as_ref()
+            {
+                self.v2_entry_by_parent_label
+                    .remove(&(emitter.to_ascii_lowercase(), label.clone()));
+            }
         }
         self.replace_v2_token_indexes(&new_key, None, Some(&state));
+        if state.resolver.is_some() {
+            self.set_v2_resolver_token_index(emitter, new_token_id, true);
+        }
+        self.set_v2_token_resolver_alias_index(emitter, new_token_id, &state, true);
         self.replace_v2_expiry_index(&new_key, None, state.expiry);
         self.mark_v2_token_component_dirty(&new_key);
-        Some(state)
+        Some((state, displaced))
     }
 
     pub(in crate::schema_v2) fn release_v2_token(
@@ -501,6 +500,10 @@ impl State {
         let emitter = emitter.to_ascii_lowercase();
         let token_key = v2_key(&emitter, token_id);
         let state = self.v2_tokens.remove(&token_key)?;
+        if state.resolver.is_some() {
+            self.set_v2_resolver_token_index(&emitter, token_id, false);
+        }
+        self.set_v2_token_resolver_alias_index(&emitter, token_id, &state, false);
         self.replace_v2_token_indexes(&token_key, Some(&state), None);
         self.replace_v2_expiry_index(&token_key, state.expiry, None);
         self.remove_v2_current_name(&state);
@@ -530,7 +533,7 @@ impl State {
         })
     }
 
-    fn replace_v2_expiry_index(
+    pub(super) fn replace_v2_expiry_index(
         &mut self,
         token_key: &str,
         previous: Option<u64>,
@@ -547,7 +550,7 @@ impl State {
         }
     }
 
-    fn remove_v2_current_name(&mut self, token: &V2TokenState) {
+    pub(super) fn remove_v2_current_name(&mut self, token: &V2TokenState) {
         self.remove_v2_current_surface(token);
         self.remove_v2_active_resource(token);
     }
@@ -584,7 +587,7 @@ impl State {
     }
 }
 
-fn v2_key(emitter: &str, token_id: &str) -> String {
+pub(super) fn v2_key(emitter: &str, token_id: &str) -> String {
     format!(
         "{}:{}",
         emitter.to_ascii_lowercase(),

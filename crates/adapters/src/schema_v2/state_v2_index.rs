@@ -1,6 +1,6 @@
 use imbl::{ordmap::OrdMap, ordset::OrdSet};
 
-use super::{State, V2TokenState};
+use super::{State, V2TokenState, v2_pointers::resolver_observation_id};
 
 #[cfg(test)]
 std::thread_local! {
@@ -22,6 +22,7 @@ impl State {
         self.v2_token_by_upstream_resource_index.clear();
         self.v2_token_by_name_index.clear();
         self.v2_tokens_by_current_name_index.clear();
+        self.v2_subregistry_tokens_by_observation.clear();
         let tokens = self
             .v2_tokens
             .iter()
@@ -87,6 +88,12 @@ impl State {
             return;
         }
         if let Some(previous) = previous {
+            replace_subregistry_index(
+                &mut self.v2_subregistry_tokens_by_observation,
+                token_key,
+                previous,
+                false,
+            );
             remove_token_indexes(
                 &mut self.v2_token_by_upstream_resource_index,
                 &mut self.v2_token_by_name_index,
@@ -96,6 +103,12 @@ impl State {
             );
         }
         if let Some(current) = current {
+            replace_subregistry_index(
+                &mut self.v2_subregistry_tokens_by_observation,
+                token_key,
+                current,
+                true,
+            );
             insert_token_indexes(
                 &mut self.v2_token_by_upstream_resource_index,
                 &mut self.v2_token_by_name_index,
@@ -104,6 +117,29 @@ impl State {
                 current,
             );
         }
+    }
+}
+
+fn replace_subregistry_index(
+    index: &mut OrdMap<(String, String), OrdSet<String>>,
+    token_key: &str,
+    token: &V2TokenState,
+    active: bool,
+) {
+    if token.subregistry.is_none() {
+        return;
+    }
+    let Some((emitter, token_id)) = token_key.rsplit_once(':') else {
+        return;
+    };
+    let identity = (emitter.to_owned(), resolver_observation_id(token_id));
+    if active {
+        index
+            .entry(identity)
+            .or_default()
+            .insert(token_id.to_owned());
+    } else {
+        remove_index_key(index, &identity, token_id);
     }
 }
 

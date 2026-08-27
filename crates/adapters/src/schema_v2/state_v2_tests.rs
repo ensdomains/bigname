@@ -10,6 +10,8 @@ const THIRD: &str = "0x0000000000000000000000000000000000000044";
 const NEST_ROOT: &str = "0x0000000000000000000000000000000000000050";
 const NEST: &str = "0x0000000000000000000000000000000000000051";
 const NAMESPACE: &str = "ens";
+#[path = "state_v2_pointer_tests.rs"]
+mod pointer_tests;
 #[test]
 fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
     let mut state = anchored_state();
@@ -502,6 +504,9 @@ fn assert_v2_indexes_are_derived(state: &State) {
     let mut names = OrdMap::<(String, String), OrdSet<String>>::new();
     let mut current_names = OrdMap::<String, OrdSet<String>>::new();
     let mut expiries = OrdSet::new();
+    let mut resolver_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
+    let mut resolver_aliases = OrdMap::<(String, String), OrdSet<(String, String)>>::new();
+    let mut subregistry_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
     for (token_key, token) in &state.v2_tokens {
         let (emitter, token_id) = token_key
             .rsplit_once(':')
@@ -527,9 +532,42 @@ fn assert_v2_indexes_are_derived(state: &State) {
         if let Some(expiry) = token.expiry {
             expiries.insert((expiry, token_key.clone()));
         }
+        if token.resolver.is_some() {
+            resolver_tokens
+                .entry((
+                    emitter.to_owned(),
+                    super::v2_pointers::resolver_observation_id(token_id),
+                ))
+                .or_default()
+                .insert(token_id.to_owned());
+        }
+        if token.subregistry.is_some() {
+            subregistry_tokens
+                .entry((
+                    emitter.to_owned(),
+                    super::v2_pointers::resolver_observation_id(token_id),
+                ))
+                .or_default()
+                .insert(token_id.to_owned());
+        }
+        for alias in &token.resolver_discovery_aliases {
+            resolver_aliases
+                .entry((
+                    emitter.to_owned(),
+                    super::v2_pointers::resolver_observation_id(alias),
+                ))
+                .or_default()
+                .insert((token_id.to_owned(), alias.clone()));
+        }
     }
     assert_eq!(state.v2_token_by_upstream_resource_index, upstream);
     assert_eq!(state.v2_token_by_name_index, names);
     assert_eq!(state.v2_tokens_by_current_name_index, current_names);
     assert_eq!(state.v2_expiries, expiries);
+    assert_eq!(state.v2_resolver_tokens_by_observation, resolver_tokens);
+    assert_eq!(state.v2_resolver_aliases_by_observation, resolver_aliases);
+    assert_eq!(
+        state.v2_subregistry_tokens_by_observation,
+        subregistry_tokens
+    );
 }

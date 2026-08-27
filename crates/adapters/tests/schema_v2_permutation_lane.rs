@@ -467,6 +467,692 @@ fn v2_unregistered_record_name_link_is_batch_grid_independent() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn v2_regeneration_collision_closes_displaced_registration_in_every_replay_shape() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    for (case, collision) in [
+        ("regeneration-collision", true),
+        ("unregister-comparator", false),
+    ] {
+        let input = v2_regeneration_collision_input(&wiring, collision)?;
+        let fresh = interpret_schema_v2_batch(input.clone())?;
+        assert_v2_regeneration_collision_output(&fresh, collision)?;
+        let converged = converge(
+            &format!("directed=v2-{case}"),
+            input,
+            vec![0..1, 1..2, 2..3, 3..4, 4..5],
+        )?;
+        assert!(
+            converged.artifacts.counts().is_empty(),
+            "{case} retained batch-boundary byte differences: {}",
+            converged.artifacts
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Label)?;
+    let output = interpret_schema_v2_batch(input)?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_202,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-label-registration",
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Label)?,
+        vec![0..1, 1..2, 2..3],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_label_reservation_preserves_a_shared_subregistry_observation_key() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input =
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Reservation)?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_202,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-label-reservation",
+        input,
+        vec![0..1, 1..2, 2..3],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_regeneration_collision_preserves_a_shared_subregistry_observation_key() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Collision)?;
+    let output = interpret_schema_v2_batch(input)?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_205,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-regeneration-collision",
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Collision)?,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_label_replacement_preserves_a_shared_subregistry_observation_key() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input =
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Replacement)?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_203,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-label-replacement",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_unregister_preserves_a_shared_subregistry_key_until_the_last_holder_leaves() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input =
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Unregister)?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_203,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
+    assert!(output.discovery_edge_closures.iter().any(|closure| {
+        closure.active_to_block_number == 20_000_204
+            && closure.edge_kind == "subregistry"
+            && closure.observation_key == observation_key
+    }));
+    let converged = converge(
+        "directed=v2-shared-subregistry-unregister",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_last_subregistry_asserter_departure_reasserts_the_surviving_holder() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::LastAsserterDeparture,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_reassertion(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_204,
+        SHARED_SUBREGISTRY_SURVIVOR,
+        SHARED_SUBREGISTRY_DEPARTING,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-last-asserter-departure",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_cross_base_regeneration_reasserts_the_old_key_to_its_surviving_holder() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::CrossBaseRegeneration,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_reassertion(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_204,
+        SHARED_SUBREGISTRY_SURVIVOR,
+        SHARED_SUBREGISTRY_DEPARTING,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-cross-base-regeneration",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_subregistry_reassertion_chooses_the_greatest_retained_token_id() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::DeterministicSurvivor,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_reassertion(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_206,
+        SHARED_SUBREGISTRY_GREATEST_SURVIVOR,
+        SHARED_SUBREGISTRY_DEPARTING,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-deterministic-survivor",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6, 6..7],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_occupied_regeneration_emits_one_destination_subregistry_edge() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::OccupiedDestinationWithSharedHolder,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_207,
+        SHARED_SUBREGISTRY_DEPARTING,
+    )?;
+    let converged = converge(
+        "directed=v2-occupied-regeneration-shared-destination",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6, 6..7, 7..8],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_pointerless_label_addition_elects_the_greatest_pointer_holder() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::PointerlessAddition,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_206,
+        SHARED_SUBREGISTRY_GREATEST_SURVIVOR,
+    )?;
+    let converged = converge(
+        "directed=v2-pointerless-addition-deterministic-survivor",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6, 6..7],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+fn assert_subregistry_reassertion(
+    output: &BatchOutput,
+    observation_key: &str,
+    block_number: i64,
+    surviving_target: &str,
+    departed_target: &str,
+) -> Result<()> {
+    let surviving_target_id = assert_subregistry_target_reasserted(
+        output,
+        observation_key,
+        block_number,
+        surviving_target,
+    )?;
+    let target_id = |address: &str| {
+        output
+            .contract_addresses
+            .iter()
+            .find(|row| row.address.eq_ignore_ascii_case(address))
+            .map(|row| row.contract_instance_id)
+            .with_context(|| format!("missing discovered contract address {address}"))
+    };
+    let departed_target_id = target_id(departed_target)?;
+    assert_ne!(surviving_target_id, departed_target_id);
+    Ok(())
+}
+
+fn assert_subregistry_target_reasserted(
+    output: &BatchOutput,
+    observation_key: &str,
+    block_number: i64,
+    surviving_target: &str,
+) -> Result<uuid::Uuid> {
+    let surviving_target_id = output
+        .contract_addresses
+        .iter()
+        .find(|row| row.address.eq_ignore_ascii_case(surviving_target))
+        .map(|row| row.contract_instance_id)
+        .with_context(|| format!("missing discovered contract address {surviving_target}"))?;
+    let reassertions = output
+        .discovery_edges
+        .iter()
+        .filter(|edge| {
+            edge.edge_kind == "subregistry"
+                && edge.observation_key == observation_key
+                && edge.active_from_block_number == block_number
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reassertions.len(),
+        1,
+        "departure must emit exactly one survivor reassertion: {:#?}",
+        output.discovery_edges
+    );
+    assert_eq!(reassertions[0].to_contract_instance_id, surviving_target_id);
+    assert!(output.discovery_edge_closures.iter().any(|closure| {
+        closure.edge_kind == "subregistry"
+            && closure.observation_key == observation_key
+            && closure.active_to_block_number == block_number
+            && closure.except_to_contract_instance_id == Some(surviving_target_id)
+    }));
+    Ok(surviving_target_id)
+}
+
+#[test]
+fn v2_regeneration_collision_preserves_resolver_intake_until_explicit_update() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let observation_key = |token: U256| {
+        let mut bytes = token.to_be_bytes::<32>();
+        bytes[28..].fill(0);
+        format!(
+            "resolver:{}:{:#x}",
+            registry.to_ascii_lowercase(),
+            U256::from_be_bytes(bytes)
+        )
+    };
+    for (case, same_observation_key, source_key_retired, source_key_reused) in [
+        ("cross-label", false, false, false),
+        ("retired-source-key", false, true, false),
+        ("live-source-key-reuse", false, false, true),
+        ("same-key", true, false, false),
+    ] {
+        let input = v2_regeneration_collision_input_with_topology(
+            &wiring,
+            same_observation_key,
+            source_key_retired,
+            source_key_reused,
+        )?;
+        let fresh = interpret_schema_v2_batch(input.clone())?;
+        let (token_a, token_b) = v2_regeneration_collision_tokens(same_observation_key);
+        let old_key = observation_key(token_b);
+        let new_key = observation_key(token_a);
+        if source_key_retired {
+            assert!(fresh.discovery_edge_closures.iter().any(|closure| {
+                closure.active_to_block_number == 20_000_001
+                    && closure.edge_kind == "resolver"
+                    && closure.observation_key == old_key
+            }));
+        }
+        if source_key_reused {
+            assert!(fresh.discovery_edges.iter().any(|edge| {
+                edge.active_from_block_number == 20_000_003
+                    && edge.edge_kind == "resolver"
+                    && edge.observation_key == old_key
+            }));
+        }
+        if same_observation_key {
+            assert_eq!(old_key, new_key);
+            let displaced_resolver = fresh
+                .contract_addresses
+                .iter()
+                .find(|address| address.address == "0x00000000000000000000000000000000f0000098")
+                .context("the aliased displaced resolver was not materialized")?
+                .contract_instance_id;
+            assert!(fresh.discovery_edges.iter().any(|edge| {
+                edge.active_from_block_number == 20_000_001
+                    && edge.edge_kind == "resolver"
+                    && edge.observation_key == new_key
+                    && edge.to_contract_instance_id == displaced_resolver
+            }));
+            assert!(!fresh.discovery_edge_closures.iter().any(|closure| {
+                closure.active_to_block_number == 20_000_002
+                    && closure.edge_kind == "resolver"
+                    && closure.observation_key == old_key
+            }));
+            assert!(!fresh.discovery_edges.iter().any(|edge| {
+                edge.active_from_block_number == 20_000_002
+                    && edge.edge_kind == "resolver"
+                    && edge.observation_key == new_key
+            }));
+        }
+        assert!(!fresh.discovery_edge_closures.iter().any(|closure| {
+            closure.active_to_block_number == 20_000_002
+                && closure.edge_kind == "resolver"
+                && closure.observation_key == old_key
+        }));
+        assert!(!fresh.discovery_edges.iter().any(|edge| {
+            edge.active_from_block_number == 20_000_002
+                && edge.edge_kind == "resolver"
+                && edge.observation_key == new_key
+        }));
+        assert_eq!(
+            fresh.discovery_edge_closures.iter().any(|closure| {
+                closure.active_to_block_number == 20_000_004
+                    && closure.edge_kind == "resolver"
+                    && closure.observation_key == old_key
+            }),
+            !source_key_reused,
+        );
+        assert!(fresh.discovery_edges.iter().any(|edge| {
+            edge.active_from_block_number == 20_000_004
+                && edge.edge_kind == "resolver"
+                && edge.observation_key == new_key
+        }));
+        let converged = converge(
+            &format!("directed=v2-regeneration-collision-survivor-topology-{case}"),
+            input,
+            vec![0..1, 1..2, 2..3, 3..4, 4..5],
+        )?;
+        assert!(
+            converged
+                .whole
+                .output
+                .normalized_events
+                .iter()
+                .all(|event| {
+                    event.after_state["source_event"] != "TokenRegenerated"
+                        || !matches!(
+                            event.event_kind.as_str(),
+                            "ResolverChanged" | "SubregistryChanged"
+                        )
+                }),
+            "a registration collision must not clear topology inherited by the surviving token"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn v2_regeneration_alias_protection_survives_repeated_token_restore() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_repeated_regeneration_alias_input(&wiring)?;
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let shared = versioned_token("beta", 1);
+    let mut bytes = shared.to_be_bytes::<32>();
+    bytes[28..].fill(0);
+    let observation_key = format!(
+        "resolver:{}:{:#x}",
+        registry.to_ascii_lowercase(),
+        U256::from_be_bytes(bytes)
+    );
+    let fresh = interpret_schema_v2_batch(input.clone())?;
+    assert!(!fresh.discovery_edge_closures.iter().any(|closure| {
+        closure.active_to_block_number == 20_000_105
+            && closure.edge_kind == "resolver"
+            && closure.observation_key == observation_key
+    }));
+    let converged = converge(
+        "directed=v2-repeated-regeneration-resolver-alias",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_regeneration_collision_closes_displaced_discovery_and_child_registrations() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_regeneration_collision_displaced_subregistry_input(&wiring)?;
+    let fresh = interpret_schema_v2_batch(input.clone())?;
+    let discovery_closures = fresh
+        .discovery_edge_closures
+        .iter()
+        .filter(|closure| closure.active_to_block_number == 20_000_105)
+        .map(|closure| {
+            assert_eq!(closure.except_to_contract_instance_id, None);
+            closure.edge_kind.as_str()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        discovery_closures,
+        BTreeSet::from(["resolver", "subregistry"]),
+        "the collision must close both discovery edges owned by the displaced registration"
+    );
+
+    let child_name = format!("ens:{:#x}", namehash(&["kid", "alpha", "eth"]));
+    let child_terminal_kinds = fresh
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(20_000_105)
+                && event.logical_name_id.as_deref() == Some(child_name.as_str())
+                && event.after_state["source_event"] == "TokenRegenerated"
+        })
+        .map(|event| event.event_kind.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        child_terminal_kinds,
+        BTreeSet::from(["RegistrationReleased", "SurfaceUnbound"]),
+        "removing the displaced parent path must cascade terminal child events"
+    );
+    assert!(fresh.binding_closures.iter().any(|closure| {
+        closure.block_number == 20_000_105
+            && closure.logical_name_id == child_name
+            && closure.authority_arm == "ens_v2"
+    }));
+
+    let converged = converge(
+        "directed=v2-regeneration-collision-displaced-subregistry",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6],
+    )?;
+    assert!(
+        converged.artifacts.counts().is_empty(),
+        "the displaced child cascade retained batch-boundary byte differences: {}",
+        converged.artifacts
+    );
+    Ok(())
+}
+
+#[test]
+fn v2_regeneration_collision_releases_a_resource_pending_displaced_registration() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let mut input = v2_regeneration_collision_input(&wiring, true)?;
+    input.raw_logs.retain(|raw| {
+        !(raw.block_number == 20_000_000 && raw.transaction_index == 1 && raw.log_index == 0)
+    });
+    let fresh = interpret_schema_v2_batch(input.clone())?;
+    let alpha = format!("ens:{:#x}", namehash(&["alpha", "eth"]));
+    let regenerated = fresh
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "TokenRegenerated")
+        .context("the survivor must regenerate")?;
+    let released = fresh
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationReleased"
+                && event.logical_name_id.as_deref() == Some(alpha.as_str())
+                && event.after_state["source_event"] == "TokenRegenerated"
+        })
+        .context("the resource-pending displaced registration must release")?;
+    assert_eq!(released.resource_id, None);
+    assert_eq!(
+        released.after_state["token_id"], regenerated.after_state["new_token_id"],
+        "the synthetic release carries the survivor's destination token id"
+    );
+    assert_eq!(
+        released.after_state["terminal_reason"],
+        "registry_name_binding_changed"
+    );
+    assert!(fresh.normalized_events.iter().all(|event| {
+        event.event_kind != "SurfaceUnbound"
+            || event.logical_name_id.as_deref() != Some(alpha.as_str())
+    }));
+    assert!(fresh.binding_closures.iter().any(|closure| {
+        closure.block_number == 20_000_002
+            && closure.logical_name_id == alpha
+            && closure.authority_arm == "ens_v2"
+    }));
+
+    let converged = converge(
+        "directed=v2-regeneration-collision-resource-pending-displaced-registration",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+fn assert_v2_regeneration_collision_output(output: &BatchOutput, collision: bool) -> Result<()> {
+    let alpha = format!("ens:{:#x}", namehash(&["alpha", "eth"]));
+    let beta = format!("ens:{:#x}", namehash(&["beta", "eth"]));
+    let alpha_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound"
+                && event.logical_name_id.as_deref() == Some(alpha.as_str())
+        })
+        .and_then(|event| event.resource_id)
+        .context("alpha's surface must be bound before displacement")?;
+    let beta_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound"
+                && event.logical_name_id.as_deref() == Some(beta.as_str())
+        })
+        .and_then(|event| event.resource_id)
+        .context("beta's surface must be bound before regeneration")?;
+    let source_event = if collision {
+        "TokenRegenerated"
+    } else {
+        "LabelUnregistered"
+    };
+    let released = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(20_000_002)
+                && event.event_kind == "RegistrationReleased"
+                && event.logical_name_id.as_deref() == Some(alpha.as_str())
+                && event.resource_id == Some(alpha_resource)
+                && event.after_state["source_event"] == source_event
+        })
+        .count();
+    let unbound = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(20_000_002)
+                && event.event_kind == "SurfaceUnbound"
+                && event.logical_name_id.as_deref() == Some(alpha.as_str())
+                && event.resource_id == Some(alpha_resource)
+                && event.after_state["source_event"] == source_event
+        })
+        .count();
+    let terminal_closures = output
+        .binding_closures
+        .iter()
+        .filter(|closure| {
+            closure.block_number == 20_000_002
+                && closure.logical_name_id == alpha
+                && closure.authority_arm == "ens_v2"
+        })
+        .count();
+    assert_eq!(
+        (released, unbound, terminal_closures),
+        (1, 1, 1),
+        "the displaced registration must have the comparator's exact terminal shape"
+    );
+
+    let renewals = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(20_000_003) && event.event_kind == "RegistrationRenewed"
+        })
+        .collect::<Vec<_>>();
+    if collision {
+        assert_eq!(renewals.len(), 1, "only the surviving token is renewed");
+        assert_eq!(renewals[0].logical_name_id.as_deref(), Some(beta.as_str()));
+        assert_eq!(renewals[0].resource_id, Some(beta_resource));
+    } else {
+        assert!(
+            renewals.is_empty(),
+            "the unregistered token cannot be renewed"
+        );
+    }
+
+    let record = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .context("the late resolver record must be interpreted")?;
+    assert_eq!(record.logical_name_id.as_deref(), Some(alpha.as_str()));
+    assert_eq!(
+        record.resource_id, None,
+        "the late record must not retain the displaced registration's resource"
+    );
+    Ok(())
+}
+
 /// `clearRecords` emits `VersionChanged` for the node after incrementing its record version.
 /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
 /// ens_v2@ccaeb58)
@@ -877,6 +1563,789 @@ fn v2_released_name_record_input(
             .enumerate()
             .map(|(index, event)| log(2 + index, 3 + index as u64, resolver, event)),
     );
+    wiring.batch_input(&blocks, &logs)
+}
+
+/// Registers two ENSv2 names, then either regenerates the second token onto the first token's
+/// occupied key or unregisters the first token as the terminal-boundary comparator. A later renewal
+/// and resolver record expose any surviving attribution to the displaced registration.
+fn v2_regeneration_collision_input(wiring: &Wiring, collision: bool) -> Result<BatchInput> {
+    v2_regeneration_collision_input_inner(wiring, collision, false, false, false, false)
+}
+
+fn v2_regeneration_collision_input_with_topology(
+    wiring: &Wiring,
+    same_observation_key: bool,
+    source_key_retired: bool,
+    source_key_reused: bool,
+) -> Result<BatchInput> {
+    v2_regeneration_collision_input_inner(
+        wiring,
+        true,
+        true,
+        same_observation_key,
+        source_key_retired,
+        source_key_reused,
+    )
+}
+
+fn v2_regeneration_collision_tokens(same_observation_key: bool) -> (U256, U256) {
+    let token_b = U256::from_be_bytes(labelhash("beta").0);
+    let token_a = if same_observation_key {
+        let mut bytes = token_b.to_be_bytes::<32>();
+        bytes[31] ^= 1;
+        U256::from_be_bytes(bytes)
+    } else {
+        U256::from_be_bytes(labelhash("alpha").0)
+    };
+    (token_a, token_b)
+}
+
+fn versioned_token(label: &str, version: u32) -> U256 {
+    let mut bytes = labelhash(label).0;
+    bytes[28..].copy_from_slice(&version.to_be_bytes());
+    U256::from_be_bytes(bytes)
+}
+
+fn v2_shared_subregistry_observation_key(wiring: &Wiring) -> String {
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let mut bytes = versioned_token("alpha", 1).to_be_bytes::<32>();
+    bytes[28..].fill(0);
+    format!(
+        "{}:{:#x}",
+        registry.to_ascii_lowercase(),
+        U256::from_be_bytes(bytes)
+    )
+}
+
+const SHARED_SUBREGISTRY_SURVIVOR: &str = "0x00000000000000000000000000000000f0000484";
+const SHARED_SUBREGISTRY_DEPARTING: &str = "0x00000000000000000000000000000000f0000485";
+const SHARED_SUBREGISTRY_GREATEST_SURVIVOR: &str = "0x00000000000000000000000000000000f0000486";
+
+#[derive(Clone, Copy)]
+enum SharedSubregistryCase {
+    Label,
+    Reservation,
+    Collision,
+    Replacement,
+    Unregister,
+    LastAsserterDeparture,
+    CrossBaseRegeneration,
+    DeterministicSurvivor,
+    OccupiedDestinationWithSharedHolder,
+    PointerlessAddition,
+}
+
+fn v2_shared_subregistry_observation_input(
+    wiring: &Wiring,
+    case: SharedSubregistryCase,
+) -> Result<BatchInput> {
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let alpha_v1 = versioned_token("alpha", 1);
+    let alpha_v2 = versioned_token("alpha", 2);
+    let alpha_v3 = versioned_token("alpha", 3);
+    let alpha_v4 = versioned_token("alpha", 4);
+    let gamma_v1 = versioned_token("gamma", 1);
+    let block_count = match case {
+        SharedSubregistryCase::Label | SharedSubregistryCase::Reservation => 3,
+        SharedSubregistryCase::Collision => 6,
+        SharedSubregistryCase::Replacement => 4,
+        SharedSubregistryCase::Unregister => 5,
+        SharedSubregistryCase::LastAsserterDeparture
+        | SharedSubregistryCase::CrossBaseRegeneration => 5,
+        SharedSubregistryCase::DeterministicSurvivor => 7,
+        SharedSubregistryCase::OccupiedDestinationWithSharedHolder => 8,
+        SharedSubregistryCase::PointerlessAddition => 7,
+    };
+    let blocks = (0..block_count)
+        .map(|index| BlockSpec {
+            number: 20_000_200 + index,
+            hash: format!("0x{:064x}", 0x4832_u64 + index as u64),
+            timestamp: 1_700_000_200 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, encoded: LogData| {
+        let emission = scenario::emission(registry, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x4832_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let registration = |block_index, ordinal, token_id, label: &str| {
+        log(
+            block_index,
+            ordinal,
+            V2Registry::LabelRegistered {
+                tokenId: token_id,
+                labelHash: labelhash(label),
+                label: label.to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        )
+    };
+    let subregistry = |block_index, ordinal, token_id, target: &str| {
+        log(
+            block_index,
+            ordinal,
+            V2Registry::SubregistryUpdated {
+                tokenId: token_id,
+                subregistry: target.parse().expect("valid child registry"),
+                sender,
+            }
+            .encode_log_data(),
+        )
+    };
+    let reservation = |block_index, ordinal, token_id, label: &str| {
+        log(
+            block_index,
+            ordinal,
+            V2Registry::LabelReserved {
+                tokenId: token_id,
+                labelHash: labelhash(label),
+                label: label.to_owned(),
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        )
+    };
+    let mut logs = vec![
+        registration(0, 0, alpha_v1, "alpha"),
+        subregistry(1, 1, alpha_v1, SHARED_SUBREGISTRY_SURVIVOR),
+        match case {
+            SharedSubregistryCase::Reservation => reservation(2, 2, alpha_v2, "beta"),
+            _ => registration(2, 2, alpha_v2, "beta"),
+        },
+    ];
+    match case {
+        SharedSubregistryCase::Label | SharedSubregistryCase::Reservation => {}
+        SharedSubregistryCase::Collision => logs.extend([
+            subregistry(3, 3, alpha_v1, SHARED_SUBREGISTRY_SURVIVOR),
+            registration(4, 4, gamma_v1, "gamma"),
+            log(
+                5,
+                5,
+                V2Registry::TokenRegenerated {
+                    oldTokenId: gamma_v1,
+                    newTokenId: alpha_v2,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::Replacement => {
+            logs.push(registration(3, 3, gamma_v1, "beta"));
+        }
+        SharedSubregistryCase::Unregister => logs.extend([
+            log(
+                3,
+                3,
+                V2Registry::LabelUnregistered {
+                    tokenId: alpha_v2,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+            log(
+                4,
+                4,
+                V2Registry::LabelUnregistered {
+                    tokenId: alpha_v1,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::LastAsserterDeparture => logs.extend([
+            subregistry(3, 3, alpha_v2, SHARED_SUBREGISTRY_DEPARTING),
+            log(
+                4,
+                4,
+                V2Registry::LabelUnregistered {
+                    tokenId: alpha_v2,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::CrossBaseRegeneration => logs.extend([
+            subregistry(3, 3, alpha_v2, SHARED_SUBREGISTRY_DEPARTING),
+            log(
+                4,
+                4,
+                V2Registry::TokenRegenerated {
+                    oldTokenId: alpha_v2,
+                    newTokenId: gamma_v1,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::DeterministicSurvivor => logs.extend([
+            registration(3, 3, alpha_v3, "gamma"),
+            subregistry(4, 4, alpha_v3, SHARED_SUBREGISTRY_GREATEST_SURVIVOR),
+            subregistry(5, 5, alpha_v2, SHARED_SUBREGISTRY_DEPARTING),
+            log(
+                6,
+                6,
+                V2Registry::LabelUnregistered {
+                    tokenId: alpha_v2,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::OccupiedDestinationWithSharedHolder => logs.extend([
+            registration(3, 3, alpha_v3, "gamma"),
+            subregistry(4, 4, alpha_v3, SHARED_SUBREGISTRY_GREATEST_SURVIVOR),
+            registration(5, 5, gamma_v1, "delta"),
+            subregistry(6, 6, gamma_v1, SHARED_SUBREGISTRY_DEPARTING),
+            log(
+                7,
+                7,
+                V2Registry::TokenRegenerated {
+                    oldTokenId: gamma_v1,
+                    newTokenId: alpha_v2,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::PointerlessAddition => logs.extend([
+            registration(3, 3, alpha_v3, "gamma"),
+            subregistry(4, 4, alpha_v3, SHARED_SUBREGISTRY_GREATEST_SURVIVOR),
+            subregistry(5, 5, alpha_v1, SHARED_SUBREGISTRY_SURVIVOR),
+            registration(6, 6, alpha_v4, "delta"),
+        ]),
+    }
+    wiring.batch_input(&blocks, &logs)
+}
+
+fn v2_repeated_regeneration_alias_input(wiring: &Wiring) -> Result<BatchInput> {
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let resolver: Address = "0x00000000000000000000000000000000f0000097".parse()?;
+    let replacement_resolver: Address = "0x00000000000000000000000000000000f0000098".parse()?;
+    let token_a = versioned_token("alpha", 1);
+    let token_b = versioned_token("beta", 1);
+    let token_c = versioned_token("gamma", 1);
+    let shared_b = versioned_token("beta", 2);
+    let blocks = (0..6_i64)
+        .map(|index| BlockSpec {
+            number: 20_000_100 + index,
+            hash: format!("0x{:064x}", 0x4831_u64 + index as u64),
+            timestamp: 1_700_000_100 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, encoded: LogData| {
+        let emission = scenario::emission(registry, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x4831_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = vec![
+        log(
+            0,
+            0,
+            V2Registry::LabelRegistered {
+                tokenId: token_a,
+                labelHash: labelhash("alpha"),
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            0,
+            1,
+            V2Registry::ResolverUpdated {
+                tokenId: token_a,
+                resolver,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            2,
+            V2Registry::TokenRegenerated {
+                oldTokenId: token_a,
+                newTokenId: token_b,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            3,
+            V2Registry::TokenRegenerated {
+                oldTokenId: token_b,
+                newTokenId: token_a,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            3,
+            4,
+            V2Registry::TokenRegenerated {
+                oldTokenId: token_a,
+                newTokenId: token_c,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            4,
+            5,
+            V2Registry::LabelRegistered {
+                tokenId: shared_b,
+                labelHash: labelhash("delta"),
+                label: "delta".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            4,
+            6,
+            V2Registry::ResolverUpdated {
+                tokenId: shared_b,
+                resolver: replacement_resolver,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            5,
+            7,
+            V2Registry::LabelUnregistered {
+                tokenId: shared_b,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
+}
+
+fn v2_regeneration_collision_displaced_subregistry_input(wiring: &Wiring) -> Result<BatchInput> {
+    const REGISTRY: &str = "ens_v2_registry_l1";
+    const RESOLVER: &str = "ens_v2_resolver_l1";
+    const CHILD_REGISTRY: &str = "0x00000000000000000000000000000000f0000483";
+    let registry = wiring.address(REGISTRY, "registry");
+    let resolver = wiring.address(RESOLVER, "resolver");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let alpha_hash = labelhash("alpha");
+    let beta_hash = labelhash("beta");
+    let child_hash = labelhash("kid");
+    let token_a = U256::from_be_bytes(alpha_hash.0);
+    let token_b = U256::from_be_bytes(beta_hash.0);
+    let child_token = U256::from_be_bytes(child_hash.0);
+    let blocks = (0..6_i64)
+        .map(|index| BlockSpec {
+            number: 20_000_100 + index,
+            hash: format!("0x{:064x}", 0x4831_u64 + index as u64),
+            timestamp: 1_700_000_100 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, emitter: &str, encoded: LogData| {
+        let emission = scenario::emission(emitter, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x4831_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = vec![
+        log(
+            0,
+            0,
+            registry,
+            V2Registry::LabelRegistered {
+                tokenId: token_a,
+                labelHash: alpha_hash,
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            0,
+            1,
+            registry,
+            V2Registry::TokenResource {
+                tokenId: token_a,
+                resource: U256::from(0xa483_u64),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            2,
+            CHILD_REGISTRY,
+            V2Registry::RegistryCreated {}.encode_log_data(),
+        ),
+        log(
+            2,
+            3,
+            registry,
+            V2Registry::ResolverUpdated {
+                tokenId: token_a,
+                resolver: resolver.parse()?,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            4,
+            registry,
+            V2Registry::SubregistryUpdated {
+                tokenId: token_a,
+                subregistry: CHILD_REGISTRY.parse()?,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            5,
+            CHILD_REGISTRY,
+            V2Registry::ParentUpdated {
+                parent: registry.parse()?,
+                label: "alpha".to_owned(),
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            3,
+            6,
+            CHILD_REGISTRY,
+            V2Registry::LabelRegistered {
+                tokenId: child_token,
+                labelHash: child_hash,
+                label: "kid".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            3,
+            7,
+            CHILD_REGISTRY,
+            V2Registry::TokenResource {
+                tokenId: child_token,
+                resource: U256::from(0xc483_u64),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            4,
+            8,
+            registry,
+            V2Registry::LabelRegistered {
+                tokenId: token_b,
+                labelHash: beta_hash,
+                label: "beta".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            4,
+            9,
+            registry,
+            V2Registry::TokenResource {
+                tokenId: token_b,
+                resource: U256::from(0xb483_u64),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            5,
+            10,
+            registry,
+            V2Registry::TokenRegenerated {
+                oldTokenId: token_b,
+                newTokenId: token_a,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
+}
+
+fn v2_regeneration_collision_input_inner(
+    wiring: &Wiring,
+    collision: bool,
+    survivor_topology: bool,
+    same_observation_key: bool,
+    source_key_retired: bool,
+    source_key_reused: bool,
+) -> Result<BatchInput> {
+    const REGISTRY: &str = "ens_v2_registry_l1";
+    const RESOLVER: &str = "ens_v2_resolver_l1";
+    let registry = wiring.address(REGISTRY, "registry");
+    let resolver = wiring.address(RESOLVER, "resolver");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let alpha_hash = labelhash("alpha");
+    let beta_hash = labelhash("beta");
+    let (token_a, token_b) = v2_regeneration_collision_tokens(same_observation_key);
+    let resource_a = U256::from(0xa483_u64);
+    let resource_b = U256::from(0xb483_u64);
+    let node_a = namehash(&["alpha", "eth"]);
+    let blocks = (0..5_i64)
+        .map(|index| BlockSpec {
+            number: 20_000_000 + index,
+            hash: format!("0x{:064x}", 0x4830_u64 + index as u64),
+            timestamp: 1_700_000_000 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, emitter: &str, encoded: LogData| {
+        let emission = scenario::emission(emitter, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x4830_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let displacement = if collision {
+        V2Registry::TokenRegenerated {
+            oldTokenId: token_b,
+            newTokenId: token_a,
+        }
+        .encode_log_data()
+    } else {
+        V2Registry::LabelUnregistered {
+            tokenId: token_a,
+            sender,
+        }
+        .encode_log_data()
+    };
+    let mut logs = vec![
+        log(
+            0,
+            0,
+            registry,
+            V2Registry::LabelRegistered {
+                tokenId: token_a,
+                labelHash: alpha_hash,
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            0,
+            1,
+            registry,
+            V2Registry::TokenResource {
+                tokenId: token_a,
+                resource: resource_a,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            2,
+            registry,
+            V2Registry::LabelRegistered {
+                tokenId: token_b,
+                labelHash: beta_hash,
+                label: "beta".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            3,
+            registry,
+            V2Registry::TokenResource {
+                tokenId: token_b,
+                resource: resource_b,
+            }
+            .encode_log_data(),
+        ),
+        log(2, 4, registry, displacement),
+        log(
+            3,
+            5,
+            registry,
+            V2Registry::ExpiryUpdated {
+                tokenId: token_a,
+                newExpiry: 1_850_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            4,
+            6,
+            resolver,
+            V2Resolver::AddressChanged {
+                node: node_a,
+                coinType: U256::from(60_u64),
+                newAddress: vec![0x48, 0x3].into(),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    if survivor_topology {
+        let resolver = resolver.parse()?;
+        logs.insert(
+            2,
+            log(
+                0,
+                2,
+                registry,
+                V2Registry::ResolverUpdated {
+                    tokenId: token_a,
+                    resolver,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        );
+        logs.insert(
+            5,
+            log(
+                1,
+                4,
+                registry,
+                V2Registry::ResolverUpdated {
+                    tokenId: token_b,
+                    resolver,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        );
+        if source_key_retired {
+            let mut alias_bytes = token_b.to_be_bytes::<32>();
+            alias_bytes[31] ^= 2;
+            let alias_token = U256::from_be_bytes(alias_bytes);
+            logs.push(log(
+                1,
+                5,
+                registry,
+                V2Registry::LabelRegistered {
+                    tokenId: alias_token,
+                    labelHash: labelhash("gamma"),
+                    label: "gamma".to_owned(),
+                    owner,
+                    expiry: 1_800_000_000,
+                    sender,
+                }
+                .encode_log_data(),
+            ));
+            logs.push(log(
+                1,
+                6,
+                registry,
+                V2Registry::LabelUnregistered {
+                    tokenId: alias_token,
+                    sender,
+                }
+                .encode_log_data(),
+            ));
+        }
+        if source_key_reused {
+            let mut alias_bytes = token_b.to_be_bytes::<32>();
+            alias_bytes[31] ^= 2;
+            let alias_token = U256::from_be_bytes(alias_bytes);
+            logs.push(log(
+                3,
+                6,
+                registry,
+                V2Registry::LabelRegistered {
+                    tokenId: alias_token,
+                    labelHash: labelhash("gamma"),
+                    label: "gamma".to_owned(),
+                    owner,
+                    expiry: 1_800_000_000,
+                    sender,
+                }
+                .encode_log_data(),
+            ));
+            logs.push(log(
+                3,
+                7,
+                registry,
+                V2Registry::ResolverUpdated {
+                    tokenId: alias_token,
+                    resolver: "0x00000000000000000000000000000000f0000098".parse()?,
+                    sender,
+                }
+                .encode_log_data(),
+            ));
+        }
+        if same_observation_key {
+            logs.push(log(
+                1,
+                5,
+                registry,
+                V2Registry::ResolverUpdated {
+                    tokenId: token_a,
+                    resolver: "0x00000000000000000000000000000000f0000098".parse()?,
+                    sender,
+                }
+                .encode_log_data(),
+            ));
+        }
+        logs.push(log(
+            4,
+            7,
+            registry,
+            V2Registry::ResolverUpdated {
+                tokenId: token_a,
+                resolver: "0x00000000000000000000000000000000f0000099".parse()?,
+                sender,
+            }
+            .encode_log_data(),
+        ));
+    }
     wiring.batch_input(&blocks, &logs)
 }
 

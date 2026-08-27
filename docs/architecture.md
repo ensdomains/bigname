@@ -479,11 +479,29 @@ Discovery expands the canonical graph through time-versioned indexability and re
 ENSv2 mappings:
 
 - `RegistryCreated()` → normalized `RegistryCreated` and a registry-announcement instance admission at the emitting address. The admission does not require a parent link. For a registry created through the [ENSv1→ENSv2 migration family](manifests.md#ensv2-migration-family-admission-plan), rule ownership remains with `registry_announcement`: the normalized event and indexability edge remain ordinary, and the watch plan traverses the edge from that log position. A separate `migration_registry_creation` association attaches to each; it does not create a suffix, parent relation, name binding, or current authority. Correlation-dependent downstream identity, parent, role, registration, renewal, topology, and normalized rows activate only after all groups they reference are complete; incomplete or refused groups retain candidate output. Association with the migration group is not by itself enough to reclassify independently admitted output: anything that `ens_v2_registry_l1` derives from the ordinary edge and raw event without the association remains ordinary and byte-for-byte unchanged. When that address also has a declaration in an active manifest for the same namespace, interpretation uses the declaring manifest; otherwise it falls back to the announcer's manifest. A direct `PermissionedRegistry` emits this event during construction. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58)
-- `SubregistryUpdated(tokenId, subregistry, sender)` → normalized `SubregistryChanged` and the parent-child reachability edge. It does not decide whether the child registry instance is indexable.[^v2-events-l49][^v2-pr-l131][^v2-pr-l222]
+- `SubregistryUpdated(tokenId, subregistry, sender)` → normalized
+  `SubregistryChanged` and the parent-child reachability edge. It is the source
+  of the pointer and relationship truth; defensive `TokenRegenerated`
+  interpretation reasserts the migrating token's retained edge under the
+  successor token's `observation_key`. When the predecessor key is different
+  and remains shared by another retained holder, interpretation also reasserts
+  that key to the deterministically selected holder's target. The edge does not
+  decide whether the child registry instance is
+  indexable.[^v2-events-l49][^v2-pr-l131][^v2-pr-l222]
 - `ParentUpdated(parent, label, sender)` → normalized `ParentChanged` contract history. Manifest-declared `RootRegistry` and `ETHRegistry` instances are suffix anchors; every registry below those anchors has a registry-name suffix only while both current sides agree: the child's latest claim names `(parent, label)`, and that parent's latest unexpired `SubregistryUpdated` pointer for `label` leads back to the child. Either side changing, clearing, or expiring retracts the binding. A suffix move closes and releases each old logical-name binding, then opens and grants a distinct binding epoch under the new reachable suffix; the underlying registry resource remains the same, and its current resolver and subregistry pointers are restated under the new logical name. `ParentUpdated` does not create parent-child reachability; `SubregistryUpdated` remains its only source. Replay retains both current sides even while an intermediate registry has no reachable name, and later descendant events recheck the complete bidirectional, unexpired ancestor path. The child's `setParent` call writes its parent and label atomically, independently of the parent's subregistry pointer. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L171 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L175 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L176 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L177 @ ens_v2@ccaeb58) Canonical validation reads the child's current claim and rejects it unless the parent's current pointer leads back to the child. (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L82 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L86 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L87 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L88 @ ens_v2@ccaeb58) Upstream stops that walk only at the supplied `RootRegistry`; treating the manifest-declared `ETHRegistry` as an additional suffix anchor is the documented ENSv2 cutover divergence. (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L78 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L79 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L80 @ ens_v2@ccaeb58) See [`upstream.md` § Known divergences](upstream.md#known-divergences). An expired parent label makes `getSubregistry` return zero at the event timestamp. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L251 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L253 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L625 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L626 @ ens_v2@ccaeb58)
 Registry-name suffix labels are retained verbatim. Raw label text keys the live topology maps, so the current parent pointer and child claim must agree on the same raw label. A raw-distinct label path has a distinct namehash identity; if any label does not byte-equal its ENSIP-15 normalized result, that identity remains a shadow and cannot open a current binding. Thus labels such as `Foo` and `foo` retain distinct preimages and namehash identities, while only the normalization-gate-passing identity can bind.
 
-- `ResolverUpdated(tokenId, resolver, sender)` → updates the resolver edge for the current registry resource. Admitted resolver endpoints belong to `ens_v2_resolver_l1`.[^v2-events-l59][^v2-pr-l141][^v2-pr-l225]
+- `ResolverUpdated(tokenId, resolver, sender)` → updates the resolver edge for
+  the current registry resource and is the source of its resolver target;
+  defensive `TokenRegenerated` interpretation leaves the survivor's resolver
+  edge under its existing `observation_key` and records that prior key on the
+  successor token. The next explicit resolver update or terminal token event
+  closes both the current key and recorded prior keys, except for any key currently
+  shared by another live token with resolver state. Regeneration never
+  reopens a retained resolver edge, because another accepted noncanonical token
+  ID could already have retired that key and its address-scoped logs would then
+  be incomplete. Admitted resolver
+  endpoints belong to `ens_v2_resolver_l1`.[^v2-events-l59][^v2-pr-l141][^v2-pr-l225]
 
 [Watch-plan](glossary.md) expansion includes manifest-declared instances, registry-announcement admissions, resolver admissions, and proxy/implementation targets. Announcement admission is forward-only from the observed event; bootstrap can discover earlier announcements only back to the configured ingest coverage start and therefore assumes that coverage reaches the deployment. A `subregistry` edge changes parent-child topology only; it never admits the child emitter. Match-all signature scopes are manifest event subscriptions rather than address rows.
 
@@ -665,7 +683,17 @@ ENSv2 mappings:
   `RegistrationReleased` payloads always identify the emitting registry with
   `registry_contract_instance_id`. A direct `unregister` emits
   `LabelUnregistered` from that registry, so its normalized release carries the
-  same identity as the corresponding grant or renewal.
+  same identity as the corresponding grant or renewal. If an admitted
+  noncanonical registry regenerates a token onto a token key already occupied
+  by another registration, interpretation also emits
+  `RegistrationReleased` for the displaced registration, with
+  `source_event=TokenRegenerated` and
+  `terminal_reason=registry_name_binding_changed`. Its `token_id` is the
+  destination token ID now occupied by the surviving registration. Consumers
+  select a release by `(logical_name_id, resource_id)`, not by `token_id`, and
+  retained-state restoration applies the preceding `TokenRegenerated` key
+  replacement while treating this terminal-reason release as a boundary rather
+  than a second token-state mutation.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58)
 - The `MigrationApplied` kind records an [ENSv1→ENSv2
@@ -711,7 +739,73 @@ ENSv2 mappings:
   observations remain resource-less. Interpretation never collapses a
   transaction into one synthetic renewal.
 - `TokenResourceLinked` ← upstream `TokenResource(tokenId, resource)`. The only adapter event linking current token ID to upstream EAC resource.[^v2-iperm-l34][^v2-pr-l216]
-- `TokenRegenerated` ← upstream `TokenRegenerated(oldTokenId, newTokenId)`. Preserves `resource_id`, `token_lineage_id`, and active surface binding.[^v2-events-l69][^v2-pr-l451]
+- `TokenRegenerated` ← upstream `TokenRegenerated(oldTokenId, newTokenId)`. The
+  ordinary canonical path preserves `resource_id`, `token_lineage_id`, and the
+  active surface binding.[^v2-events-l69][^v2-pr-l451] If an admitted
+  noncanonical registry regenerates onto an occupied destination token key,
+  interpretation preserves the regenerated registration and closes the
+  displaced registration's surface binding and unshared resolver and
+  subregistry discovery edges, plus any child registrations that lose their
+  registry path. When `LabelRegistered`, `LabelReserved`, `LabelUnregistered`,
+  or `TokenRegenerated` would retire a shared subregistry `observation_key`,
+  interpretation reasserts that key to the stored subregistry target of the
+  greatest fixed-width lowercase token ID that still has a subregistry pointer
+  in interpreter state; otherwise the key closes. This includes registration or
+  reservation under an observation key formed by clearing the token ID's low 32
+  version bits, even when no exact token ID was displaced. Expiry retracts name
+  reachability but does not discard that stored pointer or its discovery
+  coverage. When the selected target differs,
+  materialization caps the prior edge under the shared key; a repeated edge
+  assertion to the same target is deduplicated and stays continuously active.
+  When an occupied `TokenRegenerated` destination has the same observation key
+  as its predecessor, interpretation atomically closes and reasserts that key at
+  the regeneration log position. When an occupied
+  regeneration also moves a stored subregistry pointer onto that destination
+  key, its single successor edge performs the cap instead of emitting a second
+  survivor edge at the same log position. The
+  surviving registration's subregistry observation moves to the destination
+  token's key. When the survivor has resolver state, its
+  resolver observation stays continuously active under the source token's key.
+  That prior key is recorded on the successor so the next explicit resolver
+  update or terminal token event retires it unless another live token still uses
+  or retains the same resolver `observation_key`. A resolverless survivor retains
+  no source-key observation, so an unshared displaced resolver edge closes at
+  regeneration. The normalized event's `resolver_discovery_aliases` records the
+  complete retained-key set so compacted restore preserves that protection.
+  That restored-convergence guarantee covers the resolver aliases only: a
+  noncanonical registry that repeats a regeneration for the same old token ID
+  onto an occupied destination can compact away the intermediate transition,
+  and restore then rebuilds the displaced registration identity as the
+  survivor. That corner is explicitly unsupported and tracked in #596.
+
+  A resolver `observation_key` carries at most one live discovery edge: before
+  asserting an edge to a different target, discovery closes the existing edge
+  for the same contract instance, edge kind, and observation key; it deduplicates
+  a repeated assertion to the same target. The retained-key protection governs
+  retirement when the successor itself next updates its resolver or terminates,
+  and is also consulted when another token sharing the key terminates; it does
+  not make the shared key immune to an explicit resolver update or clear by a
+  different token whose ID matches after the low 32-bit version is cleared. Such
+  a collision requires a noncanonical emitter, because the canonical registry
+  derives the version-cleared token ID from the label and regeneration changes
+  only the low 32-bit version after burning the predecessor
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L423-L426 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528-L538 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L645-L647 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2@ccaeb58).
+  The collision therefore remains scoped to token state and discovery edges
+  keyed to the emitting registry address.
+
+  A resolver key shared by a resolver-holding survivor and the displaced
+  registration is not closed at the collision. Regeneration never reopens a resolver edge from retained
+  state, so interpretation cannot claim historical address coverage that
+  Ingest did not load. The
+  canonical registry burns the old token, increments the entry's version,
+  constructs the successor token ID, and mints it
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528-L538 @ ens_v2@ccaeb58);
+  minting an already-owned singleton ID fails the update's owner check
+  (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L182-L203 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L305-L319 @ ens_v2@ccaeb58).
 - `TokenControlTransferred` ← each positive-value item in upstream ERC-1155 `TransferSingle` or `TransferBatch` when both `from` and `to` are nonzero. A batch item produces its own normalized event. The upstream update changes the current owner only for positive values and uses the zero address for mint and burn, so those lifecycle logs do not become token-control transfers. Both events are present in the deployed `ETHRegistry` and `UserRegistryImpl` ABIs. (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L194 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L201 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L208 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L210 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L318 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L333 @ ens_v2@ccaeb58)
 - `SubregistryChanged` ← `SubregistryUpdated`; `ParentChanged` ← `ParentUpdated`.[^v2-events-l49][^v2-events-l75]
 - `AliasChanged` ← `PermissionedResolver.AliasChanged`; the alias path stores source and destination DNS-encoded names.[^v2-iperm-resolver-l14][^v2-pres-l230]
