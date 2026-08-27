@@ -58,6 +58,7 @@ sol! {
     event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry);
     event NameUnwrapped(bytes32 indexed node, address owner);
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
+    event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
     event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
     event RegistryCreated();
     event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation);
@@ -220,6 +221,30 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
         "Project must publish the successor selected by the production ENSv1→ENSv2 migration authority proof"
     );
 
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn cold_restore_retains_zero_clear_beside_later_state_tail() -> TestResult {
+    let database = database("interpret_zero_clear_retention").await?;
+    sync_schema_v2_repository(database.pool(), &load_repository(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"))?).await?;
+    let resume_block = 11_163_500_i64;
+    let token_id = format!("{:#066x}", U256::from(1));
+    let state_key = format!("{ETH_REGISTRY}:-:{token_id}:-:SubregistryUpdated");
+    sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) SELECT $1, 'zero-clear-' || n, n, to_timestamp(n), 'canonical' FROM generate_series($2 - 3, $2) n").bind(CHAIN).bind(resume_block).execute(database.pool()).await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state, after_state) SELECT 'zero-clear-' || n, 'ens', 'SubregistryChanged', 'ens_v2_registry_l1', 2, $1, $2 - 4 + n, 'zero-clear-' || ($2 - 4 + n), 'tx-' || n, n, 0, jsonb_build_object($3, $4, $5, $4), 'ens_v2_registry_resource_surface', 'canonical', state FROM (VALUES (1, jsonb_build_object('source_event', 'SubregistryUpdated', 'token_id', $6::text, 'subregistry', '0x0000000000000000000000000000000000000011')), (2, jsonb_build_object('source_event', 'SubregistryUpdated', 'token_id', $6::text, 'subregistry', null, $7::text, jsonb_build_array($6::text))), (3, jsonb_build_object('source_event', 'SubregistryUpdated', 'token_id', $6::text, 'subregistry', '0x0000000000000000000000000000000000000012'))) rows(n, state)").bind(CHAIN).bind(resume_block).bind(bigname_adapters::schema_v2::seam::INTERPRETER_STATE_KEY).bind(&state_key).bind(bigname_adapters::schema_v2::seam::STATE_SCOPE_KEY).bind(&token_id).bind(bigname_adapters::schema_v2::seam::SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY).execute(database.pool()).await?;
+    let mut loaded = crate::load::batch_input(database.pool(), CHAIN, resume_block, resume_block, None, None, StateCacheCapacity::Unlimited).await?;
+    assert_eq!(loaded.restored_event_count, 2);
+    let block = loaded.input.blocks[0].clone();
+    let update = SubregistryUpdated { tokenId: U256::from(1), subregistry: "0x0000000000000000000000000000000000000013".parse()?, sender: Address::ZERO }.encode_log_data();
+    loaded.input.raw_logs.push(bigname_adapters::schema_v2::RawLogInput { chain_id: CHAIN.to_owned(), block_hash: block.block_hash, block_number: resume_block, block_timestamp: block.block_timestamp, canonicality_state: "canonical".to_owned(), transaction_hash: "zero-clear-resume".to_owned(), transaction_index: 0, log_index: 0, emitting_address: ETH_REGISTRY.to_owned(), topics: update.topics().iter().map(|topic| format!("{topic:#x}")).collect(), data: update.data.to_vec() });
+    let prepared = prepare_schema_v2_batch_incremental(loaded.input, loaded.adapter_session, StateCacheCapacity::Unlimited)?;
+    let state_values = crate::load::prior_state_values(database.pool(), CHAIN, resume_block, prepared.state_value_requests()).await?;
+    let (output, _) = prepared.finish(state_values)?;
+    let update = output.normalized_events.iter().find(|event| event.event_kind == "SubregistryChanged").expect("resumed update");
+    assert_eq!(update.before_state["subregistry"], serde_json::json!("0x0000000000000000000000000000000000000012"));
     database.cleanup().await?;
     Ok(())
 }

@@ -158,11 +158,22 @@ fn registry(
                 e.tokenId,
                 json!({"source_event":"SubregistryUpdated","subregistry":nullable_address(e.subregistry),"sender":address_hex(e.sender)}),
             )?;
-            state.set_v2_subregistry(
+            let invalidated = state.apply_v2_subregistry_update(
                 &raw.emitting_address,
                 &u256_word_hex(e.tokenId),
                 (e.subregistry != Address::ZERO).then(|| address.clone()),
             );
+            // Only a clear can mark a second cold-restore row.
+            if !invalidated.is_empty() {
+                output.events[0]
+                    .after_state
+                    .as_object_mut()
+                    .expect("token event state is an object")
+                    .insert(
+                        "subregistry_invalidated_token_ids".to_owned(),
+                        json!(invalidated),
+                    );
+            }
             let transitions = state.refresh_dirty_v2_names(raw.block_timestamp.unix_timestamp());
             append_v2_name_transitions(&mut output, transitions, raw, "SubregistryUpdated", None);
             output.discovery.push(DiscoveryDraft::Edge {

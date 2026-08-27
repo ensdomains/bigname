@@ -16,6 +16,7 @@ pub const ARM_WIDE_BINDING_CLOSE_KEY: &str = "arm_wide_binding_close";
 pub const CLOSED_AUTHORITY_ARM_KEY: &str = "closed_authority_arm";
 pub const TOKEN_LINEAGE_ID_KEY: &str = "token_lineage_id";
 pub const INTERPRETER_STATE_KEY: &str = "interpreter_state_key";
+pub const SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY: &str = "subregistry_invalidated_token_ids";
 pub const STATE_SCOPE_KEY: &str = "state_scope";
 pub const OBSERVATION_KEY: &str = "observation_key";
 pub const TRANSACTION_INDEX_KEY: &str = "transaction_index";
@@ -223,14 +224,18 @@ pub fn fold_prior_events(
             (None, None) => None,
             _ => bail!("normalized event has an incomplete block position"),
         };
-        let prior = super::PriorEventInput {
-            retained_state_key: retained_prior_state_key(
+        let retained_state_key = retained_event_state_key(
+            retained_prior_state_key(
                 event
                     .raw_fact_ref
                     .get(INTERPRETER_STATE_KEY)
                     .and_then(Value::as_str),
                 &event.event_identity,
             ),
+            &event.after_state,
+        );
+        let prior = super::PriorEventInput {
+            retained_state_key,
             chain_id: event.chain_id.clone(),
             namespace: event.namespace.clone(),
             logical_name_id: event.logical_name_id.clone(),
@@ -249,6 +254,13 @@ pub fn fold_prior_events(
     let mut compacted = compacted.into_values().collect::<Vec<_>>();
     compacted.sort_by_key(|(sequence, _)| *sequence);
     Ok(compacted.into_iter().map(|(_, event)| event).collect())
+}
+
+pub fn retained_event_state_key(mut key: String, state: &Value) -> String {
+    if state.get(SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY).is_some() {
+        key.push_str(":subregistry-zero-clear");
+    }
+    key
 }
 
 pub fn retained_prior_state_key(

@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use super::{State, v2::V2TokenState, v2::v2_key};
+use super::{State, V2NameTransition, v2::V2TokenState, v2::v2_key};
 
 #[cfg(test)]
 std::thread_local! {
@@ -17,6 +17,17 @@ pub(in crate::schema_v2) fn reset_v2_subregistry_lookup_visits() {
 #[cfg(test)]
 pub(in crate::schema_v2) fn v2_subregistry_lookup_visits() -> usize {
     V2_SUBREGISTRY_LOOKUP_VISITS.get()
+}
+
+impl V2NameTransition {
+    pub(in crate::schema_v2) fn pointer_restatement_state(
+        &self,
+        source_event: &str,
+        field: &str,
+        target: &str,
+    ) -> Value {
+        json!({"source_event":source_event,"token_id":self.token_id,(field):target})
+    }
 }
 
 impl State {
@@ -100,6 +111,65 @@ impl State {
         for registry in previous.into_iter().chain(subregistry) {
             self.mark_v2_registry_dirty(&registry);
         }
+    }
+
+    pub(in crate::schema_v2) fn apply_v2_subregistry_update(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        subregistry: Option<String>,
+    ) -> BTreeSet<String> {
+        if subregistry.is_some() {
+            self.set_v2_subregistry(emitter, token_id, subregistry);
+            // Empty keeps nonzero updates from marking a second cold-restore row.
+            return BTreeSet::new();
+        }
+
+        let emitter = emitter.to_ascii_lowercase();
+        let observation_id = resolver_observation_id(token_id);
+        let mut holders = self
+            .v2_subregistry_tokens_by_observation
+            .get(&(emitter.clone(), observation_id))
+            .cloned()
+            .unwrap_or_default();
+        holders.insert(token_id.to_owned());
+        let invalidated = holders.iter().cloned().collect::<BTreeSet<_>>();
+        for holder in &holders {
+            self.set_v2_subregistry(&emitter, holder, None);
+        }
+        invalidated
+    }
+
+    pub(in crate::schema_v2) fn restore_v2_subregistry_change(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        after_state: &Value,
+    ) {
+        let subregistry = after_state
+            .get("subregistry")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        // This source-event gate and the separately retained zero clear must stay paired so other
+        // event kinds cannot replace the clear during compaction.
+        if after_state.get("source_event").and_then(Value::as_str) != Some("SubregistryUpdated") {
+            self.set_v2_subregistry(emitter, token_id, subregistry);
+            return;
+        }
+        let invalidated = after_state
+            .get("subregistry_invalidated_token_ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        for invalidated in &invalidated {
+            self.set_v2_subregistry(emitter, invalidated, None);
+        }
+        // Re-reading the live index is the load-bearing clear; the recorded set only clears IDs
+        // restored after their zero event.
+        let _ = self.apply_v2_subregistry_update(emitter, token_id, subregistry);
     }
 
     pub(in crate::schema_v2) fn live_v2_resolver_tokens_sharing(

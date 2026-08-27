@@ -142,12 +142,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
         }
         "SubregistryChanged" => {
             let Some(token) = token else { return };
-            let subregistry = event
-                .after_state
-                .get("subregistry")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            state.set_v2_subregistry(emitter, token, subregistry);
+            state.restore_v2_subregistry_change(emitter, token, &event.after_state);
         }
         "ExpiryChanged" => {
             let (Some(token), Some(expiry)) =

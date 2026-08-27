@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn v2_zero_subregistry_update_darkens_shared_observation_state() {
+    const FIRST: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000001";
+    const SECOND: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000002";
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, FIRST, b"first", 100);
+    install_token(&mut state, ROOT, SECOND, b"second", 100);
+    state.set_v2_subregistry(ROOT, FIRST, Some(CHILD.to_owned()));
+    state.set_v2_subregistry(ROOT, SECOND, Some(THIRD.to_owned()));
+    state.refresh_dirty_v2_names(1);
+
+    let _ = state.apply_v2_subregistry_update(ROOT, SECOND, None);
+
+    assert_eq!(state.v2_token(ROOT, FIRST).unwrap().subregistry, None);
+    assert_eq!(state.v2_token(ROOT, SECOND).unwrap().subregistry, None);
+    let observation = (
+        ROOT.to_ascii_lowercase(),
+        super::super::v2_pointers::resolver_observation_id(SECOND),
+    );
+    assert!(
+        !state
+            .v2_subregistry_tokens_by_observation
+            .contains_key(&observation)
+    );
+    assert_eq!(state.v2_subregistry_reassertion_target(ROOT, SECOND), None);
+    assert_v2_indexes_are_derived(&state);
+    assert!(state.v2_dirty_registries.contains(CHILD));
+    assert!(state.v2_dirty_registries.contains(THIRD));
+    assert!((0..32).all(|_| {
+        state
+            .apply_v2_subregistry_update(ROOT, SECOND, Some(CHILD.to_owned()))
+            .is_empty()
+    }));
+}
+
+#[test]
 fn v2_subregistry_holder_lookup_is_constant_per_versioned_token() {
     const PREFIX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let mut state = anchored_state();

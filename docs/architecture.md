@@ -778,6 +778,37 @@ ENSv2 mappings:
   and restore then rebuilds the displaced registration identity as the
   survivor. That corner is explicitly unsupported and tracked in #596.
 
+  The four lifecycle events above remove or replace a token without supplying
+  the surviving subregistry value, so they may reassert a retained token's
+  pointer. A zero-address `SubregistryUpdated` instead supplies the canonical
+  entry's value. ENSv2 resolves every versioned ID to that entry, reconstructs
+  the current token ID for the emitted update, and reads the subregistry from
+  the same entry. Interpretation therefore closes the observation key and
+  clears every retained per-token pointer under the emitting registry and token
+  key after masking its low 32 version bits. A later lifecycle event cannot
+  reassert those former pointers; only a later nonzero `SubregistryUpdated`
+  reopens the child topology. Subregistry discovery edges are topology-only and
+  do not alter the [watch plan](glossary.md#watch-plan--watched-tuple); while the
+  pointer is zero, exact ENSv2 resolution has no child registry through which to
+  continue. The normalized zero event's `subregistry_invalidated_token_ids`
+  records the emitting token ID and the other token IDs whose pointers it
+  cleared. [Cold restore](storage.md#interpret-process-memory) retains that zero
+  separately from an ordinary later value for the same
+  [interpreter state key](glossary.md#interpreter-state-key), preserving both
+  the clear evidence and the logical before/after event stream.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L33 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L63-L73 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L146 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L252 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L595-L598 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L614-L625 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L648-L650 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L44 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L78-L82 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L475 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L16 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L42 @ ens_v2@a971bd64)
+
   A resolver `observation_key` carries at most one live discovery edge: before
   asserting an edge to a different target, discovery closes the existing edge
   for the same contract instance, edge kind, and observation key; it deduplicates
