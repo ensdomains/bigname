@@ -135,6 +135,73 @@ async fn v2_search_match_modes_and_q_validation() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_search_contains_accepts_label_boundary_fragments() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_identity_name(
+        &database,
+        "ens:alice.eth.example",
+        "alice.eth.example",
+        "alice.eth.example",
+        "namehash:alice.eth.example",
+        Uuid::from_u128(0x584_1001),
+        Uuid::from_u128(0x584_1002),
+        Uuid::from_u128(0x584_1003),
+        "0x0000000000000000000000000000000000058410",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        220,
+    )
+    .await?;
+    seed_identity_name(
+        &database,
+        "ens:ethereal.xyz",
+        "ethereal.xyz",
+        "ethereal.xyz",
+        "namehash:ethereal.xyz",
+        Uuid::from_u128(0x584_2001),
+        Uuid::from_u128(0x584_2002),
+        Uuid::from_u128(0x584_2003),
+        "0x0000000000000000000000000000000000058420",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        221,
+    )
+    .await?;
+
+    for (fragment, expected_names) in [
+        (".eth", None),
+        ("eth.", Some(vec!["alice.eth.example"])),
+        (".eth.", Some(vec!["alice.eth.example"])),
+        ("th.e", Some(vec!["alice.eth.example"])),
+    ] {
+        let uri = format!("/v2/search?q={fragment}&match=contains&namespace=ens");
+        let response = v2_search_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{fragment}");
+        let payload: Value = read_json(response).await?;
+        let names = v2_search_names(payload["data"].as_array().expect("contains data"));
+        if let Some(expected_names) = expected_names {
+            assert_eq!(names, expected_names, "{fragment}");
+        } else {
+            assert!(names.contains(&"alpha.eth"), "{fragment}: {names:?}");
+            assert!(names.contains(&"gamma.eth"), "{fragment}: {names:?}");
+            assert!(!names.contains(&"ethereal.xyz"), "{fragment}: {names:?}");
+        }
+    }
+
+    for fragment in [".", ".."] {
+        let uri = format!("/v2/search?q={fragment}&match=contains&namespace=ens");
+        let response = v2_search_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{fragment}");
+        assert_eq!(
+            read_json::<Value>(response).await?["error"]["code"],
+            json!("invalid_input"),
+            "{fragment}"
+        );
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_normalizes_q_and_filters_namespace() -> Result<()> {
     let (database, uppercase) = v2_search_payload("/v2/search?q=AL&namespace=ens").await?;
     assert_eq!(

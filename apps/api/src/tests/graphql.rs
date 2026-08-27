@@ -2176,3 +2176,90 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn graphql_name_contains_accepts_label_boundary_fragments() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    seed_identity_name(
+        &database,
+        "ens:alice.eth.example",
+        "alice.eth.example",
+        "alice.eth.example",
+        "namehash:alice.eth.example",
+        Uuid::from_u128(0x584_3001),
+        Uuid::from_u128(0x584_3002),
+        Uuid::from_u128(0x584_3003),
+        "0x0000000000000000000000000000000000058430",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        430,
+    )
+    .await?;
+    seed_identity_name(
+        &database,
+        "ens:ethereal.xyz",
+        "ethereal.xyz",
+        "ethereal.xyz",
+        "namehash:ethereal.xyz",
+        Uuid::from_u128(0x584_4001),
+        Uuid::from_u128(0x584_4002),
+        Uuid::from_u128(0x584_4003),
+        "0x0000000000000000000000000000000000058440",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        431,
+    )
+    .await?;
+
+    let query = r#"query Domains($where: DomainFilter!) {
+        domains(where: $where) { name }
+    }"#;
+    for (fragment, expected_names) in [
+        (".eth", None),
+        ("eth.", Some(vec!["alice.eth.example"])),
+        (".eth.", Some(vec!["alice.eth.example"])),
+        ("th.e", Some(vec!["alice.eth.example"])),
+    ] {
+        let payload = post_graphql_allow_errors(
+            database.app_state(),
+            query,
+            json!({ "where": { "name_contains": fragment } }),
+        )
+        .await?;
+        assert!(payload.get("errors").is_none(), "{fragment}: {payload}");
+        let matched = payload["data"]["domains"]
+            .as_array()
+            .expect("domains must be an array")
+            .iter()
+            .map(|domain| domain["name"].as_str().expect("name"))
+            .collect::<Vec<_>>();
+        if let Some(expected_names) = expected_names {
+            assert_eq!(matched, expected_names, "{fragment}");
+        } else {
+            assert!(matched.contains(&"alice.eth"), "{fragment}: {matched:?}");
+            assert!(matched.contains(&"bob.eth"), "{fragment}: {matched:?}");
+            assert!(
+                !matched.contains(&"ethereal.xyz"),
+                "{fragment}: {matched:?}"
+            );
+        }
+    }
+
+    for fragment in [".", ".."] {
+        let payload = post_graphql_allow_errors(
+            database.app_state(),
+            query,
+            json!({ "where": { "name_contains": fragment } }),
+        )
+        .await?;
+        assert_eq!(payload["data"], Value::Null, "{fragment}");
+        assert!(
+            payload["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty()),
+            "{fragment}: {payload}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}

@@ -184,7 +184,7 @@ fn domain_filter_to_storage(filter: Option<DomainFilter>) -> Result<NameCurrentL
     let contains = filter
         .name_contains
         .as_deref()
-        .map(crate::name_filter::normalize_name_prefix)
+        .map(crate::name_filter::normalize_name_contains)
         .transpose()
         .map_err(|error| {
             async_graphql::Error::new(format!(
