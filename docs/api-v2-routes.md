@@ -1032,9 +1032,16 @@ Field ownership:
   required; a missing or empty `q` returns `400 invalid_input`. The API treats
   `q` as an ENSIP-15 name fragment, normalizes it, and then applies the selected
   `match=prefix|contains` byte comparison directly to stored names. Invalid
-  normalization returns `400 invalid_input`. A single trailing dot is preserved
-  as a label boundary after the preceding nonempty name is normalized, matching
-  the address-names `q` behavior documented above. An explicit
+  normalization returns `400 invalid_input`. A single trailing dot remains
+  preserved as a label boundary after the preceding nonempty name is normalized,
+  matching the address-names `q` behavior documented above. With
+  `match=contains`, one leading dot is also accepted when it is followed by a
+  nonempty fragment that does not begin with another dot. The following fragment
+  is normalized as usual, and the leading dot is preserved for matching. Thus
+  `.eth`, `eth.`, `.eth.`, and `th.e` are accepted contains fragments, while `.`
+  and `..` return `400 invalid_input`. Leading-boundary support is specific to
+  `match=contains`; `match=prefix` fragment behavior is unchanged and does not
+  accept a leading dot. An explicit
   recognized namespace bypasses public namespace derivation and reads its
   current rows without a deployment-readiness gate, including the Interpret
   redo check, preserving the existing behavior. Bare search excludes a
