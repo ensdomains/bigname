@@ -513,12 +513,6 @@ async fn repeated_batches_with_a_pinned_durable_cursor_are_observable_for_every_
                         assert_eq!(count, 3);
                         assert_eq!(age, age.max(0));
                     }
-                    if call == 5 {
-                        assert_eq!(
-                            phase_progress.observation(chain_id, phase, &RunMode::Normal),
-                            (0, 0)
-                        );
-                    }
                     let current = (call >= 4).then(|| head.clone());
                     let progress = PhaseProgress {
                         current: current.clone(),
@@ -531,11 +525,11 @@ async fn repeated_batches_with_a_pinned_durable_cursor_are_observable_for_every_
                             safe: None,
                             finalized: None,
                         }),
-                        verification_level: (phase == PhaseName::Verify && call == 5)
+                        verification_level: (phase == PhaseName::Verify && call == 4)
                             .then_some(VerificationLevel::QuickSynced),
                         ..PhaseProgress::default()
                     };
-                    Ok(if call < 5 {
+                    Ok(if call < 4 {
                         PhaseBatchOutcome::Continue(progress)
                     } else {
                         PhaseBatchOutcome::Complete(progress)
@@ -550,13 +544,14 @@ async fn repeated_batches_with_a_pinned_durable_cursor_are_observable_for_every_
         available_capacity(),
         "pinned-interpret-runner",
     )?
-    .with_phase_progress(phase_progress);
+    .with_phase_progress(phase_progress.clone());
 
     runner
         .run_chain(&chain(chain_id)?, CancellationToken::new())
         .await?;
-    for calls in calls {
-        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    for (phase, calls) in PhaseName::ALL.into_iter().zip(calls) {
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(phase_progress.observation(chain_id, phase, &RunMode::Normal), (0, 0));
     }
     scratch.cleanup().await
 }
