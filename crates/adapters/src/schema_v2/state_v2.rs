@@ -51,6 +51,7 @@ pub(in crate::schema_v2) struct V2NameTransition {
     pub registration: Option<Value>,
     pub resolver: Option<String>,
     pub subregistry: Option<String>,
+    pub subregistry_invalidated_token_ids: BTreeSet<String>,
 }
 
 impl State {

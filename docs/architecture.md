@@ -778,6 +778,30 @@ ENSv2 mappings:
   and restore then rebuilds the displaced registration identity as the
   survivor. That corner is explicitly unsupported and tracked in #596.
 
+  The four lifecycle events above are holder departure or replacement doors:
+  they may reassert a retained holder because the departing event supplies no
+  surviving subregistry value. A zero-address `SubregistryUpdated` is the fifth
+  shared-key door, but it is not a departure. ENSv2 resolves every versioned ID
+  to one canonical entry, reconstructs the current token ID for the emitted
+  update, and reads the subregistry from that same entry. An explicit zero
+  therefore authoritatively closes the shared observation key. Interpretation
+  closes the key and clears every retained per-token subregistry pointer under
+  the emitting registry and low-32-bit-masked token key, so a later lifecycle
+  departure cannot reassert a former-current target. Only a later nonzero
+  `SubregistryUpdated` reopens the child topology. Subregistry discovery edges
+  are topology-only and do not alter the
+  [watch plan](glossary.md#watch-plan--watched-tuple); while the pointer is zero,
+  exact ENSv2 resolution has no child registry through which to continue.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L33 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L63-L73 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L146 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L252 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L595-L598 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L614-L625 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L648-L650 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L16 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L21-L42 @ ens_v2@a971bd64)
+
   A resolver `observation_key` carries at most one live discovery edge: before
   asserting an edge to a different target, discovery closes the existing edge
   for the same contract instance, edge kind, and observation key; it deduplicates

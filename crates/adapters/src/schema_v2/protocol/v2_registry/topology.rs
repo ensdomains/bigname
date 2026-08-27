@@ -399,11 +399,7 @@ fn append_rebound_state_events(
                 transition.registry, transition.token_id
             ),
             explicit_before: Some(json!({})),
-            after_state: json!({
-                "source_event":source_event,
-                "token_id":transition.token_id,
-                (field):target,
-            }),
+            after_state: transition.pointer_restatement_state(source_event, field, target),
             state_scope: transition_scope(transition, source_event),
         });
     }
