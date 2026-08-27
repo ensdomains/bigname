@@ -713,7 +713,8 @@ blocks its publication. There is no production interval serving candidate-only
 data. The ordinary announcement edge above remains a watch-plan input and this
 activation creates no ingest gap.
 
-Other current Sepolia artifacts — including universal/reverse resolution,
+Other artifacts of the admitted 2026-06-29 Sepolia deployment — including
+universal/reverse resolution,
 other wrapper surfaces, oracle, resolver-set administration, and mock-payment
 surfaces — remain outside admission.
 
