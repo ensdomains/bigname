@@ -198,6 +198,36 @@ fn redo_cli_carries_canonical_head_hydration_rpc() {
 }
 
 #[test]
+fn dual_ens_chain_redo_refuses_during_configuration_validation() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--chain",
+        "ethereum-mainnet,ethereum-sepolia",
+        "--phase",
+        "recompute-flags",
+        "--from-block",
+        "42",
+        "--to-block",
+        "42",
+    ])
+    .expect("dual-chain redo parses before topology validation");
+    let error = command
+        .resolve()
+        .err()
+        .expect("two ENS chains must fail redo configuration validation");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(
+        error
+            .to_string()
+            .contains("chains carrying the ens namespace never share a table set")
+    );
+}
+
+#[test]
 fn redo_cli_carries_watch_set_coverage_attestation() {
     configure_redo_source_endpoint();
     let command = Cli::try_parse_from([

@@ -237,7 +237,7 @@ The no-value `TextChanged(bytes32,string,string)` event — the legacy signature
 
 ### ENSv2 (`sepolia` deployment profile)
 
-The `sepolia` deployment profile currently admits five ENSv2 families from the post-audit current Sepolia deployment under `manifests/sepolia/ethereum/ens/`, all in `deployment_epoch = "ens_v2_sepolia_post_audit"`:[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
+The `sepolia` deployment profile currently admits five ENSv2 families from the admitted post-audit 2026-06-29 Sepolia deployment — archived upstream at `contracts/deployments/sepolia-20260629-r1/` (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/.deployment.json:L4 @ ens_v2@a971bd64); upstream's 2026-07-30 redeploy is not admitted (upstream: .refs/ens_v2/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2@a971bd64) (see [`upstream.md` § Known divergences](upstream.md#known-divergences)) — under `manifests/sepolia/ethereum/ens/`, all in `deployment_epoch = "ens_v2_sepolia_post_audit"`:[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
 
 - `ens_v2_root_l1` — `RootRegistry` at `0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c`, `start_block = 11163319`. Tokenized, [resource](glossary.md)-scoped permissioned registry seed for discovery and parent graph state.[^v2-pr-l22][^v2-pr-l28]
 - `ens_v2_registry_l1` — `ETHRegistry` at `0x67b728a792e789a8978b30cf1b3b641f19354b43`, `start_block = 11163391`, plus registry instances announced by `RegistryCreated()`. Direct `PermissionedRegistry` construction emits the announcement first; a `UserRegistry` proxy emits it during initialization. It admits the emitting address from that exact log position without requiring a parent link. `UserRegistryImpl` at `0x840fa461059862ea466a711e8c98c8de732061c0` is implementation metadata, not a separate owner. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L43 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L47 @ ens_v2@ccaeb58)[^v2-userreg-l15]
@@ -713,7 +713,8 @@ blocks its publication. There is no production interval serving candidate-only
 data. The ordinary announcement edge above remains a watch-plan input and this
 activation creates no ingest gap.
 
-Other current Sepolia artifacts — including universal/reverse resolution,
+Other artifacts of the admitted 2026-06-29 Sepolia deployment — including
+universal/reverse resolution,
 other wrapper surfaces, oracle, resolver-set administration, and mock-payment
 surfaces — remain outside admission.
 
@@ -742,6 +743,16 @@ Basenames registry `NewResolver` updates a node binding but does not discover a 
 ## Contract instance admission and continuity
 
 Manifest loading admits source-graph nodes as `contract_instance_id`s, not raw addresses. Each active `[[roots]]` and `[[contracts]]` entry resolves to one admitted instance.
+
+[Address-admission floors](glossary.md#discovery-rule-widening-and-narrowing)
+are monotone: manifest synchronization keeps the earliest declared
+`start_block` for an address. A later declaration with a higher start has no
+effect on the stored floor. Keeping the earlier floor can only over-fetch, which
+is safe. Raising a stored floor could silently stop fetching previously
+included history, so in-place floor narrowing is unsupported. An operator who
+needs a narrower floor must retire the address, synchronize that close, and
+then re-declare it at the later start: this explicit close-and-reopen path
+creates the new bounded active range.
 
 - `[[roots]]` seed canonical graph and watch-plan expansion; otherwise they follow the same identity rules as `[[contracts]]`.
 - Reusing the same address on the same chain across manifest versions, even across an inactive gap, carries forward the existing `contract_instance_id` and appends a new non-overlapping active range.
@@ -825,7 +836,26 @@ and adapter-checkpoint machinery. Closed intervals remain historical emitter
 admission while their manifest authority is active, but do not expand the
 current watch plan.
 
-Schema-v2 manifest synchronization retires manifest-declared address ranges and
+Schema-v2 manifest synchronization snapshots the directly preceding active
+address declarations before replacing their stored children. It retires an
+active address range that belonged to that snapshot when no desired active
+manifest still declares the same contract instance and address. This membership
+check repairs a row whose declaration provenance was overwritten by an older
+interpreter before retiring it. Interpret may observe a currently declared
+address through a discovery event and backdate its active range, but that
+refresh preserves the declaration provenance and source-manifest ID; the
+event-derived discovery edge records the raw-log observation separately.
+Interpret redo preserves a finitely retired manifest-declared address row as
+coordination state. Replaying an observation at or before that row's close block
+may reproduce its discovery edge, but does not reopen the address range. A
+genuinely later discovery observation either appends a bounded address range or
+backdates an existing later active range to the greater of the observation
+block and the greatest preceding address range's close plus one; it does not
+change any retired range. Re-admission therefore remains possible. Deprecating
+a manifest version or removing a declaration in place cannot be undone by
+replay of the history that preceded retirement. An address admitted only
+through discovery keeps its event provenance and remains outside this
+retirement rule. Synchronization also
 updates manifest-declared proxy edges. It does not run a full-source
 reconciliation over event-driven edges. An authority change invalidates the
 interpret and project phase content hashes. Complete the [mandatory historical
@@ -1027,11 +1057,10 @@ with the two consequence classes described above, and normalized-output removal
 can be followed by an empty rebuild that clears before the next producer event.
 Reuse of a retired address under a different namespace, family, or role whose
 declared start precedes its bounded new contract-address active range can
-conservatively inherit the older address floor. Conversely, a full Interpret
-redo after declaration retirement can delete the last retired contract-address
-range; a later future-dated re-add then has retained declaration text but no
-persisted address floor and can evade historical resolver classification. A
-binary change can also add a new address-admitting discovery edge kind or change
+conservatively inherit the older address floor. Interpret redo preserves a
+finitely retired manifest-declared contract-address range, while a later
+observation can append a bounded re-admission range. A binary change can also
+add a new address-admitting discovery edge kind or change
 Interpret selection or discovery behavior without a manifest-field transition.
 The accepted fail-loud configurations are unsupported operator transitions,
 not proof of safe narrowing; supporting any listed shape requires a new proof

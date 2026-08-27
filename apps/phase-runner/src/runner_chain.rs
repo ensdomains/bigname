@@ -100,6 +100,8 @@ impl PhaseRunner {
             self.run_spine_phase(chain, phase, cancellation.clone())
                 .await?;
         }
+        self.run_required_verify_redo(chain, cancellation.clone())
+            .await?;
 
         if Self::verify_before_live(chain)? {
             self.phases.get(PhaseName::Verify).preflight(
@@ -117,5 +119,28 @@ impl PhaseRunner {
             return self.run_live_follow(chain, cancellation).await;
         }
         self.run_verify_and_live(chain, cancellation).await
+    }
+
+    pub(super) async fn run_required_verify_redo(
+        &self,
+        chain: &ChainConfig,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let Some(range) = self
+            .store
+            .required_redo_range(&chain.chain_id, PhaseName::Verify)
+            .await?
+        else {
+            return Ok(());
+        };
+        let mode = RunMode::Redo(range);
+        self.phases
+            .get(PhaseName::Verify)
+            .preflight(&chain.chain_id, &chain.sources, &mode)?;
+        self.run_phase_with_restart(chain, PhaseName::Verify, mode, cancellation)
+            .await
     }
 }

@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        CapacityConfig, ChainConfig, RuntimeConfig, SourceConfig, TimingConfig, group_sources,
+        COMPILED_CHAIN_NAMESPACES, CapacityConfig, ChainConfig, RuntimeConfig, SourceConfig,
+        TimingConfig, group_sources, validate_deployment_table_set,
     },
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName},
@@ -432,6 +433,9 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
             phase.requires_intake_sources(),
         )?)
     };
+    if let RedoChains::Explicit(chains) = &chains {
+        validate_deployment_table_set(chains, COMPILED_CHAIN_NAMESPACES.iter().copied())?;
+    }
     Ok(ResolvedCommand::Redo {
         database_url: args.connection.database_url,
         verification_database_url: args.verification_database_url,

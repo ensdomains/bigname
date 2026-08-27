@@ -892,8 +892,11 @@ Field ownership:
   The `eth`-node redirect is scripted intent plus a deployed Sepolia resolver in
   the pinned checkout
   `(upstream: .refs/ens_v2/contracts/deployments/sepolia/ENSV2Resolver.json:L2 @ ens_v2@ccaeb58)`;
-  the [`ens_v2` pin](../.refs/MANIFEST.toml) is scoped to current Sepolia
-  deployment evidence and does not establish a Mainnet redirect.
+  the [`ens_v2` pin](../.refs/MANIFEST.toml) is scoped to the admitted
+  2026-06-29 Sepolia deployment's archived evidence (upstream's 2026-07-30
+  redeploy is not admitted) and does not establish a Mainnet redirect
+  `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/.deployment.json:L4 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v2/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2@a971bd64)`.
 
   There is one known narrow exception. A locked name migrated with
   `CANNOT_SET_RESOLVER` burned keeps its ENSv1 resolver entry because the

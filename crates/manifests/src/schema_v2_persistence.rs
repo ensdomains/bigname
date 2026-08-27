@@ -7,17 +7,7 @@ use uuid::Uuid;
 
 use crate::{LoadedManifest, ManifestContract, SourceManifest};
 
-#[derive(sqlx::FromRow)]
-struct RetiredManifestAddress {
-    row_id: i64,
-    chain_id: String,
-    address: String,
-    active_from: Option<i64>,
-    active_to: Option<i64>,
-    active_to_hash: Option<String>,
-    head_number: Option<i64>,
-    head_hash: Option<String>,
-}
+use super::{ManifestAddressDeclaration, retirement::RetiredManifestAddress};
 
 #[derive(sqlx::FromRow)]
 struct ExistingContractAddress {
@@ -288,10 +278,29 @@ pub(super) async fn insert_declaration(
 
 pub(super) async fn deactivate_retired_manifest_addresses(
     transaction: &mut Transaction<'_, Postgres>,
+    previous_declarations: &[ManifestAddressDeclaration],
 ) -> Result<()> {
+    let chains = previous_declarations
+        .iter()
+        .map(|row| row.chain_id.clone())
+        .collect::<Vec<_>>();
+    let instances = previous_declarations
+        .iter()
+        .map(|row| row.instance_id)
+        .collect::<Vec<_>>();
+    let addresses = previous_declarations
+        .iter()
+        .map(|row| row.address.clone())
+        .collect::<Vec<_>>();
     let rows = sqlx::query_as::<_, RetiredManifestAddress>(
         "
+        WITH previous AS (
+            SELECT *
+            FROM unnest($1::text[], $2::uuid[], $3::text[])
+                 AS prior(chain_id, instance_id, address)
+        )
         SELECT address.contract_instance_address_id AS row_id,
+               address.contract_instance_id AS instance_id,
                address.chain_id,
                address.address,
                address.active_from_block_number AS active_from,
@@ -302,10 +311,17 @@ pub(super) async fn deactivate_retired_manifest_addresses(
         FROM contract_instance_addresses address
         LEFT JOIN chain_heads head
           ON head.chain_id = address.chain_id
+        LEFT JOIN previous prior
+          ON prior.chain_id = address.chain_id
+         AND prior.instance_id = address.contract_instance_id
+         AND prior.address = lower(address.address)
         WHERE address.deactivated_at IS NULL
-          AND address.provenance ->> 'source' IN (
-              'manifest_declaration',
-              'manifest_proxy_implementation'
+          AND (
+              address.provenance ->> 'source' IN (
+                  'manifest_declaration',
+                  'manifest_proxy_implementation'
+              )
+              OR prior.chain_id IS NOT NULL
           )
           AND NOT EXISTS (
               SELECT 1
@@ -331,11 +347,19 @@ pub(super) async fn deactivate_retired_manifest_addresses(
         ORDER BY address.chain_id, address.contract_instance_address_id
         ",
     )
+    .bind(chains)
+    .bind(instances)
+    .bind(addresses)
     .fetch_all(&mut **transaction)
     .await
     .context("failed to load retired manifest address rows")?;
 
     for row in rows {
+        let previous = previous_declarations.iter().find(|declaration| {
+            declaration.chain_id == row.chain_id
+                && declaration.instance_id == row.instance_id
+                && declaration.address.eq_ignore_ascii_case(&row.address)
+        });
         let (Some(head_number), Some(head_hash)) = (row.head_number, row.head_hash.as_deref())
         else {
             bail!(
@@ -366,6 +390,8 @@ pub(super) async fn deactivate_retired_manifest_addresses(
             UPDATE contract_instance_addresses
             SET active_to_block_number = $2,
                 active_to_block_hash = $3,
+                source_manifest_id = COALESCE($4, source_manifest_id),
+                provenance = COALESCE($5, provenance),
                 deactivated_at = now()
             WHERE contract_instance_address_id = $1
               AND deactivated_at IS NULL
@@ -374,6 +400,8 @@ pub(super) async fn deactivate_retired_manifest_addresses(
         .bind(row.row_id)
         .bind(close_number)
         .bind(close_hash)
+        .bind(previous.map(|declaration| declaration.manifest_id))
+        .bind(previous.map(|declaration| &declaration.provenance))
         .execute(&mut **transaction)
         .await
         .with_context(|| {

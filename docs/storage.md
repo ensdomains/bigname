@@ -8,6 +8,9 @@ in-place schema-migrations for initialized `bigname_phase` databases.
 ## Invariants
 
 - [Raw facts](glossary.md#raw-fact) are immutable and block-hash anchored.
+- A Verify row with a recorded cursor is stamped before intake replay can
+  rewrite its readable raw-fact extent; stamping makes any retained level
+  historical until Verify reruns.
 - [Canonicality](glossary.md#canonicality) is explicit; block number alone is
   never sufficient identity.
 - Interpretation output and [projections](glossary.md#projection) are
@@ -25,6 +28,18 @@ in-place schema-migrations for initialized `bigname_phase` databases.
 API use that namespace in one database. Reviewed versioned schema-migrations
 normally upgrade an initialized namespace in place when the change can preserve
 its durable state; the reviewed replacement procedure is required otherwise.
+One deployment's `bigname_phase` tables are one table set. Chains carrying the
+`ens` namespace never share a table set: Ethereum Mainnet and Ethereum Sepolia
+must not write to the same tables, and Sepolia always runs as its own deployment
+with its own tables. Two chains may share one database only when their
+chain-native name-system namespaces differ, as in the supported Ethereum-plus-Base
+production deployment. The phase runner derives each configured chain's
+namespace from the binary-approved [deployment
+profiles](glossary.md#deployment-profile) and refuses this invalid topology
+before starting any chain. A chain ID absent from those approved deployment
+profiles is unsupported and refused explicitly. The check runs for supervised
+startup and operator redo after its chain set is resolved, before manifest
+synchronization or any indexing phase runs.
 An additive baseline index may be an explicitly reviewed release exception when
 its production build must use `CREATE INDEX CONCURRENTLY`: the release runbook
 must carry the exact live DDL, validity checks, recovery procedure, and
@@ -178,6 +193,15 @@ the earliest configured source start) and invalidates the derived phases for the
 restored interval. The repair is
 one-shot because the stored row is then zero and its positive-floor predicate
 cannot fire again; a current finite declaration keeps its finite watch bound.
+
+Before re-deriving a range, Interpret preserves a finitely retired
+manifest-declared contract-address row as coordination state. An event-derived
+observation at or before that row's close block may reproduce its discovery
+edge but cannot reopen its address range. An observation after the close block
+may append a range or backdate an existing later active range to the greater of
+the observation block and the greatest preceding address range's close plus
+one. Retired ranges remain unchanged. This preservation does not change raw
+facts, normalized-event identity, or projection ownership.
 
 A non-retryable validation failure on an already-completed Ingest or Verify
 row changes its lifecycle status from `completed` to `failed` without clearing

@@ -170,7 +170,6 @@ async fn completed_project_cannot_enter_ingest_verify_retained_recovery() -> Res
     .bind(chain_id)
     .execute(scratch.pool())
     .await?;
-
     assert_eq!(
         store
             .start_phase(chain_id, PhaseName::Project, &RunMode::Normal)
@@ -1861,6 +1860,7 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
             set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
         }
     }
+    set_phase_extent(scratch.pool(), failed_chain, PhaseName::Verify, 0).await?;
 
     let calls = Arc::new(Mutex::new(Vec::new()));
     let phases = PhaseName::ALL.map(|name| {
@@ -1899,14 +1899,27 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
             .to_string()
             .contains("fixture failed during all-phase interpret redo")
     );
-    assert!(report.stopped_chains[0].1.to_string().contains(
-        "phase-runner redo --chain redo-all-failed-chain --phase interpret --from-block 0 \
-         --to-block 1"
-    ));
-    assert!(report.stopped_chains[0].1.to_string().contains(
-        "phase-runner redo --chain redo-all-failed-chain --phase all --from-block 0 \
-         --to-block 1"
-    ));
+    let failure = report.stopped_chains[0].1.to_string();
+    let interpret_recovery = failure
+        .find(
+            "phase-runner redo --chain redo-all-failed-chain --phase interpret --from-block 0 \
+             --to-block 1",
+        )
+        .expect("Interpret recovery command");
+    let verify_recovery = failure
+        .find(
+            "phase-runner redo --chain redo-all-failed-chain --phase verify --from-block 0 \
+             --to-block 0",
+        )
+        .expect("Verify recovery command");
+    let all_recovery = failure
+        .find(
+            "phase-runner redo --chain redo-all-failed-chain --phase all --from-block 0 \
+             --to-block 0",
+        )
+        .expect("all-phase recovery command");
+    assert!(interpret_recovery < verify_recovery);
+    assert!(verify_recovery < all_recovery);
     assert_eq!(
         *calls.lock().expect("recorded calls lock"),
         [
@@ -1935,7 +1948,7 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
             ("ingest".into(), "completed".into(), false),
             ("interpret".into(), "running".into(), true),
             ("project".into(), "completed".into(), false),
-            ("verify".into(), "completed".into(), false),
+            ("verify".into(), "running".into(), true),
         ]
     );
 
@@ -1953,29 +1966,6 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         available_capacity(),
         "redo-all-phases-recovery-runner",
     )?;
-    let recovery_error = recovery_runner
-        .redo(
-            &chain(failed_chain)?,
-            RedoPhase::All,
-            BlockRange::new(0, 0)?,
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("all phases must identify the interrupted phase-specific recovery");
-    assert!(recovery_error.to_string().contains(
-        "phase-runner redo --chain redo-all-failed-chain --phase interpret --from-block 0 \
-         --to-block 1"
-    ));
-    assert!(recovery_error.to_string().contains(
-        "phase-runner redo --chain redo-all-failed-chain --phase all --from-block 0 \
-         --to-block 1"
-    ));
-    assert!(
-        recovery_calls
-            .lock()
-            .expect("recovery calls lock")
-            .is_empty()
-    );
     recovery_runner
         .redo(
             &chain(failed_chain)?,
@@ -1984,11 +1974,32 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
             CancellationToken::new(),
         )
         .await?;
+    let verify_refusal = recovery_runner
+        .redo(
+            &chain(failed_chain)?,
+            RedoPhase::All,
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("all phases must refuse the required Verify redo");
+    assert!(verify_refusal.to_string().contains(
+        "phase-runner redo --chain redo-all-failed-chain --phase verify --from-block 0 \
+         --to-block 0"
+    ));
+    recovery_runner
+        .redo(
+            &chain(failed_chain)?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await?;
     recovery_runner
         .redo(
             &chain(failed_chain)?,
             RedoPhase::All,
-            BlockRange::new(0, 1)?,
+            BlockRange::new(0, 0)?,
             CancellationToken::new(),
         )
         .await?;
@@ -1997,11 +2008,26 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         [
             (failed_chain.into(), PhaseName::Interpret),
             (failed_chain.into(), PhaseName::Project),
+            (failed_chain.into(), PhaseName::Verify),
             (failed_chain.into(), PhaseName::Ingest),
             (failed_chain.into(), PhaseName::Interpret),
             (failed_chain.into(), PhaseName::Project),
             (failed_chain.into(), PhaseName::Verify),
         ]
+    );
+    let recovered_verify: (String, bool, Option<String>, Option<i64>, Option<i64>) =
+        sqlx::query_as(
+            "SELECT phase_status, redo_in_progress, redo_mode,
+                    redo_from_block_number, redo_to_block_number
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+        )
+        .bind(failed_chain)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(
+        recovered_verify,
+        ("completed".into(), false, None, None, None)
     );
 
     let remaining_active: i64 = sqlx::query_scalar(
@@ -2012,6 +2038,139 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(remaining_active, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn all_phase_redo_refuses_a_range_beyond_the_verify_extent() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_all_verify_extent").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "redo-all-verify-extent-chain";
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    for (phase, hash, through) in [
+        (PhaseName::Ingest, None, 1),
+        (
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            1,
+        ),
+        (
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            1,
+        ),
+        (PhaseName::Verify, None, 0),
+    ] {
+        mark_completed(scratch.pool(), chain_id, phase, hash).await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, through).await?;
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseName::ALL.map(|name| {
+        Arc::new(RecordingRedoPhase {
+            name,
+            calls: Arc::clone(&calls),
+            fail_chain: None,
+        }) as Arc<dyn Phase>
+    });
+    let phase_runner = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "redo-all-verify-extent-runner",
+    )?;
+    let error = phase_runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::All,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("all-phase redo must not silently clip its Verify range");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("beyond Verify's recorded extent")
+    );
+    assert!(calls.lock().expect("recorded calls lock").is_empty());
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn all_phase_project_failure_keeps_the_original_range_in_recovery() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_all_project_recovery").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "redo-all-project-recovery-chain";
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    for (phase, hash, through) in [
+        (PhaseName::Ingest, None, 1),
+        (
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            1,
+        ),
+        (
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            1,
+        ),
+        (PhaseName::Verify, None, 0),
+    ] {
+        mark_completed(scratch.pool(), chain_id, phase, hash).await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, through).await?;
+    }
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseName::ALL.map(|name| {
+        Arc::new(RecordingRedoPhase {
+            name,
+            calls: Arc::clone(&calls),
+            fail_chain: (name == PhaseName::Project).then(|| chain_id.to_owned()),
+        }) as Arc<dyn Phase>
+    });
+    let error = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "redo-all-project-recovery-runner",
+    )?
+    .redo(
+        &chain(chain_id)?,
+        RedoPhase::All,
+        BlockRange::new(0, 0)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("Project fixture must leave executable all-phase recovery");
+
+    let failure = error.to_string();
+    assert!(failure.contains(
+        "phase-runner redo --chain redo-all-project-recovery-chain --phase project \
+         --from-block 0 --to-block 1"
+    ));
+    assert!(failure.contains(
+        "phase-runner redo --chain redo-all-project-recovery-chain --phase verify \
+         --from-block 0 --to-block 0"
+    ));
+    assert!(failure.contains(
+        "phase-runner redo --chain redo-all-project-recovery-chain --phase all \
+         --from-block 0 --to-block 0"
+    ));
+    assert!(!failure.contains(
+        "phase-runner redo --chain redo-all-project-recovery-chain --phase all \
+         --from-block 0 --to-block 1"
+    ));
+    assert_eq!(
+        *calls.lock().expect("recorded calls lock"),
+        [
+            (chain_id.into(), PhaseName::Ingest),
+            (chain_id.into(), PhaseName::Interpret),
+            (chain_id.into(), PhaseName::Project),
+        ]
+    );
     scratch.cleanup().await
 }
 
@@ -2047,6 +2206,27 @@ async fn all_phase_redo_refuses_to_absorb_a_pending_project_redo() -> Result<()>
              updated_at = now()
          WHERE chain_id = $1
            AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running',
+             redo_in_progress = true,
+             redo_mode = 'redo',
+             redo_previous_phase_status = phase_status,
+             redo_previous_last_error = last_error,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 0,
+             redo_to_block_number = 1,
+             last_error = 'required downstream redo: verify fixture',
+             started_at = now(),
+             finished_at = NULL,
+             updated_at = now()
+         WHERE chain_id = $1
+           AND phase_name = 'verify'",
     )
     .bind(chain_id)
     .execute(scratch.pool())
@@ -2094,6 +2274,7 @@ async fn all_phase_redo_refuses_to_absorb_a_pending_project_redo() -> Result<()>
 
     assert_eq!(error.kind(), ErrorKind::DataIntegrity);
     assert!(error.to_string().contains("pending project redo"));
+    assert!(!error.to_string().contains("--phase verify"));
     assert!(calls.lock().expect("recorded calls lock").is_empty());
     let after: (
         String,
@@ -2509,6 +2690,24 @@ async fn head_publication_atomically_replaces_a_readable_fork() -> Result<()> {
             .fetch_one(scratch.pool())
             .await?;
     assert_eq!(initial_orphaning_epoch, 0);
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', current_block_number = 2,
+             current_block_hash = $2, target_block_number = 2,
+             target_block_hash = $2,
+             verification_level = CASE
+                 WHEN phase_name = 'verify' THEN 'cross_checked'
+             END,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1
+           AND phase_name IN ('interpret', 'project', 'verify')",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-2"))
+    .execute(scratch.pool())
+    .await?;
     for (number, hash, parent) in [
         (1_i64, "head-fork-new-1", format!("{chain_id}-block-0")),
         (2_i64, "head-fork-new-2", "head-fork-new-1".to_owned()),
@@ -2544,6 +2743,26 @@ async fn head_publication_atomically_replaces_a_readable_fork() -> Result<()> {
         },
     )
     .await?;
+
+    type RedoStampState = (String, String, bool, Option<i64>, Option<i64>);
+    let stamped: Vec<RedoStampState> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress,
+                redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1
+           AND phase_name IN ('interpret', 'project', 'verify')
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    let expected = ["interpret", "project", "verify"]
+        .map(|phase| (phase.into(), "running".into(), true, Some(1), Some(2)))
+        .to_vec();
+    assert_eq!(
+        stamped, expected,
+        "orphaning a completed Verify extent must demote its attestation with the derived phases"
+    );
 
     let orphaning_epoch: i64 =
         sqlx::query_scalar("SELECT lineage_orphaning_epoch FROM chain_heads WHERE chain_id = $1")

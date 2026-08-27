@@ -4,11 +4,14 @@ use alloy_primitives::keccak256;
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Row, Transaction};
+use uuid::Uuid;
 
 use crate::{LoadedManifest, ManifestLoadStatus, ManifestRepository};
 
 #[path = "schema_v2_persistence.rs"]
 mod persistence;
+#[path = "schema_v2_retirement.rs"]
+mod retirement;
 #[path = "schema_v2_sync_state.rs"]
 mod sync_state;
 #[path = "schema_v2_watch.rs"]
@@ -19,8 +22,18 @@ use persistence::{
     reopen_proxy_edge, repair_retired_omitted_admission_floors, resolve_contract,
     validate_proxy_shape,
 };
+use retirement::active_manifest_address_declarations;
 
 const SCHEMA_V2_MANIFEST_SYNC_LOCK: i64 = 0x4249_474e_414d_4532;
+
+#[derive(Clone)]
+struct ManifestAddressDeclaration {
+    chain_id: String,
+    instance_id: Uuid,
+    address: String,
+    manifest_id: i64,
+    provenance: serde_json::Value,
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ManifestKey {
@@ -119,6 +132,7 @@ pub async fn sync_schema_v2_repository(
     let previous_admission_floors = sync_state::active_admission_floors(&mut transaction).await?;
     let desired_authority = sync_state::repository_authority(repository)?;
     let existing = load_manifest_states(&mut transaction).await?;
+    let previous_declarations = active_manifest_address_declarations(&mut transaction).await?;
 
     sqlx::query(
         "UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE rollout_status = 'active'",
@@ -162,7 +176,7 @@ pub async fn sync_schema_v2_repository(
         after.rollout_status = "deprecated".to_owned();
         write_manifest_event(&mut transaction, Some(before), &after).await?;
     }
-    deactivate_retired_manifest_addresses(&mut transaction).await?;
+    deactivate_retired_manifest_addresses(&mut transaction, &previous_declarations).await?;
     repair_retired_omitted_admission_floors(
         &mut transaction,
         &omitted_admission_addresses,
