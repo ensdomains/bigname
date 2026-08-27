@@ -15,7 +15,7 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
 
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("name"), Some(&json!("alice.eth")));
-    assert_eq!(data.get("display_name"), Some(&json!("Alice.eth")));
+    assert_eq!(data.get("display_name"), Some(&json!("alice.eth")));
     assert_eq!(data.get("namespace"), Some(&json!("ens")));
     assert_eq!(
         data.get("namehash"),
@@ -78,6 +78,142 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
     assert!(data.get("unsupported_fields").is_none());
 
     Ok(())
+}
+
+#[tokio::test]
+async fn storage_name_surface_reads_preserve_stored_ensip15_normalized_name_bytes() -> Result<()> {
+    const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
+    const INPUT_LOGICAL_NAME_ID: &str = "ens:ᏣᎳᎩ.eth";
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        INPUT_LOGICAL_NAME_ID,
+        NORMALIZED_NAME,
+        NORMALIZED_NAME,
+        "node:ᏣᎳᎩ.eth",
+        Uuid::from_u128(0x349_6001),
+        Uuid::from_u128(0x349_6002),
+        Uuid::from_u128(0x349_6003),
+        "0x0000000000000000000000000000000000000349",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        349,
+    )
+    .await?;
+
+    let logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = $1",
+    )
+    .bind(NORMALIZED_NAME)
+    .fetch_one(&database.pool)
+    .await?;
+    let one = bigname_storage::load_name_surface(&database.pool, &logical_name_id)
+        .await?
+        .expect("seeded surface");
+    assert_eq!(one.normalized_name, NORMALIZED_NAME);
+
+    let many = bigname_storage::load_name_surfaces_by_logical_name_ids(
+        &database.pool,
+        std::slice::from_ref(&logical_name_id),
+    )
+    .await?;
+    assert_eq!(many[&logical_name_id].normalized_name, NORMALIZED_NAME);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_subnames_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
+    const NORMALIZED_NAME: &str = "ᏣᎳᎩ.parent.eth";
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_v2_subnames_bound_child(
+        &database,
+        "ens:ᏣᎳᎩ.parent.eth",
+        NORMALIZED_NAME,
+        "node:ᏣᎳᎩ.parent.eth",
+        85,
+        Uuid::from_u128(0x349_2001),
+        Uuid::from_u128(0x349_2002),
+        Uuid::from_u128(0x349_2003),
+        json!({
+            "registration": {"status": "active", "authority_kind": "registrar"},
+            "control": {
+                "registry_owner": "0x0000000000000000000000000000000000034920"
+            }
+        }),
+    )
+    .await?;
+    upsert_phase_children_current_rows(
+        &database.pool,
+        &[v2_subnames_declared_child_row(
+            "ens:parent.eth",
+            "ens:ᏣᎳᎩ.parent.eth",
+            NORMALIZED_NAME,
+            "node:ᏣᎳᎩ.parent.eth",
+            906,
+            85,
+        )],
+    )
+    .await?;
+    let stored_raw_name: String = sqlx::query_scalar(
+        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+    )
+    .bind(NORMALIZED_NAME)
+    .fetch_one(&database.pool)
+    .await?;
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v2/names/parent.eth/subnames?page_size=20",
+    )
+    .await?;
+    let row = payload["data"]
+        .as_array()
+        .expect("subnames data must be an array")
+        .iter()
+        .find(|row| row["display_name"] == json!(NORMALIZED_NAME))
+        .expect("Cherokee subname must be served");
+    assert_eq!(row["name"], json!(stored_raw_name));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
+    const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:ᏣᎳᎩ.eth",
+        NORMALIZED_NAME,
+        NORMALIZED_NAME,
+        "namehash:ᏣᎳᎩ.eth",
+        Uuid::from_u128(0x349_4001),
+        Uuid::from_u128(0x349_4002),
+        Uuid::from_u128(0x349_4003),
+        "0x0000000000000000000000000000000000034940",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        43,
+    )
+    .await?;
+    let stored_raw_name: String = sqlx::query_scalar(
+        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+    )
+    .bind(NORMALIZED_NAME)
+    .fetch_one(&database.pool)
+    .await?;
+
+    let payload = v2_name_record_payload_for_database(
+        &database,
+        "/v2/names/%E1%8F%A3%E1%8E%B3%E1%8E%A9.eth",
+    )
+    .await?;
+    assert_eq!(payload["data"]["name"], json!(stored_raw_name));
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -2403,7 +2539,7 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     assert_eq!(data[0]["name"], json!("alpha.parent.eth"));
     assert_eq!(data[1]["name"], json!("beta.parent.eth"));
     assert_eq!(data[2]["name"], json!("gamma.parent.eth"));
-    assert_eq!(data[0]["display_name"], json!("Alpha.Parent.eth"));
+    assert_eq!(data[0]["display_name"], json!("alpha.parent.eth"));
     assert_eq!(data[0]["namespace"], json!("ens"));
     assert_eq!(
         data[0]["namehash"],
@@ -2851,7 +2987,7 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
         .iter()
         .find(|row| row["labelhash"] == "0xfeed0002")
         .unwrap_or_else(|| panic!("an undecodable label must be served, not dropped: {names:?}"));
-    assert_eq!(escaped_row["name"], "\\377\tbad.parent.eth");
+    assert_eq!(escaped_row["name"], "\\377\tBad.parent.eth");
     assert_eq!(escaped_row["display_name"], "\\377\tBad.parent.eth");
 
     // The audit read has no keyset to drop the row, so it decodes the name directly.

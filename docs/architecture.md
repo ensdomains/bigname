@@ -49,9 +49,18 @@ Manager name inputs have ENS name semantics rather than display-string equality.
 `domain(id: ...)` and `DomainFilter.name` normalize a name, compute its
 namehash, and match that hash, so `ALICE.eth` resolves the same ENS name as
 `alice.eth`. An `id` already shaped as a namehash is matched only within the
-`ens` namespace. `name_contains` compares its pattern case-sensitively with
-the normalized ENS name, and `orderBy: name` uses byte-wise stored
-display-name order. Resolver record fields select the
+`ens` namespace. `name_contains` is ENSIP-15 normalized at the GraphQL boundary
+and then compared byte-for-byte with the stored normalized name; invalid input
+returns a GraphQL error. A single trailing dot remains preserved after
+normalization as a label boundary. One leading dot is also accepted when it is
+followed by a nonempty fragment that does not begin with another dot. The
+following fragment is normalized as usual, and the leading dot is preserved for
+matching. Thus `.eth`, `eth.`, `.eth.`, and `th.e` are accepted contains
+fragments, while `.` and `..` return a GraphQL error. Leading-boundary support is
+specific to contains filters; REST `match=prefix` fragment behavior is unchanged
+and does not accept a leading dot. `orderBy: name` uses byte-wise stored
+normalized-name order.
+Resolver record fields select the
 sole projected inventory for the name's resource without coupling its event
 boundary to the later name-publication target. If a resource has multiple
 inventory rows and no declared boundary selects exactly one, the operation

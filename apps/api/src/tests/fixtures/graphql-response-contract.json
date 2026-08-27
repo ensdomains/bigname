@@ -8,7 +8,7 @@
             "createdAt": 1700000000,
             "expiryDate": 1900000000,
             "id": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "name": "Alice.eth",
+            "name": "alice.eth",
             "normalizedName": "alice.eth",
             "owner": {
               "id": "0x000000000000000000000000000000000000000a"
@@ -31,7 +31,7 @@
         "data": {
           "domain": {
             "id": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "name": "Alice.eth",
+            "name": "alice.eth",
             "normalizedName": "alice.eth",
             "owner": {
               "id": "0x000000000000000000000000000000000000000a"
@@ -55,14 +55,14 @@
           "domains": [
             {
               "id": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-              "name": "Alice.eth",
+              "name": "alice.eth",
               "owner": {
                 "id": "0x000000000000000000000000000000000000000a"
               }
             },
             {
               "id": "0xbe11069ec59144113f438b6ef59dd30497769fc2dce8e2b52e3ae71ac18e47c9",
-              "name": "Bob.eth",
+              "name": "bob.eth",
               "owner": {
                 "id": "0x000000000000000000000000000000000000000a"
               }
@@ -77,7 +77,7 @@
         "data": {
           "domains": [
             {
-              "name": "Bob.eth"
+              "name": "bob.eth"
             }
           ]
         }
@@ -179,10 +179,10 @@
         "data": {
           "domains": [
             {
-              "name": "Dave.eth"
+              "name": "dave.eth"
             },
             {
-              "name": "Carol.eth"
+              "name": "carol.eth"
             }
           ]
         }
@@ -194,10 +194,10 @@
         "data": {
           "domains": [
             {
-              "name": "Carol.eth"
+              "name": "carol.eth"
             },
             {
-              "name": "Dave.eth"
+              "name": "dave.eth"
             }
           ]
         }
@@ -209,10 +209,10 @@
         "data": {
           "domains": [
             {
-              "name": "Dave.eth"
+              "name": "dave.eth"
             },
             {
-              "name": "Carol.eth"
+              "name": "carol.eth"
             }
           ]
         }
@@ -234,7 +234,7 @@
         "data": {
           "domains": [
             {
-              "name": "Carol.eth"
+              "name": "carol.eth"
             }
           ]
         }
@@ -246,7 +246,7 @@
         "data": {
           "domains": [
             {
-              "name": "Alice.eth",
+              "name": "alice.eth",
               "resolver": {
                 "address": "0x000000000000000000000000000000000000def0",
                 "addresses": [
@@ -267,7 +267,7 @@
               }
             },
             {
-              "name": "Bob.eth",
+              "name": "bob.eth",
               "resolver": {
                 "address": "0x000000000000000000000000000000000000def0",
                 "addresses": [],
@@ -329,7 +329,7 @@
             "createdAt": 1700000000,
             "expiryDate": 1900000000,
             "id": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "name": "Alice.eth",
+            "name": "alice.eth",
             "normalizedName": "alice.eth",
             "owner": {
               "id": "0x000000000000000000000000000000000000000a"
@@ -367,7 +367,7 @@
               "createdAt": 1700000000,
               "expiryDate": 1900000000,
               "id": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-              "name": "Alice.eth",
+              "name": "alice.eth",
               "normalizedName": "alice.eth",
               "owner": {
                 "id": "0x000000000000000000000000000000000000000a"
@@ -397,7 +397,7 @@
               "createdAt": 1650000000,
               "expiryDate": 1800000000,
               "id": "0xbe11069ec59144113f438b6ef59dd30497769fc2dce8e2b52e3ae71ac18e47c9",
-              "name": "Bob.eth",
+              "name": "bob.eth",
               "normalizedName": "bob.eth",
               "owner": {
                 "id": "0x000000000000000000000000000000000000000a"
@@ -441,7 +441,7 @@
         "data": {
           "domains": [
             {
-              "name": "Alice.eth",
+              "name": "alice.eth",
               "resolver": {
                 "addresses": [
                   {
@@ -457,7 +457,7 @@
               }
             },
             {
-              "name": "Bob.eth",
+              "name": "bob.eth",
               "resolver": {
                 "addresses": [
                   {

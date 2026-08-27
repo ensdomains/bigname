@@ -24,6 +24,85 @@ const GRAPHQL_ERIN_NAMEHASH: &str =
     "0x93b576b9c8b56a6b4c3041e60f742e3678cfec194a3d9e4f5c069c8a2d0d194a";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
+#[tokio::test]
+async fn graphql_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
+    const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    seed_identity_name(
+        &database,
+        "ens:ᏣᎳᎩ.eth",
+        NORMALIZED_NAME,
+        NORMALIZED_NAME,
+        &bigname_lookup::ens_namehash_hex(NORMALIZED_NAME)?,
+        Uuid::from_u128(0x349_5001),
+        Uuid::from_u128(0x349_5002),
+        Uuid::from_u128(0x349_5003),
+        GRAPHQL_OWNER,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        410,
+    )
+    .await?;
+    let filtered = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) {
+            domains(where: $where) { name }
+        }"#,
+        json!({ "where": { "name_contains": "Ꮳ" } }),
+    )
+    .await?;
+    assert_eq!(filtered["data"]["domains"].as_array().map(Vec::len), Some(1));
+    assert_eq!(filtered["data"]["domains"][0]["name"], json!(NORMALIZED_NAME));
+
+    let lowercase_cherokee = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) {
+            domains(where: $where) { name }
+        }"#,
+        json!({ "where": { "name_contains": "ꮳꮃꭹ" } }),
+    )
+    .await?;
+    assert_eq!(
+        lowercase_cherokee["data"]["domains"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        lowercase_cherokee["data"]["domains"][0]["name"],
+        json!(NORMALIZED_NAME)
+    );
+
+    let original_namehash = bigname_lookup::ens_namehash_hex(NORMALIZED_NAME)?;
+    const STORED_NAME: &str = "ᏣᎳᎩ bad.eth";
+    sqlx::query("UPDATE bigname_phase.name_current SET raw_name = $1 WHERE raw_name = $2")
+        .bind(STORED_NAME)
+        .bind(NORMALIZED_NAME)
+        .execute(&database.pool)
+        .await?;
+    let stored_raw_name: String = sqlx::query_scalar(
+        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+    )
+    .bind(STORED_NAME)
+    .fetch_one(&database.pool)
+    .await?;
+
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query Domain($id: String!) { domain(id: $id) { name normalizedName } }"#,
+        json!({"id": original_namehash}),
+    )
+    .await?;
+    assert_eq!(payload["data"]["domain"]["name"], json!(stored_raw_name));
+    assert_eq!(
+        payload["data"]["domain"]["normalizedName"],
+        json!(stored_raw_name)
+    );
+
+    database.cleanup().await
+}
+
 fn graphql_declared_summary(
     owner: &str,
     resolver: &str,
@@ -78,9 +157,7 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
     upsert_test_name_surfaces(
         &database.pool,
         &[
-            // `collection_name_surface` derives the surface `normalized_name` from this arg, and
-            // `upsert_name_current_rows` validates it equals the row's normalized name — so pass the
-            // normalized (lowercase) form here. The display-cased name lives on the name_current row.
+            // Phase serving projections admit and retain the normalized bytes from these surfaces.
             collection_name_surface("ens:alice.eth", "alice.eth", GRAPHQL_ALICE_NAMEHASH, 411),
             collection_name_surface("ens:bob.eth", "bob.eth", GRAPHQL_BOB_NAMEHASH, 412),
         ],
@@ -513,11 +590,11 @@ async fn graphql_domains_list_batches_resolver_records_per_domain() -> Result<()
         .expect("domains array");
     let alice = domains
         .iter()
-        .find(|domain| domain["name"] == json!("Alice.eth"))
+        .find(|domain| domain["name"] == json!("alice.eth"))
         .expect("alice present");
     let bob = domains
         .iter()
-        .find(|domain| domain["name"] == json!("Bob.eth"))
+        .find(|domain| domain["name"] == json!("bob.eth"))
         .expect("bob present");
 
     assert_eq!(alice["resolver"]["contentHash"], json!("0xe30101701220aabbccdd"));
@@ -564,11 +641,11 @@ async fn graphql_domains_list_batch_mixes_hit_and_clean_miss() -> Result<()> {
         .expect("domains array");
     let alice = domains
         .iter()
-        .find(|domain| domain["name"] == json!("Alice.eth"))
+        .find(|domain| domain["name"] == json!("alice.eth"))
         .expect("alice present");
     let bob = domains
         .iter()
-        .find(|domain| domain["name"] == json!("Bob.eth"))
+        .find(|domain| domain["name"] == json!("bob.eth"))
         .expect("bob present");
 
     // alice (hit) keeps her records.
@@ -816,7 +893,7 @@ async fn graphql_compatibility_reads_phase_projections() -> Result<()> {
         json!({"id": "alice.eth", "where": {"owner": GRAPHQL_OWNER}}),
     )
     .await?;
-    assert_eq!(payload["data"]["domain"]["name"], json!("Alice.eth"));
+    assert_eq!(payload["data"]["domain"]["name"], json!("alice.eth"));
     assert_eq!(
         payload["data"]["domain"]["resolver"]["contentHash"],
         json!("0xe30101701220aabbccdd")
@@ -977,9 +1054,9 @@ async fn graphql_connection_count_snapshot_metadata_is_bounded() -> Result<()> {
         SET chain_positions = jsonb_set(
             jsonb_set(chain_positions, '{ethereum,block_number}',
                 to_jsonb(CASE raw_name
-                    WHEN 'Alice.eth' THEN 401
-                    WHEN 'Bob.eth' THEN 402
-                    WHEN 'Carol.eth' THEN 403
+                    WHEN 'alice.eth' THEN 401
+                    WHEN 'bob.eth' THEN 402
+                    WHEN 'carol.eth' THEN 403
                     ELSE 404
                 END)),
             '{ethereum,block_hash}',
@@ -998,9 +1075,9 @@ async fn graphql_connection_count_snapshot_metadata_is_bounded() -> Result<()> {
                 chain_positions,
                 '{ethereum,block_number}',
                 to_jsonb(CASE raw_name
-                    WHEN 'Alice.eth' THEN 401
-                    WHEN 'Bob.eth' THEN 402
-                    WHEN 'Carol.eth' THEN 403
+                    WHEN 'alice.eth' THEN 401
+                    WHEN 'bob.eth' THEN 402
+                    WHEN 'carol.eth' THEN 403
                     ELSE 404
                 END)
             ),
@@ -1358,7 +1435,7 @@ async fn graphql_does_not_publish_unsupported_phase_rows() -> Result<()> {
         json!({ "where": { "owner": GRAPHQL_OWNER } }),
     )
     .await?;
-    assert_eq!(list["data"]["domains"], json!([{ "name": "Bob.eth" }]));
+    assert_eq!(list["data"]["domains"], json!([{ "name": "bob.eth" }]));
 
     sqlx::query(
         r#"
@@ -1458,7 +1535,7 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
 
     let domain = &payload["data"]["domain"];
     assert_eq!(domain["id"], json!(GRAPHQL_ALICE_NAMEHASH));
-    assert_eq!(domain["name"], json!("Alice.eth"));
+    assert_eq!(domain["name"], json!("alice.eth"));
     assert_eq!(domain["normalizedName"], json!("alice.eth"));
     assert_eq!(domain["owner"]["id"], json!(GRAPHQL_OWNER));
     // createdAt/expiryDate are GraphQL Ints, so they must serialize as JSON numbers, not strings.
@@ -1485,7 +1562,7 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     .await?;
     let by_name = &by_name["data"]["domain"];
     assert_eq!(by_name["id"], json!(GRAPHQL_ALICE_NAMEHASH));
-    assert_eq!(by_name["name"], json!("Alice.eth"));
+    assert_eq!(by_name["name"], json!("alice.eth"));
     assert_eq!(by_name["normalizedName"], json!("alice.eth"));
     assert_eq!(by_name["owner"]["id"], json!(GRAPHQL_OWNER));
 
@@ -1528,8 +1605,8 @@ async fn graphql_domains_op_offset_paginates_owner_in() -> Result<()> {
         .as_array()
         .expect("domains must be an array");
     assert_eq!(domains.len(), 2);
-    assert_eq!(domains[0]["name"], json!("Alice.eth"));
-    assert_eq!(domains[1]["name"], json!("Bob.eth"));
+    assert_eq!(domains[0]["name"], json!("alice.eth"));
+    assert_eq!(domains[1]["name"], json!("bob.eth"));
     assert_eq!(domains[0]["owner"]["id"], json!(GRAPHQL_OWNER));
 
     // Offset window is disjoint and stable.
@@ -1549,7 +1626,7 @@ async fn graphql_domains_op_offset_paginates_owner_in() -> Result<()> {
     .await?;
     let page = second["data"]["domains"].as_array().expect("array");
     assert_eq!(page.len(), 1);
-    assert_eq!(page[0]["name"], json!("Bob.eth"));
+    assert_eq!(page[0]["name"], json!("bob.eth"));
 
     database.cleanup().await?;
     Ok(())
@@ -1865,14 +1942,19 @@ async fn graphql_domain_serves_a_stored_name_that_no_longer_normalizes() -> Resu
 }
 
 #[tokio::test]
-async fn graphql_name_order_uses_stored_display_name_bytes() -> Result<()> {
+async fn graphql_name_order_uses_stored_normalized_name_bytes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     sqlx::query(
-        "UPDATE bigname_phase.name_current SET raw_name = 'carol.eth' \
-         WHERE logical_name_id = 'ens:' || $1",
+        "UPDATE bigname_phase.name_current
+         SET raw_name = CASE logical_name_id
+             WHEN 'ens:' || $1 THEN 'ᏣᎳᎩ.eth'
+             WHEN 'ens:' || $2 THEN 'z.eth'
+         END
+         WHERE logical_name_id IN ('ens:' || $1, 'ens:' || $2)",
     )
     .bind(GRAPHQL_CAROL_NAMEHASH)
+    .bind(GRAPHQL_DAVE_NAMEHASH)
     .execute(&database.lookup_pool)
     .await?;
 
@@ -1886,9 +1968,68 @@ async fn graphql_name_order_uses_stored_display_name_bytes() -> Result<()> {
     .await?;
     assert_eq!(
         payload["data"]["domains"],
-        json!([{ "name": "Dave.eth" }, { "name": "carol.eth" }])
+        json!([{ "name": "z.eth" }, { "name": "ᏣᎳᎩ.eth" }])
     );
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+
+    let config = database.database_config(1)?;
+    let options = PgConnectOptions::from_str(
+        config
+            .database_url
+            .as_deref()
+            .context("GraphQL SQL-capture database URL is missing")?,
+    )?
+    .options([("search_path", "bigname_phase".to_owned())]);
+    let capture_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let state = AppState::new_with_rpc_urls(
+        capture_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    )
+    .with_public_namespaces_for_test(["ens", "basenames"]);
+
+    for direction in ["asc", "desc"] {
+        post_graphql(
+            state.clone(),
+            &format!(
+                r#"query Domains($where: DomainFilter!) {{
+                    domains(where: $where, orderBy: name, orderDirection: {direction}) {{ name }}
+                }}"#
+            ),
+            json!({ "where": { "owner": GRAPHQL_FALLBACK_HOLDER } }),
+        )
+        .await?;
+    }
+
+    let prepared_statements: Vec<String> = sqlx::query_scalar(
+        "SELECT statement FROM pg_prepared_statements \
+         WHERE statement LIKE '%canonical_display_name%'",
+    )
+    .fetch_all(&capture_pool)
+    .await?;
+    for direction in ["ASC", "DESC"] {
+        let expected = format!(
+            "ORDER BY canonical_display_name COLLATE \"C\" {direction}, \
+             namespace ASC, normalized_name ASC, namehash ASC"
+        );
+        assert!(
+            prepared_statements
+                .iter()
+                .any(|statement| statement.contains(&expected)),
+            "GraphQL name {direction} SQL must include `{expected}`"
+        );
+    }
+
+    capture_pool.close().await;
     database.cleanup().await
 }
 
@@ -1919,7 +2060,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
         }),
     )
     .await?;
-    assert_eq!(names(&desc), vec!["Dave.eth", "Carol.eth"]);
+    assert_eq!(names(&desc), vec!["dave.eth", "carol.eth"]);
 
     // expiryDate asc ranks NULL expiries last (carol has 1.95e9, dave has none)…
     let expiry_asc = post_graphql(
@@ -1934,7 +2075,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
         }),
     )
     .await?;
-    assert_eq!(names(&expiry_asc), vec!["Carol.eth", "Dave.eth"]);
+    assert_eq!(names(&expiry_asc), vec!["carol.eth", "dave.eth"]);
 
     // …and desc ranks them first ("no expiry" sorts as furthest-future).
     let expiry_desc = post_graphql(
@@ -1949,7 +2090,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
         }),
     )
     .await?;
-    assert_eq!(names(&expiry_desc), vec!["Dave.eth", "Carol.eth"]);
+    assert_eq!(names(&expiry_desc), vec!["dave.eth", "carol.eth"]);
 
     database.cleanup().await?;
     Ok(())
@@ -1982,7 +2123,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
     .await?;
     let matched = contains["data"]["domains"].as_array().expect("array");
     assert_eq!(matched.len(), 1);
-    assert_eq!(matched[0]["name"], json!("Carol.eth"));
+    assert_eq!(matched[0]["name"], json!("carol.eth"));
 
     let wrong_case = post_graphql(
         database.app_state(),
@@ -1992,7 +2133,132 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER], "name_contains": "ARO" } }),
     )
     .await?;
-    assert_eq!(wrong_case["data"]["domains"], json!([]));
+    assert_eq!(wrong_case["data"]["domains"].as_array().map(Vec::len), Some(1));
+    assert_eq!(wrong_case["data"]["domains"][0]["name"], json!("carol.eth"));
+
+    let invalid = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) {
+            domains(where: $where) { name }
+        }"#,
+        json!({ "where": { "name_contains": "%" } }),
+    )
+    .await?;
+    assert_eq!(invalid["data"], Value::Null);
+    assert!(invalid["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+
+    let empty = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) {
+            domains(where: $where) { name }
+        }"#,
+        json!({ "where": { "name_contains": "" } }),
+    )
+    .await?;
+    assert_eq!(empty["data"], Value::Null);
+    assert!(empty["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+
+    let invalid_empty_page = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) {
+            domains(first: 0, where: $where) { name }
+        }"#,
+        json!({ "where": { "name_contains": "%" } }),
+    )
+    .await?;
+    assert_eq!(invalid_empty_page["data"], Value::Null);
+    assert!(
+        invalid_empty_page["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty())
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graphql_name_contains_accepts_label_boundary_fragments() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    seed_identity_name(
+        &database,
+        "ens:alice.eth.example",
+        "alice.eth.example",
+        "alice.eth.example",
+        "namehash:alice.eth.example",
+        Uuid::from_u128(0x584_3001),
+        Uuid::from_u128(0x584_3002),
+        Uuid::from_u128(0x584_3003),
+        "0x0000000000000000000000000000000000058430",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        430,
+    )
+    .await?;
+    seed_identity_name(
+        &database,
+        "ens:ethereal.xyz",
+        "ethereal.xyz",
+        "ethereal.xyz",
+        "namehash:ethereal.xyz",
+        Uuid::from_u128(0x584_4001),
+        Uuid::from_u128(0x584_4002),
+        Uuid::from_u128(0x584_4003),
+        "0x0000000000000000000000000000000000058440",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        431,
+    )
+    .await?;
+
+    let query = r#"query Domains($where: DomainFilter!) {
+        domains(where: $where) { name }
+    }"#;
+    for (fragment, expected_names) in [
+        (".eth", None),
+        ("eth.", Some(vec!["alice.eth.example"])),
+        (".eth.", Some(vec!["alice.eth.example"])),
+        ("th.e", Some(vec!["alice.eth.example"])),
+    ] {
+        let payload = post_graphql_allow_errors(
+            database.app_state(),
+            query,
+            json!({ "where": { "name_contains": fragment } }),
+        )
+        .await?;
+        assert!(payload.get("errors").is_none(), "{fragment}: {payload}");
+        let matched = payload["data"]["domains"]
+            .as_array()
+            .expect("domains must be an array")
+            .iter()
+            .map(|domain| domain["name"].as_str().expect("name"))
+            .collect::<Vec<_>>();
+        if let Some(expected_names) = expected_names {
+            assert_eq!(matched, expected_names, "{fragment}");
+        } else {
+            assert!(matched.contains(&"alice.eth"), "{fragment}: {matched:?}");
+            assert!(matched.contains(&"bob.eth"), "{fragment}: {matched:?}");
+            assert!(
+                !matched.contains(&"ethereal.xyz"),
+                "{fragment}: {matched:?}"
+            );
+        }
+    }
+
+    for fragment in [".", ".."] {
+        let payload = post_graphql_allow_errors(
+            database.app_state(),
+            query,
+            json!({ "where": { "name_contains": fragment } }),
+        )
+        .await?;
+        assert_eq!(payload["data"], Value::Null, "{fragment}");
+        assert!(
+            payload["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty()),
+            "{fragment}: {payload}"
+        );
+    }
 
     database.cleanup().await?;
     Ok(())

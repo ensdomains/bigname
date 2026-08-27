@@ -15,6 +15,7 @@ use tracing::error;
 use crate::{AppState, state::is_recognized_public_namespace};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::name_filter::{normalize_name_contains, normalize_name_prefix};
 use super::{
     AtSelector, CursorPayload, Envelope, Finality, Page, QueryParams, RawQueryParams,
     RegistrationStatus, V2Error, V2Result, api_error_to_v2, decode, encode,
@@ -137,11 +138,12 @@ impl TryFrom<RawSearchQueryParams> for SearchQueryParams {
             validate_namespace(namespace)?;
         }
 
+        let match_mode = parse_match(raw.match_mode.as_deref())?;
         Ok(Self {
             at: shared.at,
             finality: shared.finality,
-            q: parse_q(raw.q)?,
-            match_mode: parse_match(raw.match_mode.as_deref())?,
+            q: parse_q(raw.q, match_mode)?,
+            match_mode,
             namespace: shared.namespace,
             cursor: shared.cursor,
             page_size: shared.page_size,
@@ -407,12 +409,15 @@ fn namespace_cursor_anchor(binding: &SearchCursorBinding<'_>) -> String {
     format!("public:{}", binding.public_namespaces.join(","))
 }
 
-fn parse_q(value: Option<String>) -> V2Result<String> {
-    value
+fn parse_q(value: Option<String>, match_mode: SearchMatch) -> V2Result<String> {
+    let value = value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .map(|value| value.to_lowercase())
-        .ok_or_else(|| V2Error::invalid_input("q is required and must be non-empty"))
+        .ok_or_else(|| V2Error::invalid_input("q is required and must be non-empty"))?;
+    match match_mode {
+        SearchMatch::Prefix => normalize_name_prefix(&value),
+        SearchMatch::Contains => normalize_name_contains(&value),
+    }
 }
 
 fn parse_match(value: Option<&str>) -> V2Result<SearchMatch> {

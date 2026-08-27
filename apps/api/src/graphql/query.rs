@@ -71,6 +71,7 @@ impl QueryRoot {
         #[graphql(name = "orderBy")] order_by: Option<DomainOrderBy>,
         #[graphql(name = "orderDirection")] order_direction: Option<OrderDirection>,
     ) -> Result<Vec<Domain>> {
+        let storage_filter = domain_filter_to_storage(filter)?;
         let limit = match first {
             Some(first) if first <= 0 => return Ok(Vec::new()),
             Some(first) => (first as u64).min(MAX_DOMAINS_PAGE_SIZE),
@@ -83,7 +84,7 @@ impl QueryRoot {
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let rows = load_phase_graphql_name_list_page_offset(
             &state.pool,
-            &domain_filter_to_storage(filter),
+            &storage_filter,
             &snapshot_chain_ids,
             sort,
             order,
@@ -147,13 +148,11 @@ impl QueryRoot {
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_head(state, "domainConnection").await?;
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
-        let count = count_phase_graphql_name_list(
-            &state.pool,
-            &domain_filter_to_storage(filter),
-            &snapshot_chain_ids,
-        )
-        .await
-        .map_err(|error| internal_error("domainConnection", error))?;
+        let storage_filter = domain_filter_to_storage(filter)?;
+        let count =
+            count_phase_graphql_name_list(&state.pool, &storage_filter, &snapshot_chain_ids)
+                .await
+                .map_err(|error| internal_error("domainConnection", error))?;
         require_count_at_head(&count, head.as_ref(), "domainConnection")?;
         revalidate_graphql_head(state, head.as_ref(), "domainConnection").await?;
         Ok(DomainConnection {
@@ -180,12 +179,23 @@ fn storage_sort(
     (sort, order)
 }
 
-fn domain_filter_to_storage(filter: Option<DomainFilter>) -> NameCurrentListFilter {
+fn domain_filter_to_storage(filter: Option<DomainFilter>) -> Result<NameCurrentListFilter> {
     let filter = filter.unwrap_or_default();
-    NameCurrentListFilter {
+    let contains = filter
+        .name_contains
+        .as_deref()
+        .map(crate::name_filter::normalize_name_contains)
+        .transpose()
+        .map_err(|error| {
+            async_graphql::Error::new(format!(
+                "name_contains must be a valid ENSIP-15 name substring: {}",
+                error.message()
+            ))
+        })?;
+    Ok(NameCurrentListFilter {
         namespace: Some(NAMESPACE.to_owned()),
         name: filter.name,
-        contains: filter.name_contains,
+        contains,
         address: address_membership(
             filter.owner,
             filter.owner_in,
@@ -193,7 +203,7 @@ fn domain_filter_to_storage(filter: Option<DomainFilter>) -> NameCurrentListFilt
         ),
         is_migrated: filter.is_migrated,
         ..Default::default()
-    }
+    })
 }
 
 /// Build a storage address-membership filter from a single address and/or an address list, under a

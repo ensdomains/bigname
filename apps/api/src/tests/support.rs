@@ -94,7 +94,7 @@ async fn upsert_phase_name_current_rows(
         }
         let phase_identity: Option<(String, String)> = sqlx::query_as(
             "SELECT logical_name_id, namehash FROM bigname_phase.name_surfaces
-             WHERE namespace = $1 AND lower(raw_name) = lower($2)
+             WHERE namespace = $1 AND raw_name = $2
              ORDER BY logical_name_id
              LIMIT 1",
         )
@@ -151,7 +151,7 @@ async fn upsert_phase_name_current_rows(
         )
         .bind(logical_name_id)
         .bind(&row.namespace)
-        .bind(&row.canonical_display_name)
+        .bind(&row.normalized_name)
         .bind(namehash)
         .bind(row.surface_binding_id)
         .bind(row.resource_id)
@@ -380,8 +380,13 @@ async fn upsert_phase_address_names_current_rows(
 ) -> Result<Vec<bigname_storage::AddressNameCurrentRow>> {
     for row in rows {
         let (support_status, unsupported_reason) = phase_support_from_coverage(&row.coverage);
+        let normalized_name = bigname_domain::normalization::normalize_name(
+            &row.canonical_display_name,
+        )
+        .map_err(|error| anyhow::anyhow!(error.message().to_owned()))?
+        .normalized_name;
         let (logical_name_id, namehash) =
-            phase_logical_identity(&row.namespace, &row.normalized_name)?;
+            phase_logical_identity(&row.namespace, &normalized_name)?;
         let chain_positions: Option<Value> = sqlx::query_scalar(
             "SELECT chain_positions FROM bigname_phase.name_current
              WHERE logical_name_id = $1",
@@ -436,7 +441,7 @@ async fn upsert_phase_address_names_current_rows(
         .bind(logical_name_id)
         .bind(row.relation.as_str())
         .bind(&row.namespace)
-        .bind(&row.canonical_display_name)
+        .bind(&normalized_name)
         .bind(namehash)
         .bind(row.surface_binding_id)
         .bind(row.resource_id)
@@ -514,7 +519,7 @@ async fn upsert_phase_children_current_rows(
         .bind(child_logical_name_id)
         .bind(&row.surface_class)
         .bind(&row.namespace)
-        .bind(&row.canonical_display_name)
+        .bind(&row.normalized_name)
         .bind(namehash)
         .bind(row.labelhash.as_deref().unwrap_or(&row.namehash))
         .bind(&row.owner)
@@ -2476,7 +2481,7 @@ async fn upsert_test_name_surfaces(
         )
         .bind(logical_name_id)
         .bind(&row.namespace)
-        .bind(&row.canonical_display_name)
+        .bind(&row.normalized_name)
         .bind(raw_labels)
         .bind(&row.dns_encoded_name)
         .bind(namehash)
@@ -3505,6 +3510,13 @@ fn address_name_current_row(
     token_lineage_id: Option<Uuid>,
     block_number: i64,
 ) -> bigname_storage::AddressNameCurrentRow {
+    debug_assert_eq!(
+        bigname_domain::normalization::normalize_name(display_name)
+            .map(|name| name.normalized_name)
+            .ok()
+            .as_deref(),
+        Some(normalized_name)
+    );
     let namespace = logical_name_id
         .split_once(':')
         .map(|(namespace, _)| namespace)
@@ -3517,7 +3529,6 @@ fn address_name_current_row(
         relation,
         namespace: namespace.to_owned(),
         canonical_display_name: display_name.to_owned(),
-        normalized_name: normalized_name.to_owned(),
         namehash: namehash.to_owned(),
         surface_binding_id,
         resource_id,

@@ -20,6 +20,7 @@ mod errors;
 mod graphql;
 mod health;
 mod metrics;
+mod name_filter;
 #[path = "support/service.rs"]
 mod service;
 mod state;
