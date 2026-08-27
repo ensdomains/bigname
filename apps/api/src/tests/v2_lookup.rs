@@ -170,6 +170,151 @@ async fn v2_lookup_name_only_inputs_bypass_public_derivation_and_interpret_redo_
     assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
     assert_eq!(payload["data"][0]["status"], json!("not_found"));
     assert!(payload["meta"]["as_of"].get("8453").is_some());
+    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert!(payload["meta"].get("as_of_completeness").is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_bare_reverse_discloses_a_redo_suppressed_request_chain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_public_authority(&database).await?;
+    database
+        .simulate_interpret_redo_begin("base-mainnet", "recompute_flags")
+        .await?;
+
+    let response = app_router(AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    ))
+    .oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v2/lookup")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                    .expect("body must serialize"),
+            ))
+            .expect("lookup request must build"),
+    )
+    .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert!(payload["meta"]["as_of"]["1"].is_object());
+    assert!(payload["meta"]["as_of"].get("8453").is_none());
+    assert_eq!(
+        payload["meta"]["as_of_completeness"]["8453"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "temporarily_unavailable"
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_bare_reverse_returns_conflict_when_every_public_namespace_is_suppressed()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_public_authority(&database).await?;
+    for chain_id in ["ethereum-mainnet", "base-mainnet"] {
+        database
+            .simulate_interpret_redo_begin(chain_id, "recompute_flags")
+            .await?;
+    }
+
+    let response = app_router(AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    ))
+    .oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v2/lookup")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                    .expect("body must serialize"),
+            ))
+            .expect("lookup request must build"),
+    )
+    .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload:#}");
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_mixed_batch_keeps_reverse_suppression_disclosed() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_public_authority(&database).await?;
+    database
+        .simulate_interpret_redo_begin("base-mainnet", "recompute_flags")
+        .await?;
+
+    let response = app_router(AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    ))
+    .oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v2/lookup")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "inputs": [
+                        {"id": "reverse", "address": address},
+                        {"id": "forward", "name": "missing.base.eth"}
+                    ]
+                }))
+                .expect("body must serialize"),
+            ))
+            .expect("mixed lookup request must build"),
+    )
+    .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert_eq!(lookup_record_names(&payload), vec!["alice.eth", "bob.eth"]);
+    assert_eq!(payload["data"][1]["status"], json!("not_found"));
+    assert!(payload["meta"]["as_of"]["1"].is_object());
+    assert!(payload["meta"]["as_of"].get("8453").is_none());
+    assert_eq!(
+        payload["meta"]["as_of_completeness"]["8453"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "temporarily_unavailable"
+        })
+    );
+    let token = payload["meta"]["as_of_token"]
+        .as_str()
+        .expect("mixed lookup must include an as_of_token");
+    let bigname_storage::SnapshotAt::ResolvedPositions(positions) =
+        crate::v2::decode_at_token(token).expect("mixed lookup token must decode")
+    else {
+        panic!("mixed lookup token must contain resolved positions");
+    };
+    assert!(
+        positions
+            .as_map()
+            .values()
+            .any(|position| position.chain_id == "base-mainnet"),
+        "the token must retain the suppressed chain position used by the forward input"
+    );
 
     database.cleanup().await
 }
@@ -1686,6 +1831,84 @@ async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_explicit_namespace_invalid_name_keeps_the_selected_chain_in_meta() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_lookup_ethereum_head(&database, 77, "0xlookup-invalid-explicit").await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "namespace": "ens",
+            "inputs": [{"name": "bad name.eth"}]
+        }),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("invalid_name"));
+    assert_eq!(
+        payload["meta"]["as_of"]["1"],
+        json!({
+            "block_number": 77,
+            "block_hash": "0xlookup-invalid-explicit",
+            "timestamp": "2026-04-17T00:00:17Z"
+        })
+    );
+    assert!(payload["meta"].get("as_of_completeness").is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_explicit_namespace_invalid_name_discloses_a_suppressed_chain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "namespace": "ens",
+            "inputs": [{"name": "bad name.eth"}]
+        }),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("invalid_name"));
+    assert!(payload["meta"].get("as_of").is_none());
+    assert_eq!(
+        payload["meta"]["as_of_completeness"]["1"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "temporarily_unavailable"
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_inferred_name_scope_discloses_a_suppressed_chain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"inputs": [{"name": "missing.eth"}]}),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("not_found"));
+    assert!(payload["meta"].get("as_of").is_none());
+    assert_eq!(
+        payload["meta"]["as_of_completeness"]["1"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "temporarily_unavailable"
+        })
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

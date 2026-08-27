@@ -40,6 +40,7 @@ mod records;
 mod resolution_lookup;
 mod resolution_verified;
 mod reverse_identity;
+mod snapshot_disclosure;
 mod snapshots;
 pub(crate) mod status_freshness;
 
@@ -60,6 +61,7 @@ pub(crate) use reverse_identity::primary_coherence_test_hooks as identity_facade
 #[cfg(test)]
 pub(crate) use reverse_identity::test_hooks as identity_facade_count_test_hooks;
 pub(crate) use reverse_identity::*;
+pub(crate) use snapshot_disclosure::*;
 pub(crate) use snapshots::*;
 
 use super::format_timestamp;

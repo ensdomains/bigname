@@ -26,6 +26,8 @@ pub(crate) struct Meta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) as_of: Option<BTreeMap<String, AsOf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) as_of_completeness: Option<BTreeMap<String, AsOfCompleteness>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) as_of_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) completeness: Option<Completeness>,
@@ -42,6 +44,12 @@ pub(crate) struct AsOf {
     pub(crate) block_number: u64,
     pub(crate) block_hash: String,
     pub(crate) timestamp: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct AsOfCompleteness {
+    pub(crate) completeness: Completeness,
+    pub(crate) unsupported_reason: String,
 }
 
 #[cfg(test)]

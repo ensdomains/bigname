@@ -4,7 +4,9 @@ Status: Accepted
 Date: 2026-06-10
 Accepted: 2026-06-12
 Amended: 2026-08-13 (status readiness for removed chains); 2026-08-25
-(Issue #411 [source-role](../glossary.md#source-role) and ordering-based readiness enforcement)
+(Issue #411 [source-role](../glossary.md#source-role) and ordering-based readiness
+enforcement); 2026-08-26 (issue #449 request-scoped lookup and search
+`meta.as_of` coverage)
 
 ## 2026-08-06 Amendment: Schema-v2 Serving Boundary
 
@@ -23,8 +25,9 @@ collections at `GET /v2/names/{name}/subnames`,
 `GET /v2/addresses/{address}/names`,
 `GET /v2/addresses/{address}/history`, `GET /v2/search`, `GET /v2/events`,
 and `GET /v2/diagnostics/events` page over mutable latest-state rows. They
-therefore omit `meta.as_of` and `meta.as_of_token`, issue cursors without a
-snapshot validity claim, and reject `at`, `finality=safe`, and
+therefore omit `meta.as_of` and `meta.as_of_token`, except that search reports
+request-scoped `meta.as_of` and `meta.as_of_completeness` for staleness and
+suppression disclosure while still omitting `meta.as_of_token`. They issue cursors without a snapshot validity claim and reject `at`, `finality=safe`, and
 `finality=finalized`. Their collection anchor, namespace, filter, and sort
 cursor bindings remain enforced. Existing cursor snapshot components are
 ignored rather than treated as a validity condition.
@@ -290,7 +293,8 @@ Rules:
   must not otherwise run unconditional full counts on the request path.
 - `meta` is always present: `as_of` and `as_of_token` on single-resource routes
   that read snapshot-pinned chain-derived state. Top-level latest-state
-  collections omit both. Control-plane routes (`/v2/status`,
+  collections omit both except that search reports request-scoped `as_of` and
+  `as_of_completeness` while omitting `as_of_token`. Control-plane routes (`/v2/status`,
   `/v2/namespaces/{namespace}`) and verified name-profile responses served by
   the route-local on-demand fallback omit both. `completeness`,
   `unsupported_fields`, and `unsupported_reason` only when the read is not clean;
@@ -299,6 +303,13 @@ Rules:
   detail is a diagnostics route, not a query knob) and no stripped variant,
   so the envelope never changes shape per request. `meta` is one small
   response-level object (not per-record); the feed latency path tolerates it.
+- Public reverse lookup and search account for every chain selected by the
+  request. A readable position appears in `meta.as_of`; a position withheld by
+  the deployment-readiness check appears in `meta.as_of_completeness` with the
+  common `completeness` and `unsupported_reason` vocabulary. Returned rows do
+  not narrow this request-relative denominator. In a mixed lookup batch,
+  reverse suppression takes precedence over `meta.as_of` for that chain even
+  when `meta.as_of_token` contains the position used by a forward input.
 - `unsupported_fields` appears at two levels with disjoint meanings and no
   duplication: `meta.unsupported_fields` names response-level sections or
   expansions the route could not serve (e.g. an `include=` section);

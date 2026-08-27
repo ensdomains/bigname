@@ -16,10 +16,14 @@ use crate::{AppState, state::is_recognized_public_namespace};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
+    AtSelector, CursorPayload, Envelope, Finality, Page, QueryParams, RawQueryParams,
     RegistrationStatus, V2Error, V2Result, api_error_to_v2, decode, encode,
     name_record::name_registration_fields,
     support::{derive_public_namespace_set, revalidate_public_namespace_set},
+    support::{
+        explicit_namespace_request_scope, request_scope_meta,
+        revalidate_explicit_namespace_request_scope,
+    },
     validate_latest_collection_selectors,
 };
 
@@ -177,6 +181,10 @@ pub(crate) async fn get_search(
         .as_ref()
         .map(|namespaces| namespaces.names())
         .unwrap_or_default();
+    let explicit_namespace_meta = match params.namespace.as_deref() {
+        Some(namespace) => Some(explicit_namespace_request_scope(&state, namespace).await?),
+        None => None,
+    };
     let cursor_binding = SearchCursorBinding {
         q: &params.q,
         match_mode: params.match_mode,
@@ -196,11 +204,30 @@ pub(crate) async fn get_search(
     let storage_page =
         load_search_storage_page(&state, &filter, storage_cursor.as_ref(), params.page_size)
             .await?;
+    #[cfg(test)]
+    if public_namespace_set.is_none() {
+        public_namespace_read_test_hooks::run(&state.pool).await?;
+    }
     if let Some(public_namespace_set) = public_namespace_set.as_ref() {
         revalidate_public_namespace_set(&state, public_namespace_set)
             .await
             .map_err(api_error_to_v2)?;
     }
+    let meta = match public_namespace_set.as_ref() {
+        Some(public_namespace_set) => request_scope_meta(public_namespace_set.request_scope())?,
+        None => {
+            revalidate_explicit_namespace_request_scope(
+                &state,
+                params
+                    .namespace
+                    .as_deref()
+                    .expect("explicit search scope must include a namespace"),
+                explicit_namespace_meta
+                    .expect("explicit search scope metadata must be captured before the page read"),
+            )
+            .await?
+        }
+    };
 
     let next_cursor = storage_page
         .next_cursor
@@ -220,7 +247,7 @@ pub(crate) async fn get_search(
             total_count: None,
             has_more,
         }),
-        meta: Meta::default(),
+        meta,
     }))
 }
 

@@ -41,7 +41,7 @@ pub(crate) use diagnostics::{
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
     get_name_records_diagnostic,
 };
-pub(crate) use envelope::{Envelope, Meta, Page};
+pub(crate) use envelope::{AsOfCompleteness, Envelope, Meta, Page};
 #[cfg(test)]
 pub(crate) use error::ErrorCode;
 pub(crate) use error::{V2Error, V2Result};
@@ -82,8 +82,9 @@ pub(crate) use search::get_search;
 #[cfg(test)]
 pub(crate) use search::public_namespace_read_test_hooks as search_public_namespace_read_test_hooks;
 pub(crate) use snapshots::{
-    SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, decode_at_token,
-    encode_at_token, resolve_v2_snapshot_for, sanitized_snapshot_internal_error, snapshot_meta,
+    SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, as_of_meta,
+    decode_at_token, encode_at_token, resolve_v2_snapshot_for, sanitized_snapshot_internal_error,
+    snapshot_meta,
 };
 pub(crate) use status::get_status;
 pub(crate) use strict_query::{

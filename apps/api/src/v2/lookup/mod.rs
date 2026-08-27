@@ -11,7 +11,7 @@ use super::support::{load_reverse_identity_records_live, load_reverse_identity_r
 use crate::AppState;
 
 use super::{
-    Envelope, Meta, NoQueryParams, Page, Relation, RelationSet, Status, V2Error, V2Result, encode,
+    Envelope, NoQueryParams, Page, Relation, RelationSet, Status, V2Error, V2Result, encode,
 };
 
 mod admission;
@@ -47,7 +47,10 @@ use parse::{
     ensure_lookup_batch_limit, parse_address_input, parse_lookup_json_body, parse_lookup_namespace,
     parse_lookup_profile, parse_name_input,
 };
-use scope::{lookup_public_namespaces, lookup_snapshot_scope, revalidate_lookup_public_namespaces};
+use scope::{
+    lookup_public_namespaces, lookup_request_scope_meta, lookup_snapshot_scope,
+    revalidate_lookup_public_namespaces,
+};
 
 const EXACT_RELATION_SCAN_MULTIPLIER: u64 = 10;
 
@@ -141,13 +144,11 @@ pub(crate) async fn get_lookup(
         .into_iter()
         .map(|result| result.expect("every parsed lookup input must render a result"))
         .collect::<Vec<_>>();
+    let meta = lookup_request_scope_meta(&served_head, &public_namespaces, &snapshot_scope)?;
     Ok(Json(Envelope {
         data,
         page: None,
-        meta: match served_head {
-            Some(served_head) => served_head.meta()?,
-            None => Meta::default(),
-        },
+        meta,
     }))
 }
 
