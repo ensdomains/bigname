@@ -198,7 +198,7 @@ sorted per-source next block, last processed block, and loaded redo boundary.
 Thus a reorg, a hash replacement, or one Ingest source moving resets the
 sequence even when the displayed summary block is unchanged. Target/head
 movement does not reset it. A single Project boundary replay can reach count
-`1` but cannot page. Caught-up Live polls, no-head/empty completions, idle polls,
+`1` but cannot page. Caught-up Live polls that claim no cursor movement, no-head/empty completions, idle polls,
 capacity pauses, and completed Verify revalidation clear or bypass the detector.
 An idle poll clears earlier evidence, so pinned commits separated by idle polls
 do not accumulate; this is accepted because an idle poll reports no indexing or

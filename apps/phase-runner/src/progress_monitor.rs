@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(observed(&tracker, &redo), (0, 0));
     }
     #[test]
-    fn empty_idle_and_caught_up_live_outcomes_clear_evidence() {
+    fn empty_idle_and_pure_live_polls_clear_but_caught_up_work_accumulates() {
         let tracker = tracker(&Clock::new());
         let live = context(PhaseName::Live, RunMode::Normal, Some(marker(5, "five")));
         commit(&tracker, &live, work(live.resume.current.clone()));
@@ -472,17 +472,18 @@ mod tests {
             commit(&tracker, &live, work(live.resume.current.clone()));
             commit(&tracker, &live, work(live.resume.current.clone()));
         }
-        for target in [marker(6, "six"), marker(7, "seven")] {
+        tracker.clear_phase("chain", PhaseName::Live);
+        for expected in 0..=3 {
             commit(
                 &tracker,
                 &live,
                 PhaseBatchOutcome::Complete(PhaseProgress {
                     current: Some(marker(6, "six")),
-                    target: Some(target),
+                    target: Some(marker(6, "six")),
                     ..PhaseProgress::default()
                 }),
             );
-            assert!(observed(&tracker, &live).0 >= 1);
+            assert_eq!(observed(&tracker, &live).0, expected);
         }
     }
     #[test]

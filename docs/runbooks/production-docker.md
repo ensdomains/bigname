@@ -62,8 +62,8 @@ Do not start the walk until all of these checks pass:
 The equivalent operational acceptance is that livelock in any executable
 phase/mode pages within 13 minutes after the second confirmed pinned completion,
 or within 3 minutes after the third. Normal Ingest source movement, one Project
-boundary replay, caught-up Live polling, no-head completion, capacity pause,
-and completed Verify revalidation do not page.
+boundary replay, caught-up Live polling that reports no movement from the
+starting durable cursor, no-head completion, capacity pause, and completed Verify revalidation do not page.
 
 ## Planned migration and fingerprint boundary
 
