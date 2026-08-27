@@ -970,6 +970,66 @@ async fn v2_search_explicit_namespace_rejects_a_position_change_after_the_page_r
 }
 
 #[tokio::test]
+async fn v2_search_explicit_namespace_rejects_a_head_change_while_suppressed() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET current_block_number = current_block_number - 1,
+             current_block_hash = '0xsearch-explicit-lagging-a'
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .body(Body::empty())
+                    .expect("explicit search request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 999,
+                "block_hash": "0xsearch-explicit-suppressed-later",
+                "timestamp": "2026-08-26T00:16:39Z"
+            }
+        }))
+        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET current_block_number = current_block_number - 1,
+             current_block_hash = '0xsearch-explicit-lagging-b'
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("suppressed explicit search request task panicked")?
+        .context("suppressed explicit search request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        json!("conflict")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_explicit_namespace_rejects_project_republication_after_the_page_read()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

@@ -1834,6 +1834,84 @@ async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_explicit_namespace_invalid_name_keeps_the_selected_chain_in_meta() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_lookup_ethereum_head(&database, 77, "0xlookup-invalid-explicit").await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "namespace": "ens",
+            "inputs": [{"name": "bad name.eth"}]
+        }),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("invalid_name"));
+    assert_eq!(
+        payload["meta"]["as_of"]["1"],
+        json!({
+            "block_number": 77,
+            "block_hash": "0xlookup-invalid-explicit",
+            "timestamp": "2026-04-17T00:00:17Z"
+        })
+    );
+    assert!(payload["meta"].get("as_of_completeness").is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_explicit_namespace_invalid_name_discloses_a_suppressed_chain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "namespace": "ens",
+            "inputs": [{"name": "bad name.eth"}]
+        }),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("invalid_name"));
+    assert!(payload["meta"].get("as_of").is_none());
+    assert_eq!(
+        payload["meta"]["as_of_completeness"]["1"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "temporarily_unavailable"
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_inferred_name_scope_discloses_a_suppressed_chain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"inputs": [{"name": "missing.eth"}]}),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("not_found"));
+    assert!(payload["meta"].get("as_of").is_none());
+    assert_eq!(
+        payload["meta"]["as_of_completeness"]["1"],
+        json!({
+            "completeness": "unsupported",
+            "unsupported_reason": "temporarily_unavailable"
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";

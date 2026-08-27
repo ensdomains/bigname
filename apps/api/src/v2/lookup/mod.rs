@@ -144,7 +144,7 @@ pub(crate) async fn get_lookup(
         .into_iter()
         .map(|result| result.expect("every parsed lookup input must render a result"))
         .collect::<Vec<_>>();
-    let meta = lookup_request_scope_meta(served_head.as_ref(), public_namespaces.as_ref())?;
+    let meta = lookup_request_scope_meta(&served_head, &public_namespaces, &snapshot_scope)?;
     Ok(Json(Envelope {
         data,
         page: None,

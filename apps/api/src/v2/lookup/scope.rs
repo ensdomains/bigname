@@ -6,7 +6,8 @@ use tracing::error;
 use crate::{
     AppState,
     v2::support::{
-        PublicNamespaceSet, apply_request_scope_completeness, derive_public_namespace_set,
+        PublicNamespaceSet, apply_request_scope_completeness,
+        apply_suppressed_request_scope_completeness, derive_public_namespace_set,
         revalidate_lookup_public_namespace_set,
     },
 };
@@ -17,15 +18,21 @@ use super::{
 use crate::v2::{Meta, V2Error, V2Result, api_error_to_v2, v2_exact_name_snapshot_scope};
 
 pub(super) fn lookup_request_scope_meta(
-    served_head: Option<&ServedHead>,
-    namespaces: Option<&PublicNamespaceSet>,
+    served_head: &Option<ServedHead>,
+    namespaces: &Option<PublicNamespaceSet>,
+    name_scope: &Option<SnapshotSelectionScope>,
 ) -> V2Result<Meta> {
     let mut meta = served_head
+        .as_ref()
         .map(ServedHead::meta)
         .transpose()?
         .unwrap_or_default();
-    if let Some(namespaces) = namespaces {
+    if let Some(namespaces) = namespaces.as_ref() {
         apply_request_scope_completeness(&mut meta, namespaces.request_scope())?;
+    } else if served_head.is_none()
+        && let Some(scope) = name_scope.as_ref()
+    {
+        apply_suppressed_request_scope_completeness(&mut meta, scope)?;
     }
     Ok(meta)
 }
@@ -37,15 +44,15 @@ pub(super) async fn lookup_snapshot_scope(
     has_address_inputs: bool,
     public_namespaces: Option<&PublicNamespaceSet>,
 ) -> V2Result<Option<SnapshotSelectionScope>> {
-    let has_valid_name_inputs = name_inputs.iter().any(|input| input.lookup.is_some());
-    if !has_address_inputs && !has_valid_name_inputs {
-        return Ok(None);
-    }
-
     if let Some(namespace) = namespace {
         return v2_exact_name_snapshot_scope(state, namespace, None)
             .await
             .map(Some);
+    }
+
+    let has_valid_name_inputs = name_inputs.iter().any(|input| input.lookup.is_some());
+    if !has_address_inputs && !has_valid_name_inputs {
+        return Ok(None);
     }
 
     let namespaces = name_inputs

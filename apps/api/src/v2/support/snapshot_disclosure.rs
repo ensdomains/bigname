@@ -7,6 +7,7 @@ const TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ExplicitNamespaceRequestScope {
     meta: Meta,
+    selected_heads: BTreeMap<String, Option<(i64, String)>>,
     project_generations: Option<BTreeMap<String, String>>,
 }
 
@@ -61,6 +62,19 @@ pub(crate) fn apply_request_scope_completeness(
     Ok(())
 }
 
+pub(crate) fn apply_suppressed_request_scope_completeness(
+    meta: &mut Meta,
+    scope: &SnapshotSelectionScope,
+) -> V2Result<()> {
+    apply_request_scope_completeness(
+        meta,
+        &[RequestScopeSnapshot {
+            scope: scope.clone(),
+            selected: None,
+        }],
+    )
+}
+
 pub(crate) async fn explicit_namespace_request_scope(
     state: &AppState,
     namespace: &str,
@@ -73,6 +87,7 @@ pub(crate) async fn explicit_namespace_request_scope(
     )
     .await
     .map_err(api_error_to_v2)?;
+    let selected_heads = request_scope_head_fingerprint(&state.pool, &scope).await?;
     let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
         .map_err(snapshot_selection_api_error)
         .map_err(api_error_to_v2)?;
@@ -113,8 +128,29 @@ pub(crate) async fn explicit_namespace_request_scope(
         };
     Ok(ExplicitNamespaceRequestScope {
         meta: request_scope_meta(&[RequestScopeSnapshot { scope, selected }])?,
+        selected_heads,
         project_generations,
     })
+}
+
+async fn request_scope_head_fingerprint(
+    pool: &PgPool,
+    scope: &SnapshotSelectionScope,
+) -> V2Result<BTreeMap<String, Option<(i64, String)>>> {
+    let mut heads = BTreeMap::new();
+    for requirement in scope.required_positions() {
+        let head = sqlx::query_as::<_, (i64, String)>(
+            "SELECT latest_block_number, latest_block_hash
+             FROM chain_heads
+             WHERE chain_id = $1",
+        )
+        .bind(&requirement.chain_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| crate::v2::V2Error::internal_error("failed to capture request-scope head"))?;
+        heads.insert(requirement.chain_id.clone(), head);
+    }
+    Ok(heads)
 }
 
 pub(crate) async fn revalidate_explicit_namespace_request_scope(
