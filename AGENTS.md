@@ -41,7 +41,7 @@ The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. A
 
 - `.refs/ens_v1/` — canonical ENSv1 Solidity
 - `.refs/ens_v1_lll/` — historical evidence for the 2017 LLL registry only
-- `.refs/ens_v2/` — canonical post-audit ENSv2 contracts and current Sepolia deployment
+- `.refs/ens_v2/` — canonical post-audit ENSv2 contracts; admitted Sepolia deployment evidence is the archived 2026-06-29 artifacts under `contracts/deployments/sepolia-20260629-r1/` (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/.deployment.json:L4 @ ens_v2@a971bd64); the live `contracts/deployments/sepolia/` tree is upstream's unadmitted 2026-07-30 redeploy (upstream: .refs/ens_v2/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2@a971bd64)
 - `.refs/ens_v2_sepolia_dev/` — historical evidence for deprecated pre-audit `sepolia-dev` manifest versions only
 - `.refs/basenames/` — canonical Basenames Solidity
 - `.refs/ens_rainbow/` — Graph Protocol ENS rainbow-table tooling, labelhash preimage import table-shape evidence only
