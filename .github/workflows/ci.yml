@@ -226,6 +226,7 @@ jobs:
           POSTGRES_DB: bigname
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
         ports:
           - 5432:5432
         options: >-
@@ -264,10 +265,42 @@ jobs:
         if: steps.sccache.outcome != 'success'
         run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
+        run: |
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
       - name: Cache phase-runner Cargo dependencies
+        id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
           shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          workspaces: ". -> target"
+          cache-workspace-crates: false
+
+      - name: Report phase-runner dependency cache
+        env:
+          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
+        run: |
+          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
+          echo "phase-runner dependency-cache hit: $CACHE_HIT"
+          {
+            echo "### phase-runner dependency cache"
+            echo
+            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
+            echo "- Exact hit: \`$CACHE_HIT\`"
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: cargo nextest (slice 1/3)
         run: >-
@@ -309,6 +342,7 @@ jobs:
           POSTGRES_DB: bigname
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
         ports:
           - 5432:5432
         options: >-
@@ -347,10 +381,42 @@ jobs:
         if: steps.sccache.outcome != 'success'
         run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
+        run: |
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
       - name: Cache phase-runner Cargo dependencies
+        id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
           shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          workspaces: ". -> target"
+          cache-workspace-crates: false
+
+      - name: Report phase-runner dependency cache
+        env:
+          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
+        run: |
+          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
+          echo "phase-runner dependency-cache hit: $CACHE_HIT"
+          {
+            echo "### phase-runner dependency cache"
+            echo
+            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
+            echo "- Exact hit: \`$CACHE_HIT\`"
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: cargo nextest (slice 2/3)
         run: >-
@@ -378,6 +444,7 @@ jobs:
           POSTGRES_DB: bigname
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
         ports:
           - 5432:5432
         options: >-
@@ -416,10 +483,42 @@ jobs:
         if: steps.sccache.outcome != 'success'
         run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
+        run: |
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
       - name: Cache phase-runner Cargo dependencies
+        id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
           shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          workspaces: ". -> target"
+          cache-workspace-crates: false
+
+      - name: Report phase-runner dependency cache
+        env:
+          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
+        run: |
+          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
+          echo "phase-runner dependency-cache hit: $CACHE_HIT"
+          {
+            echo "### phase-runner dependency cache"
+            echo
+            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
+            echo "- Exact hit: \`$CACHE_HIT\`"
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: cargo nextest (slice 3/3)
         run: >-
@@ -480,14 +579,43 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev binutils
 
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
+        run: |
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
       - name: Cache e2e phase-runner Cargo dependencies
-        id: e2e_cache
+        id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: e2e-phase-runner-v1
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
+          shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
           workspaces: ". -> target"
           cache-workspace-crates: false
-          save-if: true
+          save-if: false
+
+      - name: Report phase-runner dependency cache
+        env:
+          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
+        run: |
+          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
+          echo "phase-runner dependency-cache hit: $CACHE_HIT"
+          {
+            echo "### phase-runner dependency cache"
+            echo
+            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
+            echo "- Exact hit: \`$CACHE_HIT\`"
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Sync pinned upstream checkouts
         run: |
@@ -564,7 +692,8 @@ jobs:
           {
             echo "### e2e phase-runner artifact"
             echo
-            echo "- Dependency-cache hit: \`${{ steps.e2e_cache.outputs.cache-hit }}\`"
+            echo "- Dependency-cache key: \`${{ steps.phase_runner_cache_key.outputs.primary }}\`"
+            echo "- Dependency-cache hit: \`${{ steps.phase_runner_cache.outputs.cache-hit }}\`"
             echo "- Build command: ${{ steps.package.outputs.build-seconds }}s"
             echo "- Strip/package: ${{ steps.package.outputs.package-seconds }}s"
             echo "- Unstripped binary: ${{ steps.package.outputs.unstripped-bytes }} bytes"
@@ -615,14 +744,43 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
+        run: |
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
       - name: Restore e2e phase-runner Cargo dependencies
-        id: e2e_cache
+        id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: e2e-phase-runner-v1
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
+          shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
           workspaces: ". -> target"
           cache-workspace-crates: false
           save-if: false
+
+      - name: Report phase-runner dependency cache
+        env:
+          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
+        run: |
+          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
+          echo "phase-runner dependency-cache hit: $CACHE_HIT"
+          {
+            echo "### phase-runner dependency cache"
+            echo
+            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
+            echo "- Exact hit: \`$CACHE_HIT\`"
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Install foundry (anvil)
         uses: foundry-rs/foundry-toolchain@v1
@@ -703,14 +861,43 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
+      - name: Compute phase-runner dependency-cache key
+        id: phase_runner_cache_key
+        run: |
+          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
+          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
+          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
+          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
+          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
+          echo "primary=$primary" >>"$GITHUB_OUTPUT"
+          echo "phase-runner dependency-cache primary key: $primary"
+
       - name: Restore e2e phase-runner Cargo dependencies
-        id: e2e_cache
+        id: phase_runner_cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: e2e-phase-runner-v1
+          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
+          shared-key: phase-runner
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
           workspaces: ". -> target"
           cache-workspace-crates: false
           save-if: false
+
+      - name: Report phase-runner dependency cache
+        env:
+          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
+          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
+        run: |
+          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
+          echo "phase-runner dependency-cache hit: $CACHE_HIT"
+          {
+            echo "### phase-runner dependency cache"
+            echo
+            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
+            echo "- Exact hit: \`$CACHE_HIT\`"
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Install foundry (anvil)
         uses: foundry-rs/foundry-toolchain@v1
