@@ -104,9 +104,9 @@ mod v2_registry_events {
         event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
         event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
         event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
-        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@a971bd64)
         event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
-        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@a971bd64)
         event ParentUpdated(address indexed parent, string label, address indexed sender);
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
         event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
@@ -6245,9 +6245,9 @@ async fn seed_v2_lifecycle_fixture(pool: &PgPool, chain_id: &str) -> Result<()> 
                 "emitter_roles": ["registry"],
                 "normalized_events": ["TokenResourceLinked"]
             },
-            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@ccaeb58)
+            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@a971bd64)
             { "name": "SubregistryUpdated", "fragment": "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)", "emitter_roles": ["registry"], "normalized_events": ["SubregistryChanged"] },
-            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58)
+            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@a971bd64)
             { "name": "ParentUpdated", "fragment": "event ParentUpdated(address indexed parent, string label, address indexed sender)", "emitter_roles": ["registry"], "normalized_events": ["ParentChanged"] },
             {
                 "name": "EACRolesChanged",

@@ -29,9 +29,9 @@ pub const ADMISSION_DISCOVERY_EDGE_KINDS: &[&str] = &["resolver", REGISTRY_ANNOU
 
 /// The only normalized event kinds a child migration boundary's recorded ENSv1 cleanup can be: the
 /// wrapper token parked in the graveyard
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58),
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58),
 /// or the node unwrapped into it
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64).
 /// Which upstream branch a cleanup came from is adapter knowledge, so the transport matches this
 /// set rather than naming kinds of its own.
 pub const CHILD_CLEANUP_EVENT_KINDS: &[&str] = &[
@@ -45,9 +45,9 @@ pub const CHILD_CLEANUP_EVENT_KINDS: &[&str] = &[
 /// so keying a reopen on the boundary's own log would find nothing to undo. This covers direct
 /// children and both unlocked second-level paths; for the `locked_child` shape, whose cleanup
 /// closes nothing by itself, the transition write is the only close there is.
-/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 pub const EVENT_CLOSE_TIME_SQL: &str = "lineage.block_timestamp + make_interval(\
     secs => COALESCE(\
         CASE WHEN event.after_state #>> '{predecessor_binding,selection}' \

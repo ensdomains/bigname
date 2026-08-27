@@ -362,9 +362,9 @@
       "id": "ens_v2_registry_subregistry_registration",
       "runner": "ens_v2_registry",
       "upstream_citations": [
-        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L468 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L472 @ ens_v2@ccaeb58)"
+        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64)",
+        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@a971bd64)",
+        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@a971bd64)"
       ],
       "manifests": [
         {
@@ -466,10 +466,10 @@
       "id": "ens_v2_permissions_grant_revoke",
       "runner": "ens_v2_permissions",
       "upstream_citations": [
-        "(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L267 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L301 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L308 @ ens_v2@ccaeb58)"
+        "(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L267 @ ens_v2@a971bd64)",
+        "(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@a971bd64)",
+        "(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L301 @ ens_v2@a971bd64)",
+        "(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L308 @ ens_v2@a971bd64)"
       ],
       "manifests": [
         {
@@ -530,8 +530,8 @@
       "id": "ens_v2_resolver_text_record",
       "runner": "ens_v2_resolver",
       "upstream_citations": [
-        "(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L475 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L488 @ ens_v2@ccaeb58)"
+        "(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L475 @ ens_v2_sepolia_20260629@ccaeb58)",
+        "(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L488 @ ens_v2_sepolia_20260629@ccaeb58)"
       ],
       "manifests": [
         {
@@ -577,9 +577,9 @@
       "id": "ens_v2_registrar_registration",
       "runner": "ens_v2_registrar",
       "upstream_citations": [
-        "(upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L159 @ ens_v2@ccaeb58)"
+        "(upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@a971bd64)",
+        "(upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@a971bd64)",
+        "(upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L159 @ ens_v2@a971bd64)"
       ],
       "manifests": [
         {
@@ -958,8 +958,8 @@
       "id": "ens_v2_registry_created_unlinked",
       "runner": "ens_v2_registry",
       "upstream_citations": [
-        "(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)",
-        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58)"
+        "(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64)",
+        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64)"
       ],
       "manifests": [
         {

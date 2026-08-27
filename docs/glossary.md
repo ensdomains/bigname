@@ -44,7 +44,7 @@ anchor* is the registry entry, registrar lease
 wrapper position
 (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f),
 or ENSv2 resource
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L39 @ ens_v2@a971bd64)
 behind a `resource_id`; the id survives changes within one anchor and rotates
 when authority moves to a different anchor. An *observation anchor* is the
 exact chain/block identity a stored row was observed at.
@@ -309,8 +309,8 @@ role-free emitter path even when an emitterless candidate or direct
 declarations already exist. Adding that path is widening because an
 announcement-admitted registry can emit `ResolverUpdated` and match the
 resolver rule.
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L478 @ ens_v2@a971bd64)
 Removing the last direct emitter narrows only the
 declaration-backed part of such a rule. Registry-announcement widening instead
 stamps a required Ingest redo for the ENSv2 registry family from the earlier of
@@ -360,7 +360,7 @@ edge remains ordinary and the watch plan traverses it while a separate
 `migration_registry_creation` association carries candidate-or-activated
 consumer-visibility provenance. The association never turns indexability itself
 into name authority.
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64)
 
 **Event-silent** — a contract that changes relevant state without emitting a
 usable event (for example a legacy reverse resolver whose `name` value changes
@@ -446,8 +446,8 @@ subname goes to its already-migrated parent's
 [migration registry](#migration-registry-wrapperregistry), which registers the
 label outright — premigration reserved only second-level names, so there is
 nothing to claim
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L212 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L224 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L215 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L227 @ ens_v2@a971bd64).
 Nothing about it is cross-chain; see [`upstream.md`](upstream.md#known-divergences)
 for the stale upstream comment that says otherwise. The
 `ens_v2_migration_l1` [source family](#source-family) admits
@@ -488,17 +488,17 @@ ENSv1→ENSv2 migration shape for that name, never from family coexistence or a
 transaction hash alone. Descendants keep their own authority until they reach
 their own activated boundary or obtain a current registration in the admitted
 migration registry below that migrated parent; the latter does not invent a
-child boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) The unlocked path transfers the
+child boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L175 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L306 @ ens_v2@a971bd64) The unlocked path transfers the
 ENSv1 position to the
 Graveyard before registering the reserved ENSv2 label. For an unlocked wrapped
 input, it unwraps into the Graveyard before injecting that registration. The
 locked receiver moves the wrapper token to the Graveyard and injects the ENSv2
 registration without unwrapping it.
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2_sepolia_20260629@ccaeb58).
 
 At an activated `.eth` second-level boundary, Interpret locks the current
 matching ENSv1 predecessor and changes the predecessor and successor binding
@@ -521,13 +521,13 @@ This rule does not cover emancipated children: their transfer gate uses wrapper
 expiry rather than the parent's registrar grace boundary. Slice 3A defines that
 separate predecessor rule under
 [child migration boundary](#child-migration-boundary).
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L103 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L48-L55 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L103 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L48-L55 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L835 @ ens_v1@91c966f)
 
@@ -619,36 +619,36 @@ publication decisions.
 before anyone migrates. In ENSv1→ENSv2 migration discussions, an **ENSv2
 reservation** means this placeholder. A batch tool registers each label with owner
 `address(0)`
-(upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L65 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L65 @ ens_v2@a971bd64),
 which makes the entry `RESERVED`: it has an expiry, a subregistry, and a
 resolver, but no ERC-1155 token and no roles, and it emits `LabelReserved`
 rather than `LabelRegistered`
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L465 @ ens_v2@a971bd64).
 The reserved expiry is an explicit BatchRegistrar input, not a value the
-registry derives. (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L52 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L65 @ ens_v2@ccaeb58) The pinned premigration tool converts a configurable whole-day
+registry derives. (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L52 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L65 @ ens_v2@a971bd64) The pinned premigration tool converts a configurable whole-day
 bonus to seconds, defaults it to 62 days, and writes the ENSv1 registrar expiry
-plus that value. (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L973 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1035 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1265 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1267 @ ens_v2@ccaeb58) Separately, the deployment passes `ETHRenewerV1` a
+plus that value. (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L973 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1035 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1265 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1267 @ ens_v2@a971bd64) Separately, the deployment passes `ETHRenewerV1` a
 62-day-and-1-second bonus computed from the two grace periods.
-(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L216 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L217 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L218 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L219 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L38 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L39 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L229 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L230 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L231 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L232 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L38 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L39 @ ens_v2@a971bd64).
 Those defaults differ by one second. Bigname therefore preserves the emitted
 reservation expiry and never reconstructs it from the renewal-bridge constant;
 any deployment or test reservation with another explicit expiry retains that
 value.
 At its stored expiry the entry becomes `AVAILABLE`, and registry resolver reads
 return zero
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L259 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L626 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L653 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L257 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L656 @ ens_v2@a971bd64).
 During the remaining configured ENSv2 grace window, the status is `AVAILABLE` but
 the registrar still treats the entry as in grace, and `ETHRenewerV1` can still
 renew it
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L290 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L145 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L290 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L145 @ ens_v2_sepolia_20260629@ccaeb58).
 The consequence for an indexer: before that expiry, a name can carry ENSv2
 expiry and resolver facts, and no owner, while ENSv1 is still the authority for
 it. For the version-zero initial reservations used by premigration, bigname
@@ -660,10 +660,10 @@ resource versions, so a nonzero-token reservation remains reservation evidence
 without an invented resource. A later successful claim reuses the derivable
 identities, while its `TokenResource` emission confirms the resource and can
 bind the name. Reserved entries are not registrations.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L468 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629-L647 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L632-L650 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@a971bd64)
 
 **Emitted expiry** — an expiry timestamp decoded directly from the event that
 writes or reports it. For ENSv1→ENSv2 migration, bigname stores the independent
@@ -673,54 +673,54 @@ It never replaces one with a value reconstructed from a duration, grace period,
 or cross-version offset. The registry emits the supplied reservation expiry,
 copies the stored expiry when a claim passes zero, and emits every renewal's
 `newExpiry`.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L444-L468 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214-L229 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L447-L471 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
-(upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2_sepolia_20260629@ccaeb58)
 
 **Migration controller** — an ENSv2 contract that accepts a transferred ENSv1
 token and performs that name's migration. There are two, split by whether the
 name can still be unwrapped: "locked" means the `CANNOT_UNWRAP` fuse is burned
-(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L76 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L76 @ ens_v2@a971bd64),
 which is exactly what makes an unwrap revert
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1023 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1024 @ ens_v1@91c966f).
 `UnlockedMigrationController` takes unwrapped registrar ERC-721s
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92 @ ens_v2@a971bd64)
 and unlocked wrapped `.eth` 2LDs — it rejects a locked name, and it also
 rejects anything whose token id is not the namehash of a `.eth` second-level
 label, so subnames never reach it
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L143 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L144 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L143 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L144 @ ens_v2@a971bd64).
 `LockedMigrationController` takes locked wrapped `.eth` 2LDs. Both inherit their
 ERC-1155 receiver from a shared base
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L101 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L101 @ ens_v2@a971bd64).
 
 Neither controller receives subnames. Both are bound to `.eth`: the locked
 controller's wrapped node is fixed to `ETH_NODE`
-(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L81 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L82 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L81 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L82 @ ens_v2@a971bd64),
 and the shared receiver requires each incoming name to be an immediate child of
 that node
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L117 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L118 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L119 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L120 @ ens_v2@a971bd64).
 A child migrates into its already-migrated parent's
 [migration registry](#migration-registry-wrapperregistry) instead, which is the
 same receiver bound to the parent's node
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L197 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L287 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L200 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@a971bd64).
 The batch helper routes accordingly: locked 2LD groups go to the locked
 controller
-(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L121 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L121 @ ens_v2_sepolia_20260629@ccaeb58),
 while child groups are looked up by parent name and sent to that parent's
 registry, reverting if the parent has not migrated
-(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L126 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L131 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L126 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L131 @ ens_v2_sepolia_20260629@ccaeb58).
 Attributing a child migration to the locked controller would name the wrong
 receiver and the wrong registry.
 A separate `MigrationHelper` batches many names through operator approval
-(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L94 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L94 @ ens_v2_sepolia_20260629@ccaeb58).
 Name collision worth guarding against: ENSv1 also ships a `MigrationHelper`, a
 controller-gated wrapper-migration tool with an entirely different interface
 (upstream: .refs/ens_v1/contracts/utils/MigrationHelper.sol:L32 @ ens_v1@91c966f)
@@ -734,36 +734,36 @@ both pins will resolve the wrong one.
 deployed for one specific migrated **locked** name, to hold that name's
 children. Only the locked branch of migration creates one: whichever contract
 receives the transfer deploys a proxy through `VerifiableFactory.deployProxy`
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
 using the name's namehash as the salt
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2_sepolia_20260629@ccaeb58),
 then binds it as the name's subregistry, which emits `SubregistryUpdated`
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L472 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@a971bd64).
 The receiver is the [migration controller](#migration-controller) for a locked
 `.eth` 2LD, but for a locked child it is the parent's own migration registry:
 `WrapperRegistry` inherits the same receiver
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64),
 so the deployment above runs with the parent registry as the caller. Naming the
 controller as the deployer is wrong for every level below the second. A
 *non-locked* [helper-positive child](#migratable-child) gets no registry at
 all — a locked child does get one, per the split in that entry — because that
 branch
 unwraps the name and registers it with whatever subregistry the caller supplied
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@a971bd64).
 
 Each registry is a token receiver in its own right, so it is where that name's
 children migrate to, and it deploys its children's registries from its own
 *current* implementation
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L88 @ ens_v2@ccaeb58) —
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L90 @ ens_v2@a971bd64) —
 not from a fixed one, because the implementation address it forwards is baked
 into whichever implementation the proxy points at today
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L53 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L55 @ ens_v2@a971bd64)
 and these registries are upgradeable in place: migration grants `ROLE_UPGRADE`
 into every migrated registry's root bitmap
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L220 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L222 @ ens_v2@a971bd64),
 and an upgrade is bounded only by membership in an allowlist of approved
 implementations
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L280 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L283 @ ens_v2@a971bd64).
 For discovery this means the set of ENSv2 registries is open-ended and grows by
 contract deployment — one per migrated locked name, at any depth, all sharing a
 single implementation *family* rather than one implementation — instead of being
@@ -778,9 +778,9 @@ migrates, the registration is emitted by the parent registry itself, with
 `LabelRegistered`'s `sender` field equal to that same emitting registry address,
 because the receiver re-enters through an external self-call restricted to
 itself
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64).
 That is what separates a child migration from an ordinary registration made by
 the parent's owner, which names an ordinary account as `sender`.
 
@@ -789,8 +789,8 @@ derived for a direct child of an already-migrated name. No migration controller
 is involved: the parent's own
 [migration registry](#migration-registry-wrapperregistry) receives the ENSv1
 NameWrapper token and registers the child into itself
-(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64),
 which is why the emitted-by-and-sent-by-the-same-registry shape described above
 is the discriminator. Its `correlation_kind` is the ordinary
 `authority_transition`; there is no child-specific correlation kind. An
@@ -817,9 +817,9 @@ labelhash, never from `ETH_NODE`, and must equal the name the ENSv2 registry
 topology resolves for the label; where the two disagree, the child rule treats
 the evidence chain as incomplete and derives no boundary. Every migratable child is held in the
 ENSv1 NameWrapper immediately before its boundary, in both branches
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L140 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L140 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64),
 so a child has exactly one predecessor arm and the registrar-backed `.eth`
 second-level arm never applies to it.
 
@@ -837,13 +837,13 @@ rule.
 Two `migration_path` values produce one, and each is admitted only with its own ENSv1
 predecessor cleanup in the registration's transaction. `locked_child` deploys a nested registry for
 the child and parks the child's wrapper token in the Graveyard without unwrapping it
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58);
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58);
 `emancipated_child` deploys no registry and instead unwraps the child's node into the Graveyard,
 injecting it into the parent's existing registry
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L176 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@a971bd64).
 A boundary asserts that ENSv1 authority ended, and only that cleanup shows it, so a self-claim
 carrying neither — a label with no ENSv1 history — derives no boundary and stays an ordinary ENSv2
 registration.
@@ -852,12 +852,12 @@ Five shapes are refused, and one more never arises. A self-claim with no ENSv1
 predecessor cleanup is not a migration, whatever its sender. A parent owner registering
 an unprotected child label directly is a real registration and an authority
 proof, but never a child `MigrationApplied`
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L175 @ ens_v2@a971bd64).
 An unmigrated [migratable child](#migratable-child) emits no ENSv2 registration
 at all and keeps resolving through the ENSv1 fallback resolver, which is
 view-only state that emits no log
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L186 @ ens_v2@a971bd64).
 A `ProxyDeployed` factory log without the `RegistryCreated` announcement of the
 registry it names is audit evidence, not registry admission. And a registration
 emitted by a registry carrying no `migration_registry_creation` correlation
@@ -865,7 +865,7 @@ means parent discovery is incomplete, so the emitter is an ordinary registry.
 `MigrationHelper` participation is the shape that never arises rather than one
 that is refused: the helper only forwards transfers and declares no event, so
 using it yields the same log sequence as sending those transfers directly
-(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2_sepolia_20260629@ccaeb58),
 and there is nothing for correlation to key on in the first place.
 
 Production and Interpret's explicit test seam admit
@@ -876,39 +876,39 @@ to the second-level predecessor rule.
 **Migratable child** — a child of an already-migrated name whose label its
 parent's [migration registry](#migration-registry-wrapperregistry) will not let
 anyone register
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L170 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L173 @ ens_v2@a971bd64),
 so the child cannot be taken on the ENSv2 side and keeps resolving through
 ENSv1 for as long as it stays unmigrated. Three conditions must hold at once,
 and failing each one means something different:
 
 1. *Never registered on ENSv2* — the label has never had an entry, live or
    lapsed, in the parent's ENSv2 registry
-   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293 @ ens_v2@ccaeb58).
+   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L296 @ ens_v2@a971bd64).
    Failing this is permanent: once the label has had an entry, ENSv2 is its
    authority and the protection never comes back. What becomes of the label is
    then decided on the ENSv2 side alone — a registered entry blocks
    registration with `LabelAlreadyRegistered`
-   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L437 @ ens_v2@ccaeb58),
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L440 @ ens_v2@a971bd64),
    a reserved one is claimable only by a holder of `ROLE_REGISTER_RESERVED`
-   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L442 @ ens_v2@ccaeb58) —
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L445 @ ens_v2@a971bd64) —
    the premigration-claim path migration itself takes
-   (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L110 @ ens_v2@ccaeb58) —
+   (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L110 @ ens_v2@a971bd64) —
    while re-reserving it reverts `LabelAlreadyReserved`
-   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L439 @ ens_v2@ccaeb58),
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L442 @ ens_v2@a971bd64),
    and only an expired ENSv2 entry can be registered again
-   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428 @ ens_v2@ccaeb58).
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L431 @ ens_v2@a971bd64).
 2. *`PARENT_CANNOT_CONTROL` burned* — the child is *helper-positive* under
    `LibMigration.isEmancipatedChild`, the superset the three-way split below is
    built on
-   (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@ccaeb58).
+   (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@a971bd64).
    Failing this means the child was never emancipated: the register test is
    false, so the label can be taken out from under a name that is still live on
    ENSv1
-   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58),
+   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L306 @ ens_v2@a971bd64),
    and migration reverts as well
-   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58).
+   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L190 @ ens_v2@a971bd64).
 3. *Nonzero ENSv1 registry owner* — the second half of that same test
-   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
+   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L306 @ ens_v2@a971bd64).
    Failing this means the name was abandoned, and releasing the label is the
    designed end state rather than a loss. Such a child cannot migrate either: a
    zero registry owner means the name is not wrapped, because wrapping puts the
@@ -921,7 +921,7 @@ The `PARENT_CANNOT_CONTROL` condition is nonetheless broader than the
 and this is the one place in the migration cluster where "emancipated" must not
 be read as that state. Beyond that fuse, `isEmancipatedChild` requires only that
 the name is not a `.eth` 2LD
-(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@ccaeb58);
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@a971bd64);
 it never consults `CANNOT_UNWRAP`, so it is *also* true of a
 [locked](#locked-namewrapper-state) child. Three states therefore have to be
 kept apart, because two of them migrate by different paths:
@@ -930,26 +930,26 @@ kept apart, because two of them migrate by different paths:
   the superset that "migratable child" is defined over, and it is not a
   migration path in itself.
 - *Locked child* — helper-positive and `CANNOT_UNWRAP` burned
-  (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L76 @ ens_v2@ccaeb58).
+  (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L76 @ ens_v2@a971bd64).
   The receiver tests locked **first**
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L127 @ ens_v2@ccaeb58),
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L129 @ ens_v2@a971bd64),
   so such a child never reaches the emancipated branch: its ERC-1155 moves to
   the [Graveyard](#graveyard) with no unwrap
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
   and it gets a [migration registry](#migration-registry-wrapperregistry) of its
   own
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58).
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58).
 - *Non-locked helper-positive child* — the true emancipated state, and the only
   one that reaches the second branch
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L176 @ ens_v2@ccaeb58).
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@a971bd64).
   It is unwrapped into the Graveyard
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64)
   and injected into the parent's existing registry with no registry deployed for
   it
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@a971bd64).
 
 Anything else reverts
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L190 @ ens_v2@a971bd64).
 Reading the no-deploy rule as covering every helper-positive child is the
 mistake this three-way split exists to prevent.
 
@@ -964,52 +964,52 @@ as migratable — and is stuck, because migration needs a NameWrapper token to
 transfer and it no longer has one. It stays blocked until its ENSv1 registry
 owner is zeroed — condition 3 above failing — which is what releases the
 label
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L306 @ ens_v2@a971bd64).
 
 **Mixed-authority tree** — a name tree in which an ancestor registration is
 authoritative in ENSv2 while an unmigrated child's control and records remain
 authoritative in ENSv1. This is a durable state, not an incomplete transaction:
 the parent's migration registry blocks ordinary ENSv2 registration for the
 child and returns the v1 fallback resolver instead
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L186 @ ens_v2@a971bd64).
 An expired ENSv2 ancestor returns no subregistry, so the fallback path is no
 longer reachable
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L253 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L251 @ ens_v2@a971bd64).
 While the ENSv2 ancestor remains active and reachable, the split ends only if
 the child migrates or its ENSv1 registry owner becomes zero, which releases the
 protection
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L296 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L306 @ ens_v2@a971bd64).
 
 **ENSv1 husk** — the residual ENSv1 registry and token state left after the
 corresponding ENSv2 registration becomes authoritative. It is not a second live
 registration. An unwrapped `.eth` name leaves the ENSv1 registry and registrar
 token with the [Graveyard](#graveyard)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@a971bd64),
 while a locked wrapped name keeps NameWrapper as the ENSv1 registry owner and
 moves only its ERC-1155 token to the Graveyard
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L135 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L137 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58).
 See [Graveyard state](#graveyard-state) for those terminal shapes.
 
 **Graveyard state** — an [ENSv1 husk](#ensv1-husk) whose terminal token or
 registry position is held by the [Graveyard](#graveyard). This bigname term is
 not the `Graveyard.State` implementation enum
-(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L31 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L31 @ ens_v2@a971bd64).
 An unwrapped or unlocked-wrapped `.eth` 2LD path leaves both ENSv1 registry
 ownership and the registrar ERC-721 with the Graveyard
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2@a971bd64).
 An emancipated non-locked child instead transfers its ENSv1 registry position
 to the Graveyard during unwrap, then enters ENSv2 without a registrar ERC-721
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@a971bd64).
 The locked path transfers the wrapper ERC-1155 while NameWrapper remains the
 registry owner
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58).
 
 **Wrapper terminal state** — the retained historical NameWrapper state after a
 complete `locked_wrapped` or `locked_child` migration. The selected ENSv1
@@ -1025,25 +1025,25 @@ wrong events and the wrong terminal state:
 - *Unwrapped `.eth` 2LD.* The controller reclaims the name, rewrites the ENSv1
   registry record so the Graveyard owns it and the resolver is cleared, then
   transfers the registrar ERC-721 to the Graveyard
-  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L112 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L114 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L115 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58).
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L112 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L114 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L115 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@a971bd64).
 - *Unlocked wrapped `.eth` 2LD.* Resolver cleared, then unwrapped straight out
   of NameWrapper into the Graveyard
-  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2@ccaeb58).
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2@a971bd64).
 - *Locked wrapped name.* ENSv1 ownership does not move: the NameWrapper stays the
   registry owner and the name stays wrapped. Only the ERC-1155 moves to the
   Graveyard, fuses intact, with no unwrap and no burn
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58),
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58),
   so a wrapper adapter watching only transfers would keep calling the name
   `wrapped` after it has migrated. The resolver is conditional, and the two
   branches differ in whether ENSv1 is written at all. With `CANNOT_SET_RESOLVER`
   unburned, migration clears the name's **ENSv1** resolver through the wrapper
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L135 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L136 @ ens_v2@ccaeb58),
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L137 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L138 @ ens_v2@a971bd64),
   which reaches the ENSv1 registry and emits `NewResolver(node, 0)`
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L670 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L93 @ ens_v1@91c966f)
@@ -1052,23 +1052,23 @@ wrong events and the wrong terminal state:
   is left untouched and the name's existing ENSv1 resolver is carried over as its
   **ENSv2** resolver, swapped for the new `PublicResolver` when the carried-over
   one is a recognized old `PublicResolver`
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L138 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L140 @ ens_v2@ccaeb58).
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L138 @ ens_v2_sepolia_20260629@ccaeb58)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L140 @ ens_v2_sepolia_20260629@ccaeb58).
 - *Emancipated child, in the narrow non-locked sense
   ([three-way split](#migratable-child)) — a locked child takes the bullet
   above instead.* Resolver cleared, then unwrapped into the Graveyard
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L177 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L179 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64).
 
 The deployment script's activation sequence also adds the Graveyard as an ENSv1
 registrar controller alongside `ETHRenewerV1`
-(upstream: .refs/ens_v2/contracts/script/setup.ts:L873 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L940 @ ens_v2@a971bd64),
 which is what lets its permissionless `clear` entrypoint
-(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L99 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L98 @ ens_v2@a971bd64)
 tidy leftover ENSv1 registry state. One more trap there: for a fully expired
 name `clear` self-claims it from the registrar with a duration chosen to pin
 expiry at `uint64` max minus the ENSv1 grace period
-(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L164 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L163 @ ens_v2@a971bd64),
 which surfaces as an ENSv1 `NameRegistered` naming the Graveyard as registrant
 with an absurdly distant expiry.
 
@@ -1080,7 +1080,7 @@ evidence and is never a
 registration, lease, backing resource, token lineage, wrapped state, current
 authority, or surface binding. The expiry is terminal evidence, not a usable
 lease deadline.
-(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158-L170 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157-L169 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L154 @ ens_v1@91c966f)
 
@@ -1088,23 +1088,23 @@ lease deadline.
 [premigrated](#premigration-reservation) but has not migrated. The deployment
 script's activation sequence revokes every ENSv1 registration path as a
 registrar controller
-(upstream: .refs/ens_v2/contracts/script/setup.ts:L860 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/script/setup.ts:L866 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L927 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L933 @ ens_v2@a971bd64)
 and adds the Graveyard and this contract in their place
-(upstream: .refs/ens_v2/contracts/script/setup.ts:L873 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/script/setup.ts:L877 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L940 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L944 @ ens_v2@a971bd64).
 Renewal writes both sides: the shared registrar base extends the ENSv2 entry
-(upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58)
 and this contract's hook extends the ENSv1 registrar expiry by the same
 duration
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58),
 so the two stay in step until the name migrates — after which only the ENSv2
 expiry moves and the ENSv1 value freezes forever. Its `syncWrapper` entrypoint
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58)
 pushes registrar expiry into NameWrapper by adding NameWrapper as an ENSv1
 registrar controller and removing it again within the same call
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58).
 Any code that treats the ENSv1 controller set as static, or `ControllerAdded`
 as a rare governance event, is wrong once this is live.
 
@@ -1115,8 +1115,8 @@ adapter correlates those facts per name but does not synthesize a transaction-le
 replacement or calculate one arm from another. The bridge first emits the ENSv2
 `ExpiryUpdated`, then renews the ENSv1 registrar by the same duration, and emits
 its own `NameRenewed` with the ENSv2 `newExpiry`.
-(upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L132-L148 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132-L148 @ ens_v2_sepolia_20260629@ccaeb58)
 
 **Historical renewal** (`historical_renewal`) — a launch-bounded ENSv1
 BaseRegistrar renewal that is not part of a synchronized renewal group. Its
@@ -1128,17 +1128,17 @@ current authority.
 **v1 fallback resolver** (`ENSV1Resolver`, exposed as `V1_RESOLVER`) — the
 ENSv2-side resolver that answers by reading ENSv1. It looks the name up in the
 ENSv1 registry
-(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L40 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L40 @ ens_v2@a971bd64)
 and forwards the resolve call to whatever resolver it finds there
-(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L69 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L68 @ ens_v2@a971bd64).
 It is the resolver the premigration tooling writes onto every reservation
-(upstream: .refs/ens_v2/contracts/script/preMigrationUtils.ts:L52 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/script/preMigrationUtils.ts:L52 @ ens_v2@a971bd64),
 and a
 [migration registry](#migration-registry-wrapperregistry) returns it for any
 child that has not migrated
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L186 @ ens_v2@a971bd64),
 where it is held as an immutable set at deploy time
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L40 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L42 @ ens_v2@a971bd64).
 Its effect is that a name resolves correctly through the ENSv2 tree while ENSv1
 is still its authority, so attributing which version served a resolution is
 time-dependent and cannot be read off the resolver pointer alone.
@@ -1433,7 +1433,7 @@ the compared projection row and its canonical block lineage remain unchanged.
 **Resource** (backing resource, `resource_id`) — the authority object behind a
 name: a registry entry, registrar lease, wrapper position, or ENSv2 EAC
 resource
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L39 @ ens_v2@a971bd64).
 Permissions and control history key to the resource, never to the name string
 or token id.
 
@@ -1519,8 +1519,8 @@ surface when. Surfaces survive re-registration; resources rotate.
 **Token lineage** (`token_lineage_id`) — the continuity of tokenized ownership
 across token-id changes (for example ENSv2 token regeneration, where a role
 change burns and mints a replacement token while leaving the resource unchanged
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @ ens_v2@ccaeb58)).
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L531 @ ens_v2@a971bd64)).
 It rotates only when authority moves to a different tokenized anchor. A return
 to the exact prior tokenized anchor — for example unwrapping back to a
 still-live lease — resumes that anchor's prior lineage, but not after release

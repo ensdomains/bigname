@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Focused fixtures for check-upstream-rotation."""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import sys
+import tomllib
+import unittest
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+
+SCRIPT = Path(__file__).with_name("check-upstream-rotation")
+LOADER = importlib.machinery.SourceFileLoader("check_upstream_rotation", str(SCRIPT))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+assert SPEC is not None
+rotation = importlib.util.module_from_spec(SPEC)
+sys.modules[LOADER.name] = rotation
+LOADER.exec_module(rotation)
+
+
+def cite(path: str, lines: str = "L1", tag: str = "a971bd64") -> bytes:
+    return (
+        f"(upstream: .refs/ens_v2/{path}:{lines} @ ens_v2@{tag})"
+    ).encode()
+
+
+class CitationParserTests(unittest.TestCase):
+    def test_multiple_citations_and_ranges_on_one_line(self) -> None:
+        data = cite("a.sol") + b" " + cite("b.sol", "L2-L4")
+        parsed = rotation.parse_citations(data, loose=False)
+        self.assertEqual([(row.start, row.end) for row in parsed], [(1, 1), (2, 4)])
+
+    def test_worktree_inventory_includes_untracked_verifier_deliverables(self) -> None:
+        self.assertIn(
+            "scripts/test-check-upstream-rotation",
+            rotation.revision_paths("WORKTREE"),
+        )
+
+    def test_malformed_old_tag_is_in_raw_census_but_not_strict_parser(self) -> None:
+        old_tag = b"ens_v2@" + b"ccaeb58"
+        data = (
+            b"(upstream:\n.refs/ens_v2/contracts/src/Foo.sol:L7 @\n"
+            + old_tag
+            + b")"
+        )
+        self.assertEqual(data.count(old_tag), 1)
+        self.assertEqual(rotation.parse_citations(data, loose=False), [])
+        loose = rotation.parse_citations(data, loose=True)
+        self.assertEqual(len(loose), 1)
+        self.assertFalse(loose[0].strict)
+
+    def test_historical_ref_is_canonical(self) -> None:
+        data = (
+            b"(upstream: .refs/"
+            + b"ens_v2_sepolia_20260629/contracts/src/Foo.sol:L9 "
+            + b"@ ens_v2_sepolia_20260629@ccaeb58)"
+        )
+        parsed = rotation.parse_citations(data, loose=False)
+        self.assertEqual(parsed[0].key, "ens_v2_sepolia_20260629")
+
+
+class MappingTests(unittest.TestCase):
+    def test_git_hunks_map_insertions_and_deletions(self) -> None:
+        self.assertEqual(
+            rotation.equal_line_map_from_hunks(5, 5, [(2, 1, 1, 0), (4, 0, 4, 1)]),
+            {1: 1, 3: 2, 4: 3, 5: 5},
+        )
+
+    def test_git_hunk_insertion_at_start(self) -> None:
+        self.assertEqual(
+            rotation.equal_line_map_from_hunks(2, 3, [(0, 0, 1, 1)]),
+            {1: 2, 2: 3},
+        )
+
+    def test_same_line_tag_refresh(self) -> None:
+        self.assertEqual(rotation.mapped_range({1: 1, 2: 2}, 2, 2), (2, 2))
+
+    def test_inserted_line_reanchor(self) -> None:
+        self.assertEqual(rotation.mapped_range({1: 1, 2: 3}, 2, 2), (3, 3))
+
+    def test_noncontiguous_duplicate_line_mapping_is_rejected(self) -> None:
+        self.assertIsNone(rotation.mapped_range({1: 2, 2: 4}, 1, 2))
+
+    def test_deployment_suffix_remap(self) -> None:
+        old_prefix = "contracts/deployments/sepolia/"
+        archive = "contracts/deployments/sepolia-20260629-r1/"
+        old = old_prefix + "nested/RootRegistry.json"
+        self.assertEqual(archive + old.removeprefix(old_prefix), archive + "nested/RootRegistry.json")
+
+    def test_full_file_archive_mismatch_is_visible(self) -> None:
+        self.assertNotEqual(rotation.sha256(b"old\n"), rotation.sha256(b"changed\n"))
+
+    def test_rewrite_refuses_a_nonbaseline_carrier(self) -> None:
+        self.assertEqual(
+            rotation.rewrite_input_mismatch("docs/example.md", b"base", b"edited"),
+            "docs/example.md",
+        )
+
+    def test_claim_context_binds_the_citation_to_nearby_text(self) -> None:
+        first = b"first claim " + cite("a.sol") + b"\n\nsecond claim\n"
+        moved = b"first claim\n\nsecond claim " + cite("a.sol") + b"\n"
+        first_citation = rotation.parse_citations(first, loose=True)[0]
+        moved_citation = rotation.parse_citations(moved, loose=True)[0]
+        self.assertNotEqual(
+            rotation.citation_claim_context(first, first_citation),
+            rotation.citation_claim_context(moved, moved_citation),
+        )
+
+    def test_claim_binding_rejects_a_same_paragraph_target_swap(self) -> None:
+        original = b"[^a]: " + cite("a.sol") + b"\n[^b]: " + cite("b.sol") + b"\n"
+        swapped = b"[^a]: " + cite("b.sol") + b"\n[^b]: " + cite("a.sol") + b"\n"
+        original_citations = rotation.parse_citations(original, loose=True)
+        swapped_citations = rotation.parse_citations(swapped, loose=True)
+        original_bindings = rotation.citation_claim_bindings(
+            original, original_citations
+        )
+        swapped_bindings = rotation.citation_claim_bindings(swapped, swapped_citations)
+        original_a = next(row for row in original_citations if row.path == "a.sol")
+        swapped_a = next(row for row in swapped_citations if row.path == "a.sol")
+        self.assertNotEqual(
+            original_bindings[original_a.begin], swapped_bindings[swapped_a.begin]
+        )
+        self.assertIsNone(
+            rotation.rewrite_input_mismatch("docs/example.md", b"base", b"base")
+        )
+
+
+class ProductionDeltaTests(unittest.TestCase):
+    def test_rust_identifier_boundaries_are_tokens(self) -> None:
+        separated = b"fn f(){let mut x=1;}"
+        merged = b"fn f(){let mutx=1;}"
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(separated),
+            rotation.rust_without_comments_and_space(merged),
+        )
+
+    def test_rust_joint_operator_boundaries_are_tokens(self) -> None:
+        separated = b"fn f(){let x=a > > b;}"
+        joint = b"fn f(){let x=a >> b;}"
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(separated),
+            rotation.rust_without_comments_and_space(joint),
+        )
+
+    def test_rust_numeric_literal_boundaries_are_tokens(self) -> None:
+        separated = b"fn f(){let x=1 . 2;}"
+        float_literal = b"fn f(){let x=1.2;}"
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(separated),
+            rotation.rust_without_comments_and_space(float_literal),
+        )
+
+    def test_nested_rust_block_comments_are_removed(self) -> None:
+        before = b"fn f(){/* outer /* old */ tail */let x=1;}"
+        after = b"fn f(){/* outer /* new citation */ tail */let x=1;}"
+        self.assertEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_raw_string_comment_lookalikes_remain_tokens(self) -> None:
+        before = b'fn f(){let x=r#"// old /* text */"#;}'
+        after = b'fn f(){let x=r#"// new /* text */"#;}'
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_sql_dash_comments_in_proven_query_literal_are_metadata(self) -> None:
+        before = b'fn f(){let x=r#"SELECT x\n-- ' + cite("a.sol", tag="1111111") + b'\nFROM t"#;}'
+        after = b'fn f(){let x=r#"SELECT x\n-- ' + cite("a.sol", tag="2222222") + b'\nFROM t"#;}'
+        self.assertEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_non_citation_sql_comment_changes_remain_tokens(self) -> None:
+        before = b'fn f(){let x=r#"SELECT x\n-- old explanation\nFROM t"#;}'
+        after = b'fn f(){let x=r#"SELECT x\n-- new explanation\nFROM t"#;}'
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_sql_comment_prose_beside_a_citation_remains_a_token(self) -> None:
+        before = (
+            b'fn f(){let x=r#"SELECT x\n-- old explanation '
+            + cite("a.sol", tag="1111111")
+            + b'\nFROM t"#;}'
+        )
+        after = (
+            b'fn f(){let x=r#"SELECT x\n-- changed explanation '
+            + cite("a.sol", tag="2222222")
+            + b'\nFROM t"#;}'
+        )
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_sql_executable_changes_remain_tokens(self) -> None:
+        before = b'fn f(){let x=r#"SELECT x FROM t"#;}'
+        after = b'fn f(){let x=r#"SELECT y FROM t"#;}'
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_toml_comments_and_inline_comments_do_not_change_values(self) -> None:
+        before = tomllib.loads("# old\na = 1 # old inline\n")
+        after = tomllib.loads("# new\na = 1 # new inline\n")
+        self.assertEqual(before, after)
+
+    def test_fixture_json_citations_are_scrubbed_but_values_are_not(self) -> None:
+        before = {"upstream_citations": ["old"], "value": 1}
+        after = {"upstream_citations": ["new"], "value": 1}
+        changed = {"upstream_citations": ["new"], "value": 2}
+        self.assertEqual(
+            rotation.scrub_fixture_citations(before),
+            rotation.scrub_fixture_citations(after),
+        )
+        self.assertNotEqual(
+            rotation.scrub_fixture_citations(before),
+            rotation.scrub_fixture_citations(changed),
+        )
+
+
+class PolicyTests(unittest.TestCase):
+    def test_manifest_tag_mismatch(self) -> None:
+        commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+        self.assertTrue(commit.startswith("a971bd64"))
+        self.assertFalse(commit.startswith("ccaeb58"))
+
+    def test_live_deployment_citation_outside_allowlist(self) -> None:
+        allowed = {
+            (
+                "AGENTS.md",
+                46,
+                "contracts/deployments/sepolia/.deployment.json",
+                4,
+                4,
+                "a971bd64",
+            )
+        }
+        candidate = (
+            "manifests/ens.toml",
+            10,
+            "contracts/deployments/sepolia/.deployment.json",
+            4,
+            4,
+            "a971bd64",
+        )
+        self.assertNotIn(candidate, allowed)
+
+    def test_deleted_tier3_has_no_final_target(self) -> None:
+        citation_bytes = cite("obsolete.sol")
+        entry = {
+            "action": "deprecated_claim_deleted",
+            "handoff_issue": "#565",
+            "deleted_claim_text": (b"obsolete claim " + citation_bytes).decode(),
+        }
+        self.assertEqual(entry["action"], "deprecated_claim_deleted")
+        self.assertEqual(entry["handoff_issue"], "#565")
+        self.assertTrue(rotation.deleted_claim_is_absent(entry, b"retained text"))
+        self.assertFalse(
+            rotation.deleted_claim_is_absent(
+                entry, b"obsolete claim " + citation_bytes
+            )
+        )
+        citation = rotation.parse_citations(citation_bytes, loose=True)[0]
+        self.assertEqual(
+            rotation.deleted_claim_replacement(
+                entry, b"prefix obsolete claim " + citation_bytes + b" suffix", citation
+            ),
+            (7, 22 + len(citation_bytes), b""),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -1,0 +1,4133 @@
+schema_version = 1
+
+key = "ens_v2"
+old_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+new_commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+
+# Frozen from origin/main at e1833238e0c502ed744e24d5feaaffde7b858c74.
+# Intervening merges added 69 governed citations after issue #566's census:
+# 43 are same-line/content-stable and 26 require a changed disposition.
+expected_old_tag_occurrences = 829
+expected_same_line_tag_refreshes = 286
+expected_changed_occurrences = 543
+expected_baseline_noncanonical_citations = 40
+
+old_deployment_prefix = "contracts/deployments/sepolia/"
+archive_deployment_prefix = "contracts/deployments/sepolia-20260629-r1/"
+forbid_unlisted_live_deployment_citations = true
+
+# Archived planning records retain the pins they were written against and are
+# not current citation or deployment authority.
+historical_carrier_exclusions = ["docs/internal/archive/**"]
+
+semantic_candidate_paths = [
+  "contracts/deploy/00_ENSV2Resolver.ts",
+  "contracts/test/integration/ENSV2Resolver.test.ts",
+  "contracts/src/**/PermissionedResolver.sol",
+  "contracts/src/**/PermissionedResolverLib.sol",
+  "contracts/src/**/IPermissionedResolver.sol",
+  "contracts/src/**/IETHRenewer.sol",
+  "contracts/src/**/AbstractETHRegistrar.sol",
+  "contracts/src/**/ETHRenewerV1.sol",
+  "contracts/src/**/UserRegistry.sol",
+  "contracts/src/**/UniversalResolverV2.sol",
+  "contracts/src/**/MigrationHelper.sol",
+]
+
+semantic_candidate_ranges = [
+  "contracts/deploy/03_ETHRegistrar.ts:L44-L44",
+  "contracts/src/resolver/PublicResolverV2.sol:L179-L179",
+  "contracts/src/migration/LockedWrapperReceiver.sol:L137-L175",
+]
+
+[[live_deployment_allowlist]]
+carrier = "AGENTS.md"
+carrier_line = 46
+path = "contracts/deployments/sepolia/.deployment.json"
+start = 4
+end = 4
+tag = "a971bd64"
+purpose = "unadmitted_redeploy"
+
+[[live_deployment_allowlist]]
+carrier = "docs/api-v2-routes.md"
+carrier_line = 910
+path = "contracts/deployments/sepolia/.deployment.json"
+start = 4
+end = 4
+tag = "a971bd64"
+purpose = "unadmitted_redeploy"
+
+[[live_deployment_allowlist]]
+carrier = "docs/architecture.md"
+carrier_line = 450
+path = "contracts/deployments/sepolia/.deployment.json"
+start = 4
+end = 4
+tag = "a971bd64"
+purpose = "unadmitted_redeploy"
+
+[[live_deployment_allowlist]]
+carrier = "docs/manifests.md"
+carrier_line = 240
+path = "contracts/deployments/sepolia/.deployment.json"
+start = 4
+end = 4
+tag = "a971bd64"
+purpose = "unadmitted_redeploy"
+
+[[live_deployment_allowlist]]
+carrier = "docs/upstream.md"
+carrier_line = 189
+path = "contracts/deployments/sepolia/.deployment.json"
+start = 4
+end = 4
+tag = "a971bd64"
+purpose = "unadmitted_redeploy"
+
+[[live_deployment_allowlist]]
+carrier = "docs/upstream.md"
+carrier_line = 194
+path = "contracts/deployments/sepolia/.deployment.json"
+start = 4
+end = 4
+tag = "a971bd64"
+purpose = "unadmitted_redeploy"
+
+[[live_deployment_allowlist]]
+carrier = "docs/upstream.md"
+carrier_line = 195
+path = "contracts/deployments/sepolia/RootRegistry.json"
+start = 2714
+end = 2714
+tag = "a971bd64"
+purpose = "unadmitted_redeploy"
+
+[[live_deployment_allowlist]]
+carrier = "docs/upstream.md"
+carrier_line = 195
+path = "contracts/deployments/sepolia/PermissionedResolverImpl.json"
+start = 373
+end = 373
+tag = "a971bd64"
+purpose = "unadmitted_redeploy"
+
+[[semantic]]
+id = "03688b1b1697a3feecb9413b2355ccc3c9d976fb9f1eba64ac4f44a6798ef678"
+carrier = "docs/architecture.md:L956"
+carrier_context_sha256 = "dc46c1db4b626cbe032229b4aba92e333791f4b9afae66d3fe56407e778ea551"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 247
+final_end = 254
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "05a1888062faccd19596d741f80f3c91845d423cedb6219365c1c7e12f2c5d70"
+carrier = "docs/glossary.md:L1106"
+carrier_context_sha256 = "e198ee9ec17f3b4ab5c976ee8895190971c23620ea158472f1ac935cfa9132cb"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 107
+final_end = 107
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "07d8c7c0e1f4f72ac8b79679ce1ed1b4a4c38e87f63a2af5376bac1bbb0c20d6"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L83"
+carrier_context_sha256 = "7bacfc3e909406619eded3293f87458078e0d48afb209ab22f0d4955295491a4"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "0a25847b3b152da7a7b039ecf290d31148850cafcc07257dd4888a8c842a3e5b"
+carrier = "docs/manifests.md:L1347"
+carrier_context_sha256 = "0b7d862db1d7e66f8cbe3278b19fce3634f24259289cbc1847580682e54d470c"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver alias event signature"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/interfaces/IPermissionedResolver.sol"
+final_start = 19
+final_end = 19
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "0b769ed30bfcc1cbde2c91b84247f87bc33e094d70cb3d25ca12149a9a31861f"
+carrier = "docs/manifests.md:L1331"
+carrier_context_sha256 = "09be5e3731d8e9b74a6d6cbd4e7f9adebba795fe01e22a08a3e5365266342d8a"
+carrier_context_ordinal = 14
+review_status = "reviewed"
+claim = "admitted PublicResolverV2 registry-ownership and approval authorization"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PublicResolverV2.sol"
+final_start = 179
+final_end = 183
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "0c1cda3b6d231b83c57c8e90901d79ba67f475c35e33ad5ecaaddc27b4198424"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 107
+final_end = 107
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "0ecefe7ef60dc26a49ac739d3dde9724ce0e3d46593028fac0d787c2d9cbd9bc"
+carrier = "docs/glossary.md:L679"
+carrier_context_sha256 = "5427344ddbaf054cf5465f52a41a098d0b21dc65c7db4217d11f75fc6715578e"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 84
+final_end = 93
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "1145f706c514e69909ed40269871a7891b947dc01e5365c0814a7fec24fed380"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L104"
+carrier_context_sha256 = "9377d6d34d979ef23206296e1d036ec27d5f5a3de0f4c2c24bc4be1dc3843e11"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 22
+final_end = 22
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "12cde6d772ec63060b3e4b071d660cdff544f17efef0755a423fb1a9a60229bc"
+carrier = "docs/glossary.md:L723"
+carrier_context_sha256 = "e6c524acadced21612c948196fcebde21d288587f345e911a62980195769633c"
+carrier_context_ordinal = 10
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 94
+final_end = 94
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "12f483097a7b72276c1e5e3e9f3380c9e99bee06dff76e115c5a4920e7509e76"
+carrier = "docs/partners/partner-1-indexing-requirements.md:L99"
+carrier_context_sha256 = "7f8e2ae1e0341d3322cde753e82aafaed819b0f3de42c068716098716b95dff6"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "13d784750d8b6805624f6e8414bb20ac58e3a0e57cc683a051def302b1a7fa1c"
+carrier = "docs/glossary.md:L1118"
+carrier_context_sha256 = "ba7dec8dcf860ab5e0b4038731e8899b7f5acea1a0c08328e991c4a2128d3b27"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 84
+final_end = 93
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "15a9ca40d0ed07f44c2abdfda87b43330e18b107cd9d2cf0d646405c46dd1fe2"
+carrier = "crates/adapters/src/schema_v2/state_wrapper.rs:L136"
+carrier_context_sha256 = "e024acf6f97cbf22f2fb4e0180a609fd3a859fa431aa06fd729d6411534c7292"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 104
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "18e6cca5e6cce4e30cb05860b7735ae72941b3c62fe05c30c7a051cb9adafc4f"
+carrier = "docs/architecture.md:L1654"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 161
+final_end = 161
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "1904f6924e222aea28417ffec02d3a7db171839b031c06bc049fb790876f0edc"
+carrier = "docs/architecture.md:L252"
+carrier_context_sha256 = "07db8edd95cdceb2df055ed02b8541dbc9db1732495eed17fdfe0fc550e4fac2"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "19afb78c493d2178fda76a95348793a3811372a538a534a2fa21c127305bfb7e"
+carrier = "crates/adapters/tests/fixtures/interpreters/raw-events.json:L534"
+carrier_context_sha256 = "d648f2ccde449a83bd7b3c3f1e71178314dff4f7b7801409b709b0260d9cfabc"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 488
+final_end = 488
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "1a774c2b713869bdc111d07395abc03ab9dde66b573db13171b38d18cc1fbe65"
+carrier = "docs/manifests.md:L512"
+carrier_context_sha256 = "a3efc9123ab5b45e38929402be9c72bf89d4b0b3576481c524040918473d2809"
+carrier_context_ordinal = 13
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 111
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "1cebc06617fe7e40e50497f1ead0701c47c0c833af95a208e844f741e4ead8a8"
+carrier = "docs/storage.md:L797"
+carrier_context_sha256 = "41fe4202df200ab1af427c37450ec716895ee413bccf2accee11dceda2654b09"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 247
+final_end = 254
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "1dbdcff4171a338ea948876a377c277729ef0c26ef6cd3de908beda12a2ed9c0"
+carrier = "crates/adapters/src/schema_v2/migration/child.rs:L222"
+carrier_context_sha256 = "9e9b25cf9a8ec0019320d5c68220723c232fd1019c3f2d530449f65088dc9819"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "1ef3cd5b27198cb1bc5501f4b59d572c660e6b95131c6712a70ab721c465d9c2"
+carrier = "docs/architecture.md:L958"
+carrier_context_sha256 = "dc46c1db4b626cbe032229b4aba92e333791f4b9afae66d3fe56407e778ea551"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 66
+final_end = 78
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "1fc023b33bd1675790e9d1a1220741528c1c7917bddf25d679d3acf4f4afb10a"
+carrier = "docs/architecture.md:L443"
+carrier_context_sha256 = "b18eaf35a36b90f9f023d3ce440faa8e8df131099e2e60e94638c7d9944f98b2"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 106
+final_end = 106
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "2606e86724f1ffeb4dbfbb4822093c7909052d05449672471848cff9ffc08ec3"
+carrier = "docs/glossary.md:L1100"
+carrier_context_sha256 = "e198ee9ec17f3b4ab5c976ee8895190971c23620ea158472f1ac935cfa9132cb"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 134
+final_end = 134
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "284c5e65be366a9fc40c0e4019b1fb9c7175e4864edf8f093c04516a54cce06e"
+carrier = "docs/architecture.md:L1590"
+carrier_context_sha256 = "eeb065369b6163680bfb3b3699e5a58dea052462fab56153e17a4d70361dbb8c"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 15
+final_end = 15
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "2a209a50e572ac003ad6e16283f855f0d0676fcfaeebd5457475f22e9efed0aa"
+carrier = "tests/e2e/src/scenarios/ens_v2_lifecycle.rs:L55"
+carrier_context_sha256 = "c99ccfbc1eb0ebcff3aa58ac6d6246bf2b5402d712e5c63f964c84fe7f667431"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 84
+final_end = 84
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "2b66f02a8eb0329ec21f3c335260056575ac05a29029126ff074c3d09317d2ff"
+carrier = "docs/storage.md:L799"
+carrier_context_sha256 = "41fe4202df200ab1af427c37450ec716895ee413bccf2accee11dceda2654b09"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 66
+final_end = 78
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "2bfdd06464eafb05bbe3d600a97c0425750077df90a5abacdb3b8e86c329f7ab"
+carrier = "crates/adapters/src/schema_v2/migration/child.rs:L33"
+carrier_context_sha256 = "9cf9b76207a34c5c4e3ffb209aa54b905e462dc5530510a0a012f7794193a1e5"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 151
+final_end = 151
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "2dc23770b1687b03fdc275fbde830e95197b55014e4ae72ee7fab85c8754a293"
+carrier = "crates/adapters/src/schema_v2/tests/migration/child.rs:L1302"
+carrier_context_sha256 = "cb80608572452e3618edb69fb6e2df9731021ffbb865d7f4c4099bfc7ee5704d"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "2e6f9e3303e04bf54c5ac6c1594e4f1677c035103f3cc8a0effb961e1aec6c54"
+carrier = "docs/glossary.md:L719"
+carrier_context_sha256 = "e6c524acadced21612c948196fcebde21d288587f345e911a62980195769633c"
+carrier_context_ordinal = 9
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 131
+final_end = 131
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "301fff58ffa549f042802ff447691368386a7f88f8f824ca9b000bff5f38da10"
+carrier = "crates/adapters/src/schema_v2/migration/registry.rs:L48"
+carrier_context_sha256 = "9c661cf61db563f3ce4cb85fbd249c8048503b0458b13000304edc83f7b18e4a"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 151
+final_end = 151
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "3043cf205ae21cf3e7cd4e315659c73553edc108beb20fbd25423c868c6b8a2b"
+carrier = "docs/manifests.md:L373"
+carrier_context_sha256 = "04cb1d41c0fcde44e4bedd0f5c1e5c74ac371ff5b3cf44759dab81b14f83d66c"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 106
+final_end = 106
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "30465b2f6eec9b54606832bb843d260a9f81b6f3acd59d84d3f5ca538a536549"
+carrier = "crates/adapters/src/schema_v2/migration/child.rs:L404"
+carrier_context_sha256 = "d215b2ba18b03c9a58bc2bb1474c6be5fda5506e87511b3d24967c9d3a941c7c"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "3128b7463241830243889b82e48572c99f57f7d0a210adb45cfa505e67086ac6"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L7"
+carrier_context_sha256 = "a7002f5d8a7cc27b56e2b1dd91e4906cec65c8373c39e0202f1f7b2b85edbdee"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 89
+final_end = 89
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "3172cced9a08c50c3b04260eba3b9cffd714b16281833b2459df514a238b159c"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 84
+final_end = 84
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "326307a52e08e334b66b129072fc49a5832951bb7b75bbe0369c6d875a240f99"
+carrier = "schema-v2/README.md:L41"
+carrier_context_sha256 = "246348800fd5f89b2c41355046c5f30e68ed2aa82336d49cc2ad536e8a0fb41f"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 133
+final_end = 133
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "33bcd115be5711ed713b55dd0449f6e2fa6df05938c544115e9c94c8a043c81b"
+carrier = "docs/storage.md:L793"
+carrier_context_sha256 = "41fe4202df200ab1af427c37450ec716895ee413bccf2accee11dceda2654b09"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 178
+final_end = 186
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "359817f231ce708e81f3a4a1ea5ad0b6d746078f8b13433d32a5c8f7032ce1b6"
+carrier = "docs/glossary.md:L868"
+carrier_context_sha256 = "cdb981ec92e0f9ba421497ad301f68de63ae993befca6f69498d045f6c14ec8c"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 108
+final_end = 113
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "366ae05d9129abf9a27264c89e5dcd6dbc549f504a61ba844a94aaf4f9e05daa"
+carrier = "crates/adapters/src/schema_v2/migration/child.rs:L221"
+carrier_context_sha256 = "9e9b25cf9a8ec0019320d5c68220723c232fd1019c3f2d530449f65088dc9819"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "37980eb4b795955f8265522096e355d6f942adaf6e981fb1ea6440a54057c589"
+carrier = "docs/manifests.md:L598"
+carrier_context_sha256 = "1e9b5b1e9495410346de50e7bb9208a80cd7bd7ab569590ba764b7c3813a52fb"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 124
+final_end = 124
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "37d546632984965549c845ddf0e28014170cd963c929ad3829e6d453e02eddde"
+carrier = "docs/glossary.md:L1097"
+carrier_context_sha256 = "e198ee9ec17f3b4ab5c976ee8895190971c23620ea158472f1ac935cfa9132cb"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 91
+final_end = 91
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "3e94706895fb3a9124340366df41d4c881adccb64d98ed5807f68a1b92c06a15"
+carrier = "docs/architecture.md:L714"
+carrier_context_sha256 = "e595976c0a59811cfef77ea66df77c0366ee08416549d80219837b4a38d89828"
+carrier_context_ordinal = 10
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "3ec57f6e72095ac14a9e9f097b23187016bfb4e421fa3a1c9f4c76a3e6d9e7ba"
+carrier = "docs/glossary.md:L651"
+carrier_context_sha256 = "e7fe0f834c2f5d1a7d027d166787425565124366b05a4ab6fb87ca09bc3660fa"
+carrier_context_ordinal = 18
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 145
+final_end = 145
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "42611f6018ebb62d2e62a385851b44761acab1f57b121159cbaaae117219c4cc"
+carrier = "docs/manifests.md:L1328"
+carrier_context_sha256 = "09be5e3731d8e9b74a6d6cbd4e7f9adebba795fe01e22a08a3e5365266342d8a"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 89
+final_end = 89
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "43b59f8ae30361dc572d87dfc489c21b2caed4b57c17839059d66faf0d1e9d5e"
+carrier = "docs/glossary.md:L718"
+carrier_context_sha256 = "e6c524acadced21612c948196fcebde21d288587f345e911a62980195769633c"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 126
+final_end = 126
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "43d9d97a46222c0170ff508b3d12029e533128f21ba9f01a45ff0df42c41c6af"
+carrier = "docs/manifests.md:L510"
+carrier_context_sha256 = "a3efc9123ab5b45e38929402be9c72bf89d4b0b3576481c524040918473d2809"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 106
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4481794db5faf92e546951793b2c98384cfdcd251a9b43ef15f33b2ca41aa61a"
+carrier = "docs/manifests.md:L511"
+carrier_context_sha256 = "a3efc9123ab5b45e38929402be9c72bf89d4b0b3576481c524040918473d2809"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 104
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "44b883373f0e8fd54ec8b4796e180e1b5e2dc0d8b31adc21e6a94364e4a1179f"
+carrier = "tests/e2e/src/harness/ens_v2.rs:L953"
+carrier_context_sha256 = "9a62b20ebd0838d6e36d3770b99ec637369377088a72dbbd7b4788ad453e6efe"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 201
+final_end = 201
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "461f989c98808f77e79bf128f13dd4673ce80d25939a216c7429ec7b2e663f26"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L6"
+carrier_context_sha256 = "a7002f5d8a7cc27b56e2b1dd91e4906cec65c8373c39e0202f1f7b2b85edbdee"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 22
+final_end = 22
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "46acfe1e4b2f80426ceeaf40f46f50f49c2f3ba2e98b357ffc3510ea5dcd396b"
+carrier = "docs/manifests.md:L541"
+carrier_context_sha256 = "2c61450c7e4b6a4c4f41151356116d6f9f10d21ca2577abb69b37e15359313ac"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 108
+final_end = 113
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "48518c24cd9b3104b84fe02afaa8aee92cb13faccf6e33dad345e8d1b7ad6ae5"
+carrier = "docs/adrs/0002-surface-resource-identity.md:L156"
+carrier_context_sha256 = "5a98716bf707ad9b06170d581ae765c5f1e56a05967158f2b2acf9b49c802b99"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 178
+final_end = 186
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4859a55e0587f7171707bcdb547910f6c05496c92f7860957151ed11962b1ff5"
+carrier = "docs/adrs/0002-surface-resource-identity.md:L160"
+carrier_context_sha256 = "5a98716bf707ad9b06170d581ae765c5f1e56a05967158f2b2acf9b49c802b99"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 247
+final_end = 254
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "487fbcd91407daa63d28d2566f8ed7ed0bb61df0452b20136f6ee196b48009f0"
+carrier = "crates/adapters/src/schema_v2/tests/migration/child.rs:L1078"
+carrier_context_sha256 = "b046de79ece7db73378dc40039a33005675e2187b8152c7a5841d2f710be24fd"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4a01ed0978ae7986a305df3fbf7874b86dc3bff6f91388cb5afbe5092539c7bb"
+carrier = "docs/architecture.md:L1645"
+carrier_context_sha256 = "a524cca5728b201dd38094ea3688d91f54de967a9084790bd8933f7120171d05"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 62
+final_end = 62
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4b96c27eec796ae922dbfe92bc33760dd490bad550faf41c749cfb95f92b6c6b"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_migration_l1/v1.toml:L98"
+carrier_context_sha256 = "88881611349b2edf0826bd7128fdebfde3fb6988899afddc7a5d9d4aaac145ab"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted NameRenewed event signature"
+family = "ens_v2_migration_l1"
+action = "deprecated_archive_evidence"
+evidence_relation = "direct"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2"
+final_commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+final_tag = "a971bd64"
+final_path = "contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json"
+final_start = 110
+final_end = 158
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4baa2985f153c8c6d433eb4c8fbb611c42fb1678901d20578a47a4b89f27e1b3"
+carrier = "docs/adrs/0002-surface-resource-identity.md:L154"
+carrier_context_sha256 = "5a98716bf707ad9b06170d581ae765c5f1e56a05967158f2b2acf9b49c802b99"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 77
+final_end = 85
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4bdc37b31ad49b357de1a7a2c52c460f2bbf43ec551e367d815fdc6de094615f"
+carrier = "docs/architecture.md:L948"
+carrier_context_sha256 = "dc46c1db4b626cbe032229b4aba92e333791f4b9afae66d3fe56407e778ea551"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 127
+final_end = 133
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4c9d7c64655dc1d61d28a3a1bb2862deba85daeee358983470ee0188cd092948"
+carrier = "docs/architecture.md:L1658"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 11
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 369
+final_end = 369
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4d10452ba9b09af38d716f2159a3b50d17a1d6f9ff02baa96c13f2a81c74c481"
+carrier = "manifests/sepolia/ethereum/ens/ens_v1_wrapper_l1/v1.toml:L91"
+carrier_context_sha256 = "ac6220edc1dfdc7578a65568db18ca980337820de9a7379acb6ae64aaf8a9367"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4d25323cb184eca87fc6f008f3eedf6d1562d682cf739611a69ef021c0977d22"
+carrier = "docs/glossary.md:L1119"
+carrier_context_sha256 = "ba7dec8dcf860ab5e0b4038731e8899b7f5acea1a0c08328e991c4a2128d3b27"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 132
+final_end = 148
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "4d9a8a43934cb4d0b0dc9fdd6934c765c9b72e8610a4c03dfe1c56ca2e78e6de"
+carrier = "docs/glossary.md:L1107"
+carrier_context_sha256 = "e198ee9ec17f3b4ab5c976ee8895190971c23620ea158472f1ac935cfa9132cb"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 111
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "500f774ded7fe8335fcbf38e8aaa2b4eb954a06e598c9f5f3be66abdcfcb5453"
+carrier = "docs/architecture.md:L1644"
+carrier_context_sha256 = "a524cca5728b201dd38094ea3688d91f54de967a9084790bd8933f7120171d05"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 57
+final_end = 57
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "5046b488d3d218f33e87fa3e4178cd73b9f1e38a5efd0c938f96ffe1663ebdb0"
+carrier = "docs/manifests.md:L365"
+carrier_context_sha256 = "1cb9115e967c04f185506e022901146cf42dc753ae1d46be6a2eec59e00a4db6"
+carrier_context_ordinal = 14
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 106
+final_end = 106
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "50702af6771b975551cd73004658bf8936690abd11dadaf3b41cc207040eb88c"
+carrier = "docs/architecture.md:L1647"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 33
+final_end = 33
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "52d3dcb3e7079aefce613f53a1d068f59b0f0a196c267b6308db114ea82213ac"
+carrier = "docs/architecture.md:L1659"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 12
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 508
+final_end = 508
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "52ecf5829242da0b764c146de7a8ee574f43d70e6e95ceb59579f35dcb34d211"
+carrier = "docs/architecture.md:L1651"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "531ecd5ad7d96ed31a0f8cd96c1f5bc02e9cfc7265b2e2cf817edd2e70105d17"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L36"
+carrier_context_sha256 = "6695fc7f6e698171294ef825d11e71fdb8af2d8a4fb634c59c30858c408ade73"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 4
+final_end = 4
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "546f7691222384d540e2c60f0dc2a5d4ea64529e7c9bf2afab2d6b8f759deac6"
+carrier = "docs/manifests.md:L1331"
+carrier_context_sha256 = "09be5e3731d8e9b74a6d6cbd4e7f9adebba795fe01e22a08a3e5365266342d8a"
+carrier_context_ordinal = 15
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 139
+final_end = 139
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "5694e06c9e9c17bfc0bb2f07424b51fec943794d18bc03f73474959b6d0a7ca6"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v2.toml:L8"
+carrier_context_sha256 = "a39de8e7d605922871d5adf54000fd5db56db95d97d25077d1744561fa0cd439"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 38
+final_end = 38
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "56997694db110a301f4c55de97011f3252f2b100679570e3577d5daf7be373c6"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 10
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 132
+final_end = 132
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "5b4f613126f9e3079f434283c2592a661e61e9b4a97aa033b03e2dd0958921d2"
+carrier = "docs/partners/partner-1-indexing-requirements.md:L100"
+carrier_context_sha256 = "7f8e2ae1e0341d3322cde753e82aafaed819b0f3de42c068716098716b95dff6"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 168
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "5d2fd89a6f5ca6c973f78cbafd87fcfa3b9a03723317eaf6ec616559220177f9"
+carrier = "docs/glossary.md:L840"
+carrier_context_sha256 = "5566860cd8d4dc887cab6049ec29857ac20a5aeadfbc972eef9dee3bc0521949"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "623597b9d37176b3af0b7edb84e313c62f00e444395d633591dd46d241e5beab"
+carrier = "docs/manifests.md:L653"
+carrier_context_sha256 = "e7271d8783fcc2209b7f8880591c64efcd43c85ad66d8f18fc69a0cbcfb9465b"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 108
+final_end = 113
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "653d34d17a538d7b585b6da0f489ada6009dc2265f6e3b5350bef33ad69f91ae"
+carrier = "crates/interpret/src/write/identity/transition.rs:L570"
+carrier_context_sha256 = "ff23258b94590cb9e220ab1a4ac2d5e14277a5a91cf7f04ebd8bb9d9909d9303"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "665ef8a822968cc221e50de5b48a619bde423873cc3ab333a96a036b79474874"
+carrier = "docs/glossary.md:L1103"
+carrier_context_sha256 = "e198ee9ec17f3b4ab5c976ee8895190971c23620ea158472f1ac935cfa9132cb"
+carrier_context_ordinal = 6
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 106
+final_end = 106
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "66c034e37a5f2bae721f16056ad43a76dc907e93d73cfa22cc4ff2c3cd1f361b"
+carrier = "docs/manifests.md:L243"
+carrier_context_sha256 = "3002a260d28fd38aa80d252d5b4092c63b5cf856f61af2b45df892fd72cebd91"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 47
+final_end = 47
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "6941ae4f3cd3b136c9896d93250da4659c5d18705ecbba532741f2766179c456"
+carrier = "docs/architecture.md:L707"
+carrier_context_sha256 = "e595976c0a59811cfef77ea66df77c0366ee08416549d80219837b4a38d89828"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "69c042f242ee224b8966ddd109e697b9022f520a7c71827efa97fe6c79e7bdba"
+carrier = "docs/manifests.md:L544"
+carrier_context_sha256 = "2c61450c7e4b6a4c4f41151356116d6f9f10d21ca2577abb69b37e15359313ac"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 103
+final_end = 103
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "6c12a92c8d3f37011fd810d99c7d5e8e0fb833572b9bfc667c1ced9c0bc7b6d3"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 93
+final_end = 93
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "6c6460c3963beae5032059ead5f4cfb4fb885cd17001a7f5b4a36416bbdc7085"
+carrier = "docs/glossary.md:L1012"
+carrier_context_sha256 = "c7a2c3adefa55e73d2ec7ff95e41359760bbe2da52e61aadd79c948860048d64"
+carrier_context_ordinal = 6
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "6d00ff8ee5da5edffebfd9ca8ccdcf65f4266dffd7e336edf028182d6ca09545"
+carrier = "docs/glossary.md:L938"
+carrier_context_sha256 = "43f4f4cde0f2fe1114858c714cbe3b9c42f0e6a69077fb1e9498c1dc5b4758d4"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "6db00db42cc6fd80e59610b6ea30dd21516e5a137d56bedaebedb2c9a4b9b425"
+carrier = "docs/storage.md:L789"
+carrier_context_sha256 = "41fe4202df200ab1af427c37450ec716895ee413bccf2accee11dceda2654b09"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 127
+final_end = 133
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "6fb0ab6eb6b7048237595659c4fa8b28b77fd5afaef9bb50cc1e5b4141009486"
+carrier = "docs/manifests.md:L399"
+carrier_context_sha256 = "bf953165c26204d198bd15ea2c3766a9fd54253b39eb8574c1c373964a2ad785"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 89
+final_end = 135
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "6fd3146c0d67d69535fc37f23a24e716d1dc607231bc9401900b0cebd01d3864"
+carrier = "docs/architecture.md:L1660"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 13
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 437
+final_end = 437
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "712dd2b9ec5cd39111227c31a089ec8058965b251c7467ff15e89fddad87e52f"
+carrier = "docs/glossary.md:L500"
+carrier_context_sha256 = "a5720a113af82f4e54fd05e8116e54de899003001bbd54e207a5ac833d552e3a"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "7394b6a2c6cbce035cb89444dfddb374df2f4056242aa9509e943693e6a0a4be"
+carrier = "tests/e2e/src/harness/ens_v2.rs:L928"
+carrier_context_sha256 = "4a0b6866f030cf09f9d441ce4b5fd5f842bcdcd87fb49215e60501cb8a63297d"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 193
+final_end = 193
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "73f49d864a6554eed0d3483934cb960101de55b5ccc10e4c6138ab8ed5738b8d"
+carrier = "crates/project/src/integrity.rs:L244"
+carrier_context_sha256 = "4d440f334378f1477ef030e16e92b8bbf61b5ea422109e957ae0718c057d03eb"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "7ae04b85cdeb4cf25832d508fcab01b195170cada555423011d7ff7f91ffa365"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L71"
+carrier_context_sha256 = "4a0b8acfe4dcc0d876438a13dd369b61f1af267dcdacc15e45478231b2f5a87c"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver alias event signature"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/interfaces/IPermissionedResolver.sol"
+final_start = 19
+final_end = 19
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "7c1b86682552b36eaae48e97e1ecf35370a7454f0596f8e457a19de639284e19"
+carrier = "crates/adapters/src/schema_v2/migration/child.rs:L405"
+carrier_context_sha256 = "d215b2ba18b03c9a58bc2bb1474c6be5fda5506e87511b3d24967c9d3a941c7c"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 168
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "7ded84c4682cc99cf40267b8d05f9015e60d7ddaf6d91fab763314488779d86b"
+carrier = "docs/architecture.md:L950"
+carrier_context_sha256 = "dc46c1db4b626cbe032229b4aba92e333791f4b9afae66d3fe56407e778ea551"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 77
+final_end = 85
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "8088cac15aaaac4d0eb303e5236adb9d5128af1cebf7be6581c6ac09df30d294"
+carrier = "crates/adapters/src/schema_v2/tests/migration/child.rs:L12"
+carrier_context_sha256 = "445c1d105a6423553ed20405db6ae388068f7fa88b3675a24e6fe4a33452aee7"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "80aa59ba39554e81e84400dcdb9ca86bff02eaa8b20af27ce7a95462ed0f9bde"
+carrier = "docs/architecture.md:L1650"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 142
+final_end = 142
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "8468b9f89d6c59f093f7f66ee99d48799fdadedfcbb5b409aaeac12953e580f2"
+carrier = "docs/manifests.md:L612"
+carrier_context_sha256 = "1e9b5b1e9495410346de50e7bb9208a80cd7bd7ab569590ba764b7c3813a52fb"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "84a21f7baf68adae98614159bd78d1101c7c8b57df4aa84592fe194fe723f217"
+carrier = "docs/glossary.md:L717"
+carrier_context_sha256 = "e6c524acadced21612c948196fcebde21d288587f345e911a62980195769633c"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 124
+final_end = 124
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "84a55d05a786d97c60d3beb84d20c93ed811864553ac259ff1043ceb63286737"
+carrier = "docs/architecture.md:L1657"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 10
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 303
+final_end = 303
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "88e9b149dd34fc9359da35ff6c62498f732d5a2d975fd11629033967a3992264"
+carrier = "crates/adapters/tests/schema_v2_permutation_lane.rs:L1157"
+carrier_context_sha256 = "85a7c4caa7b80794fdf2c3558169dea75e862c9bf4187eecfc05971244ec7bdc"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 247
+final_end = 254
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "8c04e85ba692ad9dd6bd4b5ad4ffabd315d611e7660ea9167001909b51470dc1"
+carrier = "docs/architecture.md:L1652"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 172
+final_end = 172
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "8cbfb706e67d40e884a585a818b82e2ab384d1705a0a2a0d5eabdc4b70a73e03"
+carrier = "docs/storage.md:L791"
+carrier_context_sha256 = "41fe4202df200ab1af427c37450ec716895ee413bccf2accee11dceda2654b09"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 77
+final_end = 85
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "8ebc66e1b34b0f5e2c2615465995bd351b4fe5ace8a33964a4c7e1d2e287762f"
+carrier = "tests/e2e/src/harness/ens_v2.rs:L242"
+carrier_context_sha256 = "dd10d75b33a05181f2c42bbd0b110e616fbae83718f5513dad72b692e1184faf"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted ETHRegistrar initialization wiring"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/deploy/03_ETHRegistrar.ts"
+final_start = 44
+final_end = 44
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "8f5a009e7e2e3a247490aff1cd774d468c6e7d78f46d554fb97c8a1b2e958418"
+carrier = "crates/adapters/src/schema_v2/migration/child.rs:L202"
+carrier_context_sha256 = "9e9b25cf9a8ec0019320d5c68220723c232fd1019c3f2d530449f65088dc9819"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "906f32c977709fe0e9ab0199349968230960bdd4eb52b20fdf443c65c7430f86"
+carrier = "crates/adapters/src/schema_v2/tests/migration/child.rs:L1453"
+carrier_context_sha256 = "0d53980b95da0d80a4f0a9617b7eb31fa5c7e572b2be35861e3b43e3934a035c"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "94c7bbeca787a05167b987375fbb291e32084472c161c7dc27f3d3c7436daa31"
+carrier = "docs/manifests.md:L842"
+carrier_context_sha256 = "989f88d0b5acb354ec912f2f47f41e1bef85b4ecfc16eb93d915aebf12a578f0"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 47
+final_end = 47
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "94cc0f9d602a7f7f1e5496125c3de2f61a47a6f599e432ccea9d704970e0173d"
+carrier = "docs/architecture.md:L1637"
+carrier_context_sha256 = "23295f36c454dc7ba722c420f58572b0612d8d66225368a089dbad1b6794baff"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver alias event signature"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/interfaces/IPermissionedResolver.sol"
+final_start = 19
+final_end = 19
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "96a3e4508f20b37773fe30e7ca62abbecf4a12d3a53e3d41c3dcc9a8946a6248"
+carrier = "docs/architecture.md:L90"
+carrier_context_sha256 = "e9ace701144c6068652e4fb22ca66414f4bacecaa480fbb6bb2a95d780c58709"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 104
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "9786fa0c4e398b720f6b079ab1e73f0f0a96c80d97d75c65d9c515d315a0bcb6"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 11
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 134
+final_end = 134
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "97e12a835512cf357995ba5a028a42902d1ec84e9bde8b8baf55631484d9c445"
+carrier = "docs/architecture.md:L954"
+carrier_context_sha256 = "dc46c1db4b626cbe032229b4aba92e333791f4b9afae66d3fe56407e778ea551"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 467
+final_end = 472
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "98381c8b3e53b0c4ba2243fe436fb7387f5761dd5007b441a430d3d267a8b906"
+carrier = "crates/adapters/src/schema_v2/migration/registry.rs:L38"
+carrier_context_sha256 = "e43b2ce36553c05fa328950e9f7f80ef2853ef49c240b1e5e5c87f58aad60db8"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "9ad59963a809961e534bc099049ae87ad253f880d97f1251f9b457f799969bba"
+carrier = "docs/glossary.md:L1055"
+carrier_context_sha256 = "fa7c19ed9dd7b0779098c32dba6f24e825e91001bd20046ca039a75ca170413b"
+carrier_context_ordinal = 12
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 138
+final_end = 138
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "9c4044c6447f27f24464be47f362482f4164f4097fe3138d78ed00e943e02024"
+carrier = "docs/architecture.md:L1661"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 14
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 767
+final_end = 767
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "9d2055a7e583d89451d780d4588f8c9aa38d92a18538c1032d8a05246279d7a0"
+carrier = "docs/architecture.md:L253"
+carrier_context_sha256 = "07db8edd95cdceb2df055ed02b8541dbc9db1732495eed17fdfe0fc550e4fac2"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 168
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "9e029d11a91e835d26a4110acd894ee53fd3825672cf7975dea429b291e1b8e2"
+carrier = "docs/glossary.md:L792"
+carrier_context_sha256 = "b596eccf9bc1297570152816a7d5d7a0734c69b37b6478c048ac3f3602177316"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 124
+final_end = 124
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "9ed42cb0fd60c965dfc2095fb0bbd8081fd183f3ae8626bf36fbaf9b4f0540de"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L33"
+carrier_context_sha256 = "6695fc7f6e698171294ef825d11e71fdb8af2d8a4fb634c59c30858c408ade73"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 139
+final_end = 139
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "9f17de4ffacd12789664c0f80ed3f5e759619e236945c3571824960579f835be"
+carrier = "tests/e2e/src/harness/ens_v2.rs:L679"
+carrier_context_sha256 = "b1887c6002cdd9ba600322480ed4ce0096255b015768f304a3bd8ae562c3f131"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 84
+final_end = 84
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "9f7849c3c38f2aabbdd71a043c9273dead58c65f10a03c2cf0fe18cfbff633f0"
+carrier = "docs/architecture.md:L952"
+carrier_context_sha256 = "dc46c1db4b626cbe032229b4aba92e333791f4b9afae66d3fe56407e778ea551"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 178
+final_end = 186
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a0d0506007be95ef5c15f15e2c29defb2fc9ed719572220395f1f68ec8767ac6"
+carrier = "docs/adrs/0002-surface-resource-identity.md:L158"
+carrier_context_sha256 = "5a98716bf707ad9b06170d581ae765c5f1e56a05967158f2b2acf9b49c802b99"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 467
+final_end = 472
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a1cb23491707c093c1494c9fb54b7aab0ddb8bf1bd42fd4102ece8e192594332"
+carrier = "crates/adapters/src/schema_v2/tests/migration/child.rs:L13"
+carrier_context_sha256 = "445c1d105a6423553ed20405db6ae388068f7fa88b3675a24e6fe4a33452aee7"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 168
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a280e94256970c286ad95149a242547e7c122d565160c89830164943859d7e68"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 106
+final_end = 106
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a2a2d18724749db3f5ff594142f4b702cb274fa1ec6baab90694e4503b3316b8"
+carrier = "docs/manifests.md:L373"
+carrier_context_sha256 = "04cb1d41c0fcde44e4bedd0f5c1e5c74ac371ff5b3cf44759dab81b14f83d66c"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 151
+final_end = 151
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a354ce38add13fce46cbb45527a316a9140135094845093fdc154582cc1a76dd"
+carrier = "docs/manifests.md:L365"
+carrier_context_sha256 = "1cb9115e967c04f185506e022901146cf42dc753ae1d46be6a2eec59e00a4db6"
+carrier_context_ordinal = 15
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 111
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a4f3fe4eb01c060da3bf6a2d5081d70119843e498a684d50259bd19e8cd7cf47"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 20
+review_status = "reviewed"
+claim = "admitted NameRenewed event signature"
+family = "ens_v2_registrar_l1"
+action = "deprecated_archive_evidence"
+evidence_relation = "direct"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2"
+final_commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+final_tag = "a971bd64"
+final_path = "contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json"
+final_start = 110
+final_end = 158
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a51e6a6e8c6970044e39d5274a6094235ac9587fc22943579e39a4511468eddf"
+carrier = "docs/manifests.md:L512"
+carrier_context_sha256 = "a3efc9123ab5b45e38929402be9c72bf89d4b0b3576481c524040918473d2809"
+carrier_context_ordinal = 11
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 106
+final_end = 106
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a62442db95416c0d44942f04856b6f67fd18197eb8cbb5e1bbff2ec2cfaa5ade"
+carrier = "tests/e2e/src/harness/ens_v2.rs:L929"
+carrier_context_sha256 = "4a0b6866f030cf09f9d441ce4b5fd5f842bcdcd87fb49215e60501cb8a63297d"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 233
+final_end = 233
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a74450852b72705492af073dec08303f1bc6798c1bad7b65397e65a7dc9dcd23"
+carrier = "docs/manifests.md:L366"
+carrier_context_sha256 = "1cb9115e967c04f185506e022901146cf42dc753ae1d46be6a2eec59e00a4db6"
+carrier_context_ordinal = 22
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 161
+final_end = 161
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a78bc0c0bcedb54498eb230a2cf3f2725770f365ce1b2e903f747c8200de8c9e"
+carrier = "crates/adapters/src/schema_v2/migration/child.rs:L6"
+carrier_context_sha256 = "11384b677bb1d346c78f75cf7a7a121a3139697f148cc1e7f6dc17055a98d92e"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 124
+final_end = 124
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a7b0fdc7395a5f25b8356b44ba6f9239cceb6f41659b298180f786621094d6a5"
+carrier = "docs/architecture.md:L1644"
+carrier_context_sha256 = "a524cca5728b201dd38094ea3688d91f54de967a9084790bd8933f7120171d05"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 59
+final_end = 59
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "a7db23647e27ac8962a6240361b0182665b19e8378a36b6f24c66bb06a9befcd"
+carrier = "docs/glossary.md:L841"
+carrier_context_sha256 = "5566860cd8d4dc887cab6049ec29857ac20a5aeadfbc972eef9dee3bc0521949"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "aa42765edf938b6d7cb6600deee527436b73386f6d6d2ef223a06964a8e6189e"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 91
+final_end = 91
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "aa556c549d90808a87fdd2d2d21dfec50043f90fa08c79883a868b43a51ab296"
+carrier = "docs/glossary.md:L737"
+carrier_context_sha256 = "e2fd0e4e2d3691e9633b8beb3d3b65eca892c254448486bf566fd48da4a67d36"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "aa8d435f93bf41d63ef01b463f5843020ef03e9b43cac99909ad38e791378a50"
+carrier = "docs/manifests.md:L365"
+carrier_context_sha256 = "1cb9115e967c04f185506e022901146cf42dc753ae1d46be6a2eec59e00a4db6"
+carrier_context_ordinal = 17
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 148
+final_end = 148
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ad74b67289be4ba18dd00469593ad5b0cd2869d9e46b53f0d1dc281da0e040ca"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted registrar renewal authorization and state transition"
+family = "ens_v2_registrar_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/AbstractETHRegistrar.sol"
+final_start = 92
+final_end = 92
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ade981bb4cb7017a69a6cb574bfa28912c1572135328f21dcb2335db0a7c76a0"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 19
+review_status = "reviewed"
+claim = "admitted NameRenewed event signature"
+family = "ens_v2_registrar_l1"
+action = "deprecated_archive_evidence"
+evidence_relation = "direct"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2"
+final_commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+final_tag = "a971bd64"
+final_path = "contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json"
+final_start = 110
+final_end = 158
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ae150f2c9260a9c13402f9ee3af04cd4afb1b01144b2ee486449bb00f0f32ffc"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L38"
+carrier_context_sha256 = "6695fc7f6e698171294ef825d11e71fdb8af2d8a4fb634c59c30858c408ade73"
+carrier_context_ordinal = 9
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 8
+final_end = 8
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "aec7a226125e1871c91c5b1c0fd62b1b5364d6e0d3d8061a94aa2df608e0c1ab"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v2.toml:L7"
+carrier_context_sha256 = "a39de8e7d605922871d5adf54000fd5db56db95d97d25077d1744561fa0cd439"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 15
+final_end = 15
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "af966abd683838cca046bc8392cd1fcaf9a10c2c54e2fa7a397b4528c53ba6bd"
+carrier = "docs/manifests.md:L544"
+carrier_context_sha256 = "2c61450c7e4b6a4c4f41151356116d6f9f10d21ca2577abb69b37e15359313ac"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 133
+final_end = 133
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "b07c800a0b7b2c3b095a5649fef5f44b8d7ec50c57f26b8036dd0d6b5ee51041"
+carrier = "docs/manifests.md:L587"
+carrier_context_sha256 = "8f9659a4fa28440ce4a8f181e84df8d6d52159cca118a419401d46e1f21bd097"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 151
+final_end = 151
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "b12902f83f5a6321cdc3521d9c7d38bbd0cdf8d90344cb3ef8c6f3b1609ed79f"
+carrier = "docs/manifests.md:L542"
+carrier_context_sha256 = "2c61450c7e4b6a4c4f41151356116d6f9f10d21ca2577abb69b37e15359313ac"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 124
+final_end = 124
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "b4a14e53215d5d8e22e711dc1a457b79d8f3abc532ebfc15a0e67bb2031b8306"
+carrier = "docs/architecture.md:L707"
+carrier_context_sha256 = "e595976c0a59811cfef77ea66df77c0366ee08416549d80219837b4a38d89828"
+carrier_context_ordinal = 6
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 168
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "b74aec435ca99d2ee8e061b9bf2b9796b68b728ba4be4518f19b5843840d4630"
+carrier = "docs/api-v2-routes.md:L898"
+carrier_context_sha256 = "b78eeacb6dca5717a6d2d3fc466cf5ae2be60428aad76af6831f551b961647db"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted ENSV2Resolver redirect installation and ENSv1 resolver reachability"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/test/integration/ENSV2Resolver.test.ts"
+final_start = 94
+final_end = 124
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "b9f28ed9376fa512ea05705746b0062b87ef5c0361f941af3429c501f86c03b4"
+carrier = "docs/manifests.md:L1343"
+carrier_context_sha256 = "63588557cdc54014b90ef0069d1e89293a27aadf071fd2c296a7b0eba13db739"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 46
+final_end = 46
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "bd8fc9f2e71c65edbb764213a5d5d06db99d6131130618bff8094b212cc8231e"
+carrier = "docs/architecture.md:L1639"
+carrier_context_sha256 = "23295f36c454dc7ba722c420f58572b0612d8d66225368a089dbad1b6794baff"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted NameRenewed event signature"
+family = "ens_v2_registrar_l1"
+action = "deprecated_archive_evidence"
+evidence_relation = "direct"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2"
+final_commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+final_tag = "a971bd64"
+final_path = "contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json"
+final_start = 110
+final_end = 158
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "bdc7a2273b6d9fe16269f084f32cf5763080c2c19efe009252a19142c642a0f8"
+carrier = "docs/manifests.md:L1328"
+carrier_context_sha256 = "09be5e3731d8e9b74a6d6cbd4e7f9adebba795fe01e22a08a3e5365266342d8a"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 22
+final_end = 22
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c1d395ee8e50dee15aafaf71ed7cfcfc84e2968a292f8ece51e0dad7b38291a6"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_registrar_l1/v3.toml:L49"
+carrier_context_sha256 = "9a359ad703bfae8b126afd8d4323675fbaeee87eec6f28613a44d59d940d94a4"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted NameRenewed event signature"
+family = "ens_v2_registrar_l1"
+action = "deprecated_archive_evidence"
+evidence_relation = "direct"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2"
+final_commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+final_tag = "a971bd64"
+final_path = "contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json"
+final_start = 110
+final_end = 158
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c298e9e1d4531f8898169ed1088c3c63fc10c1c66ff284e9bf361766549dd305"
+carrier = "docs/api-v2-routes.md:L885"
+carrier_context_sha256 = "b78eeacb6dca5717a6d2d3fc466cf5ae2be60428aad76af6831f551b961647db"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 135
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c4439987a27a00b4c325faa6a76494126665c46dd150125f8d1d1cfc51129a0b"
+carrier = "docs/adrs/0002-surface-resource-identity.md:L85"
+carrier_context_sha256 = "a45209adc73c3bf5bed0146fed8e64e40572930f779793c41434189fff45ca00"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 104
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c5ac1e19b0eea5e393e2fc70ca0020280c79f6fe7fb8ad7b68b86293c475678a"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_registrar_l1/v3.toml:L12"
+carrier_context_sha256 = "18ab3f6a8421cc46efb16980be753a3a55402ba9f0a077998a4d3dece4c52625"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted NameRenewed event signature"
+family = "ens_v2_registrar_l1"
+action = "deprecated_archive_evidence"
+evidence_relation = "direct"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2"
+final_commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+final_tag = "a971bd64"
+final_path = "contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json"
+final_start = 110
+final_end = 158
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c5aceabe2c0e55290703115b4205d2dad7db11cae04cf6dbd73180311a046ec5"
+carrier = "crates/adapters/tests/fixtures/interpreters/raw-events.json:L533"
+carrier_context_sha256 = "d648f2ccde449a83bd7b3c3f1e71178314dff4f7b7801409b709b0260d9cfabc"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 475
+final_end = 475
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c5ee17c7295ffdbe53a80df5441afd7b7ea43fd8e96ef23ffef6a7880e313d1e"
+carrier = "crates/adapters/tests/fixtures/interpreters/README.md:L49"
+carrier_context_sha256 = "fa7c585d547756a610fe1edecb3513766f01e487961f6f4d64383c5515c8f0db"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 475
+final_end = 475
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c682a57e8a298933f2afe851833ae414da1b2eb914db13dfe88d832db3f45af0"
+carrier = "docs/glossary.md:L739"
+carrier_context_sha256 = "e2fd0e4e2d3691e9633b8beb3d3b65eca892c254448486bf566fd48da4a67d36"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 151
+final_end = 151
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c855299de6294b6bd392371afa1ab8262427dc4463971e8cc36834b034c83078"
+carrier = "docs/manifests.md:L365"
+carrier_context_sha256 = "1cb9115e967c04f185506e022901146cf42dc753ae1d46be6a2eec59e00a4db6"
+carrier_context_ordinal = 16
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 132
+final_end = 132
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c855fe77c1859d1f9317f36ff4d87c8027b322a76a85154ef2440e6206d8c2f4"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L39"
+carrier_context_sha256 = "6695fc7f6e698171294ef825d11e71fdb8af2d8a4fb634c59c30858c408ade73"
+carrier_context_ordinal = 10
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 9
+final_end = 9
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c8678b675dd1fce173940f66d413676212ae1fa70eefeae29ab244f8800c79fe"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L77"
+carrier_context_sha256 = "200eded35e6ebc17c12bd950cf003810c7d1359241fe5fddb12e5216ff7cdd47"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 142
+final_end = 142
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c96dfaf44654086bd14cdfbfd5a13c6f05e18f032412823b7c198bc14389736e"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L105"
+carrier_context_sha256 = "9377d6d34d979ef23206296e1d036ec27d5f5a3de0f4c2c24bc4be1dc3843e11"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 89
+final_end = 89
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "c9b944b8276fe2b13bfccc1e0442ca61796d8499ac73aa6c6a0a12a018d4e6c8"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v2.toml:L157"
+carrier_context_sha256 = "e4cc8ad32e7c392dd5abde32b77e933353e82ab7cff6577022ccbcde7c287c70"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 20
+final_end = 20
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ca2831d047f1ef0e453406cd2c3088fb7b01f706480e6dfdb2db252ca9ecb72d"
+carrier = "docs/manifests.md:L243"
+carrier_context_sha256 = "3002a260d28fd38aa80d252d5b4092c63b5cf856f61af2b45df892fd72cebd91"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 43
+final_end = 43
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "cb44576e43b5b40059764977ff4e52ca32db7a2e85c5c7692a785d87835f5ba4"
+carrier = "docs/manifests.md:L512"
+carrier_context_sha256 = "a3efc9123ab5b45e38929402be9c72bf89d4b0b3576481c524040918473d2809"
+carrier_context_ordinal = 12
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 107
+final_end = 107
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "cbcdc98396c7681b1d05b024ef740e774416e4314b3ee6321e8218ce1ed369db"
+carrier = "crates/adapters/src/schema_v2/tests/migration/child.rs:L1303"
+carrier_context_sha256 = "cb80608572452e3618edb69fb6e2df9731021ffbb865d7f4c4099bfc7ee5704d"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 168
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "cd3fe8a0e1495f838e9e7c23b41a6eefb23a9b9eeb9c95f1bb588ac7e73cd5d0"
+carrier = "docs/manifests.md:L1343"
+carrier_context_sha256 = "63588557cdc54014b90ef0069d1e89293a27aadf071fd2c296a7b0eba13db739"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 161
+final_end = 161
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "cd42cf6467738cbf6e1ec007d6adfdd49137af16df2a00d5c4765877ebbb7bf4"
+carrier = "docs/api-v2-routes.md:L1124"
+carrier_context_sha256 = "c6258d1005cee5b1e7c63ec072c5c486e0a0ae3c6e2f8aba11c983f776170f46"
+carrier_context_ordinal = 9
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 111
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ce34d0c61af5c45fb731c210f00d1874c9f7f9329ac2b0bff694276cb6dde695"
+carrier = "docs/manifests.md:L408"
+carrier_context_sha256 = "bf953165c26204d198bd15ea2c3766a9fd54253b39eb8574c1c373964a2ad785"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "cefe3837718bf5dd9d6a9739df3060de0fc7d63a49d9b1f1ee4f89ab0598ff57"
+carrier = "docs/architecture.md:L1642"
+carrier_context_sha256 = "a524cca5728b201dd38094ea3688d91f54de967a9084790bd8933f7120171d05"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 7
+final_end = 7
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d10b3327644441eed619e3be59c27da8fc101f1df6581783c11047cd3765794f"
+carrier = "docs/architecture.md:L1656"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 9
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 273
+final_end = 273
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d190f0b9b41e3416b68f23b6e7a8dfe822019d84c0702e532ee69f63a90bf35d"
+carrier = "docs/glossary.md:L714"
+carrier_context_sha256 = "e6c524acadced21612c948196fcebde21d288587f345e911a62980195769633c"
+carrier_context_ordinal = 6
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 121
+final_end = 121
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d59d9ff42fa2e5fa133ff67029a8d4afcc0943c22cdd36acecee224f95d5bf3f"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L89"
+carrier_context_sha256 = "53eab93d4fee2c3d41f8f51bb8fccd11d10ecba9d9bbd099ff08215c70740920"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 172
+final_end = 172
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d5fba7848cc59a29395cc75be76122d2a403364b105d13b506ae2e31ebb97b81"
+carrier = "docs/glossary.md:L821"
+carrier_context_sha256 = "907374328542e5ec509a14297a5089cc0bd95a375fedf91dca7953a6cb55020b"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d69f70b969c24587e1982166e4b1f7601e82d332b1f7d5b3f427b29044a12991"
+carrier = "docs/adrs/0002-surface-resource-identity.md:L152"
+carrier_context_sha256 = "5a98716bf707ad9b06170d581ae765c5f1e56a05967158f2b2acf9b49c802b99"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 127
+final_end = 133
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d81eb5fb0ff5dfd04c63582ce5487781c345b0fad501229270cf460e84eb140d"
+carrier = "docs/manifests.md:L373"
+carrier_context_sha256 = "04cb1d41c0fcde44e4bedd0f5c1e5c74ac371ff5b3cf44759dab81b14f83d66c"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 134
+final_end = 134
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d8883428fa20095f125f68a544964de6c668ca4b292262214cc041524d1b9207"
+carrier = "docs/manifests.md:L1343"
+carrier_context_sha256 = "63588557cdc54014b90ef0069d1e89293a27aadf071fd2c296a7b0eba13db739"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 437
+final_end = 437
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d8a11b21561f3d8e30cb4dd113ac1b74b78b7f646dba8ed27f5984eed82eddcb"
+carrier = "docs/architecture.md:L1648"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 53
+final_end = 53
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "d972bac183d0920c477df9100d4b83cb0013b091c2a0ce997aebd051cb513412"
+carrier = "docs/manifests.md:L366"
+carrier_context_sha256 = "1cb9115e967c04f185506e022901146cf42dc753ae1d46be6a2eec59e00a4db6"
+carrier_context_ordinal = 21
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 146
+final_end = 146
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "da680d7dc1bd9ddd8f8b24c20372aaef7424c6bfedc0f77c54d9ad5dab973587"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L40"
+carrier_context_sha256 = "6695fc7f6e698171294ef825d11e71fdb8af2d8a4fb634c59c30858c408ade73"
+carrier_context_ordinal = 11
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 13
+final_end = 13
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "daa6cb8c030699ce37f3ac50823911dd6bc326e09e1a2309074849e2c67fa3a7"
+carrier = "docs/architecture.md:L314"
+carrier_context_sha256 = "406b516e349c8920f7a799da8e4d9126a06feb18d5134b8bcd5a14b72d91b9ba"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "db34378e84c4add8a3afa5cd44ed30227359e7e3b41ffe273fc4157003e00843"
+carrier = "docs/architecture.md:L1655"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 258
+final_end = 258
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "dba820f3c8dc04b468615875501471f3a08cf9ca03fee83dc9fba6826456f905"
+carrier = "crates/adapters/src/schema_v2/state_wrapper.rs:L69"
+carrier_context_sha256 = "bd08ba68a2637b60553e3a4a1271d83c972b520d8d7168146c26776569968798"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 104
+final_end = 111
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "dc4f64002b0f287ff3f3d06049511d32841061610d336d9f98aba0ba0fb6c719"
+carrier = "crates/adapters/src/schema_v2/tests/migration/child.rs:L1454"
+carrier_context_sha256 = "0d53980b95da0d80a4f0a9617b7eb31fa5c7e572b2be35861e3b43e3934a035c"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ddbbf03c66b2d5a204c4991aa99adaff8cb4f1826da821c09f8ba87460331650"
+carrier = "crates/adapters/src/schema_v2/seam.rs:L32"
+carrier_context_sha256 = "1cf7718f32b54efb86d3c27f0b0d245a85cdc5f6271999321a9efec717fe7f37"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ddef0b7e6fc71f301c15e8e5e6865f0a78e8c55938b89d1c94b0e309da63ab49"
+carrier = "docs/architecture.md:L1643"
+carrier_context_sha256 = "a524cca5728b201dd38094ea3688d91f54de967a9084790bd8933f7120171d05"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 52
+final_end = 52
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ddfef89546a580f7eb86653ad6627eb6372c07de30435ed9076f78e7cf7e593f"
+carrier = "docs/manifests.md:L1334"
+carrier_context_sha256 = "4c51ee86f66ff46fc93e927377cf6d9331e581438debb81571e5ddab97620c4b"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 15
+final_end = 15
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "de66791822304cd37ca6ed73bdfc5d3e3962f535c7cb4f1eafa806d1e1aae783"
+carrier = "docs/migration-activation-coverage.md:L112"
+carrier_context_sha256 = "700c986183bd915d94586f34db5252a1744c6b07e84f3fe064d49c18b3003616"
+carrier_context_ordinal = 6
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 178
+final_end = 200
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "e04e996e607ed6b9124703680bb9f28f295913f7f812b605f058f0cf4542245c"
+carrier = "docs/migration-activation-coverage.md:L115"
+carrier_context_sha256 = "700c986183bd915d94586f34db5252a1744c6b07e84f3fe064d49c18b3003616"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 106
+final_end = 146
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "e25808984f9bd6b4c15622f0b5b60e1e620e1deccc2c1deb0d6f7277864dc0cb"
+carrier = "docs/manifests.md:L842"
+carrier_context_sha256 = "989f88d0b5acb354ec912f2f47f41e1bef85b4ecfc16eb93d915aebf12a578f0"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 43
+final_end = 43
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "e4060e580f2d5ea39d91eb3146139727ec84277133002308ef1c55e77751acb3"
+carrier = "docs/glossary.md:L994"
+carrier_context_sha256 = "fe398d078af0b64198fbe5ca5f434c4ee6f748c76144d487302947dac1b5a10d"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "e4280c0f643092b02a5ef5b59c4445a789254b548d85750a09d03189bf636c79"
+carrier = "docs/api-v2-routes.md:L888"
+carrier_context_sha256 = "b78eeacb6dca5717a6d2d3fc466cf5ae2be60428aad76af6831f551b961647db"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted ENSV2Resolver redirect installation and ENSv1 resolver reachability"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/deploy/00_ENSV2Resolver.ts"
+final_start = 60
+final_end = 81
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "e73418ca5f2b9bebe21df5b25be763f95bfea8ff90add28048fc26a83121c587"
+carrier = "docs/api-v2-routes.md:L917"
+carrier_context_sha256 = "83da58e2e4112adfc452a68647712dd08c79816f585563ce402740b825be7888"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 137
+final_end = 175
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "e76ac49dcf730b2c3886015f0bab7de808c9ec5e695e1596bfeb816ecf92ab31"
+carrier = "docs/adrs/0002-surface-resource-identity.md:L162"
+carrier_context_sha256 = "5a98716bf707ad9b06170d581ae765c5f1e56a05967158f2b2acf9b49c802b99"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 66
+final_end = 78
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "e78061a63214d3afd19a7b8daeda71729100b74c2a57adbbdd1e9eb8bb646c5e"
+carrier = "docs/manifests.md:L586"
+carrier_context_sha256 = "8f9659a4fa28440ce4a8f181e84df8d6d52159cca118a419401d46e1f21bd097"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "e7f79769b46b5ef75137647db6259f396a29b1517229f3d35d71c04dda02ce0f"
+carrier = "docs/architecture.md:L1649"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 65
+final_end = 65
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ecf42500803de815f5ca6d049ba7d5462a9793ca8ca5542f36dc8a1f91bc5cd0"
+carrier = "docs/manifests.md:L1341"
+carrier_context_sha256 = "63588557cdc54014b90ef0069d1e89293a27aadf071fd2c296a7b0eba13db739"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 33
+final_end = 33
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ed77f0fc44e4a49cc4794a8365391d2729f165250db5181ea58f7f892f6e7c19"
+carrier = "docs/glossary.md:L501"
+carrier_context_sha256 = "a5720a113af82f4e54fd05e8116e54de899003001bbd54e207a5ac833d552e3a"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 168
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ee0bd8c90ea5a0e94141983d17fb47106eec6be0a0ba2be4ea0fbb04965a1a65"
+carrier = "docs/migration-activation-coverage.md:L110"
+carrier_context_sha256 = "700c986183bd915d94586f34db5252a1744c6b07e84f3fe064d49c18b3003616"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 104
+final_end = 207
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ee0d54aa3a06b99a4f914a1f509c2eb0a0d2eb1e5550d34cd1d52bade02a2285"
+carrier = "schema-v2/README.md:L41"
+carrier_context_sha256 = "246348800fd5f89b2c41355046c5f30e68ed2aa82336d49cc2ad536e8a0fb41f"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 68
+final_end = 68
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "eedc0c58cc896e7a6d79e191ae57e6222ffa441a37b352474077d84d8fa96c0f"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v2.toml:L156"
+carrier_context_sha256 = "e4cc8ad32e7c392dd5abde32b77e933353e82ab7cff6577022ccbcde7c287c70"
+carrier_context_ordinal = 0
+review_status = "reviewed"
+claim = "admitted user-registry initialization and upgrade behavior"
+family = "ens_v2_registry_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registry/UserRegistry.sol"
+final_start = 6
+final_end = 6
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "eee45a7d2b03b643c7a39ca1671d56d6c92340dbeddbdd2beb43ce43cdd660c0"
+carrier = "docs/manifests.md:L418"
+carrier_context_sha256 = "bf953165c26204d198bd15ea2c3766a9fd54253b39eb8574c1c373964a2ad785"
+carrier_context_ordinal = 6
+review_status = "reviewed"
+claim = "admitted migration-helper sender attribution and grouped-transfer behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/MigrationHelper.sol"
+final_start = 102
+final_end = 114
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "ef448ff627d10aa4cc47aab14c240aa526a2480b154e4743d779c39093c6ab89"
+carrier = "docs/glossary.md:L1040"
+carrier_context_sha256 = "fa7c19ed9dd7b0779098c32dba6f24e825e91001bd20046ca039a75ca170413b"
+carrier_context_ordinal = 7
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 144
+final_end = 144
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "f0964965e884992b47bd1515500b777b2be8ba59db78cbde7e1d1c9634368180"
+carrier = "crates/interpret/src/write/identity/transition.rs:L571"
+carrier_context_sha256 = "ff23258b94590cb9e220ab1a4ac2d5e14277a5a91cf7f04ebd8bb9d9909d9303"
+carrier_context_ordinal = 4
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 168
+final_end = 168
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "f1aecdbbff49ed35949b4065e5cb41e7d1a270ef774265b4f522ececc84a0d3e"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L30"
+carrier_context_sha256 = "6695fc7f6e698171294ef825d11e71fdb8af2d8a4fb634c59c30858c408ade73"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted PublicResolverV2 registry-ownership and approval authorization"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PublicResolverV2.sol"
+final_start = 179
+final_end = 183
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "f2843cca990c1a03198725ecc8c3a6ae6c77568fcf18d06377d4655892932945"
+carrier = "docs/architecture.md:L1645"
+carrier_context_sha256 = "a524cca5728b201dd38094ea3688d91f54de967a9084790bd8933f7120171d05"
+carrier_context_ordinal = 6
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 64
+final_end = 64
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "f38f7ce6c065cb0ea7009e0e91037eb5d50fc8dc4b9b91158935234aa7f02c81"
+carrier = "docs/architecture.md:L443"
+carrier_context_sha256 = "b18eaf35a36b90f9f023d3ce440faa8e8df131099e2e60e94638c7d9944f98b2"
+carrier_context_ordinal = 5
+review_status = "reviewed"
+claim = "admitted renewal and ENSv1 wrapper synchronization behavior"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/registrar/ETHRenewerV1.sol"
+final_start = 134
+final_end = 134
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "f39394f92fec2c637787984d978b5d20f8ceea572ab5187cf1bf1b349f3e2467"
+carrier = "docs/architecture.md:L1653"
+carrier_context_sha256 = "7e6f269122000c0e4b40b2bc56fceabdf8365b22b24e552b93a51135f134e3ad"
+carrier_context_ordinal = 6
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 178
+final_end = 178
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "f5c12da7cda178fe8d3eaed59f7c1347d5a77a1228868a760b8cd987a12b96d0"
+carrier = "docs/architecture.md:L1643"
+carrier_context_sha256 = "a524cca5728b201dd38094ea3688d91f54de967a9084790bd8933f7120171d05"
+carrier_context_ordinal = 2
+review_status = "reviewed"
+claim = "admitted resolver resource and record-part permission derivation"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+final_start = 54
+final_end = 54
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "f891ffc215439c8059284f58d024f7c2ff7395dcce3d200a793bcfe8e6691c4b"
+carrier = "docs/glossary.md:L941"
+carrier_context_sha256 = "43f4f4cde0f2fe1114858c714cbe3b9c42f0e6a69077fb1e9498c1dc5b4758d4"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 149
+final_end = 149
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "f94ba7ea15dd17996051f92c35311418aafb723ea1c3f89abfb963b84f3580c7"
+carrier = "docs/storage.md:L795"
+carrier_context_sha256 = "41fe4202df200ab1af427c37450ec716895ee413bccf2accee11dceda2654b09"
+carrier_context_ordinal = 3
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 467
+final_end = 472
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "fbc7d2d464042ccb6173c5d8988c7fc9c0b646a8a7786c9e83de06122363e2e5"
+carrier = "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml:L37"
+carrier_context_sha256 = "6695fc7f6e698171294ef825d11e71fdb8af2d8a4fb634c59c30858c408ade73"
+carrier_context_ordinal = 8
+review_status = "reviewed"
+claim = "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/PermissionedResolver.sol"
+final_start = 6
+final_end = 6
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "fc269cd0b58ca666950de65bf13f65bd9c7df1b381164d41fe6af2332d1a8070"
+carrier = "docs/glossary.md:L1056"
+carrier_context_sha256 = "fa7c19ed9dd7b0779098c32dba6f24e825e91001bd20046ca039a75ca170413b"
+carrier_context_ordinal = 13
+review_status = "reviewed"
+claim = "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+family = "ens_v2_migration_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/migration/LockedWrapperReceiver.sol"
+final_start = 140
+final_end = 140
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"
+
+[[semantic]]
+id = "fca74fd5896d90c37daf16af142ff3d632f25f48fc190c9bbc12dc5e2f2b276e"
+carrier = "docs/manifests.md:L1342"
+carrier_context_sha256 = "63588557cdc54014b90ef0069d1e89293a27aadf071fd2c296a7b0eba13db739"
+carrier_context_ordinal = 1
+review_status = "reviewed"
+claim = "admitted resolver alias event signature"
+family = "ens_v2_resolver_l1"
+action = "deprecated_historical_source"
+evidence_relation = "constrains"
+retention_reason = "the admitted 2026-06-29 old-model family still depends on this claim; #565 owns replacement evidence and family deprecation"
+final_key = "ens_v2_sepolia_20260629"
+final_commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+final_tag = "ccaeb58"
+final_path = "contracts/src/resolver/interfaces/IPermissionedResolver.sol"
+final_start = 19
+final_end = 19
+handoff_issue = "#565"
+handoff = "replace evidence and deprecate the admitted old-model family at re-initialization"

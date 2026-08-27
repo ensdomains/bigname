@@ -390,8 +390,8 @@ closed its wrapper binding and reactivated its registrar position before that
 recorded transfer. If no prior registrar identity was materialized, that exact
 transfer confirms the fallback identity with its binding effective from the
 preceding `NameUnwrapped`; the cleanup-relative time predicate remains strict.
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 
@@ -401,9 +401,9 @@ errors. The unlocked ERC-721 entry accepts transfers only from BaseRegistrar,
 whose `ownerOf` rejects a token after its expiry, and both wrapper entry points
 accept transfers only from NameWrapper. NameWrapper treats a `.eth` second-level
 name as expired for transfer at the start of registrar grace.
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L103 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L48-L55 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L101-L124 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L103 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L48-L55 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L101-L124 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L35-L50 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L835 @ ens_v1@91c966f)
@@ -786,25 +786,7 @@ released or expired name. ENSv2 stores resolver records by node and version.
 `setName` passes
 part zero, selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no
-current registry-registration lookup. (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L127-L133 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L77-L85 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L178-L186 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L467-L472 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L66-L78
-@ ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L192 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L374-L382 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L443-L455 @
-ens_v2@ccaeb58)
+current registry-registration lookup. (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L127-L133 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L77-L85 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L178-L186 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L467-L472 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L66-L78 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L192 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L374-L382 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L443-L455 @ ens_v2@a971bd64)
 
 Redo preparation restages only identities anchored inside the range, so an
 identity derived before it keeps its anchor even when an in-range event

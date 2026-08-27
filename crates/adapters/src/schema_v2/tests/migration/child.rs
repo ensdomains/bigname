@@ -9,12 +9,12 @@ use super::*;
 /// migrated name is locked, then the registration that level performs. The locked branch deploys
 /// the child's registry and only then registers the label into the parent registry, so the proxy
 /// creation always precedes the registration within the level
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58);
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2_sepolia_20260629@ccaeb58);
 /// the emancipated branch registers into the parent's existing registry with no proxy at all
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@a971bd64).
 /// The registration itself is emitted by the receiving registry
-/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64).
 fn level_logs(level: &Value, addresses: &Value) -> anyhow::Result<Vec<RawLogInput>> {
     let block = level["migration_block"].as_i64().unwrap();
     let emitter = level["emitting_registry"].as_str().unwrap();
@@ -1075,7 +1075,7 @@ fn a_self_claim_without_v1_cleanup_derives_no_boundary() -> anyhow::Result<()> {
 /// The receiver takes custody of the wrapper token before parking it, so a child's cleanup is two
 /// hops. Only the second reaches the Graveyard, and only the second ends ENSv1 control: custody
 /// moving to the receiver alone leaves the name live under ENSv1
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58).
 #[test]
 fn a_cleanup_that_stops_short_of_the_graveyard_derives_no_boundary() -> anyhow::Result<()> {
     let fixture = fixture()?;
@@ -1189,7 +1189,7 @@ fn a_parent_salt_that_disagrees_with_the_registry_topology_derives_no_boundary()
 
 /// The emancipated branch unwraps into the Graveyard specifically; an unwrap that hands the node
 /// back to its owner is an ordinary ENSv1 act that leaves control where it was
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64).
 #[test]
 fn an_unwrap_that_misses_the_graveyard_derives_no_boundary() -> anyhow::Result<()> {
     let fixture = fixture()?;
@@ -1267,7 +1267,7 @@ fn a_sibling_cleanup_in_the_same_transaction_proves_nothing() -> anyhow::Result<
 /// The receiver performs the child's cleanup and its ENSv2 registration in one call, so a cleanup
 /// in a neighbouring transaction is a different act — an ordinary ENSv1 wind-down that happens to
 /// share a block — and cannot back the registration
-/// (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@a971bd64).
 #[test]
 fn a_cleanup_in_an_adjacent_transaction_proves_nothing() -> anyhow::Result<()> {
     let fixture = fixture()?;
@@ -1299,10 +1299,10 @@ fn a_cleanup_in_an_adjacent_transaction_proves_nothing() -> anyhow::Result<()> {
 
 /// The receiver retires the ENSv1 name before it registers the successor — the wrapper token is
 /// parked, or the node unwrapped, and only then is the label injected into the registry
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@a971bd64).
 /// A cleanup logged after the registration is therefore not that sequence, whatever else it shows.
 #[test]
 fn a_cleanup_logged_after_the_registration_derives_no_boundary() -> anyhow::Result<()> {
@@ -1325,7 +1325,7 @@ fn a_cleanup_logged_after_the_registration_derives_no_boundary() -> anyhow::Resu
 /// `C-06` with the cleanup it never had: even a complete ENSv1 wind-down cannot make a
 /// parent-owner-controlled registration a migration. Upstream reverts that call, and the sender the
 /// registry reports is the only thing separating the two
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L190 @ ens_v2@a971bd64).
 #[test]
 fn a_parent_controlled_registration_with_a_full_cleanup_is_still_not_a_migration()
 -> anyhow::Result<()> {
@@ -1450,9 +1450,9 @@ fn without_registry_evidence(level: &Value) -> Value {
 /// Upstream pairs each child branch with its own receiver shape: the locked branch parks the
 /// wrapper token in the Graveyard *and* deploys the child's registry, while the emancipated branch
 /// unwraps into the Graveyard and deploys nothing. There is no third branch.
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L190 @ ens_v2@a971bd64)
 /// So a parked wrapper token with no registry evidence is an incomplete chain, not an emancipated
 /// child — classifying it by registry presence alone would silently relabel it.
 #[test]

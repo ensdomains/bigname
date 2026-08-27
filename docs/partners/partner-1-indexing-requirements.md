@@ -96,10 +96,10 @@ The original partner input also named "ENSv2 L2 destination chains." That is
 retained here only as historical request provenance, not as a coverage target:
 the final mechanism deploys a `WrapperRegistry` and injects it directly into
 the parent registry on the same chain
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2_sepolia_20260629@ccaeb58),
 and binds it through `SubregistryUpdated`
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L472 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@a971bd64).
 The table therefore records ENSv2 on Ethereum L1 only. See the pinned-source
 [divergence note](../upstream.md#known-divergences) for the vestigial upstream
 "namechain" wording.

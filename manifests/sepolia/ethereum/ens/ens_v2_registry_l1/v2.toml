@@ -1,11 +1,11 @@
 # ENSv2 post-audit ETHRegistry admission for the current Sepolia deployment.
 # ETHRegistry deployment address:
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2 @ ens_v2@a971bd64).
 # UserRegistryImpl is implementation metadata for discovered user-registry proxies, not
 # an independently watched source-family root:
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L38 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UserRegistryImpl.json:L2 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2_sepolia_20260629@ccaeb58)
+# (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L38 @ ens_v2_sepolia_20260629@ccaeb58).
 manifest_version = 2
 namespace = "ens"
 source_family = "ens_v2_registry_l1"
@@ -21,7 +21,7 @@ declared_children = { status = "supported", notes = "post-audit Sepolia ETHRegis
 name = "ETHRegistry"
 address = "0x67b728a792e789a8978b30cf1b3b641f19354b43"
 # Start block follows the current Sepolia deployment transaction.
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2792 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2792 @ ens_v2@a971bd64).
 start_block = 11163391
 
 [[contracts]]
@@ -29,7 +29,7 @@ role = "registry"
 address = "0x67b728a792e789a8978b30cf1b3b641f19354b43"
 proxy_kind = "none"
 # Start block follows the current Sepolia deployment transaction.
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2792 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2792 @ ens_v2@a971bd64).
 start_block = 11163391
 
 [[discovery_rules]]
@@ -53,57 +53,57 @@ admission = "reachable_from_root"
 # Registry event ABI fragments consumed by ENSv2 registry adapters.
 # RegistryCreated has no emitter_roles because it is matched across every
 # emitter. It is emitted first in the PermissionedRegistry constructor:
-# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "RegistryCreated"
 fragment = "event RegistryCreated()"
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistryCreated"]
 
 # URIUpdated remains excluded.
-# LabelRegistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@ccaeb58).
+# LabelRegistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "LabelRegistered"
 fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationGranted", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
 
-# LabelReserved: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L33 @ ens_v2@ccaeb58).
+# LabelReserved: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L33 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "LabelReserved"
 fragment = "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationReserved", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
 
-# LabelUnregistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L44 @ ens_v2@ccaeb58).
+# LabelUnregistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L44 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "LabelUnregistered"
 fragment = "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["RegistrationReleased", "SurfaceUnbound", "ResolverChanged", "SubregistryChanged"]
 
-# ExpiryUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L50 @ ens_v2@ccaeb58).
+# ExpiryUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L50 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "ExpiryUpdated"
 fragment = "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ExpiryChanged", "RegistrationRenewed", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ResolverChanged", "SubregistryChanged"]
 
-# SubregistryUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@ccaeb58).
+# SubregistryUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "SubregistryUpdated"
 fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "SubregistryChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged"]
 
-# ResolverUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58).
+# ResolverUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "ResolverUpdated"
 fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ResolverChanged"]
 
-# TokenResource: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@ccaeb58).
+# TokenResource: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L39 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "TokenResource"
 fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)"
@@ -111,11 +111,11 @@ emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenResourceLinked", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged"]
 
 # Canonical ERC-1155 transfer events are present in the deployed ETHRegistry ABI:
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L652 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L689 @ ens_v2@a971bd64).
 # The discovered UserRegistry implementation exposes the same events:
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UserRegistryImpl.json:L723 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UserRegistryImpl.json:L760 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "TransferSingle"
 fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
@@ -129,22 +129,22 @@ emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
 
 # EACRolesChanged comes from the permissioned registry's inherited EnhancedAccessControl interface:
-# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L10 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L11 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "PermissionChanged", "RootPermissionChanged"]
 
-# TokenRegenerated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@ccaeb58).
+# TokenRegenerated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "TokenRegenerated"
 fragment = "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
 emitter_roles = ["registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenRegenerated", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
 
-# ParentUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58).
+# ParentUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "ParentUpdated"
 fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"
@@ -153,10 +153,10 @@ normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ParentChanged", 
 
 # ERC-1967 implementation history for announced UserRegistry proxies. The
 # registry inherits UUPS and its pinned deployment ABI exposes Upgraded(address):
-# (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L6 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L20 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L807 @ ens_v2@ccaeb58)
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L817 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L6 @ ens_v2_sepolia_20260629@ccaeb58)
+# (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L20 @ ens_v2_sepolia_20260629@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UserRegistryImpl.json:L807 @ ens_v2@a971bd64)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/UserRegistryImpl.json:L817 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "Upgraded"
 fragment = "event Upgraded(address indexed implementation)"

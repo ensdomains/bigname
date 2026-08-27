@@ -34,8 +34,8 @@ pub(super) fn correlate_registry_creation(
 /// The deployer of a migration-created registry proxy. A locked `.eth` second-level name names the
 /// locked controller here; a locked child names its parent's own migration registry, because
 /// `WrapperRegistry` inherits the same receiver and deploys from itself.
-/// (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
 pub(super) fn proxy_sender(observation: &MigrationObservation) -> Option<&str> {
     (observation.event_name == "ProxyDeployed")
         .then(|| observation.decoded.get("sender").and_then(Value::as_str))
@@ -45,7 +45,7 @@ pub(super) fn proxy_sender(observation: &MigrationObservation) -> Option<&str> {
 /// Admits one migration-created registry from its factory log and the ordinary `RegistryCreated`
 /// announcement that precedes it in the same transaction. The CREATE2 salt is the migrated name's
 /// namehash, so the factory log alone names both the registry and the name it belongs to.
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2_sepolia_20260629@ccaeb58)
 pub(super) fn admit(
     catalog: &Catalog,
     factory: &MigrationObservation,
