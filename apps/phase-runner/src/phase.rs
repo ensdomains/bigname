@@ -111,6 +111,14 @@ pub enum RunMode {
 }
 
 impl RunMode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Redo(_) => "redo",
+            Self::RecomputeFlags(_) => "recompute_flags",
+        }
+    }
+
     pub const fn is_redo(&self) -> bool {
         !matches!(self, Self::Normal)
     }

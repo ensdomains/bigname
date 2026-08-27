@@ -17,6 +17,7 @@ pub mod live_phase;
 pub mod metrics;
 pub mod phase;
 pub mod phase_lock;
+mod progress_monitor;
 mod project_failure_audit;
 pub mod project_phase;
 mod redo_completion;
@@ -47,6 +48,7 @@ pub mod verify_phase;
 mod verify_store;
 
 pub use bigname_content_hash::INTERPRETER_CONTENT_HASH;
+pub use progress_monitor::RunnerPhaseProgress;
 
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {

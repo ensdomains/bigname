@@ -1,4 +1,11 @@
 use super::*;
+use crate::{
+    heads::BlockMarker,
+    phase::{
+        BlockRange, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseProgress, PhaseResume,
+        RedoAttemptFence, RunMode,
+    },
+};
 
 fn metric_row(phase: &str) -> PhaseMetricRow {
     PhaseMetricRow {
@@ -22,7 +29,10 @@ fn metric_row(phase: &str) -> PhaseMetricRow {
 fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     let loop_heartbeat = RunnerLoopHeartbeat::default();
     loop_heartbeat.record_progress("ethereum-mainnet");
-    let metrics = PipelineMetrics::new(900, loop_heartbeat)?;
+    let progress = RunnerPhaseProgress::default();
+    progress.seed_chain("ethereum-mainnet");
+    let metrics = PipelineMetrics::new(900, loop_heartbeat, progress)?;
+    metrics.apply_phase_progress();
     metrics.apply_rows(&[metric_row("interpret")])?;
 
     let scrape = metrics.registry.encode()?;
@@ -36,6 +46,8 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         "# TYPE phase_runner_loop_heartbeat_age_seconds gauge",
         "# TYPE phase_runner_head_lag_blocks gauge",
         "# TYPE phase_runner_reinterpretation_required gauge",
+        "# TYPE phase_runner_phase_batches_since_cursor_advance gauge",
+        "# TYPE phase_runner_phase_cursor_stall_age_seconds gauge",
     ] {
         assert!(scrape.contains(metric_type), "missing {metric_type}");
     }
@@ -48,7 +60,7 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
 fn updates_failure_freshness_lag_verification_and_redo_signals() -> Result<()> {
     let loop_heartbeat = RunnerLoopHeartbeat::default();
     loop_heartbeat.record_progress("ethereum-mainnet");
-    let metrics = PipelineMetrics::new(900, loop_heartbeat)?;
+    let metrics = PipelineMetrics::new(900, loop_heartbeat, RunnerPhaseProgress::default())?;
     metrics.apply_rows(&[metric_row("interpret")])?;
     assert_eq!(
         metrics
@@ -144,7 +156,7 @@ fn head_lag_uses_the_observed_provider_target() {
 fn configured_chain_loop_heartbeat_does_not_require_phase_rows() -> Result<()> {
     let loop_heartbeat = RunnerLoopHeartbeat::default();
     loop_heartbeat.record_progress("new-chain");
-    let metrics = PipelineMetrics::new(900, loop_heartbeat)?;
+    let metrics = PipelineMetrics::new(900, loop_heartbeat, RunnerPhaseProgress::default())?;
 
     metrics.apply_rows(&[])?;
 
@@ -156,4 +168,80 @@ fn configured_chain_loop_heartbeat_does_not_require_phase_rows() -> Result<()> {
         0
     );
     Ok(())
+}
+
+#[test]
+fn progress_snapshots_keep_normal_and_repair_modes_isolated() -> Result<()> {
+    let progress = RunnerPhaseProgress::default();
+    progress.seed_chain("chain");
+    let metrics = PipelineMetrics::new(900, RunnerLoopHeartbeat::default(), progress.clone())?;
+    for mode in [
+        RunMode::Normal,
+        RunMode::Redo(BlockRange::new(1, 9)?),
+        RunMode::RecomputeFlags(BlockRange::new(1, 9)?),
+    ] {
+        let context = progress_context(mode.clone());
+        let first = progress.begin_batch(&context);
+        progress.record_committed(first, &pinned_outcome());
+        let second = progress.begin_batch(&context);
+        progress.record_committed(second, &pinned_outcome());
+    }
+    metrics.apply_phase_progress();
+
+    for mode in ["normal", "redo", "recompute_flags"] {
+        assert_eq!(
+            metrics
+                .batches_since_cursor_advance
+                .with_label_values(&["chain", "interpret", mode])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .cursor_stall_age_seconds
+                .with_label_values(&["chain", "interpret", mode])
+                .get(),
+            0
+        );
+    }
+
+    progress.clear_phase("chain", PhaseName::Interpret);
+    metrics.apply_phase_progress();
+    for mode in ["normal", "redo", "recompute_flags"] {
+        assert_eq!(
+            metrics
+                .batches_since_cursor_advance
+                .with_label_values(&["chain", "interpret", mode])
+                .get(),
+            0
+        );
+    }
+    Ok(())
+}
+
+fn progress_context(mode: RunMode) -> PhaseContext {
+    let execution_range = mode.range();
+    PhaseContext {
+        chain_id: "chain".into(),
+        phase: PhaseName::Interpret,
+        mode,
+        redo_attempt: execution_range.map(|execution_range| RedoAttemptFence {
+            generation: 4,
+            execution_range,
+        }),
+        sources: Arc::from([]),
+        available_heads: None,
+        live_handoff: None,
+        resume: PhaseResume {
+            current: Some(BlockMarker::new(1, "one").expect("marker")),
+            ..PhaseResume::default()
+        },
+    }
+}
+
+fn pinned_outcome() -> PhaseBatchOutcome {
+    PhaseBatchOutcome::Continue(PhaseProgress {
+        current: Some(BlockMarker::new(1, "one").expect("marker")),
+        ..PhaseProgress::default()
+    })
 }

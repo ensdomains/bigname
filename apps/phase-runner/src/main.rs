@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
@@ -72,8 +73,14 @@ async fn main() -> Result<()> {
             )
             .await?;
             let loop_heartbeat = phase_runner::metrics::RunnerLoopHeartbeat::default();
+            let phase_progress = phase_runner::RunnerPhaseProgress::new(Duration::from_secs(
+                heartbeat_stale_after_secs
+                    .try_into()
+                    .expect("validated threshold"),
+            ));
             for chain in runtime.chains.iter() {
                 loop_heartbeat.record_progress(&chain.chain_id);
+                phase_progress.seed_chain(&chain.chain_id);
             }
             let bound_metrics_addr = phase_runner::metrics::start(
                 metrics_bind_addr,
@@ -81,6 +88,7 @@ async fn main() -> Result<()> {
                 cancellation.clone(),
                 heartbeat_stale_after_secs,
                 loop_heartbeat.clone(),
+                phase_progress.clone(),
             )
             .await?;
             tracing::info!(
@@ -121,7 +129,8 @@ async fn main() -> Result<()> {
                     runtime.instance_id.clone(),
                     runtime.timing.clone(),
                 )?
-                .with_loop_heartbeat(loop_heartbeat),
+                .with_loop_heartbeat(loop_heartbeat)
+                .with_phase_progress(phase_progress),
             );
             let report = runner.run(&runtime, cancellation).await?;
             require_clean_supervisor_exit(report)?;
