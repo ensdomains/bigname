@@ -34,38 +34,29 @@ async fn include_pointer_names(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    // Publication deletes every scoped resource before inserting its replacement. Stage the name
-    // of the latest readable linked pointer even when that name's historical binding has lapsed,
-    // so incremental inventory sees the same resource-to-surface choice as a full rebuild.
+    // Publication deletes every scoped resource before inserting its replacement. Stage every
+    // readable linked pointer name so the inventory builder can fall back to an earlier pointer
+    // when a later pointer's name surface is not visible at the target.
     sqlx::query("ANALYZE project_scope_resources")
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to analyze inventory scope", error))?;
     sqlx::query(
         "INSERT INTO project_scope_names
-         SELECT latest.logical_name_id
-         FROM (
-             SELECT DISTINCT ON (event.resource_id)
-                    event.resource_id, event.logical_name_id
-             FROM project_scope_resources scope
-             JOIN normalized_events event USING (resource_id)
-             JOIN chain_lineage lineage
-               ON lineage.chain_id = event.chain_id
-              AND lineage.block_hash = event.block_hash
-              AND lineage.block_number = event.block_number
-             WHERE event.chain_id = $1
-               AND event.block_number <= $2
-               AND event.event_kind = 'ResolverChanged'
-               AND event.logical_name_id IS NOT NULL
-               AND event.consumer_visibility = 'activated'
-               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-             ORDER BY event.resource_id,
-                      event.block_number DESC NULLS LAST,
-                      event.transaction_index DESC NULLS LAST,
-                      event.log_index DESC NULLS LAST,
-                      event.normalized_event_id DESC
-         ) latest
+         SELECT DISTINCT event.logical_name_id
+         FROM project_scope_resources scope
+         JOIN normalized_events event USING (resource_id)
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = event.chain_id
+          AND lineage.block_hash = event.block_hash
+          AND lineage.block_number = event.block_number
+         WHERE event.chain_id = $1
+           AND event.block_number <= $2
+           AND event.event_kind = 'ResolverChanged'
+           AND event.logical_name_id IS NOT NULL
+           AND event.consumer_visibility = 'activated'
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)

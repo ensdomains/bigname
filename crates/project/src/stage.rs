@@ -215,6 +215,7 @@ async fn create_scoped_event_ids(
         WHERE event.chain_id = $1 AND event.block_number <= $2
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
+        -- Defensive symmetry with create_identity_views; inventory closure guarantees the names.
         SELECT record.normalized_event_id FROM (
             SELECT logical_name_id FROM project_scope_names
             UNION
@@ -224,7 +225,8 @@ async fn create_scoped_event_ids(
         JOIN chain_lineage surface_lineage ON surface_lineage.chain_id = surface.chain_id
          AND (surface_lineage.block_number, surface_lineage.block_hash) = (surface.block_number, surface.block_hash)
         JOIN (
-            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.logical_name_id, lower(event.after_state ->> 'resolver') AS resolver_address
+            SELECT DISTINCT event.resource_id, event.logical_name_id,
+                   lower(event.after_state ->> 'resolver') AS resolver_address
             FROM project_scope_resources resource_scope
             JOIN normalized_events event USING (resource_id)
             JOIN chain_lineage lineage USING (chain_id, block_number, block_hash)
@@ -232,8 +234,6 @@ async fn create_scoped_event_ids(
               AND event.resource_id IS NOT NULL AND event.logical_name_id IS NOT NULL
               AND event.event_kind = 'ResolverChanged' AND event.consumer_visibility = 'activated'
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized') AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST, event.normalized_event_id DESC
         ) pointer USING (logical_name_id)
         JOIN normalized_events record ON record.chain_id = $1 AND record.logical_name_id IS NULL
          AND record.source_family = 'ens_v1_resolver_l1' AND lower(record.after_state ->> 'node') = lower(surface.namehash)

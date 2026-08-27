@@ -5452,6 +5452,201 @@ async fn retracted_pointer_selects_another_surface_of_the_same_resource() -> Res
 }
 
 #[tokio::test]
+async fn orphaned_latest_pointer_surface_falls_back_incrementally() -> Result<()> {
+    const FALLBACK_RESOLVER: &str = "0x00000000000000000000000000000000000000b8";
+    let incremental = ScratchDatabase::create("project_orphaned_pointer_incremental").await?;
+    let full = ScratchDatabase::create("project_orphaned_pointer_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_pre_surface_wrapper_boundary_fixture(pool).await?;
+        sqlx::query(
+            "UPDATE manifest_versions
+             SET manifest_payload = jsonb_set(
+                 manifest_payload,
+                 '{contracts}',
+                 (manifest_payload -> 'contracts') || jsonb_build_array(
+                     jsonb_build_object(
+                         'role', 'public_resolver',
+                         'address', lower($1::text),
+                         'proxy_kind', 'none'
+                     )
+                 )
+             )
+             WHERE chain_id = $2 AND source_family = 'ens_v1_resolver_l1'",
+        )
+        .bind(FALLBACK_RESOLVER)
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_set(
+                 after_state,
+                 '{manifest_payload,contracts}',
+                 (after_state -> 'manifest_payload' -> 'contracts') || jsonb_build_array(
+                     jsonb_build_object(
+                         'role', 'public_resolver',
+                         'address', lower($1::text),
+                         'proxy_kind', 'none'
+                     )
+                 )
+             )
+             WHERE chain_id = $2 AND event_kind = 'SourceManifestUpdated'
+               AND source_family = 'ens_v1_resolver_l1'",
+        )
+        .bind(FALLBACK_RESOLVER)
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, deactivation_reason, deactivated_at,
+                 chain_id, block_hash, block_number, canonicality_state
+             ) VALUES (
+                 'ens:0xbob', 'ens', 'bob.eth', ARRAY['bob', 'eth'],
+                 decode('00', 'hex'), '0xbob', ARRAY['0xbob-label', '0xeth'], $1,
+                 'shadow', 'fixture_shadow', to_timestamp(1),
+                 $2, $3, 1, 'canonical'
+             )",
+        )
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, active_to, chain_id, block_hash,
+                 block_number, canonicality_state
+             ) VALUES (
+                 $1, 'ens:0xbob', $2, 'declared_registry_path', 'ens_v1',
+                 to_timestamp(1), to_timestamp(2), $3, $4, 1, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(EQUIVALENCE_BOB_BINDING)?)
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some("ens:0xbob"),
+            Some(RESOURCE),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({"resolver":FALLBACK_RESOLVER}),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node":"0xbob",
+                "resolver":FALLBACK_RESOLVER,
+                "record_key":"text:orphan-fallback",
+                "record_family":"text",
+                "selector_key":"orphan-fallback",
+                "value_retained":true,
+                "value":"bob-fallback"
+            }),
+            json!({"emitting_address":FALLBACK_RESOLVER}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    let initial_name: String = sqlx::query_scalar(
+        "SELECT provenance ->> 'logical_name_id'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(initial_name, "ens:0xalice");
+
+    for pool in [incremental.pool(), full.pool()] {
+        lapse_alice_binding(pool).await?;
+        sqlx::query(
+            "UPDATE name_surfaces SET canonicality_state = 'orphaned'
+             WHERE chain_id = $1 AND logical_name_id = 'ens:0xalice'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+    let target_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 5",
+    )
+    .bind(CHAIN)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(target_events, 0, "the wrapper boundary must be event-free");
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    let incremental_fallback: (String, Option<String>, String, String) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason,
+                provenance ->> 'logical_name_id', provenance ->> 'resolver_address'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        incremental_fallback,
+        (
+            "supported".to_owned(),
+            None,
+            "ens:0xbob".to_owned(),
+            FALLBACK_RESOLVER.to_owned(),
+        )
+    );
+    assert_eq!(
+        record_entry_pairs(incremental.pool(), RESOURCE).await?,
+        vec![("text:orphan-fallback".to_owned(), "bob-fallback".to_owned(),)]
+    );
+    let full_name: String = sqlx::query_scalar(
+        "SELECT provenance ->> 'logical_name_id'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .fetch_one(full.pool())
+    .await?;
+    assert_eq!(full_name, "ens:0xbob");
+    assert_eq!(
+        record_inventory_snapshot(incremental.pool(), RESOURCE).await?,
+        record_inventory_snapshot(full.pool(), RESOURCE).await?,
+        "incremental publication omitted the earlier surfaced pointer fallback"
+    );
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
 async fn name_only_scope_closes_over_the_resources_latest_surface() -> Result<()> {
     let incremental = ScratchDatabase::create("project_name_resource_surface_incremental").await?;
     let full = ScratchDatabase::create("project_name_resource_surface_full").await?;

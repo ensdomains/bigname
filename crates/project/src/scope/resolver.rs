@@ -122,10 +122,11 @@ pub(super) async fn include_resource_pointers(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    // A resource slice rebuild embeds its current resolver classification in record inventory.
-    // Scope both the projected pointer and the latest readable pointer. Redo needs the former to
-    // retract losing output and the latter to classify surviving inventory. Unchanged resolver
-    // summaries can be republished without staging their unrelated history.
+    // A resource slice rebuild embeds its selected resolver classification in record inventory.
+    // Scope both the projected pointer and every readable linked pointer. Redo needs the former
+    // to retract losing output, while the latter set lets inventory classify whichever pointer's
+    // name has the first staged readable surface. Unchanged resolver summaries can be republished
+    // without staging their unrelated history.
     sqlx::query("ANALYZE project_scope_resources")
         .execute(&mut **transaction)
         .await
@@ -172,29 +173,19 @@ pub(super) async fn include_resource_pointers(
              JOIN project_scope_resources scope USING (resource_id)
              WHERE inventory.provenance ->> 'chain_id' = $1
              UNION ALL
-             SELECT latest.resolver_address
-             FROM (
-                 SELECT DISTINCT ON (event.resource_id)
-                        event.resource_id,
-                        event.after_state ->> 'resolver' AS resolver_address
-                 FROM normalized_events event
-                 JOIN project_scope_resources scope USING (resource_id)
-                 JOIN chain_lineage lineage
-                   ON lineage.chain_id = event.chain_id
-                  AND lineage.block_hash = event.block_hash
-                  AND lineage.block_number = event.block_number
-                 WHERE event.chain_id = $1
-                   AND event.event_kind = 'ResolverChanged'
-                   AND event.consumer_visibility = 'activated'
-                   AND event.block_number <= $2
-                   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                 ORDER BY event.resource_id,
-                          event.block_number DESC NULLS LAST,
-                          event.transaction_index DESC NULLS LAST,
-                          event.log_index DESC NULLS LAST,
-                          event.normalized_event_id DESC
-             ) latest
+             SELECT DISTINCT event.after_state ->> 'resolver' AS resolver_address
+             FROM normalized_events event
+             JOIN project_scope_resources scope USING (resource_id)
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             WHERE event.chain_id = $1
+               AND event.event_kind = 'ResolverChanged'
+               AND event.consumer_visibility = 'activated'
+               AND event.block_number <= $2
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
              UNION ALL
              SELECT permission.scope_detail ->> 'resolver_address'
              FROM permissions_current permission

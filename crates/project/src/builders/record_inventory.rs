@@ -7,9 +7,10 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
-    // Inventory follows only each resource's latest ResolverChanged pointer. Record events from a
-    // historical resolver cannot affect the current boundary, selectors, or entries after that
-    // pointer changes, so resolver-entity expansion uses current inventory provenance only.
+    // Inventory ranks each resource's ResolverChanged events only after joining staged readable
+    // surfaces, so an earlier event may win when a later event's name has no such surface. Once
+    // selected, only that resolver contributes the boundary, selectors, and entries; a selected
+    // clear suppresses the inventory row.
     sqlx::query(
         r#"
         WITH latest_pointers AS (

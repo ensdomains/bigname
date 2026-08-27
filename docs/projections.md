@@ -128,7 +128,12 @@ outcomes, or durable traces.
 - Resource-keyed projections require their selected resource to resolve to a
   readable identity row. Their input events normally carry that `resource_id`.
   `record_inventory_current` is the deliberate exception: it starts from the
-  resource's latest retained `ResolverChanged` pointer. It joins already-linked
+  resource's latest retained linked `ResolverChanged` event whose name has a
+  readable canonical surface staged at the target. If the latest linked event's
+  name lacks such a surface, an earlier linked event with one is the fallback;
+  a selected zero-address resolver suppresses inventory instead of reviving an
+  older nonzero event, and surface visibility does not participate in this
+  choice. It joins already-linked
   `RecordChanged` and `RecordVersionChanged` events by logical name and emitting
   resolver; for ENSv1 resolver events whose `logical_name_id` is null, it
   instead joins chain, surface namehash to event node, and current resolver to
@@ -311,7 +316,11 @@ into one resolver row. The resolver summary is diagnostic and does not replace
 exact-name topology.
 
 `record_inventory_current` records the selectors observed under a resource's
-latest retained resolver pointer and record boundary, explicit gaps,
+latest retained linked resolver event whose name has a readable canonical
+surface staged at the target, with fallback to an earlier linked event when a
+later event's name lacks such a surface. A selected zero-address resolver
+suppresses inventory rather than falling back to an older nonzero event. It
+also records the selected resolver's record boundary, explicit gaps,
 unsupported families, and any retained indexed values. The record event need
 not carry that resource: Project normally joins its `logical_name_id` and
 emitting resolver to the pointer. An ENSv1 resolver event whose
