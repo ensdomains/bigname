@@ -5,6 +5,7 @@ use anyhow::Context;
 use serde_json::{Value, json};
 
 use crate::schema_v2::{
+    catalog::Selected,
     protocol::{
         BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, NameDraft, ShadowNameDraft,
     },
@@ -527,18 +528,14 @@ pub(super) fn resolver_discovery_keys(
 
 pub(super) fn append_token_discovery_closures(
     output: &mut Interpreted,
+    selected: &Selected,
     raw: &crate::schema_v2::RawLogInput,
     state: &State,
     token_id: U256,
     token: Option<&V2TokenState>,
     protected_resolver_keys: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    if !state.has_live_v2_subregistry_sharing(&raw.emitting_address, &format!("{token_id:#066x}")) {
-        output.discovery.push(DiscoveryDraft::Close {
-            edge_kind: "subregistry".to_owned(),
-            observation_key: discovery_observation_key(raw, token_id, false),
-        });
-    }
+    append_subregistry_departure(output, selected, raw, state, token_id);
     let empty = BTreeSet::new();
     let aliases = token
         .map(|token| &token.resolver_discovery_aliases)
@@ -550,6 +547,38 @@ pub(super) fn append_token_discovery_closures(
         aliases,
         protected_resolver_keys,
     )
+}
+
+pub(super) fn append_subregistry_departure(
+    output: &mut Interpreted,
+    selected: &Selected,
+    raw: &crate::schema_v2::RawLogInput,
+    state: &State,
+    token_id: U256,
+) {
+    let observation_key = discovery_observation_key(raw, token_id, false);
+    match selected.event.name.as_str() {
+        "LabelRegistered" | "LabelReserved" | "LabelUnregistered" | "TokenRegenerated" => {
+            if let Some(target) = state.v2_subregistry_reassertion_target(
+                &raw.emitting_address,
+                &format!("{token_id:#066x}"),
+            ) {
+                // Materialization caps different targets first, so the survivor replaces the last asserter.
+                output.discovery.push(DiscoveryDraft::Edge {
+                    edge_kind: "subregistry".to_owned(),
+                    to_address: target,
+                    admission_basis: "linked_subregistry_event".to_owned(),
+                    observation_key,
+                });
+            } else {
+                output.discovery.push(DiscoveryDraft::Close {
+                    edge_kind: "subregistry".to_owned(),
+                    observation_key,
+                });
+            }
+        }
+        _ => unreachable!("subregistry departure selected another manifest event"),
+    }
 }
 
 pub(super) fn append_resolver_discovery_closures(

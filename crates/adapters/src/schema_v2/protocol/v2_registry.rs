@@ -445,6 +445,7 @@ fn label_event(
             topology::resolver_discovery_keys(raw, None, &protected_tokens)?;
         append_token_discovery_closures(
             &mut output,
+            selected,
             raw,
             state,
             replaced_token_id,
@@ -467,6 +468,7 @@ fn label_event(
     let protected_resolver_keys = topology::resolver_discovery_keys(raw, None, &protected_tokens)?;
     append_token_discovery_closures(
         &mut output,
+        selected,
         raw,
         state,
         token_id

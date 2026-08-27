@@ -121,18 +121,22 @@ impl State {
         sharing
     }
 
-    pub(in crate::schema_v2) fn has_live_v2_subregistry_sharing(
+    pub(in crate::schema_v2) fn v2_subregistry_reassertion_target(
         &self,
         emitter: &str,
         token_id: &str,
-    ) -> bool {
-        record_subregistry_lookup_visits(1);
-        self.v2_subregistry_tokens_by_observation
-            .get(&(
-                emitter.to_ascii_lowercase(),
-                resolver_observation_id(token_id),
-            ))
-            .is_some_and(|tokens| !tokens.is_empty())
+    ) -> Option<String> {
+        let emitter = emitter.to_ascii_lowercase();
+        let tokens = self
+            .v2_subregistry_tokens_by_observation
+            .get(&(emitter.clone(), resolver_observation_id(token_id)))?;
+        record_subregistry_lookup_visits(tokens.len());
+        // Fixed-width lowercase token IDs have a stable OrdSet order. Choosing the greatest
+        // retained token makes shared-key reassertion deterministic across replay and restore.
+        let survivor = tokens.get_max()?;
+        self.v2_tokens
+            .get(&v2_key(&emitter, survivor))
+            .and_then(|token| token.subregistry.clone())
     }
 
     pub(in crate::schema_v2) fn set_v2_resolver(

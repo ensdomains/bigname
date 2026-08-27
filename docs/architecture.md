@@ -473,9 +473,12 @@ ENSv2 mappings:
 - `SubregistryUpdated(tokenId, subregistry, sender)` → normalized
   `SubregistryChanged` and the parent-child reachability edge. It is the source
   of the pointer and relationship truth; defensive `TokenRegenerated`
-  interpretation can only reassert that retained edge under the successor
-  token's `observation_key`. The edge does not decide whether the child registry
-  instance is indexable.[^v2-events-l49][^v2-pr-l131][^v2-pr-l222]
+  interpretation reasserts the migrating token's retained edge under the
+  successor token's `observation_key`. When the predecessor key is different
+  and remains shared by another retained holder, interpretation also reasserts
+  that key to the deterministically selected holder's target. The edge does not
+  decide whether the child registry instance is
+  indexable.[^v2-events-l49][^v2-pr-l131][^v2-pr-l222]
 - `ParentUpdated(parent, label, sender)` → normalized `ParentChanged` contract history. Manifest-declared `RootRegistry` and `ETHRegistry` instances are suffix anchors; every registry below those anchors has a registry-name suffix only while both current sides agree: the child's latest claim names `(parent, label)`, and that parent's latest unexpired `SubregistryUpdated` pointer for `label` leads back to the child. Either side changing, clearing, or expiring retracts the binding. A suffix move closes and releases each old logical-name binding, then opens and grants a distinct binding epoch under the new reachable suffix; the underlying registry resource remains the same, and its current resolver and subregistry pointers are restated under the new logical name. `ParentUpdated` does not create parent-child reachability; `SubregistryUpdated` remains its only source. Replay retains both current sides even while an intermediate registry has no reachable name, and later descendant events recheck the complete bidirectional, unexpired ancestor path. The child's `setParent` call writes its parent and label atomically, independently of the parent's subregistry pointer. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L171 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L175 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L176 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L177 @ ens_v2@ccaeb58) Canonical validation reads the child's current claim and rejects it unless the parent's current pointer leads back to the child. (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L82 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L86 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L87 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L88 @ ens_v2@ccaeb58) Upstream stops that walk only at the supplied `RootRegistry`; treating the manifest-declared `ETHRegistry` as an additional suffix anchor is the documented ENSv2 cutover divergence. (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L78 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L79 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L80 @ ens_v2@ccaeb58) See [`upstream.md` § Known divergences](upstream.md#known-divergences). An expired parent label makes `getSubregistry` return zero at the event timestamp. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L251 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L253 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L625 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L626 @ ens_v2@ccaeb58)
 Registry-name suffix labels are retained verbatim. Raw label text keys the live topology maps, so the current parent pointer and child claim must agree on the same raw label. A raw-distinct label path has a distinct namehash identity; if any label does not byte-equal its ENSIP-15 normalized result, that identity remains a shadow and cannot open a current binding. Thus labels such as `Foo` and `foo` retain distinct preimages and namehash identities, while only the normalization-gate-passing identity can bind.
 
@@ -734,8 +737,25 @@ ENSv2 mappings:
   interpretation preserves the regenerated registration and closes the
   displaced registration's surface binding and unshared resolver and
   subregistry discovery edges, plus any child registrations that lose their
-  registry path. The surviving registration's subregistry observation moves to
-  the destination token's key. When the survivor has resolver state, its
+  registry path. When `LabelRegistered`, `LabelReserved`, `LabelUnregistered`,
+  or `TokenRegenerated` would retire a shared subregistry `observation_key`,
+  interpretation reasserts that key to the stored subregistry target of the
+  greatest fixed-width lowercase token ID that still has a subregistry pointer
+  in interpreter state; otherwise the key closes. This includes registration or
+  reservation under an observation key formed by clearing the token ID's low 32
+  version bits, even when no exact token ID was displaced. Expiry retracts name
+  reachability but does not discard that stored pointer or its discovery
+  coverage. When the selected target differs,
+  materialization caps the prior edge under the shared key; a repeated edge
+  assertion to the same target is deduplicated and stays continuously active.
+  When an occupied `TokenRegenerated` destination has the same observation key
+  as its predecessor, interpretation atomically closes and reasserts that key at
+  the regeneration log position. When an occupied
+  regeneration also moves a stored subregistry pointer onto that destination
+  key, its single successor edge performs the cap instead of emitting a second
+  survivor edge at the same log position. The
+  surviving registration's subregistry observation moves to the destination
+  token's key. When the survivor has resolver state, its
   resolver observation stays continuously active under the source token's key.
   That prior key is recorded on the successor so the next explicit resolver
   update or terminal token event retires it unless another live token still uses

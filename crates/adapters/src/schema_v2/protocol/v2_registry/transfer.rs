@@ -7,6 +7,7 @@ use super::{
     EACRolesChanged, LabelUnregistered, TokenRegenerated, TokenResource, TransferBatch,
     TransferSingle, single_event, token_state_event,
     topology::{
+        append_resolver_discovery_closures, append_subregistry_departure,
         append_terminal_boundaries, append_token_discovery_closures, append_v2_name_transitions,
         discovery_observation_key, resolver_discovery_keys,
     },
@@ -233,6 +234,7 @@ pub(super) fn label_unregistered(
     append_v2_name_transitions(&mut output, transitions, raw, "LabelUnregistered", None);
     append_token_discovery_closures(
         &mut output,
+        selected,
         raw,
         state,
         event.tokenId,
@@ -490,14 +492,27 @@ pub(super) fn token_regenerated(
             linked.resolver.is_some().then_some(event.oldTokenId),
             &protected_resolver_tokens,
         )?;
-        append_token_discovery_closures(
-            &mut displaced_output,
-            raw,
-            state,
-            event.newTokenId,
-            Some(displaced),
-            &protected_resolver_keys,
-        )?;
+        if linked.subregistry.is_some() {
+            // The successor edge below caps the displaced destination edge; emitting a survivor
+            // edge here as well would create two targets at the same log position.
+            append_resolver_discovery_closures(
+                &mut displaced_output,
+                raw,
+                Some(event.newTokenId),
+                &displaced.resolver_discovery_aliases,
+                &protected_resolver_keys,
+            )?;
+        } else {
+            append_token_discovery_closures(
+                &mut displaced_output,
+                selected,
+                raw,
+                state,
+                event.newTokenId,
+                Some(displaced),
+                &protected_resolver_keys,
+            )?;
+        }
         output.append(&mut displaced_output);
     }
     match selected.event.name.as_str() {
@@ -507,10 +522,20 @@ pub(super) fn token_regenerated(
             if let (Some(target), Some((old_observation_key, new_observation_key))) =
                 (linked.subregistry.as_deref(), subregistry_keys)
             {
-                output.discovery.push(DiscoveryDraft::Close {
-                    edge_kind: "subregistry".to_owned(),
-                    observation_key: old_observation_key,
-                });
+                if old_observation_key == new_observation_key {
+                    output.discovery.push(DiscoveryDraft::Close {
+                        edge_kind: "subregistry".to_owned(),
+                        observation_key: old_observation_key,
+                    });
+                } else {
+                    append_subregistry_departure(
+                        &mut output,
+                        selected,
+                        raw,
+                        state,
+                        event.oldTokenId,
+                    );
+                }
                 output.discovery.push(DiscoveryDraft::Edge {
                     edge_kind: "subregistry".to_owned(),
                     to_address: target.to_owned(),

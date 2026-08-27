@@ -500,18 +500,39 @@ fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Res
     let output = interpret_schema_v2_batch(input)?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
-    assert!(
-        output.discovery_edge_closures.iter().all(|closure| {
-            closure.active_to_block_number != 20_000_202
-                || closure.edge_kind != "subregistry"
-                || closure.observation_key != observation_key
-        }),
-        "the second live token closed its co-holder's subregistry edge: {:#?}",
-        output.discovery_edge_closures
-    );
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_202,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
     let converged = converge(
         "directed=v2-shared-subregistry-label-registration",
         v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Label)?,
+        vec![0..1, 1..2, 2..3],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_label_reservation_preserves_a_shared_subregistry_observation_key() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input =
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Reservation)?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_202,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-label-reservation",
+        input,
         vec![0..1, 1..2, 2..3],
     )?;
     assert!(converged.artifacts.counts().is_empty());
@@ -526,15 +547,12 @@ fn v2_regeneration_collision_preserves_a_shared_subregistry_observation_key() ->
     let output = interpret_schema_v2_batch(input)?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
-    assert!(
-        output.discovery_edge_closures.iter().all(|closure| {
-            closure.active_to_block_number != 20_000_205
-                || closure.edge_kind != "subregistry"
-                || closure.observation_key != observation_key
-        }),
-        "the displaced token close retired its live co-holder's subregistry edge: {:#?}",
-        output.discovery_edge_closures
-    );
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_205,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
     let converged = converge(
         "directed=v2-shared-subregistry-regeneration-collision",
         v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Collision)?,
@@ -553,11 +571,12 @@ fn v2_label_replacement_preserves_a_shared_subregistry_observation_key() -> Resu
     let output = interpret_schema_v2_batch(input.clone())?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
-    assert!(output.discovery_edge_closures.iter().all(|closure| {
-        closure.active_to_block_number != 20_000_203
-            || closure.edge_kind != "subregistry"
-            || closure.observation_key != observation_key
-    }));
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_203,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
     let converged = converge(
         "directed=v2-shared-subregistry-label-replacement",
         input,
@@ -576,11 +595,12 @@ fn v2_unregister_preserves_a_shared_subregistry_key_until_the_last_holder_leaves
     let output = interpret_schema_v2_batch(input.clone())?;
     let observation_key = v2_shared_subregistry_observation_key(&wiring);
 
-    assert!(output.discovery_edge_closures.iter().all(|closure| {
-        closure.active_to_block_number != 20_000_203
-            || closure.edge_kind != "subregistry"
-            || closure.observation_key != observation_key
-    }));
+    assert_subregistry_target_reasserted(
+        &output,
+        &observation_key,
+        20_000_203,
+        SHARED_SUBREGISTRY_SURVIVOR,
+    )?;
     assert!(output.discovery_edge_closures.iter().any(|closure| {
         closure.active_to_block_number == 20_000_204
             && closure.edge_kind == "subregistry"
@@ -593,6 +613,197 @@ fn v2_unregister_preserves_a_shared_subregistry_key_until_the_last_holder_leaves
     )?;
     assert!(converged.artifacts.counts().is_empty());
     Ok(())
+}
+
+#[test]
+fn v2_last_subregistry_asserter_departure_reasserts_the_surviving_holder() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::LastAsserterDeparture,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_reassertion(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_204,
+        SHARED_SUBREGISTRY_SURVIVOR,
+        SHARED_SUBREGISTRY_DEPARTING,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-last-asserter-departure",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_cross_base_regeneration_reasserts_the_old_key_to_its_surviving_holder() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::CrossBaseRegeneration,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_reassertion(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_204,
+        SHARED_SUBREGISTRY_SURVIVOR,
+        SHARED_SUBREGISTRY_DEPARTING,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-cross-base-regeneration",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_subregistry_reassertion_chooses_the_greatest_retained_token_id() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::DeterministicSurvivor,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_reassertion(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_206,
+        SHARED_SUBREGISTRY_GREATEST_SURVIVOR,
+        SHARED_SUBREGISTRY_DEPARTING,
+    )?;
+    let converged = converge(
+        "directed=v2-shared-subregistry-deterministic-survivor",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6, 6..7],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_occupied_regeneration_emits_one_destination_subregistry_edge() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::OccupiedDestinationWithSharedHolder,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_207,
+        SHARED_SUBREGISTRY_DEPARTING,
+    )?;
+    let converged = converge(
+        "directed=v2-occupied-regeneration-shared-destination",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6, 6..7, 7..8],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_pointerless_label_addition_elects_the_greatest_pointer_holder() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(
+        &wiring,
+        SharedSubregistryCase::PointerlessAddition,
+    )?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+
+    assert_subregistry_target_reasserted(
+        &output,
+        &v2_shared_subregistry_observation_key(&wiring),
+        20_000_206,
+        SHARED_SUBREGISTRY_GREATEST_SURVIVOR,
+    )?;
+    let converged = converge(
+        "directed=v2-pointerless-addition-deterministic-survivor",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6, 6..7],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+fn assert_subregistry_reassertion(
+    output: &BatchOutput,
+    observation_key: &str,
+    block_number: i64,
+    surviving_target: &str,
+    departed_target: &str,
+) -> Result<()> {
+    let surviving_target_id = assert_subregistry_target_reasserted(
+        output,
+        observation_key,
+        block_number,
+        surviving_target,
+    )?;
+    let target_id = |address: &str| {
+        output
+            .contract_addresses
+            .iter()
+            .find(|row| row.address.eq_ignore_ascii_case(address))
+            .map(|row| row.contract_instance_id)
+            .with_context(|| format!("missing discovered contract address {address}"))
+    };
+    let departed_target_id = target_id(departed_target)?;
+    assert_ne!(surviving_target_id, departed_target_id);
+    Ok(())
+}
+
+fn assert_subregistry_target_reasserted(
+    output: &BatchOutput,
+    observation_key: &str,
+    block_number: i64,
+    surviving_target: &str,
+) -> Result<uuid::Uuid> {
+    let surviving_target_id = output
+        .contract_addresses
+        .iter()
+        .find(|row| row.address.eq_ignore_ascii_case(surviving_target))
+        .map(|row| row.contract_instance_id)
+        .with_context(|| format!("missing discovered contract address {surviving_target}"))?;
+    let reassertions = output
+        .discovery_edges
+        .iter()
+        .filter(|edge| {
+            edge.edge_kind == "subregistry"
+                && edge.observation_key == observation_key
+                && edge.active_from_block_number == block_number
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reassertions.len(),
+        1,
+        "departure must emit exactly one survivor reassertion: {:#?}",
+        output.discovery_edges
+    );
+    assert_eq!(reassertions[0].to_contract_instance_id, surviving_target_id);
+    assert!(output.discovery_edge_closures.iter().any(|closure| {
+        closure.edge_kind == "subregistry"
+            && closure.observation_key == observation_key
+            && closure.active_to_block_number == block_number
+            && closure.except_to_contract_instance_id == Some(surviving_target_id)
+    }));
+    Ok(surviving_target_id)
 }
 
 #[test]
@@ -1364,30 +1575,46 @@ fn v2_shared_subregistry_observation_key(wiring: &Wiring) -> String {
     )
 }
 
+const SHARED_SUBREGISTRY_SURVIVOR: &str = "0x00000000000000000000000000000000f0000484";
+const SHARED_SUBREGISTRY_DEPARTING: &str = "0x00000000000000000000000000000000f0000485";
+const SHARED_SUBREGISTRY_GREATEST_SURVIVOR: &str = "0x00000000000000000000000000000000f0000486";
+
 #[derive(Clone, Copy)]
 enum SharedSubregistryCase {
     Label,
+    Reservation,
     Collision,
     Replacement,
     Unregister,
+    LastAsserterDeparture,
+    CrossBaseRegeneration,
+    DeterministicSurvivor,
+    OccupiedDestinationWithSharedHolder,
+    PointerlessAddition,
 }
 
 fn v2_shared_subregistry_observation_input(
     wiring: &Wiring,
     case: SharedSubregistryCase,
 ) -> Result<BatchInput> {
-    const CHILD_REGISTRY: &str = "0x00000000000000000000000000000000f0000484";
     let registry = wiring.address("ens_v2_registry_l1", "registry");
     let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
     let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
     let alpha_v1 = versioned_token("alpha", 1);
     let alpha_v2 = versioned_token("alpha", 2);
+    let alpha_v3 = versioned_token("alpha", 3);
+    let alpha_v4 = versioned_token("alpha", 4);
     let gamma_v1 = versioned_token("gamma", 1);
     let block_count = match case {
-        SharedSubregistryCase::Label => 3,
+        SharedSubregistryCase::Label | SharedSubregistryCase::Reservation => 3,
         SharedSubregistryCase::Collision => 6,
         SharedSubregistryCase::Replacement => 4,
         SharedSubregistryCase::Unregister => 5,
+        SharedSubregistryCase::LastAsserterDeparture
+        | SharedSubregistryCase::CrossBaseRegeneration => 5,
+        SharedSubregistryCase::DeterministicSurvivor => 7,
+        SharedSubregistryCase::OccupiedDestinationWithSharedHolder => 8,
+        SharedSubregistryCase::PointerlessAddition => 7,
     };
     let blocks = (0..block_count)
         .map(|index| BlockSpec {
@@ -1424,13 +1651,27 @@ fn v2_shared_subregistry_observation_input(
             .encode_log_data(),
         )
     };
-    let subregistry = |block_index, ordinal| {
+    let subregistry = |block_index, ordinal, token_id, target: &str| {
         log(
             block_index,
             ordinal,
             V2Registry::SubregistryUpdated {
-                tokenId: alpha_v1,
-                subregistry: CHILD_REGISTRY.parse().expect("valid child registry"),
+                tokenId: token_id,
+                subregistry: target.parse().expect("valid child registry"),
+                sender,
+            }
+            .encode_log_data(),
+        )
+    };
+    let reservation = |block_index, ordinal, token_id, label: &str| {
+        log(
+            block_index,
+            ordinal,
+            V2Registry::LabelReserved {
+                tokenId: token_id,
+                labelHash: labelhash(label),
+                label: label.to_owned(),
+                expiry: 1_800_000_000,
                 sender,
             }
             .encode_log_data(),
@@ -1438,13 +1679,16 @@ fn v2_shared_subregistry_observation_input(
     };
     let mut logs = vec![
         registration(0, 0, alpha_v1, "alpha"),
-        subregistry(1, 1),
-        registration(2, 2, alpha_v2, "beta"),
+        subregistry(1, 1, alpha_v1, SHARED_SUBREGISTRY_SURVIVOR),
+        match case {
+            SharedSubregistryCase::Reservation => reservation(2, 2, alpha_v2, "beta"),
+            _ => registration(2, 2, alpha_v2, "beta"),
+        },
     ];
     match case {
-        SharedSubregistryCase::Label => {}
+        SharedSubregistryCase::Label | SharedSubregistryCase::Reservation => {}
         SharedSubregistryCase::Collision => logs.extend([
-            subregistry(3, 3),
+            subregistry(3, 3, alpha_v1, SHARED_SUBREGISTRY_SURVIVOR),
             registration(4, 4, gamma_v1, "gamma"),
             log(
                 5,
@@ -1478,6 +1722,65 @@ fn v2_shared_subregistry_observation_input(
                 }
                 .encode_log_data(),
             ),
+        ]),
+        SharedSubregistryCase::LastAsserterDeparture => logs.extend([
+            subregistry(3, 3, alpha_v2, SHARED_SUBREGISTRY_DEPARTING),
+            log(
+                4,
+                4,
+                V2Registry::LabelUnregistered {
+                    tokenId: alpha_v2,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::CrossBaseRegeneration => logs.extend([
+            subregistry(3, 3, alpha_v2, SHARED_SUBREGISTRY_DEPARTING),
+            log(
+                4,
+                4,
+                V2Registry::TokenRegenerated {
+                    oldTokenId: alpha_v2,
+                    newTokenId: gamma_v1,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::DeterministicSurvivor => logs.extend([
+            registration(3, 3, alpha_v3, "gamma"),
+            subregistry(4, 4, alpha_v3, SHARED_SUBREGISTRY_GREATEST_SURVIVOR),
+            subregistry(5, 5, alpha_v2, SHARED_SUBREGISTRY_DEPARTING),
+            log(
+                6,
+                6,
+                V2Registry::LabelUnregistered {
+                    tokenId: alpha_v2,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::OccupiedDestinationWithSharedHolder => logs.extend([
+            registration(3, 3, alpha_v3, "gamma"),
+            subregistry(4, 4, alpha_v3, SHARED_SUBREGISTRY_GREATEST_SURVIVOR),
+            registration(5, 5, gamma_v1, "delta"),
+            subregistry(6, 6, gamma_v1, SHARED_SUBREGISTRY_DEPARTING),
+            log(
+                7,
+                7,
+                V2Registry::TokenRegenerated {
+                    oldTokenId: gamma_v1,
+                    newTokenId: alpha_v2,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::PointerlessAddition => logs.extend([
+            registration(3, 3, alpha_v3, "gamma"),
+            subregistry(4, 4, alpha_v3, SHARED_SUBREGISTRY_GREATEST_SURVIVOR),
+            subregistry(5, 5, alpha_v1, SHARED_SUBREGISTRY_SURVIVOR),
+            registration(6, 6, alpha_v4, "delta"),
         ]),
     }
     wiring.batch_input(&blocks, &logs)

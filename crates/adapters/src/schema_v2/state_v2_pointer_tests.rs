@@ -18,7 +18,10 @@ fn v2_subregistry_holder_lookup_is_constant_per_versioned_token() {
     );
     super::super::v2_pointers::reset_v2_subregistry_lookup_visits();
     for token_id in &token_ids {
-        assert!(state.has_live_v2_subregistry_sharing(ROOT, token_id));
+        assert_eq!(
+            state.v2_subregistry_reassertion_target(ROOT, token_id),
+            Some(CHILD.to_owned())
+        );
     }
     assert_eq!(
         super::super::v2_pointers::v2_subregistry_lookup_visits(),
@@ -26,6 +29,29 @@ fn v2_subregistry_holder_lookup_is_constant_per_versioned_token() {
         "each observation_key lookup must inspect at most one resident index entry"
     );
     assert_v2_indexes_are_derived(&state);
+}
+
+#[test]
+fn v2_subregistry_holder_lookup_counts_the_index_members_it_examines() {
+    const FIRST: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000001";
+    const SECOND: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000002";
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, FIRST, b"first", 100);
+    install_token(&mut state, ROOT, SECOND, b"second", 100);
+    state.set_v2_subregistry(ROOT, FIRST, Some(CHILD.to_owned()));
+    state.set_v2_subregistry(ROOT, SECOND, Some("0xother-child".to_owned()));
+
+    super::super::v2_pointers::reset_v2_subregistry_lookup_visits();
+    assert_eq!(
+        state.v2_subregistry_reassertion_target(ROOT, FIRST),
+        Some("0xother-child".to_owned()),
+        "the greatest fixed-width token ID deterministically supplies the survivor target"
+    );
+    assert_eq!(
+        super::super::v2_pointers::v2_subregistry_lookup_visits(),
+        2,
+        "the work counter must measure the resident index members, not query calls"
+    );
 }
 
 #[test]
