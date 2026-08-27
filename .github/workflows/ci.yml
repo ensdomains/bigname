@@ -684,7 +684,7 @@ jobs:
           name: ${{ steps.package.outputs.artifact-name }}
           path: target/bigname-e2e-upload/phase-runner-e2e.tar
           compression-level: 1
-          retention-days: 1
+          retention-days: 3
           if-no-files-found: error
 
       - name: Summarize phase-runner artifact
@@ -707,10 +707,11 @@ jobs:
   e2e_shard_1:
     name: test (e2e shard 1/2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    timeout-minutes: 25
     needs:
       - e2e_build
       - phase_runner_shard_1
+    # Order after the cache producer without gating on it, preserving independent e2e signal on red runs.
     if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
     services:
       postgres:
@@ -827,10 +828,11 @@ jobs:
   e2e_shard_2:
     name: test (e2e shard 2/2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    timeout-minutes: 25
     needs:
       - e2e_build
       - phase_runner_shard_1
+    # Order after the cache producer without gating on it, preserving independent e2e signal on red runs.
     if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
     services:
       postgres:

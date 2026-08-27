@@ -15,6 +15,12 @@ expected_shard_2_ignored=1
 expected_shard_2_filtered=42
 expected_shard_2_predicted_seconds=2516.283
 
+expected_ignored_tests=(
+    "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
+    "scenarios::provider_faults::transient_get_code_retries_primary_without_using_configured_fallback"
+    "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
+)
+
 shard_1_tests=(
     "harness::db::tests::concurrent_harness_databases_clone_the_migrated_template"
     "harness::db::tests::migration_template_identity_is_stable_and_identifier_sized"
@@ -150,6 +156,7 @@ discovered_raw="$gate_temp/discovered.raw"
 ignored_raw="$gate_temp/ignored.raw"
 discovered_names="$gate_temp/discovered.names"
 ignored_names="$gate_temp/ignored.names"
+expected_ignored_names="$gate_temp/expected-ignored.names"
 shard_1_names="$gate_temp/shard-1.names"
 shard_2_names="$gate_temp/shard-2.names"
 union_names="$gate_temp/union.names"
@@ -171,10 +178,11 @@ fi
 
 sed -n 's/: test$//p' "$discovered_raw" | LC_ALL=C sort >"$discovered_names"
 sed -n 's/: test$//p' "$ignored_raw" | LC_ALL=C sort >"$ignored_names"
+printf '%s\n' "${expected_ignored_tests[@]}" | LC_ALL=C sort >"$expected_ignored_names"
 printf '%s\n' "${shard_1_tests[@]}" | LC_ALL=C sort >"$shard_1_names"
 printf '%s\n' "${shard_2_tests[@]}" | LC_ALL=C sort >"$shard_2_names"
-sort -u "$shard_1_names" "$shard_2_names" >"$union_names"
-comm -12 "$shard_1_names" "$shard_2_names" >"$intersection_names"
+LC_ALL=C sort -u "$shard_1_names" "$shard_2_names" >"$union_names"
+LC_ALL=C comm -12 "$shard_1_names" "$shard_2_names" >"$intersection_names"
 
 count_lines() {
     wc -l <"$1" | tr -d ' '
@@ -187,15 +195,18 @@ union_total="$(count_lines "$union_names")"
 intersection_total="$(count_lines "$intersection_names")"
 shard_1_total="${#shard_1_tests[@]}"
 shard_2_total="${#shard_2_tests[@]}"
-shard_1_ignored="$(comm -12 "$shard_1_names" "$ignored_names" | wc -l | tr -d ' ')"
-shard_2_ignored="$(comm -12 "$shard_2_names" "$ignored_names" | wc -l | tr -d ' ')"
+shard_1_ignored="$(LC_ALL=C comm -12 "$shard_1_names" "$ignored_names" | wc -l | tr -d ' ')"
+shard_2_ignored="$(LC_ALL=C comm -12 "$shard_2_names" "$ignored_names" | wc -l | tr -d ' ')"
 shard_1_runnable="$((shard_1_total - shard_1_ignored))"
 shard_2_runnable="$((shard_2_total - shard_2_ignored))"
 
 duplicates_1="$(uniq -d "$shard_1_names")"
 duplicates_2="$(uniq -d "$shard_2_names")"
-missing_assignments="$(comm -23 "$discovered_names" "$union_names")"
-unexpected_assignments="$(comm -13 "$discovered_names" "$union_names")"
+duplicates_expected_ignored="$(uniq -d "$expected_ignored_names")"
+missing_assignments="$(LC_ALL=C comm -23 "$discovered_names" "$union_names")"
+unexpected_assignments="$(LC_ALL=C comm -13 "$discovered_names" "$union_names")"
+missing_ignored_status="$(LC_ALL=C comm -23 "$expected_ignored_names" "$ignored_names")"
+unexpected_ignored_status="$(LC_ALL=C comm -13 "$expected_ignored_names" "$ignored_names")"
 
 identity_failed=0
 if [ -n "$duplicates_1" ]; then
@@ -204,6 +215,11 @@ if [ -n "$duplicates_1" ]; then
 fi
 if [ -n "$duplicates_2" ]; then
     printf 'e2e gate: duplicate shard 2 assignments:\n%s\n' "$duplicates_2" >&2
+    identity_failed=1
+fi
+if [ -n "$duplicates_expected_ignored" ]; then
+    printf 'e2e gate: duplicate expected ignored tests:\n%s\n' \
+        "$duplicates_expected_ignored" >&2
     identity_failed=1
 fi
 if [ -s "$intersection_names" ]; then
@@ -219,6 +235,16 @@ fi
 if [ -n "$unexpected_assignments" ]; then
     printf 'e2e gate: assigned tests not discovered:\n%s\n' \
         "$unexpected_assignments" >&2
+    identity_failed=1
+fi
+if [ -n "$missing_ignored_status" ]; then
+    printf 'e2e gate: expected ignored tests now runnable or missing:\n%s\n' \
+        "$missing_ignored_status" >&2
+    identity_failed=1
+fi
+if [ -n "$unexpected_ignored_status" ]; then
+    printf 'e2e gate: tests unexpectedly marked ignored:\n%s\n' \
+        "$unexpected_ignored_status" >&2
     identity_failed=1
 fi
 
