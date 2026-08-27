@@ -22,6 +22,7 @@ use phase_runner::{
         PhaseProgress, PhaseSet, RedoAttemptFence, RunMode, SourceProgress, VerificationLevel,
     },
     phase_lock::PhaseLock,
+    progress_monitor::RunnerPhaseProgress,
     runner::{PhaseRunner, RedoPhase},
     state::{PhaseStatus, PhaseStore, StartDisposition},
 };
@@ -485,6 +486,70 @@ async fn runner_loop_heartbeat_refreshes_across_completed_live_follow_passes() -
 
     cancellation.cancel();
     task.await??;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn repeated_interpret_batches_with_a_pinned_durable_cursor_are_observable() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_pinned_interpret").await?;
+    let chain_id = "pinned-interpret-chain";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let phase_progress = RunnerPhaseProgress::default();
+    let interpret = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: {
+            let calls = Arc::clone(&calls);
+            let phase_progress = phase_progress.clone();
+            Arc::new(move |_| {
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call == 4 {
+                    let (count, age) = phase_progress.observation(
+                        chain_id,
+                        PhaseName::Interpret,
+                        &RunMode::Normal,
+                    );
+                    assert_eq!(count, 3);
+                    assert!(age >= 0);
+                }
+                if call == 5 {
+                    assert_eq!(
+                        phase_progress.observation(
+                            chain_id,
+                            PhaseName::Interpret,
+                            &RunMode::Normal,
+                        ),
+                        (0, 0)
+                    );
+                }
+                let progress = (call >= 4)
+                    .then(|| BlockMarker::new(1, "pinned-interpret-block-1"))
+                    .transpose()?
+                    .map(|marker| PhaseProgress {
+                        current: Some(marker.clone()),
+                        target: Some(marker),
+                        ..PhaseProgress::default()
+                    })
+                    .unwrap_or_default();
+                Ok(if call < 5 {
+                    PhaseBatchOutcome::Continue(progress)
+                } else {
+                    PhaseBatchOutcome::Complete(progress)
+                })
+            })
+        },
+    });
+    let runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Interpret, interpret)?,
+        available_capacity(),
+        "pinned-interpret-runner",
+    )?
+    .with_phase_progress(phase_progress);
+
+    runner
+        .run_chain(&chain(chain_id)?, CancellationToken::new())
+        .await?;
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
     scratch.cleanup().await
 }
 
