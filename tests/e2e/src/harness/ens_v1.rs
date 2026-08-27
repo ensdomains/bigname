@@ -698,6 +698,26 @@ pub async fn set_resolver(
     .await
 }
 
+pub async fn set_wrapped_resolver(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    name: &str,
+    resolver: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &setResolverCall {
+            node: namehash(name),
+            resolver,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
 /// Set a resolver on the legacy registry. `from` must control `node` in that
 /// legacy registry state.
 pub async fn set_legacy_resolver(

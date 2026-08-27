@@ -6143,6 +6143,130 @@ async fn project_redo_restores_the_surviving_resolver_pointer_like_a_full_rebuil
 }
 
 #[tokio::test]
+async fn orphaned_later_pointer_does_not_hide_node_attributed_records_incrementally() -> Result<()>
+{
+    const ORPHANED_RESOLVER: &str = "0x00000000000000000000000000000000000000b9";
+    const ORPHANED_HASH: &str = "project-fixture-orphaned-block-4";
+
+    let incremental =
+        ScratchDatabase::create("project_orphaned_pointer_record_incremental").await?;
+    let full = ScratchDatabase::create("project_orphaned_pointer_record_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node":"0xalice",
+                "resolver":RESOLVER,
+                "record_key":"text:before-surface",
+                "record_family":"text",
+                "selector_key":"before-surface",
+                "value_retained":true,
+                "value":"survives-orphaned-pointer"
+            }),
+            json!({"emitting_address":RESOLVER}),
+        )
+        .await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+
+    for pool in [incremental.pool(), full.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        insert_lineage_block(pool, CHAIN, 5).await?;
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, 4, to_timestamp(4), 'orphaned')",
+        )
+        .bind(CHAIN)
+        .bind(ORPHANED_HASH)
+        .bind(block_hash(CHAIN, 3))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            4,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({"resolver":ORPHANED_RESOLVER}),
+            json!({}),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events SET block_hash = $1
+             WHERE chain_id = $2 AND block_number = 4
+               AND event_kind = 'ResolverChanged'",
+        )
+        .bind(ORPHANED_HASH)
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            5,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "AuthorityTransferred",
+            "ens_v1_registrar_l1",
+            json!({"owner":TRANSFER_OWNER}),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        5,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    let inventory_sql = "SELECT to_jsonb(row) - 'inserted_at' - 'last_recomputed_at'
+         FROM record_inventory_current row WHERE resource_id = $1";
+    let resource_id = Uuid::parse_str(RESOURCE).expect("fixture UUID");
+    let incremental_inventory: Value = sqlx::query_scalar(inventory_sql)
+        .bind(resource_id)
+        .fetch_one(incremental.pool())
+        .await?;
+    let full_inventory: Value = sqlx::query_scalar(inventory_sql)
+        .bind(resource_id)
+        .fetch_one(full.pool())
+        .await?;
+    assert_eq!(incremental_inventory, full_inventory);
+    assert!(
+        incremental_inventory["entries"]
+            .as_array()
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry["record_key"] == "text:before-surface"
+                        && entry["value"] == "survives-orphaned-pointer"
+                })
+            })
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
 async fn candidate_resolver_pointer_cannot_change_resource_delta_scope() -> Result<()> {
     const CANDIDATE_RESOLVER: &str = "0x00000000000000000000000000000000000000b9";
 

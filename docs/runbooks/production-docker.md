@@ -102,6 +102,16 @@ three columns, the handoff table, and its range index exist; also confirm that
 `primary_names_current_reverse_hydration_attempt_check` has
 `pg_constraint.convalidated = true`.
 
+The release containing Issue #591 adds schema-migration
+`20260827120000_normalized_events_ens_v1_record_node_resolver_idx.sql`. On an
+initialized production namespace, build
+`normalized_events_ens_v1_record_node_resolver_idx` concurrently in step 3
+with the reviewed statement below and validate that it is ready and valid.
+Then apply the schema-migration in step 4; its `IF NOT EXISTS` build is a no-op
+when the concurrent index is already valid. Do not allow the versioned
+schema-migration to perform the first build against a populated production
+`normalized_events` table.
+
 ```sql
 SELECT
     to_regclass('bigname_phase.project_redo_resolver_evidence') IS NOT NULL
@@ -186,6 +196,17 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_subregistry_registrati
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND logical_name_id IS NOT NULL
       AND after_state ->> 'registry_contract_instance_id' IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_ens_v1_record_node_resolver_idx
+    ON bigname_phase.normalized_events
+       (chain_id, lower(after_state ->> 'node'),
+        lower(COALESCE(NULLIF(after_state ->> 'resolver', ''),
+                       NULLIF(raw_fact_ref ->> 'emitting_address', ''))),
+        block_number, transaction_index, log_index, normalized_event_id)
+    WHERE logical_name_id IS NULL
+      AND source_family = 'ens_v1_resolver_l1'
+      AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_chain_block_number_idx
     ON bigname_phase.name_surfaces (chain_id, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS surface_bindings_chain_block_number_idx
@@ -247,8 +268,8 @@ indexes are additive; rollback may leave them in place.
    re-walk](../glossary.md#re-derivation-boundary). Execute the [owner-ratified
    rollout section](../deployment.md#owner-ratified-sepolia-source-role-rollout)
    at step 9;
-3. for the release containing Issue #400, apply and validate the concurrent
-   baseline indexes above; otherwise skip this step;
+3. for the release containing Issue #400 or Issue #591, apply and validate the
+   applicable concurrent baseline indexes above; otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
    cannot take the required `NOT NULL` column without the forbidden historical

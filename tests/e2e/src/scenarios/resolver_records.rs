@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::support;
 use crate::harness::responses::{exact_name, pointer, selector_keys};
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, db::HarnessDb, ens_v1, manifests, pipeline, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const MULTICOIN_TYPE: u64 = 0;
@@ -66,6 +66,136 @@ fn assert_compact_record_not_success(body: &Value, path: &str) {
         body.pointer(&format!("{path}/value")).is_none(),
         "not_found record must omit value at {path}; body: {body}"
     );
+}
+
+pub(super) async fn start_split_replay(
+    anvil: &Anvil,
+    deployment: &ens_v1::EnsV1Deployment,
+    target: u64,
+    ready_sql: &str,
+) -> Result<(
+    HarnessDb,
+    support::TempDir,
+    pipeline::SequentialFixtureReplay,
+)> {
+    let root = repo_root();
+    let scratch = support::TempDir::create()?;
+    let profile =
+        manifests::generate_local_profile(scratch.path(), &root, &deployment.manifest_targets())?;
+    let db = HarnessDb::create().await?;
+    let chain_rpc_urls = [("ethereum-mainnet", anvil.url.as_str())];
+    let mut replay = pipeline::SequentialFixtureReplay::start_with_chain_rpc_urls(
+        &root,
+        &db.url,
+        &profile.root,
+        &chain_rpc_urls,
+    )
+    .await?;
+    replay
+        .replay_chain_through(&db.pool, "ethereum-mainnet", target, Some(ready_sql))
+        .await?;
+    Ok((db, scratch, replay))
+}
+
+pub(super) async fn materialize_wrapped_surface(
+    anvil: &Anvil,
+    deployment: &ens_v1::EnsV1Deployment,
+    owner: Address,
+    name: &str,
+    previous_target: u64,
+    db: &HarnessDb,
+    replay: &mut pipeline::SequentialFixtureReplay,
+) -> Result<u64> {
+    let rpc = anvil.client();
+    ens_v1::set_name_record_for_node(
+        &rpc,
+        deployment.public_resolver.address,
+        owner,
+        ens_v1::namehash(name),
+        name,
+    )
+    .await?;
+    ens_v1::set_registry_approval_for_all(
+        &rpc,
+        deployment,
+        owner,
+        deployment.name_wrapper.address,
+        true,
+    )
+    .await?;
+    ens_v1::wrap_registry_name(&rpc, deployment, owner, name, owner, Address::ZERO).await?;
+    rpc.mine(1).await?;
+    let target = rpc.block_number().await?;
+    replay
+        .replay_chain_range(
+            &db.pool,
+            "ethereum-mainnet",
+            previous_target + 1,
+            target,
+            Some(&format!(
+                "SELECT EXISTS (SELECT 1 FROM name_surfaces WHERE logical_name_id = '{}')",
+                support::schema_v2_logical_name_id(&format!("ens:{name}"))
+            )),
+        )
+        .await?;
+    Ok(target)
+}
+
+pub(super) async fn select_wrapped_resolver(
+    anvil: &Anvil,
+    deployment: &ens_v1::EnsV1Deployment,
+    owner: Address,
+    selection: (&str, Address),
+    previous_target: u64,
+    db: &HarnessDb,
+    replay: &mut pipeline::SequentialFixtureReplay,
+) -> Result<u64> {
+    let (name, resolver) = selection;
+    let rpc = anvil.client();
+    ens_v1::set_wrapped_resolver(&rpc, deployment, owner, name, resolver).await?;
+    rpc.mine(1).await?;
+    let target = rpc.block_number().await?;
+    replay
+        .replay_chain_range(
+            &db.pool,
+            "ethereum-mainnet",
+            previous_target + 1,
+            target,
+            None,
+        )
+        .await?;
+    Ok(target)
+}
+
+async fn materialize_and_select_wrapped_resolver(
+    anvil: &Anvil,
+    deployment: &ens_v1::EnsV1Deployment,
+    owner: Address,
+    selection: (&str, Address),
+    previous_target: u64,
+    db: &HarnessDb,
+    replay: &mut pipeline::SequentialFixtureReplay,
+) -> Result<u64> {
+    let surface_target = materialize_wrapped_surface(
+        anvil,
+        deployment,
+        owner,
+        selection.0,
+        previous_target,
+        db,
+        replay,
+    )
+    .await?;
+    select_wrapped_resolver(
+        anvil,
+        deployment,
+        owner,
+        selection,
+        surface_target,
+        db,
+        replay,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -147,6 +277,294 @@ async fn resolver_changes_follow_registry_and_zero_releases() -> Result<()> {
         "not_found"
     );
     assert_eq!(pointer(&records, "/data/content_hash/status"), "not_found");
+
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_surface_newowner_record_serves_after_late_surface() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+    let root = repo_root();
+
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &root).await?;
+    let alice = rpc.accounts().await?[1];
+    let resolver = deployment.public_resolver.address;
+    let name = "before.known.eth";
+    let node = format!("{:#x}", ens_v1::namehash(name));
+
+    ens_v1::register_eth_name(&rpc, &deployment, "known", alice, YEAR, resolver).await?;
+    ens_v1::create_subname(&rpc, &deployment, alice, "known.eth", "before", alice).await?;
+    ens_v1::set_text_record(
+        &rpc,
+        resolver,
+        alice,
+        name,
+        "description",
+        "written before the surface",
+    )
+    .await?;
+    let null_link_ready_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events \
+         WHERE event_kind = 'RecordChanged' \
+           AND after_state->>'record_key' = 'text:description' \
+           AND lower(after_state->>'node') = lower('{node}') \
+           AND logical_name_id IS NULL)"
+    );
+    let record_target = rpc.block_number().await?;
+    let (db, scratch, mut replay) =
+        start_split_replay(&anvil, &deployment, record_target, &null_link_ready_sql).await?;
+    materialize_and_select_wrapped_resolver(
+        &anvil,
+        &deployment,
+        alice,
+        (name, resolver),
+        record_target,
+        &db,
+        &mut replay,
+    )
+    .await?;
+    let run = support::serve_existing_db(db, scratch, &anvil).await?;
+
+    let (linked_name, retained_node, emitting_resolver): (Option<String>, String, String) =
+        sqlx::query_as(
+            "SELECT logical_name_id, after_state->>'node', \
+                    COALESCE(after_state->>'resolver', raw_fact_ref->>'emitting_address') \
+             FROM normalized_events \
+             WHERE event_kind = 'RecordChanged' \
+               AND after_state->>'record_key' = 'text:description' \
+               AND lower(after_state->>'node') = lower($1)",
+        )
+        .bind(&node)
+        .fetch_one(&run.db.pool)
+        .await?;
+    assert_eq!(
+        linked_name, None,
+        "the interpretation-time name link must stay null"
+    );
+    assert_eq!(retained_node.to_lowercase(), node);
+    assert_eq!(emitting_resolver.to_lowercase(), format!("{resolver:#x}"));
+
+    let exact = exact_name(&run.api, "ens", name).await?;
+    assert!(
+        selector_keys(&exact).contains("text:description"),
+        "late surface must recover the earlier record in inventory: {exact}"
+    );
+    let records = compact_records(&run, name, "?texts=description&mode=declared&meta=full").await?;
+    assert_eq!(
+        pointer(&records, "/data/text_records/description/value"),
+        "written before the surface"
+    );
+
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_surface_record_history_follows_current_resolver_and_version_boundary() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let resolver_two =
+        ens_v1::deploy_extra_public_resolver(&rpc, &repo_root(), &deployment).await?;
+    let owner = rpc.accounts().await?[1];
+    let resolver_one = deployment.public_resolver.address;
+    let name = "version.history.eth";
+    let node = format!("{:#x}", ens_v1::namehash(name));
+
+    ens_v1::register_eth_name(&rpc, &deployment, "history", owner, YEAR, resolver_one).await?;
+    ens_v1::create_subname(&rpc, &deployment, owner, "history.eth", "version", owner).await?;
+    ens_v1::set_text_record(&rpc, resolver_one, owner, name, "legacy", "before-version").await?;
+    ens_v1::clear_records(&rpc, resolver_one, owner, name).await?;
+    ens_v1::set_text_record(&rpc, resolver_one, owner, name, "active", "resolver-one").await?;
+    ens_v1::set_text_record(
+        &rpc,
+        resolver_two.address,
+        owner,
+        name,
+        "active",
+        "resolver-two",
+    )
+    .await?;
+
+    let record_target = rpc.block_number().await?;
+    let null_ready = format!(
+        "SELECT count(*) >= 4 FROM normalized_events \
+         WHERE logical_name_id IS NULL \
+           AND event_kind IN ('RecordChanged', 'RecordVersionChanged') \
+           AND lower(after_state->>'node') = lower('{node}')"
+    );
+    let (db, scratch, mut replay) =
+        start_split_replay(&anvil, &deployment, record_target, &null_ready).await?;
+    let resolver_one_target = materialize_and_select_wrapped_resolver(
+        &anvil,
+        &deployment,
+        owner,
+        (name, resolver_one),
+        record_target,
+        &db,
+        &mut replay,
+    )
+    .await?;
+    let run = support::serve_existing_db(db, scratch, &anvil).await?;
+
+    let resolver_one_records =
+        compact_records(&run, name, "?texts=legacy,active&mode=declared&meta=full").await?;
+    assert_compact_record_not_success(&resolver_one_records, "/data/text_records/legacy");
+    assert_eq!(
+        pointer(&resolver_one_records, "/data/text_records/active/value"),
+        "resolver-one"
+    );
+
+    let resolver_two_target = select_wrapped_resolver(
+        &anvil,
+        &deployment,
+        owner,
+        (name, resolver_two.address),
+        resolver_one_target,
+        &run.db,
+        &mut replay,
+    )
+    .await?;
+    let resolver_two_records =
+        compact_records(&run, name, "?texts=active&mode=declared&meta=full").await?;
+    assert_eq!(
+        pointer(&resolver_two_records, "/data/text_records/active/value"),
+        "resolver-two"
+    );
+
+    select_wrapped_resolver(
+        &anvil,
+        &deployment,
+        owner,
+        (name, resolver_one),
+        resolver_two_target,
+        &run.db,
+        &mut replay,
+    )
+    .await?;
+    let restored = compact_records(&run, name, "?texts=active&mode=declared&meta=full").await?;
+    assert_eq!(
+        pointer(&restored, "/data/text_records/active/value"),
+        "resolver-one",
+        "selecting the first resolver again must restore its pre-pointer value"
+    );
+
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names()
+-> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let owner = rpc.accounts().await?[1];
+    let resolver = deployment.public_resolver.address;
+    let (name_one, name_two, unknown_name) = ("one.scope.eth", "two.scope.eth", "orphan");
+
+    ens_v1::register_eth_name(&rpc, &deployment, "scope", owner, YEAR, resolver).await?;
+    ens_v1::create_subname(&rpc, &deployment, owner, "scope.eth", "one", owner).await?;
+    ens_v1::create_subname(&rpc, &deployment, owner, "scope.eth", "two", owner).await?;
+    ens_v1::create_subname(
+        &rpc,
+        &deployment,
+        deployment.deployer,
+        "",
+        unknown_name,
+        owner,
+    )
+    .await?;
+    ens_v1::set_text_record(&rpc, resolver, owner, name_one, "description", "one-only").await?;
+    ens_v1::set_text_record(&rpc, resolver, owner, name_two, "description", "two-only").await?;
+    ens_v1::set_text_record(
+        &rpc,
+        resolver,
+        owner,
+        unknown_name,
+        "description",
+        "never-served",
+    )
+    .await?;
+
+    let record_target = rpc.block_number().await?;
+    let nodes =
+        [name_one, name_two, unknown_name].map(|name| format!("{:#x}", ens_v1::namehash(name)));
+    let null_ready = format!(
+        "SELECT count(*) = 3 FROM normalized_events \
+         WHERE logical_name_id IS NULL AND event_kind = 'RecordChanged' \
+           AND after_state->>'record_key' = 'text:description' \
+           AND lower(after_state->>'node') IN (lower('{}'), lower('{}'), lower('{}'))",
+        nodes[0], nodes[1], nodes[2]
+    );
+    let (db, scratch, mut replay) =
+        start_split_replay(&anvil, &deployment, record_target, &null_ready).await?;
+    let one_pointer = materialize_and_select_wrapped_resolver(
+        &anvil,
+        &deployment,
+        owner,
+        (name_one, resolver),
+        record_target,
+        &db,
+        &mut replay,
+    )
+    .await?;
+    materialize_and_select_wrapped_resolver(
+        &anvil,
+        &deployment,
+        owner,
+        (name_two, resolver),
+        one_pointer,
+        &db,
+        &mut replay,
+    )
+    .await?;
+    let run = support::serve_existing_db(db, scratch, &anvil).await?;
+
+    for (name, expected) in [(name_one, "one-only"), (name_two, "two-only")] {
+        let records =
+            compact_records(&run, name, "?texts=description&mode=declared&meta=full").await?;
+        assert_eq!(
+            pointer(&records, "/data/text_records/description/value"),
+            expected,
+            "shared-resolver attribution leaked across nodes: {records}"
+        );
+    }
+
+    let (surface_count, name_count, child_count, inventory_count, discovery_count): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM name_surfaces WHERE namehash = $1),
+           (SELECT count(*) FROM name_current WHERE namehash = $1),
+           (SELECT count(*) FROM children_current WHERE namehash = $1),
+           (SELECT count(DISTINCT inventory.resource_id)
+            FROM record_inventory_current inventory
+            JOIN normalized_events event USING (resource_id)
+            WHERE lower(event.after_state->>'node') = lower($1)),
+           (SELECT count(*) FROM discovery_edges
+            WHERE lower(provenance::text) LIKE '%' || lower($1) || '%')",
+    )
+    .bind(&nodes[2])
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        (
+            surface_count,
+            name_count,
+            child_count,
+            inventory_count,
+            discovery_count
+        ),
+        (0, 0, 0, 0, 0),
+        "unknown-node history must remain audit-only"
+    );
 
     run.db.cleanup().await?;
     Ok(())

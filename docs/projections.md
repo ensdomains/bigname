@@ -128,9 +128,11 @@ outcomes, or durable traces.
 - Resource-keyed projections require their selected resource to resolve to a
   readable identity row. Their input events normally carry that `resource_id`.
   `record_inventory_current` is the deliberate exception: it starts from the
-  resource's latest retained `ResolverChanged` pointer, then joins
-  `RecordChanged` and `RecordVersionChanged` by logical name and emitting
-  resolver even when the record event itself is resource-less. Serving still
+  resource's latest retained `ResolverChanged` pointer. It joins already-linked
+  `RecordChanged` and `RecordVersionChanged` events by logical name and emitting
+  resolver; for ENSv1 resolver events whose `logical_name_id` is null, it
+  instead joins chain, surface namehash to event node, and current resolver to
+  emitting address. Serving still
   attaches that inventory to a name only through the name's current readable
   resource.
 - Project stages only ordinary or `consumer_visibility=activated` interpreted
@@ -311,11 +313,22 @@ exact-name topology.
 `record_inventory_current` records the selectors observed under a resource's
 latest retained resolver pointer and record boundary, explicit gaps,
 unsupported families, and any retained indexed values. The record event need
-not carry that resource: Project joins its `logical_name_id` and emitting
-resolver to the pointer. A resource-less record event cannot create a binding,
-and name and record reads expose the inventory only when the name's current
-readable `resource_id` selects it. Resolver-local events are accepted only under
-the manifest and current-resolver rules documented in
+not carry that resource: Project normally joins its `logical_name_id` and
+emitting resolver to the pointer. An ENSv1 resolver event whose
+`logical_name_id` is null may join only through the same chain, the surface
+namehash equal to its retained node, and the pointer address equal to its
+emitting resolver. Pointer position is not a write-time lower bound: selecting
+a resolver exposes its retained pre-pointer writes, switching away hides them,
+and switching back restores them. The latest `RecordVersionChanged` from that
+resolver remains the boundary, and records must be strictly later than it. This
+follows the registry resolver lookup
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+and the resolver's version-, node-, and key-scoped text storage
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
+A resource-less record event cannot create a binding, and name and record reads
+expose the inventory only when the name's current readable `resource_id` selects
+it. Resolver-local events are accepted only under the manifest and
+current-resolver rules documented in
 [`manifests.md`](manifests.md).
 
 For ENSv1, an admitted current resolver may contribute supported address, text,

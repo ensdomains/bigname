@@ -460,12 +460,20 @@ Field ownership:
   lookup. An indexed answer — including an indexed `not_found` — is admitted
   only from a record inventory whose coverage carries no unsupported reason and
   whose coverage `status` is `full` or `projected`. `projected` is admitted
-  because a supported schema-v2 inventory is complete by construction: the
-  project phase derives its entries from every interpreted record event the
-  name still has under a classified resolver — everything since that resolver
-  last bumped the name's record version and thereby cleared its earlier records
-  (the `record_version_boundary` reported below). A key's absence from that
-  inventory is therefore absence in the retained history rather than an
+  because a supported schema-v2 inventory is complete for its current resolver
+  over retained supported facts: the project phase includes both record events
+  already linked to the name and ENSv1 resolver events whose `logical_name_id`
+  is null but which match the same chain, node hash, and emitting resolver. It
+  then keeps everything
+  strictly after that resolver last bumped the node's record version and thereby
+  cleared its earlier records (the `record_version_boundary` reported below).
+  Resolver selection time is not a lower bound on writes. These rules follow
+  the registry's current-resolver lookup
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+  and the resolver's version-, node-, and key-scoped text storage
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
+  A key's absence from that inventory is therefore absence from the retained
+  attributable history, rather than an interpretation-time linking gap or
   unfinished build. The row's
   `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
   which is a weaker statement than `full` and does not weaken this admission.
