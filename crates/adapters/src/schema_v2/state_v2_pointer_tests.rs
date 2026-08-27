@@ -28,6 +28,11 @@ fn v2_zero_subregistry_update_darkens_shared_observation_state() {
     assert_v2_indexes_are_derived(&state);
     assert!(state.v2_dirty_registries.contains(CHILD));
     assert!(state.v2_dirty_registries.contains(THIRD));
+    assert!((0..32).all(|_| {
+        state
+            .apply_v2_subregistry_update(ROOT, SECOND, Some(CHILD.to_owned()))
+            .is_empty()
+    }));
 }
 
 #[test]

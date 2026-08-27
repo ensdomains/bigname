@@ -224,6 +224,19 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     Ok(())
 }
 
+#[tokio::test]
+#[rustfmt::skip]
+async fn cold_restore_retains_zero_clear_beside_later_state_tail() -> TestResult {
+    let database = database("interpret_zero_clear_retention").await?;
+    sync_schema_v2_repository(database.pool(), &load_repository(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"))?).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) SELECT $1, 'zero-clear-' || n, n, to_timestamp(n), 'canonical' FROM generate_series(1, 4) n").bind(CHAIN).execute(database.pool()).await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state, after_state) SELECT 'zero-clear-' || n, 'ens', 'SubregistryChanged', 'ens_v2_registry_l1', 1, $1, n, 'zero-clear-' || n, 'tx-' || n, n, 0, jsonb_build_object($2, 'shared', $3, '0x0000000000000000000000000000000000000001:-:0x01:-:SubregistryUpdated'), 'ens_v2_registry_resource_surface', 'canonical', state FROM (VALUES (1, '{\"source_event\":\"SubregistryUpdated\",\"token_id\":\"0x01\",\"subregistry\":\"0x0000000000000000000000000000000000000011\"}'::jsonb), (2, '{\"source_event\":\"SubregistryUpdated\",\"token_id\":\"0x01\",\"subregistry\":null}'::jsonb || jsonb_build_object($4, jsonb_build_array('0x01'))), (3, '{\"source_event\":\"SubregistryUpdated\",\"token_id\":\"0x01\",\"subregistry\":\"0x0000000000000000000000000000000000000012\"}'::jsonb)) rows(n, state)").bind(CHAIN).bind(bigname_adapters::schema_v2::seam::INTERPRETER_STATE_KEY).bind(bigname_adapters::schema_v2::seam::STATE_SCOPE_KEY).bind(bigname_adapters::schema_v2::seam::SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY).execute(database.pool()).await?;
+    let loaded = crate::load::batch_input(database.pool(), CHAIN, 4, 4, None, None, StateCacheCapacity::Unlimited).await?;
+    assert_eq!(loaded.restored_event_count, 2);
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn database(prefix: &str) -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
     for statement in [

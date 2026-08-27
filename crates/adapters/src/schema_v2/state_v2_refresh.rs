@@ -234,11 +234,6 @@ impl State {
                     registration: token.registration.clone(),
                     resolver: token.resolver.clone(),
                     subregistry: token.subregistry.clone(),
-                    subregistry_invalidated_token_ids: token
-                        .subregistry
-                        .as_ref()
-                        .map(|_| self.v2_subregistry_invalidated_tokens(emitter, token_id))
-                        .unwrap_or_default(),
                 });
                 self.replace_v2_current_surface(
                     previous_surface.as_deref(),
@@ -304,11 +299,6 @@ impl State {
             registration: token.registration.clone(),
             resolver: token.resolver.clone(),
             subregistry: token.subregistry.clone(),
-            subregistry_invalidated_token_ids: token
-                .subregistry
-                .as_ref()
-                .map(|_| self.v2_subregistry_invalidated_tokens(registry, token_id))
-                .unwrap_or_default(),
         })
     }
 

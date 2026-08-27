@@ -26,13 +26,7 @@ impl V2NameTransition {
         field: &str,
         target: &str,
     ) -> Value {
-        let mut state =
-            json!({"source_event":source_event,"token_id":self.token_id,(field):target});
-        if field == "subregistry" && !self.subregistry_invalidated_token_ids.is_empty() {
-            state["subregistry_invalidated_token_ids"] =
-                json!(self.subregistry_invalidated_token_ids);
-        }
-        state
+        json!({"source_event":source_event,"token_id":self.token_id,(field):target})
     }
 }
 
@@ -126,23 +120,8 @@ impl State {
         subregistry: Option<String>,
     ) -> BTreeSet<String> {
         if subregistry.is_some() {
-            let observation_id = resolver_observation_id(token_id);
-            let observation_prefix = observation_id
-                .strip_suffix("00000000")
-                .unwrap_or(&observation_id);
-            let start = v2_key(emitter, &format!("{observation_prefix}00000000"));
-            let end = v2_key(emitter, &format!("{observation_prefix}ffffffff"));
-            let invalidated = self
-                .v2_tokens
-                .range(start..=end)
-                .filter_map(|(key, token)| {
-                    let (_, candidate) = key.rsplit_once(':')?;
-                    (token.subregistry.is_none() && !candidate.eq_ignore_ascii_case(token_id))
-                        .then(|| candidate.to_owned())
-                })
-                .collect();
             self.set_v2_subregistry(emitter, token_id, subregistry);
-            return invalidated;
+            return BTreeSet::new();
         }
 
         let emitter = emitter.to_ascii_lowercase();
@@ -160,27 +139,6 @@ impl State {
         invalidated
     }
 
-    pub(in crate::schema_v2) fn v2_subregistry_invalidated_tokens(
-        &self,
-        emitter: &str,
-        token_id: &str,
-    ) -> BTreeSet<String> {
-        let observation_id = resolver_observation_id(token_id);
-        let observation_prefix = observation_id
-            .strip_suffix("00000000")
-            .unwrap_or(&observation_id);
-        let start = v2_key(emitter, &format!("{observation_prefix}00000000"));
-        let end = v2_key(emitter, &format!("{observation_prefix}ffffffff"));
-        self.v2_tokens
-            .range(start..=end)
-            .filter_map(|(key, token)| {
-                let (_, candidate) = key.rsplit_once(':')?;
-                (token.subregistry.is_none() && !candidate.eq_ignore_ascii_case(token_id))
-                    .then(|| candidate.to_owned())
-            })
-            .collect()
-    }
-
     pub(in crate::schema_v2) fn restore_v2_subregistry_change(
         &mut self,
         emitter: &str,
@@ -191,6 +149,8 @@ impl State {
             .get("subregistry")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        // This source-event gate and the separately retained zero clear must stay paired so other
+        // event kinds cannot replace the clear during compaction.
         if after_state.get("source_event").and_then(Value::as_str) != Some("SubregistryUpdated") {
             self.set_v2_subregistry(emitter, token_id, subregistry);
             return;

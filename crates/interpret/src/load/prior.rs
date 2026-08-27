@@ -6,7 +6,8 @@ use sqlx::{PgConnection, PgPool, types::Uuid};
 
 use crate::{InterpretError, Result};
 use bigname_adapters::schema_v2::seam::{
-    INTERPRETER_STATE_KEY, STATE_SCOPE_KEY, retained_prior_state_key,
+    INTERPRETER_STATE_KEY, STATE_SCOPE_KEY, SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY,
+    retained_event_state_key, retained_prior_state_key,
 };
 
 type Row = (
@@ -58,8 +59,8 @@ pub(super) async fn restore_events(
     before_block: i64,
     restore: &mut AdapterSessionRestore,
 ) -> Result<usize> {
-    // The content-hashed adapter owns the opaque state key. Rows without one are intentionally
-    // keyed by event identity, so this transport layer never invents compaction semantics.
+    // The content-hashed adapter owns the opaque state key. Rows without one stay keyed by event
+    // identity, and its clear marker alone retains one additional row.
     let statement = format!(
         "
         WITH ranked AS (
@@ -78,7 +79,8 @@ pub(super) async fn restore_events(
                            COALESCE(
                                event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
                                event.event_identity
-                           )
+                           ),
+                           event.after_state ? '{SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY}'
                        ORDER BY event.block_number DESC,
                                 event.transaction_index DESC NULLS LAST,
                                 event.log_index DESC NULLS LAST,
@@ -169,9 +171,9 @@ fn row_to_event(
     ): Row,
 ) -> PriorEventInput {
     PriorEventInput {
-        retained_state_key: retained_prior_state_key(
-            interpreter_state_key.as_deref(),
-            &event_identity,
+        retained_state_key: retained_event_state_key(
+            retained_prior_state_key(interpreter_state_key.as_deref(), &event_identity),
+            &after_state,
         ),
         chain_id,
         namespace,
