@@ -23,12 +23,17 @@ use crate::{
 mod inspect_resolution;
 #[path = "cli_label_preimages.rs"]
 mod label_preimages;
+#[path = "cli_monitoring.rs"]
+mod monitoring;
 #[path = "cli_source.rs"]
 mod source;
 #[path = "cli_attestation.rs"]
 mod watch_set_attestation;
 
-use source::parse_source;
+use {
+    monitoring::{HeartbeatArgs, MonitoringArgs},
+    source::parse_source,
+};
 
 #[cfg(test)]
 #[path = "cli/tests.rs"]
@@ -132,23 +137,6 @@ struct ManifestArgs {
     manifests_root: PathBuf,
 }
 
-#[derive(Clone, Debug, Args)]
-struct MonitoringArgs {
-    #[arg(
-        long,
-        env = "BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR",
-        default_value = "127.0.0.1:9465"
-    )]
-    metrics_bind_addr: SocketAddr,
-
-    #[arg(
-        long,
-        env = "BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS",
-        default_value_t = 900
-    )]
-    heartbeat_stale_after_secs: i64,
-}
-
 #[derive(Debug, Args)]
 struct RunArgs {
     #[command(flatten)]
@@ -208,8 +196,16 @@ struct RedoArgs {
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")]
     verification_database_url: Option<String>,
 
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR",
+        default_value = "127.0.0.1:0",
+        help = "metrics listener; defaults to an ephemeral loopback port"
+    )]
+    metrics_bind_addr: SocketAddr,
+
     #[command(flatten)]
-    monitoring: MonitoringArgs,
+    heartbeat: HeartbeatArgs,
 
     #[command(flatten)]
     capacity: CapacityArgs,
@@ -372,7 +368,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
             "at least one --chain must be configured",
         ));
     }
-    validate_monitoring(&args.monitoring)?;
+    validate_heartbeat_threshold(args.monitoring.heartbeat.heartbeat_stale_after_secs)?;
     let sources = args
         .sources
         .iter()
@@ -397,7 +393,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
         database_url: args.connection.database_url,
         verification_database_url: args.verification_database_url,
         metrics_bind_addr: args.monitoring.metrics_bind_addr,
-        heartbeat_stale_after_secs: args.monitoring.heartbeat_stale_after_secs,
+        heartbeat_stale_after_secs: args.monitoring.heartbeat.heartbeat_stale_after_secs,
         manifests_root: args.manifests.manifests_root,
         runtime,
         hydration_rpc_urls,
@@ -405,7 +401,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
 }
 
 fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
-    validate_monitoring(&args.monitoring)?;
+    validate_heartbeat_threshold(args.heartbeat.heartbeat_stale_after_secs)?;
     let phase = parse_redo_phase(&args.phase)?;
     let range = BlockRange::new(args.from_block, args.to_block)?;
     let watch_set_coverage_attestations = watch_set_attestation::resolve(
@@ -446,8 +442,8 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
     Ok(ResolvedCommand::Redo {
         database_url: args.connection.database_url,
         verification_database_url: args.verification_database_url,
-        metrics_bind_addr: args.monitoring.metrics_bind_addr,
-        heartbeat_stale_after_secs: args.monitoring.heartbeat_stale_after_secs,
+        metrics_bind_addr: args.metrics_bind_addr,
+        heartbeat_stale_after_secs: args.heartbeat.heartbeat_stale_after_secs,
         manifests_root: args.manifests.manifests_root,
         instance_id: resolve_instance_id(args.connection.instance_id)?,
         chains,
@@ -460,8 +456,8 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
     })
 }
 
-fn validate_monitoring(args: &MonitoringArgs) -> RunnerResult<()> {
-    if args.heartbeat_stale_after_secs <= 0 {
+fn validate_heartbeat_threshold(heartbeat_stale_after_secs: i64) -> RunnerResult<()> {
+    if heartbeat_stale_after_secs <= 0 {
         return Err(RunnerError::new(
             ErrorKind::Configuration,
             "heartbeat stale threshold must be positive",

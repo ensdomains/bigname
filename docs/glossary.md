@@ -1572,7 +1572,10 @@ watch targets, never the durable identity.
 <a id="work-bearing-batch"></a>
 **Work-bearing batch** — a successfully persisted phase batch that reports
 completed indexing or repair work, excluding idle polls, empty completions,
-caught-up Live polls that report no movement from the starting durable cursor, and completed-phase revalidation.
+caught-up Live polls that report no movement from the starting durable cursor,
+and completed-phase revalidation. A one-shot repair's non-progress counters are
+process-local and are scrapeable only while that redo process has a reachable
+metrics listener; its durable redo state remains in PostgreSQL.
 
 **Wrapped NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
 a name whose wrapper token has a nonzero owner and whose registry owner is the

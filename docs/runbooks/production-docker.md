@@ -324,7 +324,11 @@ indexes are additive; rollback may leave them in place.
    `--source` for every configured intake-capable source key; the exact persisted
    cursor-key set is required.
    The CLI refuses an ingest redo without a source, and every redo requires the
-   explicit block range;
+   explicit block range. These recovery commands override redo's ephemeral
+   metrics default with `0.0.0.0:9465` so the stopped supervisor's existing
+   Prometheus target observes repair-mode progress. Use that fixed address only
+   while the supervisor is stopped; another simultaneous redo needs its own
+   stable target or the logged ephemeral default;
 7. after any required Ingest redo succeeds, resume an already-audited Interpret
    redo with its existing token and exact active chain and range. Otherwise,
    invoke the exact required full-history Interpret redo without an attestation

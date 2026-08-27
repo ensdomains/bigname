@@ -87,6 +87,19 @@ Merge the `rule_files` and `scrape_configs` entries from
 path resolves. Keep the job name `bigname-phase-runner`; the dashboard and
 alerts select that exact label.
 
+A directly launched one-shot redo binds an ephemeral loopback listener by
+default, so concurrent repairs do not contend for the supervisor port. Its
+info-level startup event records the selected address when `RUST_LOG=info`.
+That default is not a stable Prometheus target. To apply the checked-in
+repair-mode alerts during an operator redo, pass a unique stable
+`--metrics-bind-addr` or set
+`BIGNAME_PHASE_RUNNER_REDO_METRICS_BIND_ADDR`, then add that address under the
+same job name. The redo command deliberately ignores
+`BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`, which remains the supervised runner's
+setting. Remove the temporary target and reload Prometheus immediately when the
+redo exits, then confirm it is absent before the two-minute
+`BignamePhaseRunnerDown` hold elapses.
+
 The container-restart rule uses the runner endpoint's process-start gauge. It
 does not depend on cAdvisor container labels, which are unavailable from some
 cAdvisor and Docker storage-driver combinations. Confirm that the runner target

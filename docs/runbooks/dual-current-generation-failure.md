@@ -687,6 +687,10 @@ This is why recovery re-derives evidence instead of editing the open interval.
    deployment-specific drain procedure is a stop condition
    ([production recovery plays](production-docker.md#recovery-plays),
    [interpreter-mismatch escalation](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
+   The commands below explicitly reuse the stopped supervisor's stable metrics
+   target at `0.0.0.0:9465`. Outside this stopped-supervisor procedure, redo
+   defaults to a logged ephemeral port; assign each simultaneously scraped redo
+   its own stable address.
 2. If an Interpret redo is already recorded, resume **that exact chain and
    persisted range**. Do not create a new range. If the evidence query returns
    an `active_redo_invalidation_token`, require the already-reviewed historical
