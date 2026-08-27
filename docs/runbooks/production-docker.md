@@ -42,15 +42,15 @@ Do not start the walk until all of these checks pass:
    phase.
 4. The host rule list contains `BignamePhaseRunnerPhaseNonProgress` and
    `BignamePhaseRunnerProgressMetricsMissing`.
-5. The host evaluates rules at least once per minute.
+5. The host retains the checked-in 15-second rule-group evaluation interval.
 6. The existing `severity=page` route passes the deployment's standard
    notification-path check.
 7. Operators have the [manual halt procedure](pipeline-monitoring.md#phase-cursor-non-progress-response)
    open and know every active Compose overlay.
 8. Record this acceptance statement in the walk log:
 
-> **Phase livelock paging verified:** with Prometheus rule evaluation no slower
-> than one minute, every executable phase/mode combination pages through the
+> **Phase livelock paging verified:** with the checked-in 15-second Prometheus
+> rule interval, every executable phase/mode combination pages through the
 > existing `severity=page` route no later than 13 minutes after its second
 > committed [work-bearing batch](../glossary.md#work-bearing-batch) is confirmed
 > at an unchanged [durable composite cursor](../glossary.md#durable-composite-cursor);

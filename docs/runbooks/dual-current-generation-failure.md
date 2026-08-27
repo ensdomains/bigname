@@ -721,8 +721,9 @@ This is why recovery re-derives evidence instead of editing the open interval.
    ```sh
    BIGNAME_IMAGE=<recovery-image> \
      docker compose --env-file .env.server \
-     <compose-files> run --rm --pull never phase-runner \
+     <compose-files> run --rm --pull never --use-aliases --service-ports phase-runner \
      phase-runner redo --chain ethereum-mainnet --phase project \
+     --metrics-bind-addr 0.0.0.0:9465 \
      --source 'ethereum-mainnet:<key>:<kind>:<seed-basis>:<start>[:<role>]=<endpoint-env>' \
      --from-block <persisted-project-redo-from> \
      --to-block <persisted-project-redo-to>
@@ -777,8 +778,9 @@ This is why recovery re-derives evidence instead of editing the open interval.
    ```sh
    BIGNAME_IMAGE=<recovery-image> \
      docker compose --env-file .env.server \
-     <compose-files> run --rm --pull never phase-runner \
+     <compose-files> run --rm --pull never --use-aliases --service-ports phase-runner \
      phase-runner redo --chain ethereum-mainnet --phase interpret \
+     --metrics-bind-addr 0.0.0.0:9465 \
      --from-block <redo-from> \
      --to-block <redo-to> \
      --source <affected-chain-source> \

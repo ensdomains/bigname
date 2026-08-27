@@ -1,5 +1,6 @@
 groups:
   - name: bigname-phase-runner
+    interval: 15s
     rules:
       - alert: BignamePhaseFailed
         expr: phase_runner_phase_status{job="bigname-phase-runner",status="failed"} == 1
@@ -205,7 +206,6 @@ groups:
         annotations:
           threshold: "Three committed work-bearing batches, or two with 10 minutes elapsed since the first pinned commit, leave the durable cursor unchanged for 2 minutes."
           meaning: "The named phase and mode are repeating provider/database work without durable cursor progress; provider quota or database capacity may be burning."
-
       - alert: BignamePhaseRunnerProgressMetricsMissing
         expr: |
           (

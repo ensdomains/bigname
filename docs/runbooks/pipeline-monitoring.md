@@ -198,8 +198,8 @@ capacity pauses, and completed Verify revalidation clear or bypass the detector.
 Evidence expires after the configured heartbeat-stale interval without another
 successful work-bearing commit.
 
-With rule evaluation no slower than one minute, the two-minute hold pages no
-later than 3 minutes after the third confirmed pinned completion. The age path
+With the checked-in 15-second rule interval, the two-minute hold pages no later
+than 3 minutes after the third confirmed pinned completion. The age path
 pages no later than 13 minutes after the second. A single long-running batch
 still belongs to the heartbeat alert.
 
