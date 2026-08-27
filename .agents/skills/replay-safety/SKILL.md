@@ -23,8 +23,10 @@ For replayable-state work, state:
 ## Non-negotiables
 
 - Raw facts are immutable; reorg repair marks rows noncanonical rather than deleting truth.
-- Schema-v2 interpret writes identity rows, discovery edges, and normalized
-  events. Adapters provide interpretation behavior and do not write projections.
+- Schema-v2 interpret writes identity rows, discovery edges, normalized events,
+  and append-only diagnostics for malformed event logs from undeclared
+  emitters. Adapters provide interpretation behavior and do not write database
+  rows or projections.
 - Projection workers own projection tables.
 - API reads projections, normalized events, and request-scoped lookup output
   except explicit audit endpoints and the guarded [resolution divergence

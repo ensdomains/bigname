@@ -2,8 +2,8 @@
 
 This directory is the fresh-schema baseline defined by the
 [replacement build plan](../simplification-build-plan-20260730.md). It does not
-modify `migrations/`. The SQL stores only the product data and phase state
-authorized below.
+modify `migrations/`. The SQL stores only the product data, phase state, and
+operator diagnostics authorized below.
 
 ## Installation boundary
 
@@ -224,7 +224,18 @@ row for the same conflict, and neither a later successful projection generation
 nor a reorg deletes an existing row. Operator diagnostics may read this table;
 product routes may not.
 
-The phase runner writes all four tables. The runner, redo command, health checks, and status path read cursor and phase state; redo restart also reads the attestation audit. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes the cursor and phase-state tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines [provider-trusted](../docs/glossary.md#verification-level), independently cross-checked, and node-checked status; the Issue #411 source-role contract narrows it by denying independent evidence to any source that also serves intake. The production verifier records `cross_checked` for a distinct verification-only Base or Sepolia dRPC and `node_checked` for a distinct verification-only Ethereum Mainnet reth; without one, the target-covering intake cursor records `quick_synced`. The phase runner rejects a level stronger than the chain-specific verification path earned before persistence. Base's dRPC cross-check extent stops at the Coinbase-to-dRPC ingest seam, and a partial verify redo retains the weaker of retained and currently available evidence. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
+`interpret_decode_skips` is the append-only audit for malformed event logs from
+undeclared emitters that Interpret skips under the manifest admission policy.
+A decode failure from a manifest-declared emitter is fatal regardless of event
+selection scope. Each row records the
+raw-log position, emitting address, selected event and source, selection scope,
+decoder context, and [interpreter content
+hash](../docs/glossary.md#interpreter-content-hash). Interpret writes these rows from
+adapter output with conflict ignore, so replaying one log under one interpreter
+build records one diagnostic. Redo preparation and reorg repair do not delete
+them. Operators may read this table; product routes may not.
+
+The phase runner writes the cursors, phase state, authority attestations, and Project failure audit. Interpret writes the malformed-event diagnostic table. The runner, redo command, health checks, and status path read cursor and phase state; redo restart also reads the attestation audit. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes the cursor and phase-state tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines [provider-trusted](../docs/glossary.md#verification-level), independently cross-checked, and node-checked status; the Issue #411 source-role contract narrows it by denying independent evidence to any source that also serves intake. The production verifier records `cross_checked` for a distinct verification-only Base or Sepolia dRPC and `node_checked` for a distinct verification-only Ethereum Mainnet reth; without one, the target-covering intake cursor records `quick_synced`. The phase runner rejects a level stronger than the chain-specific verification path earned before persistence. Base's dRPC cross-check extent stops at the Coinbase-to-dRPC ingest seam, and a partial verify redo retains the weaker of retained and currently available evidence. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
 
 Normal verification reads its start from these durable ingest cursors. A resumed
 normal scan retains the weaker whole-extent verification level when its

@@ -8,7 +8,7 @@
   "expected_raw_log_count": 1152,
   "expected_registration_count": 320,
   "expected_normalized_event_count": 3232,
-  "expected_output_keccak": "0x11f84d4f369edbf070090f3d3a8ebc891f6b74471b546fda3b1218f91b2c4df5",
+  "expected_output_keccak": "0x88567f9930db8806ded1cae65a1a77c0763c04f0fa9a6c31fd30fab9a4750057",
   "manifests": [
     {
       "namespace": "ens",

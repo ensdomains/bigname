@@ -88,6 +88,7 @@ pub struct BatchInput {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BatchOutput {
+    pub decode_skips: Vec<DecodeSkip>,
     pub normalized_events: Vec<NormalizedEvent>,
     pub label_preimages: Vec<LabelPreimage>,
     pub name_surfaces: Vec<NameSurface>,
@@ -104,6 +105,20 @@ pub struct BatchOutput {
     pub migration_candidate_identity_effects: Vec<MigrationCandidateEffect>,
     pub migration_candidate_discovery_effects: Vec<MigrationCandidateEffect>,
     pub migration_authority_transitions: Vec<MigrationAuthorityTransition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecodeSkip {
+    pub chain_id: String,
+    pub block_hash: String,
+    pub block_number: i64,
+    pub transaction_hash: String,
+    pub log_index: i64,
+    pub emitting_address: String,
+    pub source_family: String,
+    pub selection_topic0: String,
+    pub match_all: bool,
+    pub decode_context: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

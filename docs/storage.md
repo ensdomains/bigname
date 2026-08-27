@@ -160,6 +160,7 @@ mandatory full Interpret and Project redos.
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
+| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen only a required Ingest redo recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker) while holding every phase writer lock | Phase progress, repair work, and runtime liveness. Manifest synchronization preserves the phase runner's lifecycle backup fields, clears resumable evidence when it changes the required range or [compiled watch plan](glossary.md#compiled-watch-plan), and never executes the redo. |
@@ -169,6 +170,17 @@ mandatory full Interpret and Project redos.
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
+
+Each `interpret_decode_skips` row records the chain, block and transaction
+identity, log index, emitter, selected [source family](glossary.md#source-family)
+and signature, selection scope, decoder context, and [interpreter content
+hash](glossary.md#interpreter-content-hash). A malformed log from an emitter
+declared in an active manifest is fatal regardless of selection scope, so this
+table receives rows only for undeclared emitters. Its primary key combines
+the raw-log position with that content hash, and Interpret inserts with conflict
+ignore, so replaying or redoing the same log under one interpreter build does
+not duplicate the diagnostic. The rows remain append-only across canonicality
+changes and derived-state rebuilds; they are not replay input.
 
 For a manifest-declared address, an omitted `start_block` is initially stored
 as `contract_instance_addresses.active_from_block_number = NULL`; interval

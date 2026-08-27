@@ -3351,6 +3351,99 @@ async fn discovery_admission_applies_to_later_logs_in_the_same_batch() -> Result
 }
 
 #[tokio::test]
+async fn discovery_admitted_malformed_log_is_recorded_once_across_replay() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_decode_skip").await?;
+    let chain = "interpret-decode-skip";
+    seed_discovery_fixture(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE raw_logs
+         SET topics = array_append(topics, $2)
+         WHERE chain_id = $1 AND log_index = 1",
+    )
+    .bind(chain)
+    .bind(format!("{:#x}", B256::repeat_byte(0xff)))
+    .execute(scratch.pool())
+    .await?;
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    let skip: (i64, String, String, bool, String) = sqlx::query_as(
+        "SELECT count(*), min(emitting_address), min(source_family),
+                bool_and(NOT match_all), min(interpreter_content_hash)
+         FROM interpret_decode_skips
+         WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        skip,
+        (
+            1,
+            DISCOVERED_RESOLVER.into(),
+            "ens_v2_resolver_l1".into(),
+            true,
+            INTERPRETER_CONTENT_HASH.into(),
+        )
+    );
+    let record_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RecordChanged'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(record_events, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_declared_malformed_log_remains_fatal() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_declared_malformed").await?;
+    let chain = "interpret-declared-malformed";
+    seed_discovery_fixture(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE raw_logs
+         SET topics = array_append(topics, $2)
+         WHERE chain_id = $1 AND log_index = 0",
+    )
+    .bind(chain)
+    .bind(format!("{:#x}", B256::repeat_byte(0xff)))
+    .execute(scratch.pool())
+    .await?;
+
+    let error = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("a malformed log from a manifest-declared emitter must halt interpretation");
+    assert_eq!(error.kind(), InterpretErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("ens_v2_registry_l1 adapter failed")
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("interpret-declared-malformed-block-1:0")
+    );
+    let skips: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM interpret_decode_skips WHERE chain_id = $1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(skips, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn discovery_update_preserves_sibling_observation_key() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_discovery_siblings").await?;
     let chain = "interpret-discovery-siblings";

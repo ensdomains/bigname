@@ -1973,6 +1973,9 @@ fn flatten_outputs(outputs: &[BatchOutput]) -> BatchOutput {
     let mut merged = BatchOutput::default();
     for output in outputs {
         merged
+            .decode_skips
+            .extend(output.decode_skips.iter().cloned());
+        merged
             .normalized_events
             .extend(output.normalized_events.iter().cloned());
         merged
@@ -2061,7 +2064,7 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
         .join("\n");
     assert_eq!(
         format!("{:#x}", keccak256(snapshot.as_bytes())),
-        "0x7d5340bf49e4117648c88197b518715193a19a79bfd6167285d94bfd1689c036",
+        "0x846cf25292542808d9a5c589687a20e63f87b0479602a935b4284dfdce020420",
         "output minus the debug-only flag and the retained rows must equal the pre-retention snapshot"
     );
     Ok(())

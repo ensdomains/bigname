@@ -552,6 +552,7 @@ fn families(
     replayed: &BatchOutput,
 ) -> Vec<(&'static str, Keeps, Vec<Row>, Vec<Row>)> {
     let BatchOutput {
+        decode_skips: _,
         normalized_events: _,
         label_preimages: _,
         name_surfaces: _,
@@ -570,6 +571,12 @@ fn families(
         migration_authority_transitions: _,
     } = fresh;
     vec![
+        (
+            "decode_skips",
+            Keeps::Every,
+            decode_skips(fresh),
+            decode_skips(replayed),
+        ),
         (
             "label_preimages",
             Keeps::Last,
@@ -661,6 +668,29 @@ fn families(
             migration_authority_transitions(replayed),
         ),
     ]
+}
+
+fn decode_skips(output: &BatchOutput) -> Vec<Row> {
+    output
+        .decode_skips
+        .iter()
+        .map(|row| Row {
+            key: format!(
+                "{}:{}:{}:{}",
+                row.chain_id, row.block_hash, row.transaction_hash, row.log_index
+            ),
+            body: format!(
+                "{}:{}:{}:{}:{}:{}",
+                row.emitting_address,
+                row.source_family,
+                row.selection_topic0,
+                row.match_all,
+                row.decode_context,
+                row.block_number,
+            ),
+            anchor: String::new(),
+        })
+        .collect()
 }
 
 fn migration_event_associations(output: &BatchOutput) -> Vec<Row> {
