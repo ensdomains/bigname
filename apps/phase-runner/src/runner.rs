@@ -455,8 +455,9 @@ impl PhaseRunner {
                 .await?;
             let progress_token = self.phase_progress.begin_batch(&context);
             let retained_verification_level = context.resume.verification_level;
+            let batch = phase.run_batch(context.clone());
             let outcome = phase_lock
-                .run_while_alive(self.timing.live_poll_interval, phase.run_batch(context))
+                .run_while_alive(self.timing.live_poll_interval, batch)
                 .await;
             phase_lock.check_alive().await?;
             let outcome = outcome?;
@@ -510,6 +511,9 @@ impl PhaseRunner {
             }
             self.phase_progress
                 .record_committed(progress_token, &outcome);
+            if matches!(outcome, PhaseBatchOutcome::Complete(_)) {
+                self.confirm_progress(context).await?;
+            }
             if phase_name == PhaseName::Verify && matches!(mode, RunMode::Normal) {
                 crate::verify_level::warn_optional_downgrade(
                     &chain.chain_id,

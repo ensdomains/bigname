@@ -1,10 +1,8 @@
 use super::*;
 use crate::phase::{IngestCursor, PhaseResume, SourceProgress};
-
 fn marker(number: i64, hash: &str) -> BlockMarker {
     BlockMarker::new(number, hash).unwrap()
 }
-
 fn context(phase: PhaseName, current: BlockMarker) -> PhaseContext {
     PhaseContext {
         chain_id: "chain".into(),
@@ -20,7 +18,6 @@ fn context(phase: PhaseName, current: BlockMarker) -> PhaseContext {
         },
     }
 }
-
 fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhaseProgress) {
     let now = Arc::new(Mutex::new(Instant::now()));
     let clock = Arc::clone(&now);
@@ -45,7 +42,6 @@ fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhasePr
     tracker.record_committed(token, &PhaseBatchOutcome::Complete(progress));
     assert_eq!(observed().0, 3);
 }
-
 #[test]
 fn advancing_final_completion_is_quiet_until_durable_confirmation() {
     let pinned = context(PhaseName::Project, marker(1, "one"));
@@ -57,7 +53,6 @@ fn advancing_final_completion_is_quiet_until_durable_confirmation() {
         },
     );
 }
-
 #[test]
 fn final_ingest_next_block_progress_is_quiet_when_markers_stay_pinned() {
     let mut pinned = context(PhaseName::Ingest, marker(9, "summary"));

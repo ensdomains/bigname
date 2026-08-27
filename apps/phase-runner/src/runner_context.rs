@@ -360,6 +360,15 @@ impl PhaseRunner {
             resume,
         })
     }
+
+    pub(super) async fn confirm_progress(&self, mut context: PhaseContext) -> RunnerResult<()> {
+        context.resume = self
+            .store
+            .phase_resume(&context.chain_id, context.phase, &context.mode)
+            .await?;
+        self.phase_progress.begin_batch(&context);
+        Ok(())
+    }
 }
 
 async fn interpret_redo_heads(

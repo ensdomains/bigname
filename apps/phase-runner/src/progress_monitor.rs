@@ -1,11 +1,3 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
-
-use tracing::warn;
-
 use crate::{
     heads::BlockMarker,
     phase::{
@@ -13,37 +5,36 @@ use crate::{
         RunMode,
     },
 };
-
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tracing::warn;
 #[path = "progress_monitor_cursor.rs"]
 mod cursor;
 use cursor::{completion_reports_advance, elapsed_seconds};
-
 const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(900);
-
 #[derive(Clone)]
 pub struct RunnerPhaseProgress {
     inner: Arc<Inner>,
 }
-
 struct Inner {
     states: Mutex<BTreeMap<ProgressKey, ProgressState>>,
     stale_after: Duration,
     now: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
-
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ProgressKey {
     chain: String,
     phase: PhaseName,
     mode: &'static str,
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CursorIdentity {
     current: Option<BlockMarker>,
     ingest: Vec<IngestCursorIdentity>,
 }
-
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct IngestCursorIdentity {
     source_key: String,
@@ -51,14 +42,12 @@ struct IngestCursorIdentity {
     last_processed: Option<(i64, String)>,
     redo_loaded_boundary: Option<(i64, String)>,
 }
-
 #[derive(Clone)]
 struct PendingBatch {
     starting_cursor: CursorIdentity,
     committed_at: Instant,
     quiet_until_confirmed: bool,
 }
-
 #[derive(Default)]
 struct ProgressState {
     epoch: Option<BlockRange>,
@@ -68,13 +57,11 @@ struct ProgressState {
     first_pinned_commit: Option<Instant>,
     last_successful_commit: Option<Instant>,
 }
-
 pub(crate) struct ProgressToken {
     key: ProgressKey,
     epoch: Option<BlockRange>,
     starting_cursor: CursorIdentity,
 }
-
 pub(crate) struct ProgressSnapshot {
     pub(crate) chain: String,
     pub(crate) phase: PhaseName,
@@ -82,13 +69,11 @@ pub(crate) struct ProgressSnapshot {
     pub(crate) batches: i64,
     pub(crate) age_seconds: i64,
 }
-
 impl Default for RunnerPhaseProgress {
     fn default() -> Self {
         Self::new(DEFAULT_STALE_AFTER)
     }
 }
-
 impl RunnerPhaseProgress {
     pub fn new(stale_after: Duration) -> Self {
         assert!(!stale_after.is_zero(), "progress expiry must be positive");
@@ -104,7 +89,6 @@ impl RunnerPhaseProgress {
             }),
         }
     }
-
     pub fn seed_chain(&self, chain: &str) {
         let mut states = self.states();
         for phase in PhaseName::ALL {
@@ -119,7 +103,6 @@ impl RunnerPhaseProgress {
             }
         }
     }
-
     pub fn observation(&self, chain: &str, phase: PhaseName, mode: &RunMode) -> (i64, i64) {
         self.snapshot()
             .into_iter()

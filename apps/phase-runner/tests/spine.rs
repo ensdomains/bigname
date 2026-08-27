@@ -551,7 +551,10 @@ async fn repeated_batches_with_a_pinned_durable_cursor_are_observable_for_every_
         .await?;
     for (phase, calls) in PhaseName::ALL.into_iter().zip(calls) {
         assert_eq!(calls.load(Ordering::SeqCst), 4);
-        assert_eq!(phase_progress.observation(chain_id, phase, &RunMode::Normal), (0, 0));
+        assert_eq!(
+            phase_progress.observation(chain_id, phase, &RunMode::Normal),
+            (0, 0)
+        );
     }
     scratch.cleanup().await
 }
