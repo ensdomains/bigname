@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn redo_generation_or_execution_range_change_resets() {
+    fn redo_retries_keep_evidence_but_a_different_execution_range_clears() {
         let tracker = tracker(&Clock::new());
         let mut redo = context(
             PhaseName::Interpret,
@@ -499,11 +499,12 @@ mod tests {
         commit(&tracker, &redo, work(redo.resume.current.clone()));
         assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode).0, 1);
         redo.redo_attempt.as_mut().unwrap().generation = 2;
+        let token = tracker.begin_batch(&redo);
+        assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode).0, 2);
+        tracker.record_committed(token, &work(redo.resume.current.clone()));
+        redo.redo_attempt.as_mut().unwrap().generation = 3;
         tracker.begin_batch(&redo);
-        assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode), (0, 0));
-
-        commit(&tracker, &redo, work(redo.resume.current.clone()));
-        commit(&tracker, &redo, work(redo.resume.current.clone()));
+        assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode).0, 3);
         redo.redo_attempt.as_mut().unwrap().execution_range = BlockRange::new(2, 9).unwrap();
         tracker.begin_batch(&redo);
         assert_eq!(observed(&tracker, PhaseName::Interpret, &redo.mode), (0, 0));

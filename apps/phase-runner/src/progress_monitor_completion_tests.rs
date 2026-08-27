@@ -22,7 +22,12 @@ fn context(phase: PhaseName, current: BlockMarker) -> PhaseContext {
 }
 
 fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhaseProgress) {
-    let tracker = RunnerPhaseProgress::default();
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
+    let tracker = RunnerPhaseProgress::with_clock(
+        DEFAULT_STALE_AFTER,
+        Arc::new(move || *clock.lock().unwrap()),
+    );
     for _ in 0..2 {
         let token = tracker.begin_batch(pinned);
         tracker.record_committed(
@@ -31,10 +36,11 @@ fn assert_advancing_completion_is_quiet(pinned: &PhaseContext, progress: PhasePr
         );
     }
     let token = tracker.begin_batch(pinned);
+    *now.lock().unwrap() += Duration::from_secs(7);
     tracker.record_committed(token, &PhaseBatchOutcome::Complete(progress.clone()));
     assert_eq!(
         tracker.observation("chain", pinned.phase, &RunMode::Normal),
-        (0, 0)
+        (2, 7)
     );
     let token = tracker.begin_batch(pinned);
     assert_eq!(
