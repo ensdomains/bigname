@@ -481,6 +481,15 @@ Field ownership:
   as authoritative absence. The row's
   `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
   which is a weaker statement than `full` and does not weaken this admission.
+  Node-keyed `ens_v1_resolver_l1` records written before the name surface
+  existed enter that attributable history only when the selected pointer's
+  source family is `ens_v1_registry_l1`, `ens_v1_registrar_l1`, or
+  `ens_v1_wrapper_l1`. For a name reached through an ENSv2-family or Basenames
+  pointer, those records are not attributed and currently read as authoritative
+  `not_found` with `coverage.status=projected`; whether cross-family history
+  should instead be attributed or receive a distinct coverage signal is
+  deliberately unresolved in
+  [#621](https://github.com/ensdomains/bigname/issues/621).
   An inventory in any other coverage state is not authoritative, and the
   request falls through to verified lookup or an explicit unsupported answer
   rather than reporting absence from the index as absence on chain.
