@@ -43,6 +43,7 @@ impl State {
             restoring_state_key: None,
             active_resources: OrdMap::new(),
             v2_tokens: OrdMap::new(),
+            v2_subregistry_tokens_by_observation: OrdMap::new(),
             v2_resolver_tokens_by_observation: OrdMap::new(),
             v2_resolver_aliases_by_observation: OrdMap::new(),
             v2_expiries: OrdSet::new(),

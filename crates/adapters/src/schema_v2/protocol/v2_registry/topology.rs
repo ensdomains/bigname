@@ -528,14 +528,17 @@ pub(super) fn resolver_discovery_keys(
 pub(super) fn append_token_discovery_closures(
     output: &mut Interpreted,
     raw: &crate::schema_v2::RawLogInput,
+    state: &State,
     token_id: U256,
     token: Option<&V2TokenState>,
     protected_resolver_keys: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
-    output.discovery.push(DiscoveryDraft::Close {
-        edge_kind: "subregistry".to_owned(),
-        observation_key: discovery_observation_key(raw, token_id, false),
-    });
+    if !state.has_live_v2_subregistry_sharing(&raw.emitting_address, &format!("{token_id:#066x}")) {
+        output.discovery.push(DiscoveryDraft::Close {
+            edge_kind: "subregistry".to_owned(),
+            observation_key: discovery_observation_key(raw, token_id, false),
+        });
+    }
     let empty = BTreeSet::new();
     let aliases = token
         .map(|token| &token.resolver_discovery_aliases)

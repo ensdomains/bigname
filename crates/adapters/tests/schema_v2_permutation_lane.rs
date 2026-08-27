@@ -493,6 +493,109 @@ fn v2_regeneration_collision_closes_displaced_registration_in_every_replay_shape
 }
 
 #[test]
+fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Label)?;
+    let output = interpret_schema_v2_batch(input)?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert!(
+        output.discovery_edge_closures.iter().all(|closure| {
+            closure.active_to_block_number != 20_000_202
+                || closure.edge_kind != "subregistry"
+                || closure.observation_key != observation_key
+        }),
+        "the second live token closed its co-holder's subregistry edge: {:#?}",
+        output.discovery_edge_closures
+    );
+    let converged = converge(
+        "directed=v2-shared-subregistry-label-registration",
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Label)?,
+        vec![0..1, 1..2, 2..3],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_regeneration_collision_preserves_a_shared_subregistry_observation_key() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Collision)?;
+    let output = interpret_schema_v2_batch(input)?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert!(
+        output.discovery_edge_closures.iter().all(|closure| {
+            closure.active_to_block_number != 20_000_205
+                || closure.edge_kind != "subregistry"
+                || closure.observation_key != observation_key
+        }),
+        "the displaced token close retired its live co-holder's subregistry edge: {:#?}",
+        output.discovery_edge_closures
+    );
+    let converged = converge(
+        "directed=v2-shared-subregistry-regeneration-collision",
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Collision)?,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_label_replacement_preserves_a_shared_subregistry_observation_key() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input =
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Replacement)?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert!(output.discovery_edge_closures.iter().all(|closure| {
+        closure.active_to_block_number != 20_000_203
+            || closure.edge_kind != "subregistry"
+            || closure.observation_key != observation_key
+    }));
+    let converged = converge(
+        "directed=v2-shared-subregistry-label-replacement",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn v2_unregister_preserves_a_shared_subregistry_key_until_the_last_holder_leaves() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input =
+        v2_shared_subregistry_observation_input(&wiring, SharedSubregistryCase::Unregister)?;
+    let output = interpret_schema_v2_batch(input.clone())?;
+    let observation_key = v2_shared_subregistry_observation_key(&wiring);
+
+    assert!(output.discovery_edge_closures.iter().all(|closure| {
+        closure.active_to_block_number != 20_000_203
+            || closure.edge_kind != "subregistry"
+            || closure.observation_key != observation_key
+    }));
+    assert!(output.discovery_edge_closures.iter().any(|closure| {
+        closure.active_to_block_number == 20_000_204
+            && closure.edge_kind == "subregistry"
+            && closure.observation_key == observation_key
+    }));
+    let converged = converge(
+        "directed=v2-shared-subregistry-unregister",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5],
+    )?;
+    assert!(converged.artifacts.counts().is_empty());
+    Ok(())
+}
+
+#[test]
 fn v2_regeneration_collision_preserves_resolver_intake_until_explicit_update() -> Result<()> {
     let checked_in = checked_in_manifests()?;
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
@@ -1248,6 +1351,136 @@ fn versioned_token(label: &str, version: u32) -> U256 {
     let mut bytes = labelhash(label).0;
     bytes[28..].copy_from_slice(&version.to_be_bytes());
     U256::from_be_bytes(bytes)
+}
+
+fn v2_shared_subregistry_observation_key(wiring: &Wiring) -> String {
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let mut bytes = versioned_token("alpha", 1).to_be_bytes::<32>();
+    bytes[28..].fill(0);
+    format!(
+        "{}:{:#x}",
+        registry.to_ascii_lowercase(),
+        U256::from_be_bytes(bytes)
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SharedSubregistryCase {
+    Label,
+    Collision,
+    Replacement,
+    Unregister,
+}
+
+fn v2_shared_subregistry_observation_input(
+    wiring: &Wiring,
+    case: SharedSubregistryCase,
+) -> Result<BatchInput> {
+    const CHILD_REGISTRY: &str = "0x00000000000000000000000000000000f0000484";
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let alpha_v1 = versioned_token("alpha", 1);
+    let alpha_v2 = versioned_token("alpha", 2);
+    let gamma_v1 = versioned_token("gamma", 1);
+    let block_count = match case {
+        SharedSubregistryCase::Label => 3,
+        SharedSubregistryCase::Collision => 6,
+        SharedSubregistryCase::Replacement => 4,
+        SharedSubregistryCase::Unregister => 5,
+    };
+    let blocks = (0..block_count)
+        .map(|index| BlockSpec {
+            number: 20_000_200 + index,
+            hash: format!("0x{:064x}", 0x4832_u64 + index as u64),
+            timestamp: 1_700_000_200 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, encoded: LogData| {
+        let emission = scenario::emission(registry, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x4832_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let registration = |block_index, ordinal, token_id, label: &str| {
+        log(
+            block_index,
+            ordinal,
+            V2Registry::LabelRegistered {
+                tokenId: token_id,
+                labelHash: labelhash(label),
+                label: label.to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        )
+    };
+    let subregistry = |block_index, ordinal| {
+        log(
+            block_index,
+            ordinal,
+            V2Registry::SubregistryUpdated {
+                tokenId: alpha_v1,
+                subregistry: CHILD_REGISTRY.parse().expect("valid child registry"),
+                sender,
+            }
+            .encode_log_data(),
+        )
+    };
+    let mut logs = vec![
+        registration(0, 0, alpha_v1, "alpha"),
+        subregistry(1, 1),
+        registration(2, 2, alpha_v2, "beta"),
+    ];
+    match case {
+        SharedSubregistryCase::Label => {}
+        SharedSubregistryCase::Collision => logs.extend([
+            subregistry(3, 3),
+            registration(4, 4, gamma_v1, "gamma"),
+            log(
+                5,
+                5,
+                V2Registry::TokenRegenerated {
+                    oldTokenId: gamma_v1,
+                    newTokenId: alpha_v2,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+        SharedSubregistryCase::Replacement => {
+            logs.push(registration(3, 3, gamma_v1, "beta"));
+        }
+        SharedSubregistryCase::Unregister => logs.extend([
+            log(
+                3,
+                3,
+                V2Registry::LabelUnregistered {
+                    tokenId: alpha_v2,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+            log(
+                4,
+                4,
+                V2Registry::LabelUnregistered {
+                    tokenId: alpha_v1,
+                    sender,
+                }
+                .encode_log_data(),
+            ),
+        ]),
+    }
+    wiring.batch_input(&blocks, &logs)
 }
 
 fn v2_repeated_regeneration_alias_input(wiring: &Wiring) -> Result<BatchInput> {

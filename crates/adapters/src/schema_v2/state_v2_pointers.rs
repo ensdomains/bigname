@@ -4,6 +4,21 @@ use serde_json::Value;
 
 use super::{State, v2::V2TokenState, v2::v2_key};
 
+#[cfg(test)]
+std::thread_local! {
+    static V2_SUBREGISTRY_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(in crate::schema_v2) fn reset_v2_subregistry_lookup_visits() {
+    V2_SUBREGISTRY_LOOKUP_VISITS.set(0);
+}
+
+#[cfg(test)]
+pub(in crate::schema_v2) fn v2_subregistry_lookup_visits() -> usize {
+    V2_SUBREGISTRY_LOOKUP_VISITS.get()
+}
+
 impl State {
     pub(in crate::schema_v2) fn restore_v2_regeneration(
         &mut self,
@@ -71,11 +86,16 @@ impl State {
         subregistry: Option<String>,
     ) {
         let key = v2_key(emitter, token_id);
-        let previous = self
-            .v2_tokens
-            .get(&key)
+        let previous_state = self.v2_tokens.get(&key).cloned();
+        let previous = previous_state
+            .as_ref()
             .and_then(|token| token.subregistry.clone());
-        self.v2_tokens.entry(key.clone()).or_default().subregistry = subregistry.clone();
+        let current = {
+            let token = self.v2_tokens.entry(key.clone()).or_default();
+            token.subregistry = subregistry.clone();
+            token.clone()
+        };
+        self.replace_v2_token_indexes(&key, previous_state.as_ref(), Some(&current));
         self.mark_v2_token_dirty(key);
         for registry in previous.into_iter().chain(subregistry) {
             self.mark_v2_registry_dirty(&registry);
@@ -99,6 +119,20 @@ impl State {
             }
         }
         sharing
+    }
+
+    pub(in crate::schema_v2) fn has_live_v2_subregistry_sharing(
+        &self,
+        emitter: &str,
+        token_id: &str,
+    ) -> bool {
+        record_subregistry_lookup_visits(1);
+        self.v2_subregistry_tokens_by_observation
+            .get(&(
+                emitter.to_ascii_lowercase(),
+                resolver_observation_id(token_id),
+            ))
+            .is_some_and(|tokens| !tokens.is_empty())
     }
 
     pub(in crate::schema_v2) fn set_v2_resolver(
@@ -215,4 +249,11 @@ pub(super) fn resolver_observation_id(token_id: &str) -> String {
         .map(|prefix| format!("{prefix}00000000"))
         .unwrap_or_else(|| token_id.to_owned())
         .to_ascii_lowercase()
+}
+
+fn record_subregistry_lookup_visits(visits: usize) {
+    #[cfg(test)]
+    V2_SUBREGISTRY_LOOKUP_VISITS.set(V2_SUBREGISTRY_LOOKUP_VISITS.get() + visits);
+    #[cfg(not(test))]
+    let _ = visits;
 }

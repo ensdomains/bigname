@@ -234,6 +234,7 @@ pub(super) fn label_unregistered(
     append_token_discovery_closures(
         &mut output,
         raw,
+        state,
         event.tokenId,
         linked.as_ref(),
         &protected_resolver_keys,
@@ -492,6 +493,7 @@ pub(super) fn token_regenerated(
         append_token_discovery_closures(
             &mut displaced_output,
             raw,
+            state,
             event.newTokenId,
             Some(displaced),
             &protected_resolver_keys,

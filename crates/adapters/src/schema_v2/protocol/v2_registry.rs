@@ -446,6 +446,7 @@ fn label_event(
         append_token_discovery_closures(
             &mut output,
             raw,
+            state,
             replaced_token_id,
             Some(previous),
             &protected_resolver_keys,
@@ -467,6 +468,7 @@ fn label_event(
     append_token_discovery_closures(
         &mut output,
         raw,
+        state,
         token_id
             .parse::<U256>()
             .with_context(|| format!("stored ENSv2 token ID {token_id} is malformed"))?,

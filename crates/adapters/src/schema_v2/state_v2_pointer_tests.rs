@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn v2_subregistry_holder_lookup_is_constant_per_versioned_token() {
+    const PREFIX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut state = anchored_state();
+    let mut token_ids = Vec::new();
+    for version in 0..64_u32 {
+        let token_id = format!("0x{PREFIX}{version:08x}");
+        let label = format!("label-{version}");
+        install_token(&mut state, ROOT, &token_id, label.as_bytes(), 100);
+        token_ids.push(token_id);
+    }
+    state.set_v2_subregistry(
+        ROOT,
+        token_ids.last().expect("at least one token ID"),
+        Some(CHILD.to_owned()),
+    );
+    super::super::v2_pointers::reset_v2_subregistry_lookup_visits();
+    for token_id in &token_ids {
+        assert!(state.has_live_v2_subregistry_sharing(ROOT, token_id));
+    }
+    assert_eq!(
+        super::super::v2_pointers::v2_subregistry_lookup_visits(),
+        64,
+        "each observation_key lookup must inspect at most one resident index entry"
+    );
+    assert_v2_indexes_are_derived(&state);
+}
+
+#[test]
 fn v2_resolver_observation_index_moves_and_queries_only_candidate_keys() {
     const OLD: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000001";
     const OTHER_OLD: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000002";

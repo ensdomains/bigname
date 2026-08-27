@@ -99,6 +99,7 @@ pub(super) struct State {
     restoring_state_key: Option<String>,
     active_resources: OrdMap<String, Uuid>,
     v2_tokens: OrdMap<String, V2TokenState>,
+    v2_subregistry_tokens_by_observation: OrdMap<(String, String), OrdSet<String>>,
     v2_resolver_tokens_by_observation: OrdMap<(String, String), OrdSet<String>>,
     v2_resolver_aliases_by_observation: OrdMap<(String, String), OrdSet<(String, String)>>,
     v2_expiries: OrdSet<(u64, String)>,

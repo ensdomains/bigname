@@ -481,6 +481,7 @@ fn assert_v2_indexes_are_derived(state: &State) {
     let mut expiries = OrdSet::new();
     let mut resolver_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
     let mut resolver_aliases = OrdMap::<(String, String), OrdSet<(String, String)>>::new();
+    let mut subregistry_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
     for (token_key, token) in &state.v2_tokens {
         let (emitter, token_id) = token_key
             .rsplit_once(':')
@@ -515,6 +516,15 @@ fn assert_v2_indexes_are_derived(state: &State) {
                 .or_default()
                 .insert(token_id.to_owned());
         }
+        if token.subregistry.is_some() {
+            subregistry_tokens
+                .entry((
+                    emitter.to_owned(),
+                    super::v2_pointers::resolver_observation_id(token_id),
+                ))
+                .or_default()
+                .insert(token_id.to_owned());
+        }
         for alias in &token.resolver_discovery_aliases {
             resolver_aliases
                 .entry((
@@ -531,4 +541,8 @@ fn assert_v2_indexes_are_derived(state: &State) {
     assert_eq!(state.v2_expiries, expiries);
     assert_eq!(state.v2_resolver_tokens_by_observation, resolver_tokens);
     assert_eq!(state.v2_resolver_aliases_by_observation, resolver_aliases);
+    assert_eq!(
+        state.v2_subregistry_tokens_by_observation,
+        subregistry_tokens
+    );
 }
