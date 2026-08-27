@@ -26,10 +26,10 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `79 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shard 1 requires `40 passed; 0 failed; 2
-ignored; 40 filtered out`, and shard 2 requires `39 passed; 0 failed; 1
-ignored; 42 filtered out`. The gate checks both Cargo's exit status and every
+The default gate requires the exact library-test summary `83 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shard 1 requires `42 passed; 0 failed; 2
+ignored; 42 filtered out`, and shard 2 requires `41 passed; 0 failed; 1
+ignored; 44 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
 
@@ -125,7 +125,7 @@ scripts/test-db -- bash -euo pipefail -c '
 
 Sort durations descending, seed shard 1 with
 `scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
-and shard 2 with the second-slowest scenario, then assign each remaining name
+and shard 2 with the second-longest scenario by measured duration, then assign each remaining name
 to the lower predicted load subject to the required final capacities. The
 post-#612 runnable split is 42 on shard 1 and 41 on shard 2. Break equal-duration
 or equal-load ties by full test name, keep at most five of the measured top ten
@@ -142,17 +142,17 @@ gate deliberately fails closed if the inventory changes first.
 
 ## Coverage ledger
 
-The semantic inventory contains 58 scenario tests:
+The semantic inventory contains 62 scenario tests:
 
-- 55 retargeted and runnable;
+- 59 retargeted and runnable;
 - 3 explicitly retired with one-line reasons.
 
-The 55 runnable scenarios include the #154 known-defect reproduction described
+The 59 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 82 total tests when 24 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is -6: obsolete
+The crate contains 86 total tests when 24 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is -2: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
 parity-completeness regression tests were added. The pure in-memory
@@ -162,7 +162,7 @@ semantic scenario. The final worker-coordination stub, verified-resolution
 scenario, and stale observed-code-hash admission scenario were removed
 explicitly with issue #314.
 
-### Retargeted and runnable (55)
+### Retargeted and runnable (59)
 
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
@@ -192,6 +192,7 @@ explicitly with issue #314.
   `lifecycle_divergence::transfer_without_reclaim_keeps_registry_owner_divergent`.
 - Replay, reorg, and provider faults:
   `perturbations::rich_chain_live_reorg_converges_to_winning_branch`;
+  `perturbations::pre_surface_records_converge_fresh_incremental_and_restored`;
   `perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable`;
   `perturbations::rich_chain_rpc_ingest_normalized_events_match_upfront_facts`;
   `perturbations::rich_chain_successive_fixture_replays_match_single_pass`;
@@ -211,6 +212,9 @@ explicitly with issue #314.
   `registry_preimages::label_preimage_revealed_later_upgrades_child_listing`.
 - Resolver and reverse claims:
   `resolver_authorization::operator_delegate_writes_match_owner_authorship`;
+  `resolver_records::pre_surface_newowner_record_serves_after_late_surface`;
+  `resolver_records::pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names`;
+  `resolver_records::pre_surface_record_history_follows_current_resolver_and_version_boundary`;
   `resolver_records::records_route_values_and_version_boundaries_follow_current_resolver`;
   `resolver_records::resolver_changes_follow_registry_and_zero_releases`;
   `resolver_records::shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported`;
@@ -239,15 +243,15 @@ explicitly with issue #314.
 
 | Measure | Historical baseline | Retargeted suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 82 | -6 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 58 | -1 reclassified, -3 deleted |
-| Runnable passed-count gate | 65 in the historical Anvil gate | 79 | +14 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 58 | -7 |
-| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 55 | -10 |
+| Total crate tests | 88 | 86 | -2 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 62 | -1 reclassified, -3 deleted, +4 added |
+| Runnable passed-count gate | 65 in the historical Anvil gate | 83 | +18 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 62 | -3 |
+| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 59 | -6 |
 
 The two 65 comparisons are reported because that is the historical gate
-reference, but the current passed-count denominator is explicit: 55 runnable
-Anvil scenarios and 24 harness/support checks produce 79 passes. Three semantic
+reference, but the current passed-count denominator is explicit: 59 runnable
+Anvil scenarios and 24 harness/support checks produce 83 passes. Three semantic
 scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics

@@ -785,7 +785,17 @@ key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
 named-resource resolver hint and diverge from a fresh walk
 ([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
 in as an ignored collision probe). Project's resource-keyed record inventory
-follows the resource's latest retained `ResolverChanged` pointer. When an ended
+follows the resource's latest retained linked `ResolverChanged` event whose
+name has a readable canonical surface staged at the target. If a later linked
+event's name lacks such a surface, an earlier linked event with one is the
+fallback. A selected zero-address resolver suppresses inventory rather than
+reviving an older nonzero event; surface visibility does not participate in
+this pointer choice. Record events that already carry a logical name are joined
+without restricting either the pointer or record event's source family. An
+`ens_v1_resolver_l1` event with no logical-name attribution may instead join
+only when the selected pointer's source family is `ens_v1_registry_l1`,
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`; incremental staging applies the
+same pointer-family restriction. When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
 resource-less. This does not restore a current binding: name and record reads

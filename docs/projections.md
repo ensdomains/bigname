@@ -128,9 +128,20 @@ outcomes, or durable traces.
 - Resource-keyed projections require their selected resource to resolve to a
   readable identity row. Their input events normally carry that `resource_id`.
   `record_inventory_current` is the deliberate exception: it starts from the
-  resource's latest retained `ResolverChanged` pointer, then joins
-  `RecordChanged` and `RecordVersionChanged` by logical name and emitting
-  resolver even when the record event itself is resource-less. Serving still
+  resource's latest retained linked `ResolverChanged` event whose name has a
+  readable canonical surface staged at the target. If the latest linked event's
+  name lacks such a surface, an earlier linked event with one is the fallback;
+  a selected zero-address resolver suppresses inventory instead of reviving an
+  older nonzero event, and surface visibility does not participate in this
+  choice. It joins already-linked `RecordChanged` and `RecordVersionChanged`
+  events by logical name and emitting resolver without restricting the source
+  family of either the pointer or record event. For an `ens_v1_resolver_l1`
+  event whose `logical_name_id` is null, attribution instead requires the
+  selected pointer's source family to be `ens_v1_registry_l1`,
+  `ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`, then joins chain, surface
+  namehash to event node, and current resolver to emitting address. Incremental
+  Project staging uses the same three-family pointer restriction when adding
+  those null-name events. Serving still
   attaches that inventory to a name only through the name's current readable
   resource.
 - Project stages only ordinary or `consumer_visibility=activated` interpreted
@@ -309,13 +320,40 @@ into one resolver row. The resolver summary is diagnostic and does not replace
 exact-name topology.
 
 `record_inventory_current` records the selectors observed under a resource's
-latest retained resolver pointer and record boundary, explicit gaps,
+latest retained linked resolver event whose name has a readable canonical
+surface staged at the target, with fallback to an earlier linked event when a
+later event's name lacks such a surface. A selected zero-address resolver
+suppresses inventory rather than falling back to an older nonzero event. It
+also records the selected resolver's record boundary, explicit gaps,
 unsupported families, and any retained indexed values. The record event need
-not carry that resource: Project joins its `logical_name_id` and emitting
-resolver to the pointer. A resource-less record event cannot create a binding,
-and name and record reads expose the inventory only when the name's current
-readable `resource_id` selects it. Resolver-local events are accepted only under
-the manifest and current-resolver rules documented in
+not carry that resource: Project normally joins its `logical_name_id` and
+emitting resolver to the pointer without restricting either event's source
+family. An `ens_v1_resolver_l1` event whose `logical_name_id` is null may join
+only when the selected pointer's source family is `ens_v1_registry_l1`,
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`, and only through the same chain,
+the surface namehash equal to its retained node, and the pointer address equal
+to its emitting resolver. Incremental staging applies the same pointer-family
+restriction. Whether an ENSv2-family pointer should serve node-keyed
+pre-surface ENSv1 records is deliberately unresolved and tracked in
+[#621](https://github.com/ensdomains/bigname/issues/621); that issue's comment
+records the sibling question for `basenames_base_resolver` records with no
+logical-name attribution and a Basenames pointer. Pointer position is not a
+write-time lower bound: selecting a resolver exposes its retained pre-pointer
+writes, switching away hides them,
+and switching back restores them. The latest `RecordVersionChanged` from that
+resolver remains the boundary, and records must be strictly later than it. This
+follows the registry resolver lookup
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
+and the resolver's version-, node-, and key-scoped text storage
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
+A known model limitation remains: if a resolver was selected only before the
+[name surface](glossary.md#surface-name-surface) existed and was never selected
+again afterward, Project has no linked resolver pointer for that name and does
+not serve its retained records.
+A resource-less record event cannot create a binding, and name and record reads
+expose the inventory only when the name's current readable `resource_id` selects
+it. Resolver-local events are accepted only under the manifest and
+current-resolver rules documented in
 [`manifests.md`](manifests.md).
 
 For ENSv1, an admitted current resolver may contribute supported address, text,

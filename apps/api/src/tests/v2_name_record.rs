@@ -1431,6 +1431,95 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
 }
 
 #[tokio::test]
+async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_records() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
+        inventory.selectors = json!([{
+            "record_key": "text:pre-surface",
+            "record_family": "text",
+            "selector_key": "pre-surface",
+            "cacheable": true
+        }]);
+        inventory.entries = json!([{
+            "record_key": "text:pre-surface",
+            "record_family": "text",
+            "selector_key": "pre-surface",
+            "status": "success",
+            "value": {
+                "key": "pre-surface",
+                "value": "recovered before the name surface"
+            }
+        }]);
+        inventory.explicit_gaps = json!([]);
+        inventory.unsupported_families = json!([]);
+    })
+    .await?;
+
+    // A closed RPC endpoint makes any accidental verified fallback fail the request.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={unavailable_rpc_url}"),
+        ])?)
+        .await?;
+
+    let mut payloads = Vec::new();
+    for uri in [
+        "/v2/names/Alice.eth",
+        "/v2/names/Alice.eth/records?source=indexed&keys=text:pre-surface",
+        "/v2/names/Alice.eth/records?source=auto&keys=text:pre-surface&include=inventory",
+    ] {
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("pre-surface recovered record request failed")?;
+        let status = response.status();
+        let payload: Value = read_json(response).await?;
+        assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+        payloads.push(payload);
+    }
+
+    assert_eq!(payloads[0]["meta"]["source"], json!("indexed"));
+    assert_eq!(
+        payloads[0]["data"]["text_records"]["pre-surface"],
+        json!("recovered before the name surface")
+    );
+    assert!(payloads[0]["data"].get("unsupported_fields").is_none());
+    for payload in &payloads[1..] {
+        assert_eq!(payload["meta"]["source"], json!("indexed"));
+        assert_eq!(
+            payload["data"]["records"]["text:pre-surface"],
+            json!({
+                "status": "ok",
+                "value": "recovered before the name surface"
+            })
+        );
+    }
+    assert_eq!(
+        payloads[2]["data"]["inventory"],
+        json!({
+            "known_keys": ["text:pre-surface"],
+            "unset_keys": [],
+            "unsupported_keys": []
+        })
+    );
+    let divergence_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
+            .fetch_one(&database.lookup_pool)
+            .await?;
+    assert_eq!(divergence_count, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_name_records_rejects_too_many_keys() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let keys = (0..=200)

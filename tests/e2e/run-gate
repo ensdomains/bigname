@@ -3,17 +3,17 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=82
-expected_runnable=79
+expected_total=86
+expected_runnable=83
 expected_ignored=3
-expected_shard_1_runnable=40
+expected_shard_1_runnable=42
 expected_shard_1_ignored=2
-expected_shard_1_filtered=40
-expected_shard_1_predicted_seconds=2500.472
-expected_shard_2_runnable=39
+expected_shard_1_filtered=42
+expected_shard_1_predicted_seconds=1093.991
+expected_shard_2_runnable=41
 expected_shard_2_ignored=1
-expected_shard_2_filtered=42
-expected_shard_2_predicted_seconds=2516.283
+expected_shard_2_filtered=44
+expected_shard_2_predicted_seconds=1093.152
 
 expected_ignored_tests=(
     "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
@@ -22,93 +22,96 @@ expected_ignored_tests=(
 )
 
 shard_1_tests=(
-    "harness::db::tests::concurrent_harness_databases_clone_the_migrated_template"
+    "harness::db::tests::dropped_harness_database_is_removed_after_early_return"
     "harness::db::tests::migration_template_identity_is_stable_and_identifier_sized"
+    "harness::db::tests::replace_database_preserves_query_parameters"
     "harness::fault_proxy::tests::clean_eof_before_complete_request_is_a_client_disconnect"
-    "harness::fault_proxy::tests::ordered_one_shot_faults_advance_one_response_at_a_time"
     "harness::fault_proxy::tests::pruned_code_rule_targets_only_one_address_and_block_hash"
     "harness::perturb::tests::normalized_event_parity_includes_transaction_index"
-    "harness::pipeline::tests::one_shot_command_deadline_stops_and_reaps_the_child"
-    "harness::pipeline::tests::one_shot_command_deadline_terminates_descendants"
-    "harness::pipeline::tests::process_log_files_are_unique_for_repeated_labels"
-    "harness::pipeline::tests::profile_runner_binary_and_build_lock_have_scoped_lifetimes"
-    "harness::pipeline::tests::stop_reports_a_child_that_crashed_after_readiness"
-    "harness::tests::local_server_start_lock_serializes_waiters"
-    "scenarios::basenames::basenames_declared_state_matrix_end_to_end"
-    "scenarios::basenames_lifecycle::l2_resolver_records_clear_and_contenthash_gap"
-    "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_outputs"
-    "scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage"
-    "scenarios::ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow"
-    "scenarios::ens_v2_lifecycle::resolver_and_subregistry_edges_follow_set_change_zero"
-    "scenarios::ens_v2_live_poll::ens_v2_registry_lifecycle_survives_successive_fixture_replays"
-    "scenarios::lifecycle::expire_without_reregistration_releases_and_unlists_registration"
-    "scenarios::lifecycle::expiry_grace_and_reregistration_rotate_identity"
-    "scenarios::lifecycle::renew_and_transfer_keep_identity"
-    "scenarios::perturbations::rich_chain_rpc_ingest_normalized_events_match_upfront_facts"
-    "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
-    "scenarios::provider_faults::transient_get_code_retries_primary_without_using_configured_fallback"
-    "scenarios::provider_faults::transient_provider_faults_and_partial_receipts_recover_to_control"
-    "scenarios::record_families::pubkey_write_on_admitted_resolver_stays_raw_only"
-    "scenarios::register_eth_name::register_eth_name_end_to_end"
-    "scenarios::registration_burst::registration_with_records_reverse_and_referrer_derives_single_burst"
-    "scenarios::registry_driven_reads::registry_driven_reads"
-    "scenarios::registry_driven_reads::same_label_under_two_parents_keeps_children_distinct"
-    "scenarios::registry_driven_reads::zero_owner_subname_leaves_default_children_listing"
-    "scenarios::registry_migration::registry_migration_legacy_to_current_semantics"
-    "scenarios::resolver_records::records_route_values_and_version_boundaries_follow_current_resolver"
-    "scenarios::reverse_primary::generic_name_record_set_changed_then_cleared_stays_unadmitted"
-    "scenarios::reverse_primary::reverse_claim_invalid_name_surfaces_raw_claim"
-    "scenarios::reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted"
-    "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
-    "scenarios::wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity"
-    "scenarios::wrapper_registration::born_wrapped_registration_retains_wrapper_authority"
-    "scenarios::wrapper_renewal_and_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity"
-    "scenarios::wrapper_renewal_and_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event"
-)
-
-shard_2_tests=(
-    "harness::db::tests::dropped_harness_database_is_removed_after_early_return"
-    "harness::db::tests::replace_database_preserves_query_parameters"
-    "harness::db::tests::replace_database_rejects_missing_database_path"
-    "harness::pipeline::tests::expired_readiness_deadline_bounds_a_pending_probe"
     "harness::pipeline::tests::stop_reports_a_child_that_crashes_between_status_check_and_kill"
-    "harness::pipeline::tests::supervised_readiness_timeout_stops_and_reaps_child"
     "harness::pipeline::tests::timeout_configuration_requires_positive_integer_seconds"
     "harness::responses::tests::pointer_preserves_explicit_null"
     "harness::responses::tests::pointer_rejects_missing_path"
     "scenarios::basenames_lifecycle::basenames_subnames_list_preimages_placeholders_and_tombstones"
     "scenarios::basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only"
+    "scenarios::basenames_lifecycle::upgradeable_controller_proxy_registers_and_renews"
+    "scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage"
+    "scenarios::ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow"
+    "scenarios::ens_v2_live_poll::ens_v2_registry_lifecycle_survives_successive_fixture_replays"
+    "scenarios::lifecycle::expire_without_reregistration_releases_and_unlists_registration"
+    "scenarios::lifecycle_divergence::transfer_without_reclaim_keeps_registry_owner_divergent"
+    "scenarios::perturbations::pre_surface_records_converge_fresh_incremental_and_restored"
+    "scenarios::perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable"
+    "scenarios::perturbations::rich_chain_rpc_ingest_normalized_events_match_upfront_facts"
+    "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
+    "scenarios::provider_faults::silently_short_logs_are_accepted_until_explicit_refetch_matches_control"
+    "scenarios::provider_faults::transient_get_code_retries_primary_without_using_configured_fallback"
+    "scenarios::provider_faults::transient_provider_faults_and_partial_receipts_recover_to_control"
+    "scenarios::record_families::pubkey_write_on_admitted_resolver_stays_raw_only"
+    "scenarios::registry_driven_reads::zero_owner_subname_leaves_default_children_listing"
+    "scenarios::registry_migration::registry_migration_legacy_to_current_semantics"
+    "scenarios::resolver_authorization::operator_delegate_writes_match_owner_authorship"
+    "scenarios::resolver_records::pre_surface_newowner_record_serves_after_late_surface"
+    "scenarios::resolver_records::pre_surface_record_history_follows_current_resolver_and_version_boundary"
+    "scenarios::resolver_records::records_route_values_and_version_boundaries_follow_current_resolver"
+    "scenarios::reverse_primary::generic_name_record_set_changed_then_cleared_stays_unadmitted"
+    "scenarios::reverse_primary::reverse_claim_invalid_name_surfaces_raw_claim"
+    "scenarios::reverse_primary_claims::authorised_third_party_generic_name_record_does_not_key_claim"
+    "scenarios::reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted"
+    "scenarios::support::tests::canonical_event_readiness_adds_only_requested_record_key"
+    "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
+    "scenarios::unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only"
+    "scenarios::wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity"
+    "scenarios::wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry"
+    "scenarios::wrapper_registration::wrap_existing_registry_subname_rotates_child_only"
+    "scenarios::wrapper_renewal_and_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity"
+    "scenarios::wrapper_renewal_and_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event"
+)
+
+shard_2_tests=(
+    "harness::db::tests::concurrent_harness_databases_clone_the_migrated_template"
+    "harness::db::tests::replace_database_rejects_missing_database_path"
+    "harness::fault_proxy::tests::ordered_one_shot_faults_advance_one_response_at_a_time"
+    "harness::pipeline::tests::expired_readiness_deadline_bounds_a_pending_probe"
+    "harness::pipeline::tests::one_shot_command_deadline_stops_and_reaps_the_child"
+    "harness::pipeline::tests::one_shot_command_deadline_terminates_descendants"
+    "harness::pipeline::tests::process_log_files_are_unique_for_repeated_labels"
+    "harness::pipeline::tests::profile_runner_binary_and_build_lock_have_scoped_lifetimes"
+    "harness::pipeline::tests::stop_reports_a_child_that_crashed_after_readiness"
+    "harness::pipeline::tests::supervised_readiness_timeout_stops_and_reaps_child"
+    "harness::tests::local_server_start_lock_serializes_waiters"
+    "scenarios::basenames::basenames_declared_state_matrix_end_to_end"
+    "scenarios::basenames_lifecycle::l2_resolver_records_clear_and_contenthash_gap"
     "scenarios::basenames_lifecycle::renew_release_and_premium_reregistration_rotate_lineage"
     "scenarios::basenames_lifecycle::third_party_controller_registration_degrades_without_label_events"
-    "scenarios::basenames_lifecycle::upgradeable_controller_proxy_registers_and_renews"
     "scenarios::catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity"
+    "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_outputs"
     "scenarios::catchup_equivalence::upfront_facts_match_rpc_ingest_wrapper_reverse_outputs"
     "scenarios::cross_protocol::base_reorg_leaves_ethereum_canonicality_untouched"
     "scenarios::ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage"
     "scenarios::ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale"
+    "scenarios::ens_v2_lifecycle::resolver_and_subregistry_edges_follow_set_change_zero"
     "scenarios::ens_v2_lifecycle::root_apex_attach_and_root_scope_roles"
+    "scenarios::lifecycle::expiry_grace_and_reregistration_rotate_identity"
     "scenarios::lifecycle::register_without_resolver_keeps_declared_resolver_empty"
-    "scenarios::lifecycle_divergence::transfer_without_reclaim_keeps_registry_owner_divergent"
+    "scenarios::lifecycle::renew_and_transfer_keep_identity"
     "scenarios::perturbations::rich_chain_live_reorg_converges_to_winning_branch"
-    "scenarios::perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable"
     "scenarios::perturbations::rich_chain_successive_fixture_replays_match_single_pass"
-    "scenarios::provider_faults::silently_short_logs_are_accepted_until_explicit_refetch_matches_control"
     "scenarios::record_families::remaining_record_families_derive_normalized_but_stay_unenumerated"
+    "scenarios::register_eth_name::register_eth_name_end_to_end"
+    "scenarios::registration_burst::registration_with_records_reverse_and_referrer_derives_single_burst"
     "scenarios::registry_driven_reads::deep_registry_hierarchy_lists_direct_children_only"
+    "scenarios::registry_driven_reads::registry_driven_reads"
+    "scenarios::registry_driven_reads::same_label_under_two_parents_keeps_children_distinct"
     "scenarios::registry_preimages::label_preimage_revealed_later_upgrades_child_listing"
     "scenarios::registry_preimages::registry_only_non_eth_tree_derives_declared_state"
-    "scenarios::resolver_authorization::operator_delegate_writes_match_owner_authorship"
+    "scenarios::resolver_records::pre_surface_record_attribution_is_node_scoped_and_never_materializes_unknown_names"
     "scenarios::resolver_records::resolver_changes_follow_registry_and_zero_releases"
     "scenarios::resolver_records::shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported"
-    "scenarios::reverse_primary_claims::authorised_third_party_generic_name_record_does_not_key_claim"
     "scenarios::reverse_primary_claims::claim_without_name_record_keeps_candidate_absent"
     "scenarios::reverse_primary_claims::unadmitted_reverse_resolver_keeps_candidate_absent"
-    "scenarios::support::tests::canonical_event_readiness_adds_only_requested_record_key"
-    "scenarios::unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only"
-    "scenarios::wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry"
-    "scenarios::wrapper_registration::wrap_existing_registry_subname_rotates_child_only"
+    "scenarios::wrapper_registration::born_wrapped_registration_retains_wrapper_authority"
 )
-
 shard="${BIGNAME_E2E_SHARD:-all}"
 case "$shard" in
     all | 1 | 2) ;;

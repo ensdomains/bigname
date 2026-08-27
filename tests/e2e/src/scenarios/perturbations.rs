@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::support;
+use super::{resolver_records, support};
 use crate::harness::{
     anvil::Anvil, db::HarnessDb, ens_v1, manifests, perturb, pipeline, repo_root,
 };
@@ -131,6 +131,43 @@ async fn assert_exact_resolver(run: &support::PipelineRun, resolver: Address) ->
     Ok(())
 }
 
+async fn pre_surface_event_snapshot(pool: &sqlx::PgPool, node: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'logical_name_id', logical_name_id,
+             'resource_id', resource_id,
+             'after_state', after_state,
+             'raw_fact_ref', raw_fact_ref
+         )
+         FROM normalized_events
+         WHERE event_kind = 'RecordChanged'
+           AND after_state->>'record_key' = 'text:description'
+           AND lower(after_state->>'node') = lower($1)",
+    )
+    .bind(node)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn pre_surface_projection_snapshot(
+    pool: &sqlx::PgPool,
+    logical_name_id: &str,
+) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'name_current', to_jsonb(name_row) - 'inserted_at' - 'last_recomputed_at',
+             'record_inventory_current',
+                 to_jsonb(inventory) - 'inserted_at' - 'last_recomputed_at'
+         )
+         FROM name_current name_row
+         JOIN record_inventory_current inventory USING (resource_id)
+         WHERE name_row.logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?)
+}
+
 #[tokio::test]
 async fn rich_chain_projection_and_normalized_event_replay_are_route_stable() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -192,6 +229,141 @@ async fn rich_chain_successive_fixture_replays_match_single_pass() -> Result<()>
 
     successive.db.cleanup().await?;
     control.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_surface_records_converge_fresh_incremental_and_restored() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let owner = rpc.accounts().await?[1];
+    let resolver = deployment.public_resolver.address;
+    let name = "late.convergeparent.eth";
+    let node = format!("{:#x}", ens_v1::namehash(name));
+    let logical_name_id = support::schema_v2_logical_name_id(&format!("ens:{name}"));
+
+    ens_v1::register_eth_name(&rpc, &deployment, "convergeparent", owner, YEAR, resolver).await?;
+    ens_v1::create_subname(
+        &rpc,
+        &deployment,
+        owner,
+        "convergeparent.eth",
+        "late",
+        owner,
+    )
+    .await?;
+    ens_v1::set_text_record(&rpc, resolver, owner, name, "description", "converged").await?;
+    let record_target = rpc.block_number().await?;
+    let null_ready = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events \
+         WHERE logical_name_id IS NULL AND event_kind = 'RecordChanged' \
+           AND after_state->>'record_key' = 'text:description' \
+           AND lower(after_state->>'node') = lower('{node}'))"
+    );
+
+    let (incremental_db, incremental_scratch, mut incremental_replay) =
+        resolver_records::start_split_replay(&anvil, &deployment, record_target, &null_ready)
+            .await?;
+    let (restored_db, restored_scratch, restored_before_surface) =
+        resolver_records::start_split_replay(&anvil, &deployment, record_target, &null_ready)
+            .await?;
+    drop(restored_before_surface);
+
+    let surface_target = resolver_records::materialize_wrapped_surface(
+        &anvil,
+        &deployment,
+        owner,
+        name,
+        record_target,
+        &incremental_db,
+        &mut incremental_replay,
+    )
+    .await?;
+    let final_target = resolver_records::select_wrapped_resolver(
+        &anvil,
+        &deployment,
+        owner,
+        (name, resolver),
+        surface_target,
+        &incremental_db,
+        &mut incremental_replay,
+    )
+    .await?;
+
+    let restored_profile = restored_scratch.path().join("manifests-e2e");
+    let chain_rpc_urls = [("ethereum-mainnet", anvil.url.as_str())];
+    let mut restored_replay = pipeline::SequentialFixtureReplay::start_with_chain_rpc_urls(
+        &repo_root(),
+        &restored_db.url,
+        &restored_profile,
+        &chain_rpc_urls,
+    )
+    .await?;
+    restored_replay
+        .replay_chain_range(
+            &restored_db.pool,
+            "ethereum-mainnet",
+            record_target + 1,
+            surface_target,
+            Some(&format!(
+                "SELECT EXISTS (SELECT 1 FROM name_surfaces WHERE logical_name_id = '{logical_name_id}')"
+            )),
+        )
+        .await?;
+    restored_replay
+        .replay_chain_range(
+            &restored_db.pool,
+            "ethereum-mainnet",
+            surface_target + 1,
+            final_target,
+            None,
+        )
+        .await?;
+
+    let fresh = support::ingest_at_current_head(&anvil, &deployment, Some(&null_ready)).await?;
+    let incremental =
+        support::serve_existing_db(incremental_db, incremental_scratch, &anvil).await?;
+    let restored = support::serve_existing_db(restored_db, restored_scratch, &anvil).await?;
+
+    let fresh_event = pre_surface_event_snapshot(&fresh.db.pool, &node).await?;
+    assert_eq!(fresh_event["logical_name_id"], Value::Null);
+    assert_eq!(fresh_event["resource_id"], Value::Null);
+    for pool in [&incremental.db.pool, &restored.db.pool] {
+        assert_eq!(pre_surface_event_snapshot(pool, &node).await?, fresh_event);
+    }
+
+    let fresh_projection =
+        pre_surface_projection_snapshot(&fresh.db.pool, &logical_name_id).await?;
+    assert!(
+        fresh_projection["record_inventory_current"]["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["record_key"] == "text:description" && entry["value"] == "converged"
+            })),
+        "fresh replay must recover the pre-surface record: {fresh_projection}"
+    );
+    for pool in [&incremental.db.pool, &restored.db.pool] {
+        assert_eq!(
+            pre_surface_projection_snapshot(pool, &logical_name_id).await?,
+            fresh_projection
+        );
+    }
+
+    let subjects = perturb::RouteSnapshotSubjects::new([name], [format!("{owner:#x}")]);
+    let fresh_routes = support::route_snapshots(&fresh, &subjects).await?;
+    perturb::assert_snapshots_equal(
+        &fresh_routes,
+        &support::route_snapshots(&incremental, &subjects).await?,
+    )?;
+    perturb::assert_snapshots_equal(
+        &fresh_routes,
+        &support::route_snapshots(&restored, &subjects).await?,
+    )?;
+
+    fresh.db.cleanup().await?;
+    incremental.db.cleanup().await?;
+    restored.db.cleanup().await?;
     Ok(())
 }
 

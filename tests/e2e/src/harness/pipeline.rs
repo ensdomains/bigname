@@ -460,6 +460,7 @@ pub async fn run_fixture_spine(
             manifests_root,
             chain,
             "interpret",
+            0,
             *target,
             Some(rpc_url),
         )
@@ -471,6 +472,7 @@ pub async fn run_fixture_spine(
             manifests_root,
             chain,
             "project",
+            0,
             *target,
             Some(rpc_url),
         )
@@ -501,9 +503,11 @@ async fn run_phase_redo(
     manifests_root: &Path,
     chain: &str,
     phase: &str,
+    from_block: u64,
     target: u64,
     hydration_rpc_url: Option<&str>,
 ) -> Result<()> {
+    let from_block = from_block.to_string();
     let target = target.to_string();
     let source =
         format!("{chain}:e2e-fixture:fixture:new_signature_range:0=BIGNAME_E2E_FIXTURE_SOURCE");
@@ -520,7 +524,7 @@ async fn run_phase_redo(
             "--phase",
             phase,
             "--from-block",
-            "0",
+            &from_block,
             "--to-block",
             &target,
             "--initial-backoff-ms",
@@ -1288,21 +1292,135 @@ impl SequentialFixtureReplay {
         target_block: u64,
         extra_ready_sql: Option<&str>,
     ) -> Result<()> {
-        let rpc_urls = self
-            .chain_rpc_urls
-            .iter()
-            .map(|(configured_chain, url)| (configured_chain.as_str(), url.as_str()))
-            .collect::<Vec<_>>();
-        run_fixture_spine(
-            &self.repo_root,
-            &self.database_url,
-            pool,
-            &self.manifests_root,
-            &rpc_urls,
-            &[(chain, target_block)],
-            extra_ready_sql,
+        let rpc_url = self.rpc_url(chain)?.to_owned();
+        let repository = bigname_manifests::load_repository(&self.manifests_root)?;
+        bigname_manifests::sync_schema_v2_repository(pool, &repository).await?;
+        super::facts::seed_anvil_snapshot(pool, chain, &rpc_url, target_block).await?;
+        for phase in ["interpret", "project"] {
+            run_phase_redo(
+                &self.repo_root,
+                &self._binary,
+                &self.database_url,
+                &self.manifests_root,
+                chain,
+                phase,
+                0,
+                target_block,
+                Some(&rpc_url),
+            )
+            .await?;
+        }
+        if let Some(ready_sql) = extra_ready_sql {
+            let ready: bool = sqlx::query_scalar(ready_sql)
+                .fetch_one(pool)
+                .await
+                .with_context(|| format!("evaluate post-redo readiness SQL: {ready_sql}"))?;
+            anyhow::ensure!(
+                ready,
+                "post-redo readiness predicate was false: {ready_sql}"
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn replay_chain_range(
+        &mut self,
+        pool: &sqlx::PgPool,
+        chain: &str,
+        from_block: u64,
+        target_block: u64,
+        extra_ready_sql: Option<&str>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            from_block <= target_block,
+            "sequential fixture replay range is reversed"
+        );
+        let rpc_url = self.rpc_url(chain)?.to_owned();
+        let previous_hashes: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT phase_name, input_content_hash
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
         )
-        .await
+        .bind(chain)
+        .fetch_all(pool)
+        .await?;
+        anyhow::ensure!(
+            previous_hashes.len() == 2,
+            "fixture derived phase state is missing"
+        );
+        anyhow::ensure!(
+            previous_hashes.iter().all(|row| row
+                .1
+                .as_deref()
+                .is_some_and(|hash| hash.starts_with("keccak256:"))),
+            "incremental fixture replay must continue one compiled-hash epoch"
+        );
+        // The initial replay already synchronized this immutable deployment profile. Re-syncing
+        // between fixture windows would stamp a manifest-authority redo and turn the incremental
+        // history test into a full interpretation replay.
+        super::facts::seed_anvil_snapshot(pool, chain, &rpc_url, target_block).await?;
+        for (phase, content_hash) in previous_hashes {
+            sqlx::query(
+                "UPDATE chain_phase_state
+                 SET input_content_hash = $3
+                 WHERE chain_id = $1 AND phase_name = $2",
+            )
+            .bind(chain)
+            .bind(phase)
+            .bind(content_hash)
+            .execute(pool)
+            .await?;
+        }
+        run_phase_redo(
+            &self.repo_root,
+            &self._binary,
+            &self.database_url,
+            &self.manifests_root,
+            chain,
+            "interpret",
+            from_block,
+            target_block,
+            Some(&rpc_url),
+        )
+        .await?;
+        let interpreter_hash: String = sqlx::query_scalar(
+            "SELECT input_content_hash FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'interpret'",
+        )
+        .bind(chain)
+        .fetch_one(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE chain_phase_state SET input_content_hash = $2
+             WHERE chain_id = $1 AND phase_name = 'project'",
+        )
+        .bind(chain)
+        .bind(interpreter_hash)
+        .execute(pool)
+        .await?;
+        run_phase_redo(
+            &self.repo_root,
+            &self._binary,
+            &self.database_url,
+            &self.manifests_root,
+            chain,
+            "project",
+            from_block,
+            target_block,
+            Some(&rpc_url),
+        )
+        .await?;
+        if let Some(ready_sql) = extra_ready_sql {
+            let ready: bool = sqlx::query_scalar(ready_sql)
+                .fetch_one(pool)
+                .await
+                .with_context(|| format!("evaluate post-redo readiness SQL: {ready_sql}"))?;
+            anyhow::ensure!(
+                ready,
+                "post-redo readiness predicate was false: {ready_sql}"
+            );
+        }
+        Ok(())
     }
 
     fn rpc_url(&self, chain: &str) -> Result<&str> {
@@ -1474,6 +1592,7 @@ pub async fn phase_runner_replay_normalized_events(
         manifests_root,
         "ethereum-mainnet",
         "interpret",
+        0,
         to_block,
         Some(chain_rpc_url),
     )
@@ -1485,6 +1604,7 @@ pub async fn phase_runner_replay_normalized_events(
         manifests_root,
         "ethereum-mainnet",
         "project",
+        0,
         to_block,
         Some(chain_rpc_url),
     )
@@ -1509,6 +1629,7 @@ pub async fn phase_runner_replay_current_projections(
         manifests_root,
         "ethereum-mainnet",
         "project",
+        0,
         to_block,
         Some(chain_rpc_url),
     )

@@ -5,6 +5,7 @@ use crate::{
 };
 
 mod authority;
+mod inventory;
 mod primary;
 mod resolver;
 mod retracted;
@@ -46,11 +47,9 @@ pub(crate) async fn initialize(
     if window.retain_retracted {
         retracted::seed(transaction, chain_id, window.from_block, window.to_block).await?;
         // Resource citations retain the losing projected pointer while canonical history supplies
-        // its surviving replacement. Both resolver keys must expand before redo rebuilds either
-        // row family.
+        // its replacement; both resolver keys must expand before redo rebuilds either row family.
         resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
-        // Redo keeps the pre-existing resolver expansion for every retained or changed
-        // resolver key. Normal live-follow uses the event-kind split seeded below.
+        // Redo expands every retained or changed resolver key; live-follow uses the split below.
         sqlx::query(
             "INSERT INTO project_scope_resolver_dependents
              SELECT resolver_address FROM project_scope_resolvers
@@ -67,12 +66,13 @@ pub(crate) async fn initialize(
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
-    // Time-bound resource boundaries and resolver expansion add names through binding closure.
-    // Topology must consume that final name set before event-history staging begins.
+    // Topology must consume names added by time boundaries and resolver binding closure before
+    // event-history staging begins.
     // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
     authority::include_topology_dependents(transaction, chain_id, target.number).await?;
     close_binding_scope(transaction, chain_id, target).await?;
+    inventory::close(transaction, chain_id, target).await?;
     resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
     resolver::classify_unchanged(transaction, chain_id).await?;
     resolver::include_permission_resources(transaction, chain_id, target.number).await?;
