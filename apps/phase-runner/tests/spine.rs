@@ -769,14 +769,27 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
     .await?;
     mark_completed(scratch.pool(), "restart-chain", PhaseName::Verify, None).await?;
     let calls = Arc::new(AtomicUsize::new(0));
+    let phase_progress = RunnerPhaseProgress::default();
     let flaky = Arc::new(FunctionPhase {
         name: PhaseName::Verify,
         handler: {
             let calls = Arc::clone(&calls);
+            let phase_progress = phase_progress.clone();
             Arc::new(move |_| {
-                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call <= 2 {
+                    Ok(PhaseBatchOutcome::Continue(PhaseProgress::default()))
+                } else if call == 3 {
                     Err(RunnerError::transient("temporary provider outage"))
                 } else {
+                    assert_eq!(
+                        phase_progress.observation(
+                            "restart-chain",
+                            PhaseName::Verify,
+                            &RunMode::Redo(BlockRange::new(0, 0)?),
+                        ),
+                        (2, 0)
+                    );
                     Ok(PhaseBatchOutcome::Complete(PhaseProgress {
                         verification_level: Some(VerificationLevel::QuickSynced),
                         ..PhaseProgress::default()
@@ -790,7 +803,8 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
         phase_set_replacing(PhaseName::Verify, flaky)?,
         available_capacity(),
         "restart-runner",
-    )?;
+    )?
+    .with_phase_progress(phase_progress);
     runner
         .redo(
             &chain("restart-chain")?,
@@ -799,7 +813,7 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
             CancellationToken::new(),
         )
         .await?;
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     scratch.cleanup().await
 }
 

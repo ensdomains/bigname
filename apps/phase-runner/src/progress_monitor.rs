@@ -317,31 +317,25 @@ mod tests {
 
     #[derive(Clone)]
     struct Clock(Arc<Mutex<Instant>>);
-
     impl Clock {
         fn new() -> Self {
             Self(Arc::new(Mutex::new(Instant::now())))
         }
-
         fn now(&self) -> Instant {
             *self.0.lock().unwrap()
         }
-
         fn advance(&self, duration: Duration) {
             let mut now = self.0.lock().unwrap();
             *now += duration;
         }
     }
-
     fn tracker(clock: &Clock) -> RunnerPhaseProgress {
         let clock = clock.clone();
         RunnerPhaseProgress::with_clock(Duration::from_secs(900), Arc::new(move || clock.now()))
     }
-
     fn marker(number: i64, hash: &str) -> BlockMarker {
         BlockMarker::new(number, hash).unwrap()
     }
-
     fn context(phase: PhaseName, mode: RunMode, current: Option<BlockMarker>) -> PhaseContext {
         let redo_attempt = mode.range().map(|execution_range| RedoAttemptFence {
             generation: 1,
@@ -361,23 +355,19 @@ mod tests {
             },
         }
     }
-
     fn work(current: Option<BlockMarker>) -> PhaseBatchOutcome {
         PhaseBatchOutcome::Continue(PhaseProgress {
             current,
             ..PhaseProgress::default()
         })
     }
-
     fn commit(tracker: &RunnerPhaseProgress, context: &PhaseContext, outcome: PhaseBatchOutcome) {
         let token = tracker.begin_batch(context);
         tracker.record_committed(token, &outcome);
     }
-
     fn observed(tracker: &RunnerPhaseProgress, context: &PhaseContext) -> (i64, i64) {
         tracker.observation("chain", context.phase, &context.mode)
     }
-
     #[test]
     fn unchanged_commits_are_confirmed_one_batch_late() {
         let clock = Clock::new();
@@ -393,7 +383,6 @@ mod tests {
         clock.advance(Duration::from_secs(1));
         assert_eq!(observed(&tracker, &pinned).1, 1);
     }
-
     #[test]
     fn durable_number_hash_and_backward_changes_reset_but_target_does_not() {
         let tracker = tracker(&Clock::new());
@@ -411,7 +400,6 @@ mod tests {
             commit(&tracker, &pinned, work(pinned.resume.current.clone()));
         }
     }
-
     #[test]
     fn one_ingest_source_or_redo_boundary_movement_resets_a_pinned_summary() {
         let tracker = tracker(&Clock::new());
