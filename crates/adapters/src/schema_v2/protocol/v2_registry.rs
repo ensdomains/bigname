@@ -163,6 +163,7 @@ fn registry(
                 &u256_word_hex(e.tokenId),
                 (e.subregistry != Address::ZERO).then(|| address.clone()),
             );
+            // Only a clear can mark a second cold-restore row.
             if !invalidated.is_empty() {
                 output.events[0]
                     .after_state

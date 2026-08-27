@@ -746,8 +746,14 @@ retained cache after the database transaction persists the batch. This keeps
 dropped or retargeted provisional events out of later ENSv1 block-boundary
 decisions, retained memory, and future restore input.
 
-Ordinarily, a cold restore streams the latest readable event per [interpreter state key](glossary.md#interpreter-state-key) in chain order. A marked zero-address ENSv2 `SubregistryUpdated` is retained separately from the ordinary latest event
-for the same key, preserving one logical before/after stream and the clear needed to invalidate older token-version pointers. Restore rebuilds the adapter's protocol state while admitting at most
+Ordinarily, a cold restore streams the latest readable event per [interpreter
+state key](glossary.md#interpreter-state-key) in chain order. A zero-address
+ENSv2 `SubregistryUpdated` carrying the
+[`subregistry_invalidated_token_ids` marker](architecture.md#normalized-event-taxonomy)
+is retained separately from the ordinary latest event for the same key. This
+preserves one logical before/after stream and the clear needed to invalidate
+older token-version pointers. Restore rebuilds the adapter's protocol state
+while admitting at most
 the configured number of `after_state` values to the cache; it does not first
 materialize every retained JSON value in one process allocation. If the chain
 [lineage orphaning epoch](glossary.md#lineage-orphaning-epoch) changes, the

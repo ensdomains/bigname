@@ -655,12 +655,17 @@ fn v2_zero_subregistry_update_stays_dark_after_current_holder_departure_in_every
     let clear_block = 20_000_204;
     let departure_block = 20_000_205;
 
-    assert!(output.discovery_edge_closures.iter().any(|closure| {
-        closure.active_to_block_number == clear_block
-            && closure.edge_kind == "subregistry"
-            && closure.observation_key == observation_key
-            && closure.except_to_contract_instance_id.is_none()
-    }));
+    let clear_closures = output
+        .discovery_edge_closures
+        .iter()
+        .filter(|closure| {
+            closure.active_to_block_number == clear_block
+                && closure.edge_kind == "subregistry"
+                && closure.observation_key == observation_key
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(clear_closures.len(), 1);
+    assert_eq!(clear_closures[0].except_to_contract_instance_id, None);
     assert!(!output.discovery_edges.iter().any(|edge| {
         edge.edge_kind == "subregistry"
             && edge.observation_key == observation_key
@@ -734,7 +739,7 @@ fn v2_repeated_subregistry_clear_survives_compaction_and_allows_a_fresh_sibling(
         20_000_210,
         SHARED_SUBREGISTRY_SURVIVOR,
     )?;
-    let token_id = format!("{:#x}", versioned_token("alpha", 2));
+    let token_id = format!("{:#066x}", versioned_token("alpha", 2));
     let states = output
         .normalized_events
         .iter()
@@ -742,6 +747,7 @@ fn v2_repeated_subregistry_clear_survives_compaction_and_allows_a_fresh_sibling(
             event.event_kind == "SubregistryChanged" && event.after_state["token_id"] == token_id
         })
         .collect::<Vec<_>>();
+    assert!(states.len() >= 2);
     assert!(
         states.windows(2).all(|pair| {
             pair[1].before_state["subregistry"] == pair[0].after_state["subregistry"]

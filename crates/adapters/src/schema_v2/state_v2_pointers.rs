@@ -121,6 +121,7 @@ impl State {
     ) -> BTreeSet<String> {
         if subregistry.is_some() {
             self.set_v2_subregistry(emitter, token_id, subregistry);
+            // Empty keeps nonzero updates from marking a second cold-restore row.
             return BTreeSet::new();
         }
 
@@ -166,6 +167,8 @@ impl State {
         for invalidated in &invalidated {
             self.set_v2_subregistry(emitter, invalidated, None);
         }
+        // Re-reading the live index is the load-bearing clear; the recorded set only clears IDs
+        // restored after their zero event.
         let _ = self.apply_v2_subregistry_update(emitter, token_id, subregistry);
     }
 
