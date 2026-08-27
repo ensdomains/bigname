@@ -6,12 +6,14 @@ use serde_json::Value;
 
 use crate::{SourceManifest, all_emitter_topic0s, normalize_address};
 
+pub(super) use super::watch_widening::{PersistedWatchFloors, widening_start};
+
 const COMPILED_WATCH_FIELD: &str = "_bigname_compiled_watch";
 pub(super) type AdmissionFloors = BTreeMap<(String, String, String, String), u64>;
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum WatchEmitter {
+pub(super) enum WatchEmitter {
     All,
     Family {
         #[serde(default)]
@@ -39,9 +41,9 @@ impl WatchEmitter {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-struct WatchKey {
-    emitter: WatchEmitter,
-    topic0: String,
+pub(super) struct WatchKey {
+    pub(super) emitter: WatchEmitter,
+    pub(super) topic0: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,7 +100,7 @@ struct DeploymentIdentity {
 
 #[derive(Default)]
 pub(super) struct Snapshot {
-    watch_by_chain: BTreeMap<String, BTreeMap<WatchKey, u64>>,
+    pub(super) watch_by_chain: BTreeMap<String, BTreeMap<WatchKey, u64>>,
     discovery_by_chain: BTreeMap<String, BTreeMap<DiscoveryRuleKey, u64>>,
     deployments_by_chain: BTreeMap<String, BTreeMap<(String, String), DeploymentIdentity>>,
 }
@@ -153,20 +155,6 @@ pub(super) fn record(
         );
     record_discovery_rules(snapshot, manifest)?;
     Ok(())
-}
-
-pub(super) fn widening_start(
-    previous: &Snapshot,
-    desired: &Snapshot,
-    chain_id: &str,
-) -> Option<u64> {
-    let previous = previous.watch_by_chain.get(chain_id);
-    desired
-        .watch_by_chain
-        .get(chain_id)?
-        .iter()
-        .filter_map(|(key, start)| (!watch_is_covered(previous, key, *start)).then_some(*start))
-        .min()
 }
 
 pub(super) fn discovery_widening_start(
@@ -562,7 +550,7 @@ fn insert_watch(
         .or_insert(start);
 }
 
-fn watch_is_covered(
+pub(super) fn watch_is_covered(
     previous: Option<&BTreeMap<WatchKey, u64>>,
     desired: &WatchKey,
     desired_start: u64,

@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS manifest_versions (
     normalizer_version text NOT NULL,
     file_path text NOT NULL UNIQUE,
     manifest_payload jsonb NOT NULL,
+    applied_change_count bigint NOT NULL DEFAULT 0,
     loaded_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (manifest_id, chain_id),
     UNIQUE (
@@ -33,7 +34,9 @@ CREATE TABLE IF NOT EXISTS manifest_versions (
     CHECK (rollout_status IN ('draft', 'shadow', 'active', 'deprecated')),
     CHECK (btrim(normalizer_version) <> ''),
     CHECK (btrim(file_path) <> ''),
-    CHECK (jsonb_typeof(manifest_payload) = 'object')
+    CHECK (jsonb_typeof(manifest_payload) = 'object'),
+    CONSTRAINT manifest_versions_applied_change_count_check
+        CHECK (applied_change_count >= 0)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS manifest_versions_one_active_idx
@@ -178,6 +181,8 @@ COMMENT ON COLUMN manifest_versions.file_path IS
     'This value is the repository path.';
 COMMENT ON COLUMN manifest_versions.manifest_payload IS
     'This object stores the complete declaration.';
+COMMENT ON COLUMN manifest_versions.applied_change_count IS
+    'This value counts the manifest changes that synchronization has applied.';
 COMMENT ON COLUMN manifest_versions.loaded_at IS
     'This time records the last load.';
 

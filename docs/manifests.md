@@ -925,6 +925,24 @@ declared addresses remain explicit watch targets.
 Adding a less general target already covered by an all-emitter event does not
 count as widening.
 
+Synchronization refuses a newly widened direct-address watch when its declared
+start is earlier than the earliest block the stored Ingest intervals can honor
+and the desired compiled watch plan has no all-emitter entry for the same event
+topic. The transaction records no new coverage promise, and the error names
+both values as `promised coverage start <S>` and [`persisted ingest floor
+<F>`](glossary.md#persisted-ingest-floor). This bound is used only by the
+compiled-watch comparison.
+For a closed stored interval, only a non-empty intersection with the declared
+start contributes to that floor; an interval ending before that intersection
+starts cannot support the coverage promise.
+The operator may re-declare the address at or above `<F>`. To close and reopen
+instead, remove the declaration and synchronize, complete the full Interpret
+redo that closes the old stored interval, then restore the declaration and
+synchronize again; direct database edits are not supported. An all-emitter
+entry in the desired plan covers the direct address for that topic, so this
+refusal does not apply and any existing required Ingest redo continues to back
+the covered range.
+
 Adding or broadening an indexability-producing `resolver` discovery rule over
 an already-ingested range is a different ordering problem. Replacing a
 declaration that emits an unchanged active resolver rule has the same problem:
@@ -984,6 +1002,13 @@ zero; a later finite declaration therefore cannot replace the retained
 effective-zero floor. Conversely, omitting a previously finite start backdates
 that active epoch to zero, so the required redo can select the newly widened
 interval. Re-admitting a retired address still begins after its prior epoch.
+When a later declared start does not raise an already lower stored address
+bound, synchronization keeps that bound. The [persisted address
+floor](glossary.md#persisted-address-floor) notice is `declared start … did not
+raise persisted address floor; keeping …`. It is informational: it reports
+that the shared address interval did not move, while the declaration's own
+start still participates in the effective Ingest range. It does not change
+admission, watch selection, or redo behavior.
 Retained omitted-start manifest history also contributes zero during widening
 classification. Interpret's discovery refresh now leaves an initial epoch's
 stored `NULL` untouched, fixing
@@ -1192,11 +1217,26 @@ current manifest-authority marker nor an active audited redo remains flagless.
 Manifest declaration changes produce the `SourceManifestUpdated` [normalized
 event](glossary.md). Its state includes proxy declarations and the staged
 authored capability fields, so manifest synchronization does not mint separate
-proxy- or capability-change event kinds. The synchronization transaction also
-invalidates completed interpret and project phase content hashes for changed
-chains. The deleted admission-epoch and full-source reconciliation writers no
-longer participate; phase redo applies the new authority to discovery and
-projection state.
+proxy- or capability-change event kinds. Each `SourceManifestUpdated` event
+written by current synchronization carries `raw_fact_ref.applied_change_count`,
+the per-manifest transition counter incremented once for each applied manifest
+transition in the same transaction, and that counter participates in
+`event_identity`; older events retain their original `raw_fact_ref` and
+identities. When persisted manifest authority already matches the desired
+declaration but the newest stored event is missing or its `after_state`
+disagrees with that persisted state, synchronization appends another
+`SourceManifestUpdated` that re-derives the current-state transition without
+changing manifest authority.
+The synchronization transaction also invalidates completed interpret and
+project phase content hashes for chains with changed authority or repaired
+manifest event history. The deleted [admission
+epoch](glossary.md#admission-epoch) and full-source
+reconciliation writers no longer participate; phase redo applies the current
+authority to discovery and projection state. Repairing Ethereum Mainnet
+`basenames_execution` history also invalidates the Base project phase because
+that phase consumes the repaired events. A history-triggered invalidation uses
+the same manifest-authority marker and attested full Interpret redo as an
+authority change.
 
 The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 

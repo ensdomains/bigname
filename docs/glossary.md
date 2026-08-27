@@ -1256,9 +1256,10 @@ transfer powers before the later wrapper expiry.
 **Manifest-authority marker** — a
 `manifest-authority:<authority-fingerprint>:<invalidation-token>` value that
 manifest synchronization records in a derived phase's input-hash field when
-the active manifest authority changes or a persisted admission-floor repair
-invalidates derived results. The fingerprint identifies the desired manifest
-set. The database mints a new invalidation token for every invalidation,
+the active manifest authority changes, a persisted admission-floor repair
+invalidates derived results, or stored manifest event history is repaired. The
+fingerprint identifies the desired manifest set. The database mints a new
+invalidation token for every invalidation,
 including a later return to the same desired set. The marker poisons ordinary
 hash adoption until the required full redo begins. It proves that derived
 results must be redone under the named authority; it does not itself prove the
@@ -1302,6 +1303,18 @@ and are not reorg-addressable. Durable raw facts and competing chain lineage,
 not superseded normalized events, are the permanent audit trail for chain
 events. The current event stream is what projections consume. See the [reorg
 and redo boundary](storage.md#reorg-and-redo-boundary).
+
+**Persisted Ingest floor** — the earliest block that the stored address
+intervals can honor for one compiled-watch address and event topic. Manifest
+synchronization compares a newly promised direct-address start with this bound
+and refuses to record an earlier promise unless the desired all-emitter watch
+already covers the same topic.
+
+**Persisted address floor** — the earliest block stored on the shared active
+interval for one chain address. Refreshing a declaration keeps the lower bound
+already recorded for that active interval. Ingest separately combines that
+shared bound with each declaration's own start when it builds the effective
+watch range.
 
 **Path class / support class** — the classification of a resolution's shape
 that decides which verified answers are publicly supported. Direct, alias-only,

@@ -22,15 +22,29 @@ pub(super) async fn lock_phase_writers(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &ManifestRepository,
 ) -> Result<()> {
-    let active_manifests: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT DISTINCT chain_id, namespace, source_family
-         FROM manifest_versions
-         WHERE rollout_status = 'active'",
+    let lock_manifests: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT manifest.chain_id, manifest.namespace, manifest.source_family
+         FROM manifest_versions manifest
+         LEFT JOIN LATERAL (
+             SELECT event.after_state
+             FROM normalized_events event
+             WHERE event.source_manifest_id = manifest.manifest_id
+               AND event.event_kind = 'SourceManifestUpdated'
+             ORDER BY event.normalized_event_id DESC
+             LIMIT 1
+         ) latest ON true
+         WHERE manifest.rollout_status = 'active'
+            OR latest.after_state IS DISTINCT FROM jsonb_build_object(
+                'manifest_version', manifest.manifest_version,
+                'normalizer_version', manifest.normalizer_version,
+                'rollout_status', manifest.rollout_status,
+                'manifest_payload', manifest.manifest_payload
+            )",
     )
     .fetch_all(&mut **transaction)
     .await
-    .context("failed to load active manifest chains before schema-v2 sync")?;
-    let mut chains = active_manifests
+    .context("failed to load manifest chains requiring phase locks before schema-v2 sync")?;
+    let mut chains = lock_manifests
         .iter()
         .map(|(chain_id, _, _)| chain_id.clone())
         .collect::<BTreeSet<_>>();
@@ -41,7 +55,7 @@ pub(super) async fn lock_phase_writers(
             .map(|loaded| loaded.manifest.chain.clone()),
     );
     let has_basenames_execution =
-        active_manifests
+        lock_manifests
             .iter()
             .any(|(chain_id, namespace, source_family)| {
                 chain_id == BASENAMES_EXECUTION_CHAIN
@@ -131,7 +145,10 @@ pub(super) async fn invalidate_changed_derived_epochs(
     desired: &AuthoritySnapshot,
     previous_admission_floors: &BTreeMap<String, super::watch::AdmissionFloors>,
     repaired_floor_chains: &HashSet<String>,
+    repaired_history_chains: &HashSet<String>,
+    repaired_basenames_execution_history: bool,
 ) -> Result<()> {
+    let persisted_watch_floors = super::watch_floors::load(transaction).await?;
     let mut chains = previous
         .manifests_by_chain
         .keys()
@@ -139,6 +156,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
         .cloned()
         .collect::<BTreeSet<_>>();
     chains.extend(repaired_floor_chains.iter().cloned());
+    chains.extend(repaired_history_chains.iter().cloned());
     for chain_id in chains {
         let previous_manifests = previous
             .manifests_by_chain
@@ -150,7 +168,10 @@ pub(super) async fn invalidate_changed_derived_epochs(
             .get(&chain_id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        if previous_manifests == desired_manifests && !repaired_floor_chains.contains(&chain_id) {
+        if previous_manifests == desired_manifests
+            && !repaired_floor_chains.contains(&chain_id)
+            && !repaired_history_chains.contains(&chain_id)
+        {
             continue;
         }
         let admission_floors = previous_admission_floors
@@ -192,9 +213,12 @@ pub(super) async fn invalidate_changed_derived_epochs(
                     .await?;
             stamp_required_ingest(transaction, &chain_id, widened_from).await?;
         }
-        if let Some(widened_from) =
-            super::watch::widening_start(&previous.watch, &desired.watch, &chain_id)
-        {
+        if let Some(widened_from) = super::watch::widening_start(
+            &previous.watch,
+            &desired.watch,
+            &chain_id,
+            &persisted_watch_floors,
+        )? {
             stamp_required_ingest(transaction, &chain_id, widened_from).await?;
         }
         let encoded = serde_json::to_vec(&(chain_id.as_str(), desired_manifests))
@@ -218,7 +242,9 @@ pub(super) async fn invalidate_changed_derived_epochs(
             format!("failed to invalidate derived phase epochs for chain {chain_id}")
         })?;
     }
-    if previous.basenames_execution != desired.basenames_execution {
+    if previous.basenames_execution != desired.basenames_execution
+        || repaired_basenames_execution_history
+    {
         let encoded = serde_json::to_vec(&(
             BASENAMES_PROJECT_CHAIN,
             "basenames_execution",
@@ -247,6 +273,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
     }
     Ok(())
 }
+
 pub(super) async fn active_admission_floors(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<BTreeMap<String, super::watch::AdmissionFloors>> {

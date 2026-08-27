@@ -1,13 +1,14 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 
-use alloy_primitives::keccak256;
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{LoadedManifest, ManifestLoadStatus, ManifestRepository};
 
+#[path = "schema_v2_event_history.rs"]
+mod event_history;
 #[path = "schema_v2_persistence.rs"]
 mod persistence;
 #[path = "schema_v2_retirement.rs"]
@@ -16,7 +17,12 @@ mod retirement;
 mod sync_state;
 #[path = "schema_v2_watch.rs"]
 mod watch;
+#[path = "schema_v2_watch_floors.rs"]
+mod watch_floors;
+#[path = "schema_v2_watch_widening.rs"]
+mod watch_widening;
 
+use event_history::{load_manifest_states, manifest_state, write_manifest_event};
 use persistence::{
     deactivate_retired_manifest_addresses, insert_declaration, normalize_address,
     reopen_proxy_edge, repair_retired_omitted_admission_floors, resolve_contract,
@@ -34,48 +40,13 @@ struct ManifestAddressDeclaration {
     manifest_id: i64,
     provenance: serde_json::Value,
 }
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ManifestKey {
-    namespace: String,
-    source_family: String,
-    chain_id: String,
-    deployment_label: String,
-    manifest_version: i64,
-}
-
-#[derive(Clone, Debug)]
-struct StoredManifestState {
-    manifest_id: i64,
-    key: ManifestKey,
-    rollout_status: String,
-    normalizer_version: String,
-    manifest_payload: serde_json::Value,
-}
-
-impl StoredManifestState {
-    fn event_state(&self) -> serde_json::Value {
-        json!({
-            "manifest_version": self.key.manifest_version,
-            "normalizer_version": self.normalizer_version,
-            "rollout_status": self.rollout_status,
-            "manifest_payload": self.manifest_payload,
-        })
-    }
-
-    fn authority_matches(&self, other: &Self) -> bool {
-        self.rollout_status == other.rollout_status
-            && self.normalizer_version == other.normalizer_version
-            && self.manifest_payload == other.manifest_payload
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchemaV2ManifestSyncSummary {
     pub manifest_count: usize,
     pub declaration_count: usize,
     pub discovery_rule_count: usize,
     pub proxy_edge_count: usize,
+    pub notices: Vec<String>,
 }
 
 pub async fn sync_schema_v2_repository(
@@ -146,35 +117,65 @@ pub async fn sync_schema_v2_repository(
     let mut proxy_edge_count = 0usize;
     let mut desired_keys = HashSet::new();
     let mut repaired_floor_chains = HashSet::new();
+    let mut repaired_history_chains = HashSet::new();
+    let mut repaired_basenames_execution_history = false;
+    let mut notices = Vec::new();
     for loaded in repository.manifests() {
         let file_path = loaded.relative_path.to_string_lossy().into_owned();
         let manifest_id = upsert_manifest(&mut transaction, loaded, &file_path).await?;
         let state = manifest_state(manifest_id, loaded)?;
         desired_keys.insert(state.key.clone());
-        if existing
-            .get(&state.key)
-            .is_none_or(|before| !before.authority_matches(&state))
-        {
-            write_manifest_event(&mut transaction, existing.get(&state.key), &state).await?;
+        match existing.get(&state.key) {
+            None => write_manifest_event(&mut transaction, json!({}), &state).await?,
+            Some(before) if !before.authority_matches(&state) => {
+                let repaired_history = !before.history_matches();
+                write_manifest_event(&mut transaction, before.event_state(), &state).await?;
+                if repaired_history {
+                    repaired_history_chains.insert(state.key.chain_id.clone());
+                    repaired_basenames_execution_history |= is_basenames_execution(&state.key);
+                }
+            }
+            Some(before) if !before.history_matches() => {
+                write_manifest_event(
+                    &mut transaction,
+                    before.latest_event_state_or_empty(),
+                    &state,
+                )
+                .await?;
+                repaired_history_chains.insert(state.key.chain_id.clone());
+                repaired_basenames_execution_history |= is_basenames_execution(&state.key);
+            }
+            Some(_) => {}
         }
         let counts = replace_manifest_children(
             &mut transaction,
             manifest_id,
             loaded,
             &mut repaired_floor_chains,
+            &mut notices,
         )
         .await?;
         declaration_count += counts.0;
         discovery_rule_count += counts.1;
         proxy_edge_count += counts.2;
     }
-    for before in existing
-        .values()
-        .filter(|state| state.rollout_status == "active" && !desired_keys.contains(&state.key))
-    {
+    for before in existing.values().filter(|state| {
+        !desired_keys.contains(&state.key)
+            && (state.rollout_status == "active" || !state.history_matches())
+    }) {
         let mut after = before.clone();
-        after.rollout_status = "deprecated".to_owned();
-        write_manifest_event(&mut transaction, Some(before), &after).await?;
+        let repaired_history = before.rollout_status != "active";
+        let before_state = if before.rollout_status == "active" {
+            after.rollout_status = "deprecated".to_owned();
+            before.event_state()
+        } else {
+            before.latest_event_state_or_empty()
+        };
+        write_manifest_event(&mut transaction, before_state, &after).await?;
+        if repaired_history {
+            repaired_history_chains.insert(before.key.chain_id.clone());
+            repaired_basenames_execution_history |= is_basenames_execution(&before.key);
+        }
     }
     deactivate_retired_manifest_addresses(&mut transaction, &previous_declarations).await?;
     repair_retired_omitted_admission_floors(
@@ -189,6 +190,8 @@ pub async fn sync_schema_v2_repository(
         &desired_authority,
         &previous_admission_floors,
         &repaired_floor_chains,
+        &repaired_history_chains,
+        repaired_basenames_execution_history,
     )
     .await?;
     transaction
@@ -200,161 +203,14 @@ pub async fn sync_schema_v2_repository(
         declaration_count,
         discovery_rule_count,
         proxy_edge_count,
+        notices,
     })
 }
 
-async fn load_manifest_states(
-    transaction: &mut Transaction<'_, Postgres>,
-) -> Result<HashMap<ManifestKey, StoredManifestState>> {
-    let rows = sqlx::query(
-        "
-        SELECT manifest_id, namespace, source_family, chain_id, deployment_label,
-               manifest_version, rollout_status, normalizer_version, manifest_payload
-        FROM manifest_versions
-        ",
-    )
-    .fetch_all(&mut **transaction)
-    .await
-    .context("failed to load existing schema-v2 manifest states")?;
-    rows.into_iter()
-        .map(|row| {
-            let key = ManifestKey {
-                namespace: row.try_get("namespace")?,
-                source_family: row.try_get("source_family")?,
-                chain_id: row.try_get("chain_id")?,
-                deployment_label: row.try_get("deployment_label")?,
-                manifest_version: row.try_get("manifest_version")?,
-            };
-            let state = StoredManifestState {
-                manifest_id: row.try_get("manifest_id")?,
-                key: key.clone(),
-                rollout_status: row.try_get("rollout_status")?,
-                normalizer_version: row.try_get("normalizer_version")?,
-                manifest_payload: row.try_get("manifest_payload")?,
-            };
-            Ok((key, state))
-        })
-        .collect::<std::result::Result<_, sqlx::Error>>()
-        .context("failed to decode existing schema-v2 manifest states")
-}
-
-fn manifest_state(manifest_id: i64, loaded: &LoadedManifest) -> Result<StoredManifestState> {
-    let manifest = &loaded.manifest;
-    let manifest_version = i64::try_from(manifest.manifest_version).with_context(|| {
-        format!(
-            "manifest version {} in {} exceeds BIGINT",
-            manifest.manifest_version,
-            loaded.path.display()
-        )
-    })?;
-    Ok(StoredManifestState {
-        manifest_id,
-        key: ManifestKey {
-            namespace: manifest.namespace.clone(),
-            source_family: manifest.source_family.clone(),
-            chain_id: manifest.chain.clone(),
-            deployment_label: manifest.deployment_epoch.clone(),
-            manifest_version,
-        },
-        rollout_status: manifest.rollout_status.as_db_value().to_owned(),
-        normalizer_version: manifest.normalizer_version.clone(),
-        manifest_payload: watch::manifest_payload(manifest)
-            .with_context(|| format!("failed to compile {}", loaded.path.display()))?,
-    })
-}
-
-async fn write_manifest_event(
-    transaction: &mut Transaction<'_, Postgres>,
-    before: Option<&StoredManifestState>,
-    after: &StoredManifestState,
-) -> Result<()> {
-    let before_state = before.map_or_else(|| json!({}), StoredManifestState::event_state);
-    let after_state = after.event_state();
-    let raw_fact_ref = json!({
-        "manifest_id": after.manifest_id,
-        "namespace": after.key.namespace,
-        "source_family": after.key.source_family,
-        "chain": after.key.chain_id,
-        "deployment_epoch": after.key.deployment_label,
-    });
-    let identity_material = json!({
-        "manifest_id": after.manifest_id,
-        "before_state": &before_state,
-        "after_state": &after_state,
-    });
-    let identity_bytes = serde_json::to_vec(&identity_material)
-        .context("failed to serialize SourceManifestUpdated identity")?;
-    let event_identity = format!(
-        "manifest_sync:source_manifest_updated:{:#x}",
-        keccak256(identity_bytes)
-    );
-    let inserted = sqlx::query(
-        "
-        INSERT INTO normalized_events (
-            event_identity, namespace, event_kind, source_family, manifest_version,
-            source_manifest_id, chain_id, raw_fact_ref, derivation_kind,
-            canonicality_state, before_state, after_state
-        )
-        VALUES (
-            $1, $2, 'SourceManifestUpdated', $3, $4, $5, $6, $7,
-            'manifest_sync', 'finalized', $8, $9
-        )
-        ON CONFLICT (event_identity) DO NOTHING
-        ",
-    )
-    .bind(&event_identity)
-    .bind(&after.key.namespace)
-    .bind(&after.key.source_family)
-    .bind(after.key.manifest_version)
-    .bind(after.manifest_id)
-    .bind(&after.key.chain_id)
-    .bind(&raw_fact_ref)
-    .bind(&before_state)
-    .bind(&after_state)
-    .execute(&mut **transaction)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to write SourceManifestUpdated for schema-v2 manifest {}",
-            after.manifest_id
-        )
-    })?
-    .rows_affected();
-    if inserted == 0 {
-        let compatible: Option<bool> = sqlx::query_scalar(
-            "
-            SELECT namespace = $2
-               AND event_kind = 'SourceManifestUpdated'
-               AND source_family = $3
-               AND manifest_version = $4
-               AND source_manifest_id = $5
-               AND chain_id = $6
-               AND raw_fact_ref = $7
-               AND derivation_kind = 'manifest_sync'
-               AND canonicality_state = 'finalized'
-               AND before_state = $8
-               AND after_state = $9
-            FROM normalized_events
-            WHERE event_identity = $1
-            ",
-        )
-        .bind(&event_identity)
-        .bind(&after.key.namespace)
-        .bind(&after.key.source_family)
-        .bind(after.key.manifest_version)
-        .bind(after.manifest_id)
-        .bind(&after.key.chain_id)
-        .bind(&raw_fact_ref)
-        .bind(&before_state)
-        .bind(&after_state)
-        .fetch_optional(&mut **transaction)
-        .await
-        .context("failed to verify idempotent SourceManifestUpdated event")?;
-        if compatible != Some(true) {
-            bail!("SourceManifestUpdated event identity collision for {event_identity}");
-        }
-    }
-    Ok(())
+fn is_basenames_execution(key: &event_history::ManifestKey) -> bool {
+    key.chain_id == "ethereum-mainnet"
+        && key.namespace == "basenames"
+        && key.source_family == "basenames_execution"
 }
 
 async fn upsert_manifest(
@@ -410,6 +266,7 @@ async fn replace_manifest_children(
     manifest_id: i64,
     loaded: &LoadedManifest,
     repaired_floor_chains: &mut HashSet<String>,
+    notices: &mut Vec<String>,
 ) -> Result<(usize, usize, usize)> {
     sqlx::query("DELETE FROM manifest_contract_instances WHERE manifest_id = $1")
         .bind(manifest_id)
@@ -455,6 +312,7 @@ async fn replace_manifest_children(
                 "declared_address": address,
             }),
             repaired_floor_chains,
+            notices,
         )
         .await?;
         insert_declaration(
@@ -496,6 +354,7 @@ async fn replace_manifest_children(
                 "declared_address": address,
             }),
             repaired_floor_chains,
+            notices,
         )
         .await?;
         let implementation = if let Some(implementation) = contract.implementation.as_deref() {
@@ -516,6 +375,7 @@ async fn replace_manifest_children(
                     "declared_address": implementation,
                 }),
                 repaired_floor_chains,
+                notices,
             )
             .await?;
             Some((implementation_id, implementation))
