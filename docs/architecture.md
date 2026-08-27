@@ -743,6 +743,11 @@ ENSv2 mappings:
   no source-key observation, so an unshared displaced resolver edge closes at
   regeneration. The normalized event's `resolver_discovery_aliases` records the
   complete retained-key set so compacted restore preserves that protection.
+  That restored-convergence guarantee covers the resolver aliases only: a
+  noncanonical registry that repeats a regeneration for the same old token ID
+  onto an occupied destination can compact away the intermediate transition,
+  and restore then rebuilds the displaced registration identity as the
+  survivor. That corner is explicitly unsupported and tracked in #596.
 
   A resolver `observation_key` carries at most one live discovery edge: before
   asserting an edge to a different target, discovery closes the existing edge
@@ -762,8 +767,8 @@ ENSv2 mappings:
   The collision therefore remains scoped to token state and discovery edges
   keyed to the emitting registry address.
 
-  A resolver key shared by the survivor and displaced registration is not closed
-  at the collision. Regeneration never reopens a resolver edge from retained
+  A resolver key shared by a resolver-holding survivor and the displaced
+  registration is not closed at the collision. Regeneration never reopens a resolver edge from retained
   state, so interpretation cannot claim historical address coverage that
   Ingest did not load. The
   canonical registry burns the old token, increments the entry's version,
