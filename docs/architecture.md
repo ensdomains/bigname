@@ -735,12 +735,14 @@ ENSv2 mappings:
   displaced registration's surface binding and unshared resolver and
   subregistry discovery edges, plus any child registrations that lose their
   registry path. The surviving registration's subregistry observation moves to
-  the destination token's key. Its resolver observation stays continuously
-  active under the source token's key. That prior key is recorded on the
-  successor so the next explicit resolver update or terminal token event retires
-  it unless another live token still uses or retains the same resolver
-  `observation_key`. The normalized event's `resolver_discovery_aliases` records
-  the complete retained-key set so compacted restore preserves that protection.
+  the destination token's key. When the survivor has resolver state, its
+  resolver observation stays continuously active under the source token's key.
+  That prior key is recorded on the successor so the next explicit resolver
+  update or terminal token event retires it unless another live token still uses
+  or retains the same resolver `observation_key`. A resolverless survivor retains
+  no source-key observation, so an unshared displaced resolver edge closes at
+  regeneration. The normalized event's `resolver_discovery_aliases` records the
+  complete retained-key set so compacted restore preserves that protection.
 
   A resolver `observation_key` carries at most one live discovery edge: before
   asserting an edge to a different target, discovery closes the existing edge

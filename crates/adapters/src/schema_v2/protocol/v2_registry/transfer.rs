@@ -453,44 +453,50 @@ pub(super) fn token_regenerated(
         });
     }
     if let Some(displaced) = displaced.as_ref() {
-        let displaced_registration = V2TokenState {
-            resolver: None,
-            subregistry: None,
-            ..displaced.clone()
-        };
-        let mut release = token_state_event(
-            selected,
-            "RegistrationReleased",
-            event.newTokenId,
-            Some(&displaced_registration),
-            json!({
-                "source_event":"TokenRegenerated",
-                "terminal_reason":"registry_name_binding_changed",
-                "registry_contract_instance_id":selected.contract_instance_id.to_string(),
-            }),
-        )?;
-        append_terminal_boundaries(
-            &mut release,
-            state,
-            Some(&displaced_registration),
-            &new_token,
-            "TokenRegenerated",
-        );
+        let mut displaced_output = Interpreted::new();
+        if displaced.raw_label.is_some() {
+            let displaced_registration = V2TokenState {
+                resolver: None,
+                subregistry: None,
+                ..displaced.clone()
+            };
+            displaced_output = token_state_event(
+                selected,
+                "RegistrationReleased",
+                event.newTokenId,
+                Some(&displaced_registration),
+                json!({
+                    "source_event":"TokenRegenerated",
+                    "terminal_reason":"registry_name_binding_changed",
+                    "registry_contract_instance_id":selected.contract_instance_id.to_string(),
+                }),
+            )?;
+            append_terminal_boundaries(
+                &mut displaced_output,
+                state,
+                Some(&displaced_registration),
+                &new_token,
+                "TokenRegenerated",
+            );
+        }
         let mut candidates = displaced.resolver_discovery_aliases.clone();
         candidates.insert(new_token.clone());
         let mut protected_resolver_tokens =
             state.live_v2_resolver_tokens_sharing(&raw.emitting_address, &candidates);
         protected_resolver_tokens.extend(linked.resolver_discovery_aliases.iter().cloned());
-        let protected_resolver_keys =
-            resolver_discovery_keys(raw, Some(event.oldTokenId), &protected_resolver_tokens)?;
+        let protected_resolver_keys = resolver_discovery_keys(
+            raw,
+            linked.resolver.is_some().then_some(event.oldTokenId),
+            &protected_resolver_tokens,
+        )?;
         append_token_discovery_closures(
-            &mut release,
+            &mut displaced_output,
             raw,
             event.newTokenId,
             Some(displaced),
             &protected_resolver_keys,
         )?;
-        output.append(&mut release);
+        output.append(&mut displaced_output);
     }
     match selected.event.name.as_str() {
         "TokenRegenerated" => {
