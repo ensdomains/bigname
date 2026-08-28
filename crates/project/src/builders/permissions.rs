@@ -84,6 +84,33 @@ pub(super) async fn build(
         latest AS (
             SELECT * FROM ranked WHERE latest_rank = 1
         ),
+        v2_registration_current AS (
+            SELECT DISTINCT ON (event.resource_id)
+                   event.resource_id, event.event_kind, event.after_state
+            FROM project_events event
+            WHERE event.resource_id IS NOT NULL
+              AND (
+                  (
+                      event.event_kind IN (
+                          'RegistrationGranted', 'RegistrationReserved'
+                      )
+                      AND event.source_family IN (
+                          'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
+                      )
+                  )
+                  OR (
+                      event.event_kind = 'RegistrationReleased'
+                      AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+                      AND event.after_state ->> 'derived_from' = 'interpreter_state'
+                      AND event.after_state ->> 'terminal_reason' =
+                          'registry_name_binding_expired'
+                  )
+              )
+            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ),
         modifiers AS (
             SELECT DISTINCT ON (event.resource_id)
                    event.*,
@@ -267,6 +294,7 @@ pub(super) async fn build(
         FROM latest event
         LEFT JOIN modifiers modifier USING (resource_id)
         LEFT JOIN wrapper_expiries wrapper_expiry USING (resource_id)
+        LEFT JOIN v2_registration_current registration USING (resource_id)
         LEFT JOIN target_time ON TRUE
         CROSS JOIN wrapper_constants
         CROSS JOIN LATERAL (
@@ -338,6 +366,14 @@ pub(super) async fn build(
             END AS effective_powers
         ) masked
         WHERE jsonb_array_length(masked.effective_powers) > 0
+          AND NOT COALESCE(
+              registration.event_kind = 'RegistrationReleased'
+              AND registration.after_state ->> 'source_event' = 'RegistryPathExpired'
+              AND registration.after_state ->> 'derived_from' = 'interpreter_state'
+              AND registration.after_state ->> 'terminal_reason' =
+                  'registry_name_binding_expired',
+              FALSE
+          )
         ORDER BY event.resource_id, event.subject, event.scope
         "#,
     )

@@ -824,8 +824,10 @@ same pointer-family restriction. When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
 resource-less. This does not restore a current binding: name and record reads
-join inventory through `name_current.resource_id`, which remains null for the
-released or expired name. ENSv2 stores resolver records by node and version.
+join inventory through `name_current.resource_id`, which remains null for an
+explicitly released row. A state-derived ENSv2 expiry release removes the
+`name_current` row entirely, leaving the retained inventory reachable only
+through history. ENSv2 stores resolver records by node and version.
 `setName` passes
 part zero, selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no
@@ -981,6 +983,9 @@ unchanged; Project
 clears only the rebuildable current summary when the served projection timestamp
 passes wrapper expiry. Permission reads join this current summary by
 `resource_id` rather than persisting a second copy in `permissions_current`.
+For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
+permission rows without removing its partial-coverage summary. A same-token registration rebound
+readmits retained grants; a new versioned resource receives grants only from its own permission events.
 
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
@@ -995,7 +1000,11 @@ complete the manifest-sync-required Ingest redo for the widened address/topic
 intervals before the shared interpreter content-hash rotation permits the
 planned full-history Interpret and Project walk. A fresh deployment instead
 loads the final manifests before its block-zero historical walk, so the new raw
-facts arrive in that initial pass.
+facts arrive in that initial pass. The ENSv2 expiry Project fold also rotates
+the shared interpreter content hash without changing raw facts or
+normalized-event semantics; the expiry interpretation slice must not be served
+before its paired Project fold is deployed and that coherent replay and rebuild
+has completed.
 
 ## Snapshot serving
 

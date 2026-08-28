@@ -36,6 +36,16 @@ loc = 683
 justification = "The exact-name authority selector keeps proof, released tombstone, and released-regime arm rules in one auditable query; the released-regime clause belongs next to the tombstone rules whose positions it shares, and the file stays under the review threshold."
 
 [[files]]
+path = "crates/project/src/builders/name_current.rs"
+loc = 638
+justification = "Current-name selection keeps authority-scoped lifecycle summaries and the narrowly provenance-gated ENSv2 expiry tombstone in one query so mixed-authority fallbacks and history-only retirement remain reviewable together."
+
+[[files]]
+path = "crates/project/src/builders/permissions.rs"
+loc = 629
+justification = "Effective permission folding keeps wrapper fuse masking, partial-coverage summaries, and the narrowly provenance-gated ENSv2 expiry tombstone in one resource-keyed projection boundary."
+
+[[files]]
 path = "crates/storage/src/record_inventory/snapshot_reads.rs"
 loc = 612
 justification = "Snapshot admission, anchor fallback, and canonical-lineage proof remain together; this slice ratchets the file below its base allowance without expanding its responsibilities."

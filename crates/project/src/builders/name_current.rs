@@ -18,7 +18,9 @@ pub(super) async fn build(
                resource.token_lineage_id, binding.binding_kind,
                jsonb_build_object(
                    'registration', jsonb_build_object(
-                       'status', CASE registration.event_kind
+                       'status', CASE COALESCE(registration.event_kind, CASE
+                           WHEN COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2'
+                           THEN registration_current.event_kind END)
                            WHEN 'RegistrationReleased' THEN 'released'
                            WHEN 'RegistrationReserved' THEN 'reserved'
                            WHEN 'RegistrationGranted' THEN 'active'
@@ -51,7 +53,10 @@ pub(super) async fn build(
                                    'ENSv1 wrapper effective control is not yet projected'
                            )
                        ELSE jsonb_build_object(
-                           'status', status.after_state ->> 'status',
+                           'status', COALESCE(
+                               status.after_state ->> 'status', CASE WHEN COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2'
+                               THEN registration_current.after_state ->> 'status' END
+                           ),
                            'expiry', CASE
                                WHEN expiry.expiry_seconds IS NULL THEN NULL
                                ELSE to_jsonb(to_char(
@@ -222,6 +227,31 @@ pub(super) async fn build(
                      event.normalized_event_id DESC
             LIMIT 1
         ) registration_latest ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT event.event_kind, event.after_state
+            FROM project_events event
+            WHERE event.logical_name_id = surface.logical_name_id
+              AND (
+                  (
+                      event.event_kind IN (
+                          'RegistrationGranted', 'RegistrationReserved'
+                      )
+                      AND event.source_family IN (
+                          'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
+                      )
+                  )
+                  OR (
+                      event.event_kind = 'RegistrationReleased'
+                      AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+                      AND event.after_state ->> 'derived_from' = 'interpreter_state'
+                      AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
+                  )
+              )
+            ORDER BY event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+            LIMIT 1
+        ) registration_current ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.*, lineage.block_timestamp
             FROM project_authority_events event
@@ -587,6 +617,14 @@ pub(super) async fn build(
         ) support
         WHERE surface.visibility_state = 'active'
           AND surface.raw_name <> ''
+          AND NOT COALESCE(
+              registration_current.event_kind = 'RegistrationReleased'
+              AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired'
+              AND registration_current.after_state ->> 'derived_from' = 'interpreter_state'
+              AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
+              AND COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2',
+              FALSE
+          )
         ORDER BY surface.logical_name_id
         "#,
     )
