@@ -294,10 +294,10 @@ The no-value `TextChanged(bytes32,string,string)` event — the legacy signature
 
 The `sepolia` deployment profile currently admits five ENSv2 families from the admitted post-audit 2026-06-29 Sepolia deployment — archived upstream at `contracts/deployments/sepolia-20260629-r1/` (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/.deployment.json:L4 @ ens_v2@a971bd64); upstream's 2026-07-30 redeploy is not admitted (upstream: .refs/ens_v2/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2@a971bd64) (see [`upstream.md` § Known divergences](upstream.md#known-divergences)) — under `manifests/sepolia/ethereum/ens/`, all in `deployment_epoch = "ens_v2_sepolia_post_audit"`:[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
 
-- `ens_v2_root_l1` — `RootRegistry` at `0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c`, `start_block = 11163319`. Tokenized, [resource](glossary.md)-scoped permissioned registry seed for discovery and parent graph state.[^v2-pr-l22][^v2-pr-l28]
+- `ens_v2_root_l1` — `RootRegistry` at `0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c`, `start_block = 11163319`. The admitted deployment artifact identifies that address and names the contract type `PermissionedRegistry`. (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/RootRegistry.json:L2 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/RootRegistry.json:L1670 @ ens_v2@a971bd64) It is a tokenized, [resource](glossary.md)-scoped permissioned registry seed for parent graph state.[^v2-pr-l22][^v2-pr-l28] Its `root_registry` role records `subregistry` edges as name topology only: they do not admit or watch the child registry without an independent `RegistryCreated` announcement. The same role separately admits `resolver` addresses through `reachable_from_root`, targeting `ens_v2_resolver_l1`. `PermissionedRegistry` explicitly emits `ResolverUpdated` when a resolver is set and also emits it when registration supplies a nonzero resolver. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150-L154 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L477-L478 @ ens_v2@a971bd64) The RootRegistry manages TLDs, so its empty suffix anchor represents a registered root label as the existing single-label logical name; the root-discovery projection regression proves that its resolver pointer and records attach to that same resource rather than creating a separate serving model. (upstream: .refs/ens_v2/docs/indexing-ensv2-events.md:L505-L509 @ ens_v2@a971bd64)
 - `ens_v2_registry_l1` — `ETHRegistry` at `0x67b728a792e789a8978b30cf1b3b641f19354b43`, `start_block = 11163391`, plus registry instances announced by `RegistryCreated()`. Direct `PermissionedRegistry` construction emits the announcement first; a `UserRegistry` proxy emits it during initialization. It admits the emitting address from that exact log position without requiring a parent link. `UserRegistryImpl` at `0x840fa461059862ea466a711e8c98c8de732061c0` is implementation metadata, not a separate owner. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L43 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L47 @ ens_v2_sepolia_20260629@ccaeb58)[^v2-userreg-l15]
 - `ens_v2_registrar_l1` — `ETHRegistrar` at `0xa4449a0dd2b83007553d9b1d28b583a46a805a30`, `start_block = 11163403`. Admitted registration and renewal lifecycle facts; registered-name resource identity links back to the registry resource.[^v2-ethrc-l49][^v2-ethrc-l173]
-- `ens_v2_resolver_l1` — registry-discovered resolver contract instances retain the manifest-configured normalized record and record-version observations. `PermissionedResolver` instances additionally provide alias, named-resource, and resolver-scoped EAC events. Resolver-local projection is supported only when the proxy's latest canonical ERC-1967 `Upgraded` event names an implementation in the active manifest's `resolver_implementations` list. The current declared `PermissionedResolverImpl` is `0x7e4b2d59938930168024201752ee5503df402303`; the contract inherits UUPS upgradeability and its deployment ABI exposes `Upgraded(address)`.[^v2-deploy-pres][^v2-pres-uups][^v2-pres-upgraded] A manifest admission change reclassifies the affected resolver inline during project-phase publication. No code-hash observation participates.
+- `ens_v2_resolver_l1` — resolver contract instances discovered from either `ens_v2_registry_l1` or `ens_v2_root_l1` retain the manifest-configured normalized record and record-version observations. `PermissionedResolver` instances additionally provide alias, named-resource, and resolver-scoped EAC events. Resolver-local projection is supported only when the proxy's latest canonical ERC-1967 `Upgraded` event names an implementation in the active manifest's `resolver_implementations` list. The current declared `PermissionedResolverImpl` is `0x7e4b2d59938930168024201752ee5503df402303`; the contract inherits UUPS upgradeability and its deployment ABI exposes `Upgraded(address)`.[^v2-deploy-pres][^v2-pres-uups][^v2-pres-upgraded] A manifest admission change reclassifies the affected resolver inline during project-phase publication. No code-hash observation participates.
 
 The fifth family, `ens_v2_migration_l1`, covers fixed ENSv1→ENSv2 migration
 controllers, terminal-holder and renewal-bridge markers, factory history,
@@ -1148,6 +1148,38 @@ only `ResolverChanged` from `normalized_events` instead causes a loud,
 recoverable Interpret halt on the next selected `ResolverUpdated`, but an empty
 rebuild can likewise clear the preceding invalidation. Other ABI events
 continue through the ordinary watch-plan widening path.
+
+The `ens_v2_root_l1` resolver rule is the concrete same-version case: its
+`ResolverUpdated` producer and watch topic were already declared and selected,
+but adding the missing rule still widens [discovery-rule
+coverage](glossary.md#discovery-rule-widening-and-narrowing) because Interpret
+can now materialize resolver address intervals. The active manifest remains
+version 2; synchronization updates that manifest tuple in place and replaces
+its child rule rows. With no completed retained Ingest range overlapping the
+RootRegistry start, synchronization accepts the change, requests no Ingest
+redo solely for the rule, and replaces non-null Interpret and Project content
+hashes with the [manifest-authority
+marker](glossary.md#manifest-authority-marker). With overlapping completed
+retained Ingest history, synchronization rejects the transaction atomically:
+the prior manifest payload, child rules, authority history, phase hashes, and
+redo state remain unchanged. That retained database cannot install the rule in
+place; replacing it with a rebuilt database does not make one pass sufficient.
+On the replacement database, and on any fresh rebuild, historical coverage
+requires a second full-history Ingest pass after Interpret has materialized the
+resolver address intervals. Use `phase-runner redo --phase ingest` with the
+Sepolia manifest root explicitly selected (`--manifests-root
+manifests/sepolia`) and the required database, chain, and source options while
+normal and Live processing are held at a fixed target already completed by both
+Interpret and Project, with Interpret's discovery edges materialized through
+that target. Cover the manifest-declared RootRegistry start block through that
+target, then explicitly rerun Interpret and Project through the same target. If
+[stored-history
+verification](glossary.md#stored-history-verification) halted on the missing
+logs, restart the normal runner to complete Verify and keep serving traffic
+disabled until Verify succeeds; otherwise complete Verify before resuming
+normal and Live processing. A fresh rebuild alone remains insufficient until
+[#652](https://github.com/ensdomains/bigname/issues/652) makes the second pass
+and recovery routing automatic.
 
 `registry_announcement` rules use the same namespace-scoped comparison. In the
 `ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest

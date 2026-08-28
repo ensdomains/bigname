@@ -594,6 +594,44 @@ impl Drop for WatchManifestFixture {
     }
 }
 
+fn write_root_resolver_rule_fixture(
+    fixture: &WatchManifestFixture,
+    include_resolver_rule: bool,
+) -> Result<()> {
+    fixture.write_discovered_resolver_namespaces("test", "peer", true)?;
+    fs::remove_dir_all(fixture.root.join("peer"))?;
+    fixture.use_test_root_source()?;
+    let path = fixture.root.join("test/ens_v2_root_l1/v2.toml");
+    let resolver_rule = r#"[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "root_registry"
+admission = "reachable_from_root""#;
+    let subregistry_rule = r#"[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "root_registry"
+admission = "reachable_from_root""#;
+    let rules = if include_resolver_rule {
+        format!("{subregistry_rule}\n\n{resolver_rule}")
+    } else {
+        subregistry_rule.to_owned()
+    };
+    let manifest = fs::read_to_string(&path)?
+        .replace(
+            r#"[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root""#,
+            &rules,
+        )
+        .replace(r#"role = "registry""#, r#"role = "root_registry""#)
+        .replace(
+            r#"emitter_roles = ["registry"]"#,
+            r#"emitter_roles = ["root_registry"]"#,
+        );
+    fs::write(path, manifest)?;
+    Ok(())
+}
+
 fn loopback_runner(scratch: &ScratchDatabase, instance_id: &str) -> Result<PhaseRunner> {
     Ok(PhaseRunner::new(
         scratch.runner(),
@@ -2847,6 +2885,155 @@ normalized_events = ["ResolverChanged"]
         "{error}"
     );
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn root_resolver_rule_addition_is_accepted_before_retained_coverage() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_root_resolver_fresh").await?;
+    let chain_id = "manifest-root-resolver-fresh";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    write_root_resolver_rule_fixture(&fixture, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    PhaseStore::new(scratch.pool().clone())
+        .initialize_chain(chain_id)
+        .await?;
+    let seeded_hash = "root-resolver-rule-before-authority";
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .bind(seeded_hash)
+    .execute(scratch.pool())
+    .await?;
+    let before: (i64, String, i64, i64) = sqlx::query_as(
+        "SELECT manifest_id, deployment_label, manifest_version, applied_change_count
+         FROM manifest_versions
+         WHERE chain_id = $1 AND source_family = 'ens_v2_root_l1'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    write_root_resolver_rule_fixture(&fixture, true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    let after: (i64, String, i64, i64) = sqlx::query_as(
+        "SELECT manifest_id, deployment_label, manifest_version, applied_change_count
+         FROM manifest_versions
+         WHERE chain_id = $1 AND source_family = 'ens_v2_root_l1'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(after.0, before.0);
+    assert_eq!(after.1, "fixture");
+    assert_eq!(after.2, 2);
+    assert_eq!(after.3, before.3 + 1);
+    let rules: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT edge_kind, from_role, admission
+         FROM manifest_discovery_rules WHERE manifest_id = $1 ORDER BY edge_kind",
+    )
+    .bind(after.0)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        rules,
+        [
+            (
+                "resolver".into(),
+                "root_registry".into(),
+                "reachable_from_root".into()
+            ),
+            (
+                "subregistry".into(),
+                "root_registry".into(),
+                "reachable_from_root".into()
+            ),
+        ]
+    );
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    let hashes: Vec<String> = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(hashes.len(), 2);
+    assert!(
+        hashes
+            .iter()
+            .all(|hash| { hash != seeded_hash && hash.starts_with("manifest-authority:") })
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn root_resolver_rule_addition_rejects_retained_history_atomically() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_root_resolver_retained").await?;
+    let chain_id = "manifest-root-resolver-retained";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    write_root_resolver_rule_fixture(&fixture, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range(&scratch, chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = phase_name || '-before-root-rule'
+         WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    let before = root_resolver_authority_state(scratch.pool(), chain_id).await?;
+
+    write_root_resolver_rule_fixture(&fixture, true)?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("retained RootRegistry history must reject resolver-rule widening");
+    assert!(
+        error.to_string().contains("discovery rule widening"),
+        "{error}"
+    );
+    let after = root_resolver_authority_state(scratch.pool(), chain_id).await?;
+    assert_eq!(
+        after, before,
+        "the rejected synchronization must roll back atomically"
+    );
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    scratch.cleanup().await
+}
+
+async fn root_resolver_authority_state(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<serde_json::Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'manifests', (
+                 SELECT jsonb_agg(to_jsonb(manifest) ORDER BY source_family)
+                 FROM manifest_versions manifest WHERE chain_id = $1
+             ),
+             'rules', (
+                 SELECT COALESCE(jsonb_agg(to_jsonb(rule) ORDER BY source_family, edge_kind), '[]')
+                 FROM manifest_discovery_rules rule
+                 JOIN manifest_versions manifest USING (manifest_id)
+                 WHERE manifest.chain_id = $1
+             ),
+             'history', (
+                 SELECT COALESCE(jsonb_agg(to_jsonb(event) ORDER BY normalized_event_id), '[]')
+                 FROM normalized_events event
+                 WHERE chain_id = $1 AND event_kind = 'SourceManifestUpdated'
+             ),
+             'phases', (
+                 SELECT jsonb_agg(to_jsonb(state) ORDER BY phase_name)
+                 FROM chain_phase_state state WHERE chain_id = $1
+             )
+         )",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 #[tokio::test]
