@@ -192,7 +192,7 @@ WITH edges AS (
     SELECT event.namespace || ':' || lower(event.after_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.after_state ->> 'child_node') AS child_id
     FROM project_scope_topology_current scope
-    JOIN (
+    CROSS JOIN LATERAL (
         SELECT namespace, chain_id, block_number, block_hash, after_state
         FROM normalized_events
 -- issue-435-after-node-predicate-begin
@@ -205,11 +205,12 @@ WHERE event_kind = 'SubregistryChanged'
   AND after_state ->> 'child_node' IS NOT NULL
   AND btrim(after_state ->> 'child_node') <> ''
 -- issue-435-after-node-predicate-end
+          AND chain_id = $1
+          AND block_number <= $2
+          AND namespace || ':' || lower(after_state ->> 'node') =
+              scope.logical_name_id
+        OFFSET 0
     ) event
-      ON event.chain_id = $1
-     AND event.block_number <= $2
-     AND event.namespace || ':' || lower(event.after_state ->> 'node') =
-         scope.logical_name_id
     JOIN chain_lineage lineage
       ON lineage.chain_id = event.chain_id
      AND lineage.block_number = event.block_number
@@ -226,7 +227,7 @@ WITH edges AS (
     SELECT event.namespace || ':' || lower(event.after_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.after_state ->> 'child_node') AS child_id
     FROM project_scope_topology_current scope
-    JOIN (
+    CROSS JOIN LATERAL (
         SELECT namespace, chain_id, block_number, block_hash, after_state
         FROM normalized_events
 -- issue-435-after-child-predicate-begin
@@ -239,11 +240,12 @@ WHERE event_kind = 'SubregistryChanged'
   AND after_state ->> 'child_node' IS NOT NULL
   AND btrim(after_state ->> 'child_node') <> ''
 -- issue-435-after-child-predicate-end
+          AND chain_id = $1
+          AND block_number <= $2
+          AND namespace || ':' || lower(after_state ->> 'child_node') =
+              scope.logical_name_id
+        OFFSET 0
     ) event
-      ON event.chain_id = $1
-     AND event.block_number <= $2
-     AND event.namespace || ':' || lower(event.after_state ->> 'child_node') =
-         scope.logical_name_id
     JOIN chain_lineage lineage
       ON lineage.chain_id = event.chain_id
      AND lineage.block_number = event.block_number
@@ -260,7 +262,7 @@ WITH edges AS (
     SELECT event.namespace || ':' || lower(event.before_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.before_state ->> 'child_node') AS child_id
     FROM project_scope_topology_current scope
-    JOIN (
+    CROSS JOIN LATERAL (
         SELECT namespace, chain_id, block_number, block_hash, before_state
         FROM normalized_events
 -- issue-435-before-node-predicate-begin
@@ -273,11 +275,12 @@ WHERE event_kind = 'SubregistryChanged'
   AND before_state ->> 'child_node' IS NOT NULL
   AND btrim(before_state ->> 'child_node') <> ''
 -- issue-435-before-node-predicate-end
+          AND chain_id = $1
+          AND block_number <= $2
+          AND namespace || ':' || lower(before_state ->> 'node') =
+              scope.logical_name_id
+        OFFSET 0
     ) event
-      ON event.chain_id = $1
-     AND event.block_number <= $2
-     AND event.namespace || ':' || lower(event.before_state ->> 'node') =
-         scope.logical_name_id
     JOIN chain_lineage lineage
       ON lineage.chain_id = event.chain_id
      AND lineage.block_number = event.block_number
@@ -294,7 +297,7 @@ WITH edges AS (
     SELECT event.namespace || ':' || lower(event.before_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.before_state ->> 'child_node') AS child_id
     FROM project_scope_topology_current scope
-    JOIN (
+    CROSS JOIN LATERAL (
         SELECT namespace, chain_id, block_number, block_hash, before_state
         FROM normalized_events
 -- issue-435-before-child-predicate-begin
@@ -307,11 +310,12 @@ WHERE event_kind = 'SubregistryChanged'
   AND before_state ->> 'child_node' IS NOT NULL
   AND btrim(before_state ->> 'child_node') <> ''
 -- issue-435-before-child-predicate-end
+          AND chain_id = $1
+          AND block_number <= $2
+          AND namespace || ':' || lower(before_state ->> 'child_node') =
+              scope.logical_name_id
+        OFFSET 0
     ) event
-      ON event.chain_id = $1
-     AND event.block_number <= $2
-     AND event.namespace || ':' || lower(event.before_state ->> 'child_node') =
-         scope.logical_name_id
     JOIN chain_lineage lineage
       ON lineage.chain_id = event.chain_id
      AND lineage.block_number = event.block_number

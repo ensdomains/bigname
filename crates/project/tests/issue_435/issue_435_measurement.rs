@@ -88,6 +88,7 @@ async fn load(pool: &PgPool, start: i64, rows: i64) -> Result<f64> {
     Ok(started.elapsed().as_secs_f64())
 }
 
+#[rustfmt::skip]
 async fn configure_graph(pool: &PgPool, frontier: i64, depth: i64) -> Result<()> {
     sqlx::query(
         "WITH numbered AS (
@@ -105,10 +106,7 @@ async fn configure_graph(pool: &PgPool, frontier: i64, depth: i64) -> Result<()>
              before_state = CASE WHEN ordinal <= $1 * $2 OR ordinal % 2 = 0 THEN jsonb_build_object('node', '0x' || lpad(to_hex(parent_number), 64, '0'), 'child_node', '0x' || lpad(to_hex(parent_number + 1), 64, '0')) ELSE '{}'::jsonb END
          FROM endpoints WHERE event.normalized_event_id = endpoints.normalized_event_id",
     ).bind(frontier).bind(depth).execute(pool).await?;
-    sqlx::query("ANALYZE normalized_events")
-        .execute(pool)
-        .await?;
-    Ok(())
+    sqlx::query("ANALYZE normalized_events").execute(pool).await?; Ok(())
 }
 
 #[rustfmt::skip]
