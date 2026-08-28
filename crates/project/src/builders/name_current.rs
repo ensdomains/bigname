@@ -229,7 +229,7 @@ pub(super) async fn build(
         ) registration_latest ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.event_kind, event.after_state, event.resource_id
-            FROM (SELECT DISTINCT ON (event.resource_id) event.* FROM project_events event
+            FROM (SELECT DISTINCT ON (COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'))) event.* FROM project_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND (
                   (event.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
@@ -242,11 +242,11 @@ pub(super) async fn build(
               AND (event.event_kind = 'RegistrationReleased' OR NOT EXISTS (
                   SELECT 1 FROM project_events terminal
                   WHERE terminal.logical_name_id = event.logical_name_id
-                    AND terminal.resource_id IS NOT DISTINCT FROM event.resource_id
+                    AND COALESCE(terminal.resource_id::text, CONCAT(COALESCE(terminal.after_state ->> 'registry_contract_instance_id', terminal.raw_fact_ref ->> 'emitting_address', terminal.after_state ->> 'registry'), ':', terminal.after_state ->> 'token_id')) = COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'))
                     AND terminal.event_kind = 'RegistrationReleased'
                     AND ROW(COALESCE(terminal.block_number, -1), COALESCE(terminal.transaction_index, -1), COALESCE(terminal.log_index, -1)) >= ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1))
               ))
-            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
+            ORDER BY COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id')), event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST, (event.event_kind = 'RegistrationReleased') DESC,
                      event.normalized_event_id DESC) event
             ORDER BY (event.event_kind = 'RegistrationReleased'), event.block_number DESC NULLS LAST,
