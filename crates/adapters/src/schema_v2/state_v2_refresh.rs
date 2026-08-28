@@ -230,16 +230,16 @@ impl State {
                 .then_some(token.resource_id)
                 .flatten();
             let changed = previous != name || previous_shadow != shadow_name;
-            let expiry_retirement = name.is_none()
-                && shadow_name.is_none()
-                && (resource_retirements.contains(&key)
-                    || (!resource_retirements.is_empty()
-                        && (previous.is_some() || previous_shadow.is_some())));
             let resource_retirement = resource_retirements.contains(&key)
                 && token.resource_id.is_some()
                 && !token.expiry_retirement_emitted
                 && previous.is_none()
                 && previous_shadow.is_none();
+            let expiry_retirement = (changed || resource_retirement)
+                && current_logical_name_id.is_none()
+                && (resource_retirements.contains(&key)
+                    || (!resource_retirements.is_empty()
+                        && (previous.is_some() || previous_shadow.is_some())));
             if changed || resource_retirement {
                 if token.registration.is_some()
                     && let Some(previous) = previous.as_ref()
