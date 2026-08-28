@@ -898,9 +898,9 @@ async fn manifest_watch_comparison_trips_only_for_covered_widenings() -> Result<
 }
 
 #[tokio::test]
-async fn manifest_watch_comparison_refuses_coverage_below_the_persisted_floor() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_manifest_watch_floor_refusal").await?;
-    let chain_id = "manifest-watch-floor-refusal";
+async fn manifest_watch_comparison_refuses_before_first_persisted_interval() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_watch_leading_gap").await?;
+    let chain_id = "manifest-watch-leading-gap";
     let fixture = WatchManifestFixture::new(chain_id)?;
     fixture.write_with_start(false, false, 1)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
@@ -908,7 +908,7 @@ async fn manifest_watch_comparison_refuses_coverage_below_the_persisted_floor() 
 
     // Construct the stored address interval left by the former producers of this state. The
     // desired declaration promises block 1, while re-admission can only reopen after the stored
-    // block-5 interval and therefore has a persisted floor of block 5.
+    // block-5 interval and therefore leaves blocks 1 through 4 uncovered.
     sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE chain_id = $1")
         .bind(chain_id)
         .execute(scratch.pool())
@@ -925,10 +925,10 @@ async fn manifest_watch_comparison_refuses_coverage_below_the_persisted_floor() 
 
     let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
         .await
-        .expect_err("compiled-watch coverage below the persisted Ingest floor must be refused");
+        .expect_err("compiled-watch coverage before the first interval must be refused");
     let message = error.to_string();
     assert!(message.contains("promised coverage start 1"), "{message}");
-    assert!(message.contains("persisted ingest floor 5"), "{message}");
+    assert!(message.contains("uncovered interval 1..=4"), "{message}");
     assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
 
     fixture.move_source_a_root_start(1, 5)?;
@@ -936,15 +936,182 @@ async fn manifest_watch_comparison_refuses_coverage_below_the_persisted_floor() 
     assert_eq!(
         required_ingest_redo(scratch.pool(), chain_id).await?,
         Some((5, 10)),
-        "a normal declared start at the persisted floor must still sync"
+        "a declaration at the first continuously covered block must still sync"
     );
     scratch.cleanup().await
 }
 
 #[tokio::test]
-async fn empty_retired_intervals_do_not_lower_the_persisted_watch_floor() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_manifest_empty_interval_floor").await?;
-    let chain_id = "manifest-empty-interval-floor";
+async fn manifest_watch_comparison_refuses_redeclared_start_across_epoch_gap() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_watch_epoch_gap_probe").await?;
+    let chain_id = "manifest-watch-epoch-gap-probe";
+    let address = "0x0000000000000000000000000000000000000004";
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    let path = fixture.root.join("test/test_events/v1.toml");
+
+    // 1. Declare address A at start 5; sync.
+    fixture.write_with_start(false, false, 5)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    // 2. Retire A at head 5.
+    seed_chain_head(scratch.pool(), chain_id, 5).await?;
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen(
+            address,
+            "0x0000000000000000000000000000000000000005",
+            1,
+        ),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    // 3. Re-declare A at start 10; sync.
+    fixture.write_with_start(false, false, 10)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    // 4. Retire A at head 10.
+    advance_chain_head(scratch.pool(), chain_id, 10).await?;
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replacen(
+            address,
+            "0x0000000000000000000000000000000000000006",
+            1,
+        ),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+
+    let epochs_before: Vec<AddressEpoch> = sqlx::query_as(
+        "SELECT contract_instance_address_id, contract_instance_id,
+                active_from_block_number, active_to_block_number,
+                deactivated_at IS NULL
+         FROM contract_instance_addresses
+         WHERE chain_id = $1 AND lower(address) = $2
+         ORDER BY contract_instance_address_id",
+    )
+    .bind(chain_id)
+    .bind(address)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(epochs_before.len(), 2);
+    assert_eq!(
+        epochs_before
+            .iter()
+            .map(|epoch| (epoch.2, epoch.3, epoch.4))
+            .collect::<Vec<_>>(),
+        [(Some(5), Some(5), false), (Some(10), Some(10), false)]
+    );
+    let persisted_before = exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?;
+
+    // 5. Re-declare A at start 5. The discontinuous promise must fail before commit.
+    fixture.write_with_start(false, false, 5)?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("persisted blocks 6 through 9 do not honor the re-declared promise");
+    let message = error.to_string();
+    let transfer = format!("{:#x}", keccak256(b"Transfer(address,address,uint256)"));
+    assert!(
+        message.contains("compiled-watch comparison refused promised coverage start 5")
+            && message.contains("uncovered interval 6..=9")
+            && message.contains(chain_id)
+            && message.contains("source family test_events")
+            && message.contains(address)
+            && message.contains(&transfer),
+        "unexpected refusal: {message}"
+    );
+    assert!(
+        message.contains("Raise the declaration to the first continuously covered start")
+            && message.contains("rebuild from a fresh database/from-zero ingest")
+            && message.contains("separately planned repair")
+            && message.contains("ordinary address-scoped redo")
+            && message.contains("cannot fill this gap")
+            && message.contains("did not mark these blocks repaired"),
+        "missing operator recovery instructions: {message}"
+    );
+    assert_eq!(
+        exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?,
+        persisted_before,
+        "the refused synchronization must roll back every persisted mutation"
+    );
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+
+    fixture.write_with_start(false, false, 10)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let accepted_epochs: Vec<AddressEpoch> = sqlx::query_as(
+        "SELECT contract_instance_address_id, contract_instance_id,
+                active_from_block_number, active_to_block_number,
+                deactivated_at IS NULL
+         FROM contract_instance_addresses
+         WHERE chain_id = $1 AND lower(address) = $2
+         ORDER BY contract_instance_address_id",
+    )
+    .bind(chain_id)
+    .bind(address)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        accepted_epochs
+            .iter()
+            .map(|epoch| (epoch.2, epoch.3, epoch.4))
+            .collect::<Vec<_>>(),
+        [
+            (Some(5), Some(5), false),
+            (Some(10), Some(10), false),
+            (Some(11), None, true),
+        ]
+    );
+    let filter = load_persisted_watch_filter(scratch.pool(), chain_id, 5, 11).await?;
+    assert!(!filter.includes(address, &transfer, 9));
+    assert!(filter.includes(address, &transfer, 10));
+    assert!(filter.includes(address, &transfer, 11));
+    let compiled_watch: serde_json::Value = sqlx::query_scalar(
+        "SELECT manifest_payload -> '_bigname_compiled_watch'
+         FROM manifest_versions
+         WHERE chain_id = $1 AND rollout_status = 'active'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    let entries = compiled_watch
+        .as_array()
+        .context("compiled watch plan must remain a JSON array")?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["emitter"]["kind"], "address");
+    assert_eq!(entries[0]["emitter"]["address"], address);
+    assert_eq!(entries[0]["topic0"], transfer);
+    assert_eq!(entries[0]["start"], 10);
+
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let repeated_watch: serde_json::Value = sqlx::query_scalar(
+        "SELECT manifest_payload -> '_bigname_compiled_watch'
+         FROM manifest_versions
+         WHERE chain_id = $1 AND rollout_status = 'active'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(repeated_watch, compiled_watch);
+    let repeated_epochs: Vec<AddressEpoch> = sqlx::query_as(
+        "SELECT contract_instance_address_id, contract_instance_id,
+                active_from_block_number, active_to_block_number,
+                deactivated_at IS NULL
+         FROM contract_instance_addresses
+         WHERE chain_id = $1 AND lower(address) = $2
+         ORDER BY contract_instance_address_id",
+    )
+    .bind(chain_id)
+    .bind(address)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(repeated_epochs, accepted_epochs);
+    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn empty_retired_intervals_do_not_fill_persisted_watch_gaps() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_empty_interval_gap").await?;
+    let chain_id = "manifest-empty-interval-gap";
     let fixture = WatchManifestFixture::new(chain_id)?;
     let path = fixture.root.join("test/test_events/v1.toml");
 
@@ -989,17 +1156,17 @@ async fn empty_retired_intervals_do_not_lower_the_persisted_watch_floor() -> Res
     fixture.write_with_start(false, false, 7)?;
     let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
         .await
-        .expect_err("empty retired intervals must not lower the persisted Ingest floor");
+        .expect_err("empty retired intervals must not fill persisted Ingest coverage gaps");
     let message = error.to_string();
     assert!(message.contains("promised coverage start 7"), "{message}");
-    assert!(message.contains("persisted ingest floor 10"), "{message}");
+    assert!(message.contains("uncovered interval 7..=9"), "{message}");
     scratch.cleanup().await
 }
 
 #[tokio::test]
-async fn desired_all_emitter_watch_covers_an_address_below_its_persisted_floor() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_manifest_desired_all_covers_floor").await?;
-    let chain_id = "manifest-desired-all-covers-floor";
+async fn desired_all_emitter_watch_covers_an_address_across_a_persisted_gap() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_desired_all_covers_gap").await?;
+    let chain_id = "manifest-desired-all-covers-gap";
     let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
     fixture.write_with_start(false, false, 1)?;
     let path = fixture.root.join("test/ens_v2_registry_l1/v1.toml");
@@ -1042,85 +1209,125 @@ status = "supported"
 }
 
 #[tokio::test]
-async fn removing_previous_all_emitter_keeps_sub_floor_address_coverage_backed() -> Result<()> {
+async fn combined_announcement_widening_and_all_emitter_removal_is_refused() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_previous_all_removed").await?;
     let chain_id = "manifest-previous-all-removed";
     let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
     fixture.write_with_start(false, false, 1)?;
     let path = fixture.root.join("test/ens_v2_registry_l1/v1.toml");
     let manifest = fs::read_to_string(&path)?.replace(
-        r#"[[abi.events]]
-name = "Transfer"
-fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
-emitter_roles = ["source_a"]
-normalized_events = []
-status = "supported"
-"#,
-        "",
+        "name = \"Transfer\"\nfragment = \"event Transfer(address indexed from, address indexed to, uint256 value)\"",
+        "name = \"TextChanged\"\nfragment = \"event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)\"",
     );
     fs::write(&path, manifest)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
     seed_completed_ingest_range_through(&scratch, chain_id, 10).await?;
 
-    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE chain_id = $1")
-        .bind(chain_id)
-        .execute(scratch.pool())
-        .await?;
     sqlx::query(
-        "UPDATE contract_instance_addresses
-         SET active_from_block_number = 5,
-             active_to_block_number = 5, active_to_block_hash = NULL, deactivated_at = now()
-         WHERE chain_id = $1 AND deactivated_at IS NULL",
+        "WITH closed AS (
+             UPDATE contract_instance_addresses SET active_from_block_number = 5, active_to_block_number = 5, active_to_block_hash = NULL, deactivated_at = now()
+             WHERE chain_id = $1 AND deactivated_at IS NULL RETURNING contract_instance_id, chain_id, address, source_manifest_id, provenance)
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id, provenance)
+         SELECT contract_instance_id, chain_id, address, 6, source_manifest_id, provenance FROM closed",
     )
     .bind(chain_id)
     .execute(scratch.pool())
     .await?;
-    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
-    assert_eq!(
-        required_ingest_redo(scratch.pool(), chain_id).await?,
-        Some((0, 10)),
-        "the all-emitter re-admission must back the address's sub-floor range"
-    );
 
-    let without_all =
-        WatchManifestFixture::with_source_family(chain_id, "test_events_all_removed")?;
-    without_all.write_with_start(false, false, 1)?;
-    let path = without_all
-        .root
-        .join("test/test_events_all_removed/v1.toml");
-    let manifest = fs::read_to_string(&path)?.replace(
-        r#"name = "Transfer"
-fragment = "event Transfer(address indexed from, address indexed to, uint256 value)""#,
-        r#"name = "RegistryCreated"
-fragment = "event RegistryCreated()""#,
+    let text_changed = format!(
+        "{:#x}",
+        keccak256(b"TextChanged(bytes32,string,string,string)")
     );
-    fs::write(&path, manifest)?;
-
-    sync_schema_v2_repository(scratch.pool(), &load_repository(&without_all.root)?)
-        .await
-        .expect("removing previous all-emitter scope must not refuse its covered address");
-    let active_watch_shape: (i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (
-                    WHERE entry -> 'emitter' ->> 'kind' = 'all'
-                ),
-                count(*) FILTER (
-                    WHERE entry -> 'emitter' ->> 'kind' = 'address'
-                )
-         FROM manifest_versions manifest
-         CROSS JOIN LATERAL jsonb_array_elements(
-             manifest.manifest_payload -> '_bigname_compiled_watch'
-         ) entry
-         WHERE manifest.chain_id = $1
-           AND manifest.rollout_status = 'active'",
+    sqlx::query(
+        "UPDATE manifest_versions SET manifest_payload = jsonb_set(manifest_payload, '{_bigname_compiled_watch}',
+             (manifest_payload -> '_bigname_compiled_watch') || jsonb_build_array(jsonb_build_object('emitter', jsonb_build_object('kind', 'all'), 'topic0', $2, 'start', 0)))
+         WHERE chain_id = $1 AND rollout_status = 'active'",
     )
     .bind(chain_id)
-    .fetch_one(scratch.pool())
+    .bind(&text_changed)
+    .execute(scratch.pool())
     .await?;
-    assert_eq!(active_watch_shape, (0, 1));
+    fixture.add_discovery_rule("registry_announcement")?;
+
+    let before_refusal = exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("same-sync widening must not license removal across an address gap");
+    let message = error.to_string();
+    assert!(message.contains("uncovered interval 1..=4"), "{message}");
+    assert!(
+        message.contains("Let any pending required Ingest redo on this chain complete")
+            && message.contains("split a combined manifest change"),
+        "{message}"
+    );
+    assert_eq!(
+        exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?,
+        before_refusal,
+        "the refusal must preserve the prior manifest, watch plan, address epochs, and redo state"
+    );
     assert_eq!(
         required_ingest_redo(scratch.pool(), chain_id).await?,
-        Some((0, 10)),
-        "removing all-emitter scope must preserve the redo that backs sub-floor coverage"
+        None,
+        "the same-sync registry-announcement redo must roll back with the refusal"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn removing_all_emitter_while_chain_redo_is_pending_uses_wait_recovery() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_pending_all_removed").await?;
+    let chain_id = "manifest-pending-all-removed";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v1_resolver_l1")?;
+    fixture.write_with_start(false, false, 1)?;
+    let path = fixture.root.join("test/ens_v1_resolver_l1/v1.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replace(
+            "name = \"Transfer\"\nfragment = \"event Transfer(address indexed from, address indexed to, uint256 value)\"",
+            "name = \"TextChanged\"\nfragment = \"event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)\"",
+        ),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 10).await?;
+    sqlx::query(
+        "WITH closed AS (
+             UPDATE contract_instance_addresses SET active_from_block_number = 5, active_to_block_number = 5, deactivated_at = now()
+             WHERE chain_id = $1 AND deactivated_at IS NULL RETURNING contract_instance_id, chain_id, address, source_manifest_id, provenance)
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id, provenance) SELECT contract_instance_id, chain_id, address, 6, source_manifest_id, provenance FROM closed",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo', redo_previous_phase_status = 'completed', redo_from_block_number = 0, redo_to_block_number = 10,
+             redo_previous_started_at = started_at, redo_previous_finished_at = finished_at, last_error = 'required downstream redo: unrelated fixture', started_at = now(), finished_at = NULL WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    let replacement = fixture.root.join("test/test_events_pending_removed");
+    fs::rename(fixture.root.join("test/ens_v1_resolver_l1"), &replacement)?;
+    let path = replacement.join("v1.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replace("ens_v1_resolver_l1", "test_events_pending_removed"),
+    )?;
+
+    let before_refusal = exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("any pending chain redo must conservatively gate all-emitter removal");
+    let message = error.to_string();
+    assert!(message.contains("Let any pending required Ingest redo on this chain complete"));
+    assert!(message.contains("split a combined manifest change"));
+    assert_eq!(
+        exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?,
+        before_refusal,
+        "the refusal must preserve the prior manifest, watch plan, address epochs, and redo state"
+    );
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 10))
     );
     scratch.cleanup().await
 }
@@ -3929,6 +4136,66 @@ async fn schema_v2_manifest_readmission_appends_an_address_epoch() -> Result<()>
     assert_eq!(rows[1].3, None);
     assert!(rows[1].4);
     scratch.cleanup().await
+}
+
+async fn exact_manifest_sync_snapshot(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<serde_json::Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'manifest_versions', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row) ORDER BY row.manifest_id)
+                 FROM (SELECT * FROM manifest_versions WHERE chain_id = $1) row
+             ), '[]'::jsonb),
+             'manifest_contract_instances', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row)
+                                  ORDER BY row.manifest_contract_instance_id)
+                 FROM (
+                     SELECT declaration.*
+                     FROM manifest_contract_instances declaration
+                     JOIN manifest_versions manifest
+                       ON manifest.manifest_id = declaration.manifest_id
+                     WHERE manifest.chain_id = $1
+                 ) row
+             ), '[]'::jsonb),
+             'manifest_discovery_rules', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row)
+                                  ORDER BY row.manifest_discovery_rule_id)
+                 FROM (
+                     SELECT rule.*
+                     FROM manifest_discovery_rules rule
+                     JOIN manifest_versions manifest
+                       ON manifest.manifest_id = rule.manifest_id
+                     WHERE manifest.chain_id = $1
+                 ) row
+             ), '[]'::jsonb),
+             'contract_instances', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row) ORDER BY row.contract_instance_id)
+                 FROM (SELECT * FROM contract_instances WHERE chain_id = $1) row
+             ), '[]'::jsonb),
+             'contract_instance_addresses', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row)
+                                  ORDER BY row.contract_instance_address_id)
+                 FROM (SELECT * FROM contract_instance_addresses WHERE chain_id = $1) row
+             ), '[]'::jsonb),
+             'discovery_edges', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row) ORDER BY row.discovery_edge_id)
+                 FROM (SELECT * FROM discovery_edges WHERE chain_id = $1) row
+             ), '[]'::jsonb),
+             'normalized_events', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row) ORDER BY row.normalized_event_id)
+                 FROM (SELECT * FROM normalized_events WHERE chain_id = $1) row
+             ), '[]'::jsonb),
+             'chain_phase_state', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(row) ORDER BY row.phase_name)
+                 FROM (SELECT * FROM chain_phase_state WHERE chain_id = $1) row
+             ), '[]'::jsonb)
+         )",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn seed_completed_ingest_range(

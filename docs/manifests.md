@@ -925,23 +925,45 @@ declared addresses remain explicit watch targets.
 Adding a less general target already covered by an all-emitter event does not
 count as widening.
 
-Synchronization refuses a newly widened direct-address watch when its declared
-start is earlier than the earliest block the stored Ingest intervals can honor
-and the desired compiled watch plan has no all-emitter entry for the same event
-topic. The transaction records no new coverage promise, and the error names
-both values as `promised coverage start <S>` and [`persisted ingest floor
-<F>`](glossary.md#persisted-ingest-floor). This bound is used only by the
-compiled-watch comparison.
-For a closed stored interval, only a non-empty intersection with the declared
-start contributes to that floor; an interval ending before that intersection
-starts cannot support the coverage promise.
-The operator may re-declare the address at or above `<F>`. To close and reopen
-instead, remove the declaration and synchronize, complete the full Interpret
-redo that closes the old stored interval, then restore the declaration and
-synchronize again; direct database edits are not supported. An all-emitter
-entry in the desired plan covers the direct address for that topic, so this
-refusal does not apply and any existing required Ingest redo continues to back
-the covered range.
+For each newly widened direct-address watch, synchronization checks the
+continuous union of [persisted Ingest
+coverage](glossary.md#persisted-ingest-coverage) for the same chain, source
+family, address, and event topic. Each usable address epoch contributes the
+inclusive intersection of its stored range with the declaration's start.
+Synchronization discards an empty intersection and a deactivated epoch with no
+finite end, sorts the remaining intervals, and merges overlap and adjacency.
+The resulting union must continuously cover the promised start through an
+open-ended final interval. A desired all-emitter entry for the same topic keeps
+the existing shortcut and covers the direct-address watch without this check.
+Whenever any required Ingest redo is pending on the chain, synchronization
+deliberately and conservatively refuses to remove a previous all-emitter watch
+if doing so would expose a gap in a desired direct-address watch. The redo need
+not have been stamped by that watch. Let it complete and retry; if one manifest
+change both widens registry-announcement coverage and removes the all-emitter
+watch, split the change so its redo completes first.
+The refusal preserves the previous compiled watch plan and redo state.
+
+The transaction fails before recording a promise when the union has a leading
+or internal gap. It also retains a finite-tail structural guard, although every
+desired direct-address declaration contributes an open epoch today, so that
+class cannot arise through manifest synchronization. The error names
+the promised start and the first uncovered inclusive range; an uncovered tail
+is rendered `<N>..=unbounded`. The stored [compiled watch
+plan](glossary.md#compiled-watch-plan) keeps its existing
+emitter/topic/start JSON shape and remains backward-decodable; the interval
+union exists only while synchronization validates the desired plan.
+
+For example, stored address epochs `[5,5]`, `[10,10]`, and `[11,∞)` normalize
+to `[5,5]` and `[10,∞)`. A promise from block 5 is refused with uncovered
+blocks `6..=9`, while a promise from block 10 is valid. The operator can raise
+the declaration to the first continuously covered start, or rebuild from a
+fresh database/from-zero Ingest when coverage from the earlier block is
+required. On a retained production database, the operator must explicitly
+fetch the missing range through a separately planned repair before making the
+wider promise. This change does not add that retained-database repair path:
+ordinary address-scoped redo follows the persisted address epochs and cannot
+fill their gap. Manifest synchronization does not silently stamp an Ingest redo
+and claim that the gap was repaired. Direct database edits remain unsupported.
 
 Adding or broadening an indexability-producing `resolver` discovery rule over
 an already-ingested range is a different ordering problem. Replacing a

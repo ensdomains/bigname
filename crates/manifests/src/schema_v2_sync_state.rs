@@ -148,7 +148,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
     repaired_history_chains: &HashSet<String>,
     repaired_basenames_execution_history: bool,
 ) -> Result<()> {
-    let persisted_watch_floors = super::watch_floors::load(transaction).await?;
+    let persisted_watch_coverage = super::watch_floors::load(transaction).await?;
     let mut chains = previous
         .manifests_by_chain
         .keys()
@@ -217,7 +217,8 @@ pub(super) async fn invalidate_changed_derived_epochs(
             &previous.watch,
             &desired.watch,
             &chain_id,
-            &persisted_watch_floors,
+            &persisted_watch_coverage,
+            super::watch_floors::required_ingest_redo_pending(transaction, &chain_id).await?,
         )? {
             stamp_required_ingest(transaction, &chain_id, widened_from).await?;
         }
