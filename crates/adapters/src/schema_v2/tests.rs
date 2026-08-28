@@ -8624,6 +8624,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
                 0,
                 CHILD,
             ),
+            raw_at(with_topic0(raw_v2_registry::RawLabelRegistered { tokenId: versioned_token_bytes(b"c\0d", 1), labelHash: keccak256(b"c\0d"), label: b"c\0d".to_vec().into(), owner, expiry: 100, sender }.encode_log_data(), v2_registry::LabelRegistered::SIGNATURE_HASH), 5, 0, CHILD),
         ],
     })?;
     let shadow_namehash = super::common::namehash_raw(
@@ -8650,7 +8651,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
         None,
     )?;
     let shadow_id = format!("ens:{shadow_namehash}");
-    assert_eq!(first.normalized_events.iter().filter(|event| event.event_kind == "RegistrationGranted" && event.logical_name_id.as_deref() == Some(shadow_id.as_str())).count(), 1);
+    assert_eq!(first.normalized_events.iter().filter(|event| event.event_kind == "RegistrationGranted" && event.logical_name_id.as_ref() == Some(&format!("ens:{}", super::common::namehash_raw([b"c\0d".as_slice(), b"sub".as_slice(), b"eth".as_slice()].into_iter())))).count(), 1);
     assert!(
         boundary
             .binding_closures

@@ -91,8 +91,7 @@ pub(super) fn append_v2_name_transitions(
                 namehash: current.namehash.clone(),
                 source_kind: format!("{source_event}_registry_suffix"),
             });
-            if !identity_reassertion && !matches!(source_event, "LabelRegistered" | "LabelReserved")
-            {
+            if !identity_reassertion && source_event != "LabelReserved" {
                 let id = &current.logical_name_id;
                 let resource = transition.resource_id;
                 emit(output, &transition, id, resource, source_event);
