@@ -15,11 +15,11 @@ const BASELINE: &[&str] = &[
 ];
 #[rustfmt::skip]
 const INDEXES: &[(&str, &str)] = &[
-    ("after-node", "normalized_events_v1_subregistry_after_node_scope_idx"), ("after-child", "normalized_events_v1_subregistry_after_child_scope_idx"), ("before-node", "normalized_events_v1_subregistry_before_node_scope_idx"), ("before-child", "normalized_events_v1_subregistry_before_child_scope_idx"), ("v2-pointer", "normalized_events_v2_subregistry_pointer_scope_idx"),
+    ("after-node", "normalized_events_v1_subregistry_after_node_scope_idx"), ("after-child", "normalized_events_v1_subregistry_after_child_scope_idx"), ("before-node", "normalized_events_v1_subregistry_before_node_scope_idx"), ("before-child", "normalized_events_v1_subregistry_before_child_scope_idx"),
 ];
 #[rustfmt::skip]
 const MIGRATIONS: &[&str] = &[
-    include_str!("../../../../migrations/20260827130000_normalized_events_v1_after_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130100_normalized_events_v1_after_child_scope_idx.sql"), include_str!("../../../../migrations/20260827130200_normalized_events_v1_before_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130300_normalized_events_v1_before_child_scope_idx.sql"), include_str!("../../../../migrations/20260827130400_normalized_events_v2_subregistry_pointer_scope_idx.sql"),
+    include_str!("../../../../migrations/20260827130000_normalized_events_v1_after_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130100_normalized_events_v1_after_child_scope_idx.sql"), include_str!("../../../../migrations/20260827130200_normalized_events_v1_before_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130300_normalized_events_v1_before_child_scope_idx.sql"),
 ];
 
 fn extract(source: &str, prefix: &str, suffix: &str) -> Result<String> {
@@ -241,7 +241,7 @@ async fn issue_435_measurement() -> Result<()> {
         head_cells.push(measure(&pool, &head, true, frontier, depth, 20).await?);
     }
     let head_v2_cell = measure(&pool, &head_v2, true, 1, 1, 20).await?;
-    if scale >= 5_000_000 { ensure!(serde_json::to_string(&head_v2_cell["plan"])?.contains(INDEXES[4].1), "v2 plan did not use pointer index"); }
+    if scale >= 5_000_000 { let plan = serde_json::to_string(&head_v2_cell["plan"])?; ensure!(plan.contains("normalized_events_name_history_idx") && plan.contains("normalized_events_subregistry_registration_history_idx"), "v2 plan did not use existing history indexes"); }
     let exact_plan = serde_json::to_string(&head_cells[2]["plan"])?;
     if scale >= 5_000_000 {
         for (_, index) in &INDEXES[..4] { ensure!(exact_plan.contains(index), "plan did not use {index}"); }

@@ -444,13 +444,22 @@ async fn include_v2_event_edges(
               AND (address.active_to_block_number IS NULL
                    OR address.active_to_block_number > $2)
               AND address.deactivated_at IS NULL
-             JOIN normalized_events topology
-               ON topology.chain_id = $1
-              AND topology.block_number <= $2
-              AND topology.event_kind = 'SubregistryChanged'
-              AND topology.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-              AND topology.consumer_visibility = 'activated'
-              AND topology.canonicality_state IN ('canonical', 'safe', 'finalized')
+             CROSS JOIN LATERAL (
+                 SELECT logical_name_id, chain_id, block_number, block_hash
+                 FROM normalized_events
+                 WHERE chain_id = $1
+                   AND block_number <= $2
+                   AND event_kind = 'SubregistryChanged'
+                   AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                   AND consumer_visibility = 'activated'
+                   AND canonicality_state IN ('canonical', 'safe', 'finalized')
+                   AND logical_name_id IS NOT NULL
+                   AND ARRAY[
+                           lower(after_state ->> 'subregistry'),
+                           lower(before_state ->> 'subregistry')
+                       ] @> ARRAY[lower(address.address)]
+                 OFFSET 0
+             ) topology
              JOIN chain_lineage topology_lineage
                ON topology_lineage.chain_id = topology.chain_id
               AND topology_lineage.block_number = topology.block_number
@@ -458,11 +467,6 @@ async fn include_v2_event_edges(
               AND topology_lineage.canonicality_state IN (
                   'canonical', 'safe', 'finalized'
               )
-             WHERE ARRAY[
-                       lower(topology.after_state ->> 'subregistry'),
-                       lower(topology.before_state ->> 'subregistry')
-                   ] @> ARRAY[lower(address.address)]
-               AND topology.logical_name_id IS NOT NULL
          )
          INSERT INTO project_scope_topology_candidates
          SELECT parent_id FROM edges
