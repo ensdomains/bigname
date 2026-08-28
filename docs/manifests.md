@@ -1107,9 +1107,24 @@ hashes with the [manifest-authority
 marker](glossary.md#manifest-authority-marker). With overlapping completed
 retained Ingest history, synchronization rejects the transaction atomically:
 the prior manifest payload, child rules, authority history, phase hashes, and
-redo state remain unchanged. The supported remedies are a fresh rebuild or a
-separately designed discovery backfill, not a one-pass Ingest redo that would
-leave historical resolver discovery incomplete.
+redo state remain unchanged. That retained database cannot install the rule in
+place; replacing it with a rebuilt database does not make one pass sufficient.
+On the replacement database, and on any fresh rebuild, historical coverage
+requires a second full-history Ingest pass after Interpret has materialized the
+resolver address intervals. Use `phase-runner redo --phase ingest` with the
+Sepolia manifest root explicitly selected (`--manifests-root
+manifests/sepolia`) and the required database, chain, and source options while
+normal and Live processing are held at a fixed target already completed by both
+Interpret and Project, with Interpret's discovery edges materialized through
+that target. Cover the manifest-declared RootRegistry start block through that
+target, then explicitly rerun Interpret and Project through the same target. If
+[stored-history
+verification](glossary.md#stored-history-verification) halted on the missing
+logs, restart the normal runner to complete Verify and keep serving traffic
+disabled until Verify succeeds; otherwise complete Verify before resuming
+normal and Live processing. A fresh rebuild alone remains insufficient until
+[#652](https://github.com/ensdomains/bigname/issues/652) makes the second pass
+and recovery routing automatic.
 
 `registry_announcement` rules use the same namespace-scoped comparison. In the
 `ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest
