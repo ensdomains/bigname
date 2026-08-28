@@ -699,17 +699,29 @@ Field ownership:
   request-wide immutable projection generation; current-state generation changes
   do not produce `409 stale`. When `name` or `registration_id` binds the read to a
   registration, the projection-owned
-  per-registration permission summary classifies the result: full support adds
-  no completeness metadata, missing or partial support returns
-  `meta.completeness=partial` with
-  `unsupported_reason=permission_support_unknown`, and an ENSv1 wrapper returns
-  `meta.completeness=unsupported` with
-  `unsupported_reason=wrapper_holder_permissions_not_supported`. An
-  address-only read is always at least `partial` with the wrapper reason because
-  zero-row wrapper registrations are absent from the permission-row fan-out; a
-  missing or partial summary for a returned registration changes the reason to
-  `permission_support_unknown`. Projected rows are not suppressed by these
-  classifications. A `name` filter
+  per-registration permission summary classifies the result. Independently
+  proven full support adds no completeness metadata. A non-wrapper resource
+  whose standard operator, token-approval, or resolver-delegation paths are not
+  indexed returns `meta.completeness=partial` with
+  `unsupported_reason=approval_and_delegation_permissions_not_supported`.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) A
+  wrapper-only resource returns `meta.completeness=unsupported` with
+  `unsupported_reason=wrapper_holder_permissions_not_supported`. Missing or
+  unrecognized summary metadata returns `meta.completeness=partial` with
+  `unsupported_reason=permission_support_unknown` and takes precedence. A mixed
+  wrapper/non-wrapper request uses the approval/delegation partial reason. An
+  address-only read is always at least `partial` with the approval/delegation
+  reason, including for zero rows, unless missing or unrecognized summary
+  metadata wins. Returned rows do not define the request denominator: zero rows
+  do not prove that no account can mutate the selected name or registration.
+  Projected rows are not suppressed by these classifications and remain useful,
+  but neither the page nor a role summary is an authoritative permission
+  enumeration while the partial marker is present. NameWrapper holder
+  enumeration remains separately unsupported, and ENSv2 registry operator
+  approval remains separately narrowed until indexed.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
   retained historical ENSv1 registration for audit. Every
@@ -798,15 +810,19 @@ Field ownership:
   does not claim a request-wide immutable projection generation, and current-state
   generation changes do not produce `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
-  registration on the served page. If all are full, no completeness metadata is
-  added. A missing or partial summary returns `meta.completeness=partial`,
+  registration on the served page. If all are independently proven full, no
+  completeness metadata is added. A non-wrapper approval/delegation limitation
+  returns `meta.completeness=partial`,
   `meta.unsupported_fields=["role_summary"]`, and
-  `unsupported_reason=permission_support_unknown`. An ENSv1 wrapper summary
-  uses the same `partial` response classification and unsupported field with
+  `unsupported_reason=approval_and_delegation_permissions_not_supported`. An
+  ENSv1 wrapper-only summary uses the same `partial` response classification and
+  unsupported field with
   `unsupported_reason=wrapper_holder_permissions_not_supported`. Projected
   grants remain in `role_summary`, but the expansion is non-authoritative;
-  therefore an empty wrapper summary is not a proven empty permission set.
-  Missing summary metadata takes precedence when a page contains both cases.
+  therefore an empty summary is not a proven empty permission set. A mixed
+  wrapper/non-wrapper page uses the approval/delegation reason. Missing or
+  unrecognized summary metadata takes precedence and uses
+  `permission_support_unknown`.
   Current address relations and
   `role_summary` are built only from the selected registration. A migrated
   name therefore stops relating its superseded ENSv1 holder or controller to

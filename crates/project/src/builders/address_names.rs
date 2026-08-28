@@ -483,10 +483,20 @@ pub(super) async fn build(
                name.binding_kind,
                CASE
                    WHEN selected.relation = 'effective_controller'
+                       AND summary.support_status = 'unsupported'
+                       AND summary.unsupported_reason =
+                           'operator_approval_surfaces_not_ingested'
+                       THEN 'supported'
+                   WHEN selected.relation = 'effective_controller'
                        THEN summary.support_status
                    ELSE 'supported'
                END,
                CASE
+                   WHEN selected.relation = 'effective_controller'
+                       AND summary.support_status = 'unsupported'
+                       AND summary.unsupported_reason =
+                           'operator_approval_surfaces_not_ingested'
+                       THEN NULL
                    WHEN selected.relation = 'effective_controller'
                        THEN summary.unsupported_reason
                    ELSE NULL

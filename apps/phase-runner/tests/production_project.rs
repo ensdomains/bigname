@@ -22,7 +22,10 @@ use bigname_project::{
     BatchRequest, DUAL_CURRENT_CHILD_AUTHORITY, DUAL_CURRENT_EXACT_NAME_AUTHORITY, Engine, Marker,
     RunMode,
 };
-use bigname_storage::{NameCurrentRow, SurfaceBindingKind, resolution_verified_support_boundary};
+use bigname_storage::{
+    NameCurrentRow, READABLE_REVERSE_IDENTITY_CTES, SurfaceBindingKind,
+    resolution_verified_support_boundary,
+};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
@@ -215,8 +218,8 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                 },
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
-                "support_status": "supported",
-                "unsupported_reason": null
+                "support_status": "unsupported",
+                "unsupported_reason": "operator_approval_surfaces_not_ingested"
             }],
             "permissions": [{
                 "canonicality_summary": {
@@ -738,8 +741,8 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                 },
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
-                "support_status": "supported",
-                "unsupported_reason": null
+                "support_status": "unsupported",
+                "unsupported_reason": "operator_approval_surfaces_not_ingested"
             }
         })
     );
@@ -1512,13 +1515,20 @@ async fn expiry_fold_ignores_malformed_updates_and_clears_unrepresentable_number
 }
 
 #[tokio::test]
-async fn permission_support_preserves_known_wrapper_and_unknown_authority_status() -> Result<()> {
+async fn permission_support_marks_approvals_partial_without_hiding_known_controllers() -> Result<()>
+{
     let scratch = ScratchDatabase::create("production_project_permission_support").await?;
     seed_project_fixture(scratch.pool()).await?;
     for (resource_id, authority_kind) in [
         ("00000000-0000-0000-0000-000000000021", "registrar"),
-        ("00000000-0000-0000-0000-000000000022", "wrapper"),
-        ("00000000-0000-0000-0000-000000000023", "future_authority"),
+        ("00000000-0000-0000-0000-000000000022", "registry"),
+        ("00000000-0000-0000-0000-000000000023", "registry_only"),
+        ("00000000-0000-0000-0000-000000000024", "registry_owner"),
+        ("00000000-0000-0000-0000-000000000025", "registrant"),
+        ("00000000-0000-0000-0000-000000000026", "resolver"),
+        ("00000000-0000-0000-0000-000000000027", "ens_v2_registry"),
+        ("00000000-0000-0000-0000-000000000028", "wrapper"),
+        ("00000000-0000-0000-0000-000000000029", "future_authority"),
     ] {
         sqlx::query(
             "INSERT INTO resources (
@@ -1546,11 +1556,9 @@ async fn permission_support_preserves_known_wrapper_and_unknown_authority_status
     let support: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT authority_kind, support_status, unsupported_reason
          FROM permissions_current_resource_summary
-         WHERE resource_id IN (
-             '00000000-0000-0000-0000-000000000021'::uuid,
-             '00000000-0000-0000-0000-000000000022'::uuid,
-             '00000000-0000-0000-0000-000000000023'::uuid
-         )
+         WHERE resource_id BETWEEN
+             '00000000-0000-0000-0000-000000000021'::uuid AND
+             '00000000-0000-0000-0000-000000000029'::uuid
          ORDER BY resource_id",
     )
     .fetch_all(scratch.pool())
@@ -1558,7 +1566,41 @@ async fn permission_support_preserves_known_wrapper_and_unknown_authority_status
     assert_eq!(
         support,
         vec![
-            ("registrar".into(), "supported".into(), None),
+            (
+                "registrar".into(),
+                "unsupported".into(),
+                Some("operator_approval_surfaces_not_ingested".into())
+            ),
+            (
+                "registry".into(),
+                "unsupported".into(),
+                Some("operator_approval_surfaces_not_ingested".into())
+            ),
+            (
+                "registry_only".into(),
+                "unsupported".into(),
+                Some("operator_approval_surfaces_not_ingested".into())
+            ),
+            (
+                "registry_owner".into(),
+                "unsupported".into(),
+                Some("operator_approval_surfaces_not_ingested".into())
+            ),
+            (
+                "registrant".into(),
+                "unsupported".into(),
+                Some("operator_approval_surfaces_not_ingested".into())
+            ),
+            (
+                "resolver".into(),
+                "unsupported".into(),
+                Some("operator_approval_surfaces_not_ingested".into())
+            ),
+            (
+                "ens_v2_registry".into(),
+                "unsupported".into(),
+                Some("operator_approval_surfaces_not_ingested".into())
+            ),
             (
                 "wrapper".into(),
                 "unsupported".into(),
@@ -1570,6 +1612,31 @@ async fn permission_support_preserves_known_wrapper_and_unknown_authority_status
                 Some("resource_permission_authority_not_projected".into())
             ),
         ]
+    );
+    let controller_support: (String, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason
+         FROM address_names_current
+         WHERE logical_name_id = 'ens:0xalice'
+           AND relation = 'effective_controller'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(controller_support, ("supported".into(), None));
+
+    let readable_controller_query = format!(
+        "WITH {READABLE_REVERSE_IDENTITY_CTES}
+         SELECT EXISTS (
+             SELECT 1 FROM readable_relations
+             WHERE address = $1 AND relation = 'effective_controller'
+         )"
+    );
+    let readable_controller: bool = sqlx::query_scalar(&readable_controller_query)
+        .bind(OWNER)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert!(
+        readable_controller,
+        "partial permission enumeration must not hide a known effective controller"
     );
     scratch.cleanup().await
 }

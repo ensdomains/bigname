@@ -24,6 +24,14 @@ const SUMMARY_SELECT_COLUMNS: &str = r#"
             'enumeration_basis', 'resource_permissions',
             'unsupported_reason', NULL
         )
+        WHEN summary.unsupported_reason = 'operator_approval_surfaces_not_ingested'
+        THEN jsonb_build_object(
+            'status', 'partial',
+            'exhaustiveness', 'best_effort',
+            'source_classes_considered', jsonb_build_array('permissions_current'),
+            'enumeration_basis', 'resource_permissions',
+            'unsupported_reason', 'operator_approval_surfaces_not_ingested'
+        )
         WHEN summary.unsupported_reason = 'ensv1_wrapper_holder_permissions_not_projected'
         THEN jsonb_build_object(
             'status', 'unsupported',

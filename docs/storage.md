@@ -977,7 +977,15 @@ passes wrapper expiry. Permission reads join this current summary by
 
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
-Readers fail closed on unknown or inconsistent vocabulary.
+`operator_approval_surfaces_not_ingested` maps to partial, best-effort
+permission coverage; `ensv1_wrapper_holder_permissions_not_projected` remains a
+separate unsupported class. Readers reject inconsistent typed combinations and
+map an unrecognized persisted unsupported reason to unknown partial product
+coverage rather than treating it as wrapper support or returning an internal
+server error. Raw facts and normalized-event semantics are unchanged, but the
+Project source change rotates the shared interpreter content hash. Deployment
+therefore follows the planned full-history Interpret and Project walk instead
+of a Project-only continuation.
 
 ## Snapshot serving
 
