@@ -59,6 +59,7 @@ does not establish a registration, authority, address-to-name relation, or permi
 for a clean event word. It preserves the literal event word separately, but treats a current
 Solidity-registry emitter stored as its own owner as zero for control selection. Historical owner
 words that fail the existing masked-address check have no getter-visible owner.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
 
 **Authority epoch** (`authority_epoch`) — the interval during which one
 protocol arm supplies every current field for one logical name. For `ens`

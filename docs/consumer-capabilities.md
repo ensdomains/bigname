@@ -201,7 +201,9 @@ resolver exists; and resolver `bound_names` remains subject to the resolver
 family's existing binding-enumeration capability. Registration/control fields,
 address-name relations, and owner-derived permissions stay absent. A resolver
 selection observed only before the name surface and never repeated remains out
-of scope under the documented #613 caveat.
+of scope under the documented #613 caveat. The GraphQL compatibility surface
+uses the same serving resource for its resolver record fields; it does not infer
+registration or control from that read path.
 
 Each slice includes its behavior tests and fixture provenance. Counts are
 estimated hand-written production files; test fixtures, test-only harness

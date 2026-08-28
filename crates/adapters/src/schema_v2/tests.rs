@@ -7147,10 +7147,28 @@ fn zero_equivalent_registry_owner_restores_exactly_across_batches() -> anyhow::R
 }
 
 #[test]
-fn expired_registrar_transfer_cannot_resurrect_zeroed_registry_authority() -> anyhow::Result<()> {
+fn wrapper_fallback_transfer_before_expiry_replays_exactly_with_zero_getter() -> anyhow::Result<()>
+{
+    // BaseRegistrar rejects post-expiry transfers, and NameWrapper blocks .eth unwrapping during
+    // grace, so no admitted raw-log sequence can drive the defensive expired-state convergence
+    // branch. Its zero-getter guard is mutation-pinned directly in
+    // `state_tests::zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfer`;
+    // this adapter test covers the reachable wrapper fallback and exact cold replay for both zero
+    // encodings. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L75 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L202-L221 @ ens_v1@91c966f)
     const REGISTRY: &str = "0x0000000000000000000000000000000000000066";
+    const REGISTRAR: &str = "0x0000000000000000000000000000000000000069";
+    const WRAPPER: &str = "0x000000000000000000000000000000000000006a";
     const OWNER: &str = "0x0000000000000000000000000000000000000067";
     const NEXT_OWNER: &str = "0x0000000000000000000000000000000000000068";
+    // .eth wrapping always burns the parent-control and .eth marker fuses while leaving
+    // CANNOT_UNWRAP clear when the caller requests no user fuses.
+    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L19 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1014 @ ens_v1@91c966f)
+    const DOT_ETH_WRAPPER_FUSES: u32 = (1 << 16) | (1 << 17);
+    const REGISTRAR_EXPIRY: i64 = 1_000_000;
+    const WRAPPER_EXPIRY: u64 = REGISTRAR_EXPIRY as u64 + 90 * 24 * 60 * 60;
+    const TRANSFER_OBSERVATION: i64 = REGISTRAR_EXPIRY - 1;
     let labelhash = keccak256(b"stale");
     let node = super::common::namehash(&["stale".to_owned(), "eth".to_owned()]).parse::<B256>()?;
     let registry_manifest = manifest(
@@ -7161,30 +7179,61 @@ fn expired_registrar_transfer_cannot_resurrect_zeroed_registry_authority() -> an
         &["registry"],
         &["AuthorityTransferred", "PermissionChanged"],
     );
-    let registrar_manifest = manifest_with_events(
+    let wrapper_manifest = manifest_with_events(
         67,
         "ens",
-        "ens_v1_registrar_l1",
+        "ens_v1_wrapper_l1",
         &[
             (
-                "NameRegistered",
-                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
-                &["registrar"],
-                &["RegistrationGranted"],
+                "NameWrapped",
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                &["name_wrapper"],
+                &[
+                    "TokenControlTransferred",
+                    "ExpiryChanged",
+                    "PermissionScopeChanged",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                ],
             ),
             (
-                "Transfer",
-                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-                &["registrar"],
-                &["TokenControlTransferred"],
+                "NameUnwrapped",
+                "event NameUnwrapped(bytes32 indexed node, address owner)",
+                &["name_wrapper"],
+                &["SurfaceUnbound", "AuthorityEpochChanged"],
             ),
+        ],
+    );
+    let registrar_manifest = manifest(
+        68,
+        "ens_v1_registrar_l1",
+        "Transfer",
+        "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+        &["registrar"],
+        &[
+            "TokenControlTransferred",
+            "AuthorityTransferred",
+            "PermissionChanged",
+            "SurfaceBound",
+            "SurfaceUnbound",
+            "AuthorityEpochChanged",
         ],
     );
     let mut registry_admission = admission(66, "registry");
     registry_admission.address = REGISTRY.to_owned();
-    let registrar_admission = admission(67, "registrar");
-    let manifests = vec![registry_manifest, registrar_manifest];
-    let admissions = vec![registry_admission, registrar_admission];
+    let mut wrapper_admission = admission(67, "name_wrapper");
+    wrapper_admission.address = WRAPPER.to_owned();
+    let mut registrar_admission = admission(68, "registrar");
+    registrar_admission.address = REGISTRAR.to_owned();
+    let manifests = vec![registry_manifest, wrapper_manifest, registrar_manifest];
+    let admissions = vec![registry_admission, wrapper_admission, registrar_admission];
+    let block = |number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+    };
 
     for zero_owner in [ZERO_ADDRESS, REGISTRY] {
         let (first, session) = interpret_test_batch_incremental(
@@ -7197,26 +7246,27 @@ fn expired_registrar_transfer_cannot_resurrect_zeroed_registry_authority() -> an
                 blocks: Vec::new(),
                 raw_logs: vec![
                     raw_at(
-                        NameRegistered {
-                            name: "stale".to_owned(),
-                            label: labelhash,
-                            owner: OWNER.parse()?,
-                            expires: U256::from(1_000),
-                        }
-                        .encode_log_data(),
-                        1,
-                        0,
-                        CONTRACT,
-                    ),
-                    raw_at(
                         v1_registry::Transfer {
                             node,
                             owner: OWNER.parse()?,
                         }
                         .encode_log_data(),
-                        2,
+                        1,
                         0,
                         REGISTRY,
+                    ),
+                    raw_at(
+                        NameWrapped {
+                            node,
+                            name: b"\x05stale\x03eth\0".to_vec().into(),
+                            owner: OWNER.parse()?,
+                            fuses: DOT_ETH_WRAPPER_FUSES,
+                            expiry: WRAPPER_EXPIRY,
+                        }
+                        .encode_log_data(),
+                        2,
+                        0,
+                        WRAPPER,
                     ),
                 ],
             },
@@ -7243,17 +7293,26 @@ fn expired_registrar_transfer_cannot_resurrect_zeroed_registry_authority() -> an
             },
             Some(session),
         )?;
-        let expired_block = 1_000 + 90 * 24 * 60 * 60 + 1;
+        let unwrap = raw_at(
+            NameUnwrapped {
+                node,
+                owner: OWNER.parse()?,
+            }
+            .encode_log_data(),
+            TRANSFER_OBSERVATION,
+            0,
+            WRAPPER,
+        );
         let transfer = raw_at(
             v1_registrar::Transfer {
-                from: OWNER.parse()?,
+                from: WRAPPER.parse()?,
                 to: NEXT_OWNER.parse()?,
                 tokenId: U256::from_be_slice(labelhash.as_slice()),
             }
             .encode_log_data(),
-            expired_block,
-            0,
-            CONTRACT,
+            TRANSFER_OBSERVATION,
+            1,
+            REGISTRAR,
         );
         let input = BatchInput {
             chain_id: CHAIN.to_owned(),
@@ -7262,38 +7321,47 @@ fn expired_registrar_transfer_cannot_resurrect_zeroed_registry_authority() -> an
             admissions: admissions.clone(),
             prior_events: Vec::new(),
             blocks: Vec::new(),
-            raw_logs: vec![transfer.clone()],
+            raw_logs: vec![unwrap.clone(), transfer.clone()],
         };
         let (live, _) = interpret_test_batch_incremental(input, Some(session))?;
+        let prior =
+            seam::fold_prior_events(Vec::new(), &first.normalized_events, &[block(1), block(2)])?;
+        let prior = seam::fold_prior_events(prior, &zeroed.normalized_events, &[block(3)])?;
         let (redo, _) = interpret_test_batch_incremental(
             BatchInput {
                 chain_id: CHAIN.to_owned(),
                 manifests: manifests.clone(),
                 discovery_rules: Vec::new(),
                 admissions: admissions.clone(),
-                prior_events: first
-                    .normalized_events
-                    .iter()
-                    .chain(&zeroed.normalized_events)
-                    .map(prior_event)
-                    .collect(),
+                prior_events: prior,
                 blocks: Vec::new(),
-                raw_logs: vec![transfer],
+                raw_logs: vec![unwrap, transfer],
             },
             None,
         )?;
 
+        assert!(live.normalized_events.iter().any(|event| {
+            event.event_kind == "TokenControlTransferred"
+                && event.source_family == "ens_v1_registrar_l1"
+        }));
         assert_eq!(
             live.normalized_events, redo.normalized_events,
             "zero owner {zero_owner}: live and redo event streams must match"
         );
         assert!(live.normalized_events.iter().all(|event| {
-            event.event_kind != "AuthorityTransferred"
-                || event
+            !matches!(
+                event.event_kind.as_str(),
+                "AuthorityTransferred" | "SurfaceBound"
+            ) || (event
+                .after_state
+                .get("owner")
+                .and_then(serde_json::Value::as_str)
+                != Some(OWNER)
+                && event
                     .after_state
-                    .get("owner")
+                    .get("authority_kind")
                     .and_then(serde_json::Value::as_str)
-                    != Some(OWNER)
+                    != Some("registry_only"))
         }));
     }
     Ok(())
@@ -7513,7 +7581,7 @@ fn ownerless_registry_resolver_uses_retained_anchor_without_reopening_control() 
                 .contains(":ResolverChanged:registry-read:"))
             .count(),
         1,
-        "the registry-read linkage row must carry the product-history suppression suffix"
+        "the additional registry-resource row must carry the product-history suppression suffix"
     );
     let self_transfer = first
         .normalized_events
@@ -7750,6 +7818,164 @@ fn surface_before_first_owner_links_a_later_ownerless_resolver() -> anyhow::Resu
             .iter()
             .all(|event| event.event_kind != "PermissionChanged")
     );
+    Ok(())
+}
+
+#[test]
+fn restored_surface_after_registry_owner_keeps_resolver_name_scope() -> anyhow::Result<()> {
+    const REGISTRY: &str = "0x000000000000000000000000000000000000007b";
+    const OWNER: &str = "0x000000000000000000000000000000000000007c";
+    const RESOLVER: &str = "0x000000000000000000000000000000000000007d";
+    const REGISTRAR_CONTROLLER: &str = "0x000000000000000000000000000000000000007e";
+    let node = super::common::namehash(&["anchor".to_owned(), "eth".to_owned()]).parse::<B256>()?;
+    let logical_name_id = format!("ens:{node:#x}");
+    let registry_manifest = manifest_with_events(
+        96,
+        "ens",
+        "ens_v1_registry_l1",
+        &[
+            (
+                "Transfer",
+                "event Transfer(bytes32 indexed node, address owner)",
+                &["registry"],
+                &["AuthorityTransferred", "PermissionChanged"],
+            ),
+            (
+                "NewResolver",
+                "event NewResolver(bytes32 indexed node, address resolver)",
+                &["registry"],
+                &["ResolverChanged", "PermissionChanged"],
+            ),
+        ],
+    );
+    let surface_manifest = manifest(
+        97,
+        "ens_v1_registrar_l1",
+        "NameRenewed",
+        "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
+        &["registrar"],
+        &["RegistrationGranted", "PreimageObserved"],
+    );
+    let mut registry = admission(96, "registry");
+    registry.address = REGISTRY.to_owned();
+    let mut registrar_controller = admission(97, "registrar");
+    registrar_controller.address = REGISTRAR_CONTROLLER.to_owned();
+    let manifests = vec![registry_manifest, surface_manifest];
+    let admissions = vec![registry, registrar_controller];
+    let (owner, session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: manifests.clone(),
+            discovery_rules: Vec::new(),
+            admissions: admissions.clone(),
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                v1_registry::Transfer {
+                    node,
+                    owner: OWNER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                REGISTRY,
+            )],
+        },
+        None,
+    )?;
+    let (surface, session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: manifests.clone(),
+            discovery_rules: Vec::new(),
+            admissions: admissions.clone(),
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                NameRenewed {
+                    name: "anchor".to_owned(),
+                    label: keccak256(b"anchor"),
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                REGISTRAR_CONTROLLER,
+            )],
+        },
+        Some(session),
+    )?;
+    assert!(
+        surface.normalized_events.iter().any(|event| {
+            event.event_kind == "PreimageObserved"
+                && event.logical_name_id.as_deref() == Some(&*logical_name_id)
+        }),
+        "surface events: {:#?}",
+        surface.normalized_events
+    );
+    let resolver_log = raw_at(
+        v1_registry::NewResolver {
+            node,
+            resolver: RESOLVER.parse()?,
+        }
+        .encode_log_data(),
+        3,
+        0,
+        REGISTRY,
+    );
+    let (live, _) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: manifests.clone(),
+            discovery_rules: Vec::new(),
+            admissions: admissions.clone(),
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![resolver_log.clone()],
+        },
+        Some(session),
+    )?;
+    let prior = seam::fold_prior_events(
+        Vec::new(),
+        &owner.normalized_events,
+        &[RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-1".to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+            canonicality_state: "canonical".to_owned(),
+        }],
+    )?;
+    let prior = seam::fold_prior_events(
+        prior,
+        &surface.normalized_events,
+        &[RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-2".to_owned(),
+            block_number: 2,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(2),
+            canonicality_state: "canonical".to_owned(),
+        }],
+    )?;
+    let (restored, _) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests,
+            discovery_rules: Vec::new(),
+            admissions,
+            prior_events: prior,
+            blocks: Vec::new(),
+            raw_logs: vec![resolver_log],
+        },
+        None,
+    )?;
+    assert_eq!(live.normalized_events, restored.normalized_events);
+    let pointer = live
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "ResolverChanged")
+        .expect("post-surface resolver pointer");
+    assert_eq!(pointer.logical_name_id.as_deref(), Some(&*logical_name_id));
     Ok(())
 }
 

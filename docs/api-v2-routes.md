@@ -715,7 +715,7 @@ Field ownership:
   consume a page slot or move an existing cursor. When one V1 registry resolver
   log is linked to both the registry resource retained for reads and a distinct
   control resource, this product route returns the control-resource row once.
-  The registry-read linkage row remains available from
+  The additional normalized row that retains the registry resource link remains available from
   `GET /v2/diagnostics/events`; product suppression happens before cursor
   validation, summary calculation, and pagination. Without a distinct control
   resource, the sole registry-resource row remains product-visible.
@@ -1135,8 +1135,8 @@ Field ownership:
   summaries, or selecting and paginating final rows. A candidate row therefore
   cannot expose an older activated row by broadening the anchor set. If those
   anchors reach both rows emitted for one V1 registry resolver log, product
-  history keeps the control-resource row and suppresses the registry-read
-  linkage row before cursor validation and pagination; raw diagnostics keeps
+  history keeps the control-resource row and suppresses the additional row
+  carrying the registry resource link before cursor validation and pagination; raw diagnostics keeps
   both. Without a distinct control resource, the sole registry-resource row
   remains visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
@@ -1264,7 +1264,7 @@ Field ownership:
   limiting, cursor construction, and product-type mapping. A V1 registry
   resolver log linked to both the registry resource retained for reads and a
   distinct control resource appears once in this product route: the
-  registry-read linkage row is suppressed before cursor validation and
+  additional row carrying the registry resource link is suppressed before cursor validation and
   pagination, while the control-resource row remains visible and raw
   diagnostics retain both normalized rows. Without a distinct control resource,
   the sole registry-resource row remains product-visible.

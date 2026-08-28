@@ -60,9 +60,10 @@ fragments, while `.` and `..` return a GraphQL error. Leading-boundary support i
 specific to contains filters; REST `match=prefix` fragment behavior is unchanged
 and does not accept a leading dot. `orderBy: name` uses byte-wise stored
 normalized-name order.
-Resolver record fields select the
-sole projected inventory for the name's resource without coupling its event
-boundary to the later name-publication target. If a resource has multiple
+Resolver record fields select the sole projected inventory for the name's
+current control resource or, for an ownerless V1 registry name, its retained
+[serving resource](glossary.md#serving-resource), without coupling the
+inventory's event boundary to the later name-publication target. If a resource has multiple
 inventory rows and no declared boundary selects exactly one, the operation
 errors instead of serving empty records or choosing arbitrarily.
 

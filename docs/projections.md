@@ -262,7 +262,7 @@ never removes or duplicates the independently admitted ordinary event it
 references. One V1 registry resolver log can have a registry-resource row for
 reads and a distinct control-resource row so both resource links survive
 replay. Product history returns the control-resource row once and suppresses the
-registry-read linkage row; raw diagnostics returns both normalized rows. Without
+additional row carrying the registry resource link; raw diagnostics returns both normalized rows. Without
 a distinct control resource, the sole registry-resource row remains
 product-visible. Consumer visibility is applied before candidate evidence can
 contribute an address anchor and again when rows are selected. Name and resource
@@ -380,8 +380,8 @@ A known model limitation remains: if a resolver was selected only before the
 again afterward, Project has no linked resolver pointer for that name and does
 not serve its retained records.
 A resource-less record event cannot create a binding, and name and record reads
-expose the inventory only when the name's current readable `resource_id` selects
-it. Resolver-local events are accepted only under the manifest and
+expose the inventory only when the name's current readable control resource or
+`serving_resource_id` selects it. Resolver-local events are accepted only under the manifest and
 current-resolver rules documented in
 [`manifests.md`](manifests.md).
 

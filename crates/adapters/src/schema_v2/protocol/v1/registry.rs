@@ -28,7 +28,6 @@ enum RegistryOwnerView {
     ZeroEquivalent { reason: RegistryOwnerZeroReason },
     UnavailableUnmasked,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegistryOwnerZeroReason {
     LiteralZero,
@@ -42,7 +41,6 @@ impl RegistryOwnerZeroReason {
         }
     }
 }
-
 fn classify_registry_owner(
     owner_word: &str,
     registry_address: &str,
@@ -65,7 +63,6 @@ fn classify_registry_owner(
         }
     }
 }
-
 mod transfer {
     use super::*;
     sol! { event Transfer(bytes32 indexed node, address owner); }
@@ -457,7 +454,10 @@ pub(super) fn interpret(
             )
         });
         let resolver_anchor = registry_anchor.clone().or_else(|| control_anchor.clone());
-        let event_anchor = control_anchor.as_ref().or(resolver_anchor.as_ref());
+        let event_anchor = match (&control_anchor, &registry_anchor) {
+            (Some(control), Some(registry)) if control.0 != registry.0 => Some(control),
+            _ => resolver_anchor.as_ref(),
+        };
         let previous_resolver = state
             .set_v1_resolver_link(
                 &selected.source.namespace,

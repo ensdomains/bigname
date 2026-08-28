@@ -11,6 +11,16 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
+path = "apps/api/src/v2/name_record.rs"
+loc = 601
+justification = "Exact-name record serving keeps indexed inventory, verified fallback, and ownerless V1 resolver reads in one route boundary; this branch crosses 600 LOC while preserving #627's nearby ENSIP-19 read rules."
+
+[[files]]
+path = "crates/lookup/src/store.rs"
+loc = 610
+justification = "Lookup topology selection keeps resource_id and serving_resource_id in one snapshot query; this branch crosses 600 LOC while preserving #627's ENSIP-19 selection."
+
+[[files]]
 path = "crates/manifests/src/schema_v2_persistence.rs"
 loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
