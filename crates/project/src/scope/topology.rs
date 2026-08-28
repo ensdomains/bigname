@@ -187,7 +187,7 @@ async fn include_current_edges(
     Ok(())
 }
 
-pub(crate) const V1_EVENT_EDGES_SQL: &str = r#"
+pub(crate) const V1_AFTER_NODE_SQL: &str = r#"
 WITH edges AS (
     SELECT event.namespace || ':' || lower(event.after_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.after_state ->> 'child_node') AS child_id
@@ -215,9 +215,16 @@ WHERE event_kind = 'SubregistryChanged'
      AND lineage.block_number = event.block_number
      AND lineage.block_hash = event.block_hash
     WHERE lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-    UNION ALL
-    SELECT event.namespace || ':' || lower(event.after_state ->> 'node'),
-           event.namespace || ':' || lower(event.after_state ->> 'child_node')
+)
+INSERT INTO project_scope_topology_candidates
+SELECT parent_id FROM edges UNION SELECT child_id FROM edges
+ON CONFLICT DO NOTHING
+"#;
+
+pub(crate) const V1_AFTER_CHILD_SQL: &str = r#"
+WITH edges AS (
+    SELECT event.namespace || ':' || lower(event.after_state ->> 'node') AS parent_id,
+           event.namespace || ':' || lower(event.after_state ->> 'child_node') AS child_id
     FROM project_scope_topology_current scope
     JOIN (
         SELECT namespace, chain_id, block_number, block_hash, after_state
@@ -242,9 +249,16 @@ WHERE event_kind = 'SubregistryChanged'
      AND lineage.block_number = event.block_number
      AND lineage.block_hash = event.block_hash
     WHERE lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-    UNION ALL
-    SELECT event.namespace || ':' || lower(event.before_state ->> 'node'),
-           event.namespace || ':' || lower(event.before_state ->> 'child_node')
+)
+INSERT INTO project_scope_topology_candidates
+SELECT parent_id FROM edges UNION SELECT child_id FROM edges
+ON CONFLICT DO NOTHING
+"#;
+
+pub(crate) const V1_BEFORE_NODE_SQL: &str = r#"
+WITH edges AS (
+    SELECT event.namespace || ':' || lower(event.before_state ->> 'node') AS parent_id,
+           event.namespace || ':' || lower(event.before_state ->> 'child_node') AS child_id
     FROM project_scope_topology_current scope
     JOIN (
         SELECT namespace, chain_id, block_number, block_hash, before_state
@@ -269,9 +283,16 @@ WHERE event_kind = 'SubregistryChanged'
      AND lineage.block_number = event.block_number
      AND lineage.block_hash = event.block_hash
     WHERE lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-    UNION ALL
-    SELECT event.namespace || ':' || lower(event.before_state ->> 'node'),
-           event.namespace || ':' || lower(event.before_state ->> 'child_node')
+)
+INSERT INTO project_scope_topology_candidates
+SELECT parent_id FROM edges UNION SELECT child_id FROM edges
+ON CONFLICT DO NOTHING
+"#;
+
+pub(crate) const V1_BEFORE_CHILD_SQL: &str = r#"
+WITH edges AS (
+    SELECT event.namespace || ':' || lower(event.before_state ->> 'node') AS parent_id,
+           event.namespace || ':' || lower(event.before_state ->> 'child_node') AS child_id
     FROM project_scope_topology_current scope
     JOIN (
         SELECT namespace, chain_id, block_number, block_hash, before_state
@@ -298,23 +319,32 @@ WHERE event_kind = 'SubregistryChanged'
     WHERE lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
 )
 INSERT INTO project_scope_topology_candidates
-SELECT parent_id FROM edges
-UNION
-SELECT child_id FROM edges
+SELECT parent_id FROM edges UNION SELECT child_id FROM edges
 ON CONFLICT DO NOTHING
 "#;
+
+pub(crate) const V1_EVENT_EDGE_SQLS: [&str; 4] = [
+    V1_AFTER_NODE_SQL,
+    V1_AFTER_CHILD_SQL,
+    V1_BEFORE_NODE_SQL,
+    V1_BEFORE_CHILD_SQL,
+];
 
 async fn include_v1_event_edges(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    sqlx::query(V1_EVENT_EDGES_SQL)
-        .bind(chain_id)
-        .bind(target_block)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| ProjectError::database("failed to expand v1 topology frontier", error))?;
+    for query in V1_EVENT_EDGE_SQLS {
+        sqlx::query(query)
+            .bind(chain_id)
+            .bind(target_block)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to expand v1 topology frontier", error)
+            })?;
+    }
     Ok(())
 }
 
@@ -442,7 +472,7 @@ async fn include_v2_event_edges(
 
 #[cfg(test)]
 mod tests {
-    use super::V1_EVENT_EDGES_SQL;
+    use super::V1_EVENT_EDGE_SQLS;
 
     const AFTER_NODE_MIGRATION: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -477,15 +507,18 @@ mod tests {
 
     #[test]
     fn v1_scope_index_predicates_exactly_match_project_probes() {
-        for (label, migration) in [
+        for (index, (label, migration)) in [
             ("after-node", AFTER_NODE_MIGRATION),
             ("after-child", AFTER_CHILD_MIGRATION),
             ("before-node", BEFORE_NODE_MIGRATION),
             ("before-child", BEFORE_CHILD_MIGRATION),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             assert_eq!(
                 predicate(&migration.replace("\r\n", "\n"), label),
-                predicate(&V1_EVENT_EDGES_SQL.replace("\r\n", "\n"), label),
+                predicate(&V1_EVENT_EDGE_SQLS[index].replace("\r\n", "\n"), label),
                 "{label} partial-index predicate drifted from the Project probe"
             );
         }

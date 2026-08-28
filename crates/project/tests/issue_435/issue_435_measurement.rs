@@ -28,31 +28,23 @@ fn extract(source: &str, prefix: &str, suffix: &str) -> Result<String> {
     Ok(source[start..end].to_owned())
 }
 
-fn head_sql() -> Result<String> {
-    extract(
-        PROJECT_SOURCE,
-        "pub(crate) const V1_EVENT_EDGES_SQL: &str = r#\"",
-        "\"#;",
-    )
+#[rustfmt::skip]
+fn head_sql() -> Result<Vec<String>> {
+    ["V1_AFTER_NODE_SQL", "V1_AFTER_CHILD_SQL", "V1_BEFORE_NODE_SQL", "V1_BEFORE_CHILD_SQL"]
+        .map(|name| extract(PROJECT_SOURCE, &format!("pub(crate) const {name}: &str = r#\""), "\"#;")).into_iter().collect()
 }
 
+#[rustfmt::skip]
 fn base_source() -> Result<String> {
-    let output = Command::new("git")
-        .args([
-            "show",
-            &format!("{BASE_SHA}:crates/project/src/scope/topology.rs"),
-        ])
-        .output()?;
+    let output = Command::new("git").args(["show", &format!("{BASE_SHA}:crates/project/src/scope/topology.rs")]).output()?;
     ensure!(output.status.success(), "cannot read base topology source");
     Ok(String::from_utf8(output.stdout)?)
 }
 
+#[rustfmt::skip]
 fn base_sql() -> Result<String> {
     let source = base_source()?;
-    let function = source
-        .split("pub(super) async fn include_event_edges")
-        .nth(1)
-        .context("base function")?;
+    let function = source.split("pub(super) async fn include_event_edges").nth(1).context("base function")?;
     extract(function, "let v1 = sqlx::query(\n        \"", "\",\n    )")
 }
 
@@ -119,19 +111,15 @@ async fn configure_graph(pool: &PgPool, frontier: i64, depth: i64) -> Result<()>
     Ok(())
 }
 
+#[rustfmt::skip]
 async fn base_tables(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    raw_sql("CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP")
-        .execute(&mut **tx).await?;
-    Ok(())
+    raw_sql("CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP").execute(&mut **tx).await?; Ok(())
 }
 
+#[rustfmt::skip]
 async fn head_tables(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    raw_sql("CREATE TEMP TABLE project_scope_topology_pending (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_current (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_seen (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_candidates (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP")
-        .execute(&mut **tx).await?;
-    sqlx::query("SET LOCAL jit = off")
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
+    raw_sql("CREATE TEMP TABLE project_scope_topology_pending (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_current (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_seen (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_candidates (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP").execute(&mut **tx).await?;
+    sqlx::query("SET LOCAL jit = off").execute(&mut **tx).await?; Ok(())
 }
 
 #[rustfmt::skip]
@@ -148,48 +136,32 @@ async fn reset(tx: &mut Transaction<'_, Postgres>, head: bool, frontier: i64, de
     Ok(())
 }
 
-async fn base_once(tx: &mut Transaction<'_, Postgres>, sql: &str) -> Result<(u64, Vec<Value>)> {
+#[rustfmt::skip]
+async fn base_once(tx: &mut Transaction<'_, Postgres>, sqls: &[String]) -> Result<(u64, Vec<Value>)> {
     let mut iterations = 0;
     let mut trace = Vec::new();
     loop {
-        let rows = sqlx::query(sql)
-            .bind("issue-435-measurement")
-            .bind(435_i64)
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
-        iterations += 1;
-        trace.push(json!({"iteration":iterations,"new_logical_ids":rows}));
-        if rows == 0 {
-            return Ok((iterations, trace));
-        }
+        let mut rows = 0;
+        for sql in sqls { rows += sqlx::query(sql).bind("issue-435-measurement").bind(435_i64).execute(&mut **tx).await?.rows_affected(); }
+        iterations += 1; trace.push(json!({"iteration":iterations,"new_logical_ids":rows}));
+        if rows == 0 { return Ok((iterations, trace)); }
     }
 }
 
-async fn head_once(tx: &mut Transaction<'_, Postgres>, sql: &str) -> Result<(u64, Vec<Value>)> {
+#[rustfmt::skip]
+async fn head_once(tx: &mut Transaction<'_, Postgres>, sqls: &[String]) -> Result<(u64, Vec<Value>)> {
     let mut iterations = 0;
     let mut trace = Vec::new();
     loop {
-        sqlx::query("TRUNCATE project_scope_topology_current, project_scope_topology_candidates")
-            .execute(&mut **tx)
-            .await?;
+        sqlx::query("TRUNCATE project_scope_topology_current, project_scope_topology_candidates").execute(&mut **tx).await?;
         let input = sqlx::query("WITH moved AS (DELETE FROM project_scope_topology_pending RETURNING logical_name_id) INSERT INTO project_scope_topology_current SELECT logical_name_id FROM moved").execute(&mut **tx).await?.rows_affected();
-        if input == 0 {
-            return Ok((iterations, trace));
-        }
-        sqlx::query("ANALYZE project_scope_topology_current")
-            .execute(&mut **tx)
-            .await?;
+        if input == 0 { return Ok((iterations, trace)); }
+        sqlx::query("ANALYZE project_scope_topology_current").execute(&mut **tx).await?;
         sqlx::query("INSERT INTO project_scope_topology_seen SELECT * FROM project_scope_topology_current ON CONFLICT DO NOTHING").execute(&mut **tx).await?;
-        sqlx::query(sql)
-            .bind("issue-435-measurement")
-            .bind(435_i64)
-            .execute(&mut **tx)
-            .await?;
+        for sql in sqls { sqlx::query(sql).bind("issue-435-measurement").bind(435_i64).execute(&mut **tx).await?; }
         let found = sqlx::query("INSERT INTO project_scope_children SELECT * FROM project_scope_topology_candidates ON CONFLICT DO NOTHING").execute(&mut **tx).await?.rows_affected();
         let queued = sqlx::query("INSERT INTO project_scope_topology_pending SELECT candidate.logical_name_id FROM project_scope_topology_candidates candidate LEFT JOIN project_scope_topology_seen seen USING (logical_name_id) WHERE seen.logical_name_id IS NULL ON CONFLICT DO NOTHING").execute(&mut **tx).await?.rows_affected();
-        iterations += 1;
-        trace.push(json!({"iteration":iterations,"input_frontier_rows":input,"edges_matched":found,"new_logical_ids":queued}));
+        iterations += 1; trace.push(json!({"iteration":iterations,"input_frontier_rows":input,"edges_matched":found,"new_logical_ids":queued}));
     }
 }
 
@@ -202,21 +174,21 @@ fn stats(mut times: Vec<f64>) -> Value {
 }
 
 #[rustfmt::skip]
-async fn measure(pool: &PgPool, sql: &str, head: bool, frontier: i64, depth: i64) -> Result<Value> {
+async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, depth: i64) -> Result<Value> {
     configure_graph(pool, frontier, depth).await?;
     let mut tx = pool.begin().await?;
     if head { head_tables(&mut tx).await? } else { base_tables(&mut tx).await? }
     reset(&mut tx, head, frontier, depth).await?;
     let fresh = Instant::now();
-    let (iterations, trace) = if head { head_once(&mut tx, sql).await? } else { base_once(&mut tx, sql).await? };
+    let (iterations, trace) = if head { head_once(&mut tx, sqls).await? } else { base_once(&mut tx, sqls).await? };
     let fresh_ms = fresh.elapsed().as_secs_f64() * 1000.0;
     reset(&mut tx, head, frontier, depth).await?;
-    if head { head_once(&mut tx, sql).await?; } else { base_once(&mut tx, sql).await?; }
+    if head { head_once(&mut tx, sqls).await?; } else { base_once(&mut tx, sqls).await?; }
     let mut times = Vec::with_capacity(20);
     for _ in 0..20 {
         reset(&mut tx, head, frontier, depth).await?;
         let started = Instant::now();
-        if head { head_once(&mut tx, sql).await?; } else { base_once(&mut tx, sql).await?; }
+        if head { head_once(&mut tx, sqls).await?; } else { base_once(&mut tx, sqls).await?; }
         times.push(started.elapsed().as_secs_f64() * 1000.0);
     }
     reset(&mut tx, head, frontier, depth).await?;
@@ -224,7 +196,8 @@ async fn measure(pool: &PgPool, sql: &str, head: bool, frontier: i64, depth: i64
         sqlx::query("WITH moved AS (DELETE FROM project_scope_topology_pending RETURNING logical_name_id) INSERT INTO project_scope_topology_current SELECT * FROM moved").execute(&mut *tx).await?;
         sqlx::query("ANALYZE project_scope_topology_current").execute(&mut *tx).await?;
     }
-    let plan: Value = sqlx::query_scalar(&format!("{EXPLAIN} {sql}")).bind("issue-435-measurement").bind(435_i64).fetch_one(&mut *tx).await?;
+    let mut plan: Vec<Value> = Vec::new();
+    for sql in sqls { plan.push(sqlx::query_scalar(&format!("{EXPLAIN} {sql}")).bind("issue-435-measurement").bind(435_i64).fetch_one(&mut *tx).await?); }
     tx.rollback().await?;
     Ok(json!({"frontier":frontier,"depth":depth,"fresh_restored_ms":fresh_ms,"iterations":iterations,"iteration_trace":trace,"warm":stats(times),"plan":plan}))
 }
@@ -255,10 +228,10 @@ async fn issue_435_measurement() -> Result<()> {
     let head_only = env::var_os("ISSUE_435_HEAD_ONLY").is_some();
     let (database, pool) = prepare().await?;
     let base_source = base_source()?;
-    let base = base_sql()?;
+    let base = vec![base_sql()?];
     let head = head_sql()?;
-    let base_v2 = v2_sql(&base_source, true)?;
-    let head_v2 = v2_sql(PROJECT_SOURCE, false)?;
+    let base_v2 = vec![v2_sql(&base_source, true)?];
+    let head_v2 = vec![v2_sql(PROJECT_SOURCE, false)?];
     let load_5m_seconds = load(&pool, 0, scale).await?;
     seed_v2(&pool).await?;
     let mut base_cells = Vec::new();
@@ -277,10 +250,10 @@ async fn issue_435_measurement() -> Result<()> {
     if scale >= 5_000_000 {
         for (_, index) in &INDEXES[..4] { ensure!(exact_plan.contains(index), "plan did not use {index}"); }
     }
-    let visibility_mutation = head.replacen("  AND consumer_visibility = 'activated'\n", "", 1);
+    let mut visibility_mutation = head.clone(); visibility_mutation[0] = visibility_mutation[0].replacen("  AND consumer_visibility = 'activated'\n", "", 1);
     let mutation = measure(&pool, &visibility_mutation, true, 1, 1).await?;
     ensure!(!serde_json::to_string(&mutation["plan"])?.contains(INDEXES[0].1), "mismatched predicate retained after-node index");
-    let nonblank_mutation = head.replacen("  AND btrim(after_state ->> 'node') <> ''\n", "  AND NULLIF(after_state ->> 'node', '') IS NOT NULL\n", 1);
+    let mut nonblank_mutation = head.clone(); nonblank_mutation[0] = nonblank_mutation[0].replacen("  AND btrim(after_state ->> 'node') <> ''\n", "  AND NULLIF(after_state ->> 'node', '') IS NOT NULL\n", 1);
     let nonblank = measure(&pool, &nonblank_mutation, true, 1, 1).await?;
     let load_10m_seconds = load(&pool, scale, scale).await?;
     let head_10m = measure(&pool, &head, true, 1000, 8).await?;
