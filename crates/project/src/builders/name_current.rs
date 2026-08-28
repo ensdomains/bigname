@@ -276,7 +276,7 @@ pub(super) async fn build(
             SELECT event.after_state ->> 'authority_kind' AS authority_kind,
                    event.after_state ->> 'authority_key' AS authority_key
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
               AND event.event_kind IN (
                   'RegistrationGranted', 'AuthorityEpochChanged'
               )
@@ -291,7 +291,7 @@ pub(super) async fn build(
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
               AND event.event_kind IN (
                   'RegistrationGranted', 'TokenControlTransferred'
               )
@@ -311,7 +311,7 @@ pub(super) async fn build(
                        ELSE NULL
                    END AS expiry_seconds
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
               )
