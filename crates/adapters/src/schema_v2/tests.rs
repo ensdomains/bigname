@@ -1942,6 +1942,7 @@ fn incremental_v2_displacement_drops_the_replaced_active_resource() -> anyhow::R
 }
 
 #[test]
+#[rustfmt::skip]
 fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyhow::Result<()> {
     const DETACHED: &str = "0x0000000000000000000000000000000000000069";
     let manifest = manifest_with_events(
@@ -1963,34 +1964,35 @@ fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyho
     detached.discovery_from_contract_instance_id =
         Some(super::common::contract_id(CHAIN, DETACHED));
     detached.discovery_observation_key = Some("registry-announcement:detached".to_owned());
+    let discovery_rules = vec![DiscoveryRuleInput {
+        manifest_id: 86,
+        edge_kind: "subregistry".to_owned(),
+        from_role: Some("registry".to_owned()),
+        admission: "linked_subregistry_event".to_owned(),
+    }];
     let token = versioned_token("stale", 0);
     let sender: Address = CONTRACT.parse()?;
-    let output = interpret_test_batch(BatchInput {
-        chain_id: CHAIN.to_owned(),
-        manifests: vec![manifest],
-        discovery_rules: vec![DiscoveryRuleInput {
-            manifest_id: 86,
-            edge_kind: "subregistry".to_owned(),
-            from_role: Some("registry".to_owned()),
-            admission: "linked_subregistry_event".to_owned(),
-        }],
-        admissions: vec![detached],
-        prior_events: Vec::new(),
-        blocks: Vec::new(),
-        raw_logs: vec![raw_at(
-            v2_registry::LabelReserved {
-                tokenId: token,
-                labelHash: keccak256(b"stale"),
-                label: "stale".to_owned(),
-                expiry: 1,
-                sender,
-            }
-            .encode_log_data(),
-            1,
-            0,
-            DETACHED,
-        )],
-    })?;
+    let (output, live) = interpret_test_batch_incremental(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest.clone()],
+            discovery_rules: discovery_rules.clone(),
+            admissions: vec![detached.clone()],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                v2_registry::LabelReserved {
+                    tokenId: token,
+                    labelHash: keccak256(b"stale"),
+                    label: "stale".to_owned(),
+                    expiry: 1,
+                    sender,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                DETACHED,
+            )],
+        }, None)?;
     let release = output
         .normalized_events
         .iter()
@@ -2002,6 +2004,36 @@ fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyho
     assert!(release.logical_name_id.is_none());
     assert!(release.resource_id.is_some());
     assert_eq!(release.before_state["status"], "reserved");
+    assert_eq!(release.after_state["derived_from"], "interpreter_state");
+    assert_eq!(release.after_state["terminal_reason"], "registry_name_binding_expired");
+    assert_eq!((release.block_number, release.transaction_index, release.log_index), (Some(1), Some(0), Some(0)));
+    assert_eq!(release.transaction_hash.as_deref(), Some("transaction-1"));
+    let lifecycle = output.normalized_events.iter()
+        .filter(|event| matches!(event.event_kind.as_str(), "RegistrationReserved" | "RegistrationReleased"))
+        .map(|event| event.event_kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(lifecycle, ["RegistrationReserved", "RegistrationReleased"]);
+    let prior = seam::fold_prior_events(
+        Vec::new(),
+        &output.normalized_events,
+        &[RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-1".to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+            canonicality_state: "canonical".to_owned(),
+        }],
+    )?;
+    let (_, restored) = interpret_test_batch_incremental(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest],
+            discovery_rules,
+            admissions: vec![detached],
+            prior_events: prior,
+            blocks: Vec::new(),
+            raw_logs: Vec::new(),
+        }, None)?;
+    assert_eq!(live, restored);
     Ok(())
 }
 
