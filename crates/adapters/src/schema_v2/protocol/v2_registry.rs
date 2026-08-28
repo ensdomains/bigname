@@ -521,7 +521,11 @@ fn token_state_event(
                 .as_ref()
                 .map(|name| &name.logical_name_id)
                 .or_else(|| state.shadow_name.as_ref().map(|name| &name.logical_name_id))
-                .or(state.last_logical_name_id.as_ref())
+                .or_else(|| {
+                    (kind == "RegistrationReleased")
+                        .then_some(state.last_logical_name_id.as_ref())
+                        .flatten()
+                })
         })
         .cloned();
     let resource_id = linked.and_then(|state| state.resource_id);

@@ -171,7 +171,10 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
         }
         _ => {}
     }
-    if let (Some(token), Some(logical_name_id)) = (token, event.logical_name_id.as_deref()) {
+    if event.event_kind == "RegistrationReleased"
+        && expiry_retirement_is_projection_only(event)
+        && let (Some(token), Some(logical_name_id)) = (token, event.logical_name_id.as_deref())
+    {
         state.remember_v2_logical_name(emitter, token, logical_name_id);
     }
 }
