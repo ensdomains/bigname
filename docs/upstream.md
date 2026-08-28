@@ -66,7 +66,7 @@ Use this exact shape everywhere — docs, ADRs, manifests, code comments, task w
 
 | Date | Ref | Pin change | Baseline census | Dispositions | Verification | Follow-up |
 |---|---|---|---|---|---|---|
-| 2026-08-27 | `ens_v2` | `ccaeb58` → `a971bd64` | 829 old-tag occurrences; 286 same-line stable; 543 changed | 286 tag refresh; 251 line re-anchor; 91 archive re-point; 201 deprecated/historical; 0 stale | `scripts/check-upstream-rotation verify-pr …`; baseline `e1833238e0c502ed744e24d5feaaffde7b858c74`; dispositions SHA-256 `d08e800658c56c591edbf5e665bc3c1bddfce48b7796b7194e3206d0daf72564` | #566; #565 owns re-initialization admission and actual old-family deprecation |
+| 2026-08-27 | `ens_v2` | `ccaeb58` → `a971bd64` | 829 old-tag occurrences; 286 same-line stable; 543 changed | 286 tag refresh; 251 line re-anchor; 91 archive re-point; 201 deprecated/historical; 0 stale | `scripts/check-upstream-rotation verify-pr …`; baseline `e1833238e0c502ed744e24d5feaaffde7b858c74`; dispositions SHA-256 `b7ab2dc7d8f8f047615c62f390277cafc5fd3d977820335e6d678947f04be14f` | #566; #565 owns re-initialization admission and actual old-family deprecation |
 
 This citation-only rotation changes the [interpreter content
 hash](glossary.md#interpreter-content-hash) from

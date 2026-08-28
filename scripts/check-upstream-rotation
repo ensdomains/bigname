@@ -53,6 +53,102 @@ GOVERNED_CITATION_MARKER_RE = re.compile(
 HUNK_RE = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"
 )
+HTML_BLOCK_TAGS = frozenset(
+    {
+        b"address",
+        b"article",
+        b"aside",
+        b"base",
+        b"basefont",
+        b"blockquote",
+        b"body",
+        b"caption",
+        b"center",
+        b"col",
+        b"colgroup",
+        b"dd",
+        b"details",
+        b"dialog",
+        b"dir",
+        b"div",
+        b"dl",
+        b"dt",
+        b"fieldset",
+        b"figcaption",
+        b"figure",
+        b"footer",
+        b"form",
+        b"frame",
+        b"frameset",
+        b"head",
+        b"header",
+        b"h1",
+        b"h2",
+        b"h3",
+        b"h4",
+        b"h5",
+        b"h6",
+        b"hr",
+        b"html",
+        b"iframe",
+        b"legend",
+        b"li",
+        b"link",
+        b"main",
+        b"menu",
+        b"menuitem",
+        b"nav",
+        b"noframes",
+        b"ol",
+        b"optgroup",
+        b"option",
+        b"p",
+        b"param",
+        b"pre",
+        b"script",
+        b"search",
+        b"section",
+        b"style",
+        b"summary",
+        b"table",
+        b"tbody",
+        b"td",
+        b"template",
+        b"textarea",
+        b"tfoot",
+        b"th",
+        b"thead",
+        b"title",
+        b"tr",
+        b"track",
+        b"ul",
+    }
+)
+COMMONMARK_TYPE6_TAGS = HTML_BLOCK_TAGS - {
+    b"pre",
+    b"script",
+    b"style",
+    b"template",
+    b"textarea",
+}
+HTML_VOID_TAGS = frozenset(
+    {b"base", b"basefont", b"col", b"frame", b"hr", b"link", b"param", b"track"}
+)
+HTML_TAG_RE = re.compile(
+    rb"<\s*(/?)\s*([A-Za-z][A-Za-z0-9-]*)\b[^>]*>"
+)
+COMMONMARK_COMPLETE_OPEN_TAG_RE = re.compile(
+    rb"^[ ]{0,3}<[A-Za-z][A-Za-z0-9-]*"
+    rb"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    rb"(?:[ \t]*=[ \t]*(?:[^ \t\r\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    rb"[ \t]*/?>[ \t]*$"
+)
+COMMONMARK_COMPLETE_CLOSE_TAG_RE = re.compile(
+    rb"^[ ]{0,3}</[A-Za-z][A-Za-z0-9-]*[ \t]*>[ \t]*$"
+)
+CLAIM_CONTEXT_CACHE: dict[tuple[Any, ...], dict[int, str]] = {}
+CLAIM_LINE_CACHE: dict[tuple[Any, ...], dict[int, tuple[str, int]]] = {}
+BASELINE_CACHE: dict[tuple[str, str], Baseline] = {}
 
 
 class RotationError(RuntimeError):
@@ -247,10 +343,668 @@ def byte_lines(data: bytes) -> list[bytes]:
     return lines
 
 
+def strip_indentation(line: bytes, columns: int) -> bytes:
+    """Remove up to a Markdown container's indentation columns."""
+    index = 0
+    consumed = 0
+    while index < len(line) and consumed < columns and line[index] in b" \t":
+        consumed = consumed + 1 if line[index] == ord(" ") else (consumed // 4 + 1) * 4
+        index += 1
+    return line[index:] if consumed >= columns else line
+
+
+def strip_blockquote_containers(line: bytes) -> bytes:
+    """Remove Markdown blockquote markers before parsing child structure."""
+    content = line
+    while True:
+        match = re.match(rb"^[ ]{0,3}>[ \t]?(.*)$", content)
+        if match is None:
+            return content
+        content = match.group(1)
+
+
+def mask_code_span_segment(lines: list[bytes]) -> list[bytes]:
+    """Mask code spans in a paragraph-capable run of Markdown lines."""
+    data = b"\n".join(lines)
+    masked = bytearray(data)
+    index = 0
+    while index < len(data):
+        if data[index] != ord("`"):
+            index += 1
+            continue
+        end = index
+        while end < len(data) and data[end] == ord("`"):
+            end += 1
+        marker = data[index:end]
+        closing = data.find(marker, end)
+        while closing >= 0 and (
+            (closing and data[closing - 1] == ord("`"))
+            or (
+                closing + len(marker) < len(data)
+                and data[closing + len(marker)] == ord("`")
+            )
+        ):
+            closing = data.find(marker, closing + len(marker))
+        if closing < 0:
+            index = end
+            continue
+        for offset in range(index, closing + len(marker)):
+            if masked[offset] != ord("\n"):
+                masked[offset] = ord(" ")
+        index = closing + len(marker)
+    return bytes(masked).split(b"\n")
+
+
+def mask_markdown_code_spans(lines: list[bytes]) -> list[bytes]:
+    """Mask code spans without consuming fenced-code block delimiters."""
+    fenced = [False] * len(lines)
+    active_fence: tuple[bytes, int] | None = None
+    active_list_indent: int | None = None
+    for index, raw_line in enumerate(lines):
+        line = strip_blockquote_containers(raw_line)
+        leading = re.match(rb"^[ \t]*", line)
+        assert leading is not None
+        indentation = len(leading.group(0).expandtabs(4))
+        if active_list_indent is not None and line.strip() and indentation < active_list_indent:
+            active_list_indent = None
+        list_item = re.match(
+            rb"^[ ]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+", line
+        )
+        structural_line = line
+        if list_item is not None:
+            active_list_indent = len(list_item.group(0).expandtabs(4))
+            structural_line = line[list_item.end() :]
+        elif active_list_indent is not None and indentation >= active_list_indent:
+            structural_line = strip_indentation(line, active_list_indent)
+        if active_fence is not None:
+            fenced[index] = True
+            closing = re.match(
+                rb"^[ ]{0,3}(`{3,}|~{3,})[ \t]*$", structural_line
+            )
+            if (
+                closing is not None
+                and closing.group(1)[:1] == active_fence[0]
+                and len(closing.group(1)) >= active_fence[1]
+            ):
+                active_fence = None
+            continue
+        opener = markdown_fence_open(structural_line)
+        if opener is not None:
+            fenced[index] = True
+            active_fence = opener
+
+    masked = list(lines)
+    segment_start = 0
+    for index in range(len(lines) + 1):
+        is_blank_boundary = index < len(lines) and not strip_blockquote_containers(
+            lines[index]
+        ).strip()
+        if index < len(lines) and not fenced[index] and not is_blank_boundary:
+            continue
+        if segment_start < index:
+            masked[segment_start:index] = mask_code_span_segment(
+                lines[segment_start:index]
+            )
+        if index < len(lines):
+            masked[index] = lines[index]
+        segment_start = index + 1
+    return masked
+
+
+def mask_inline_html_opaque_regions(lines: list[bytes]) -> list[bytes]:
+    """Mask inline HTML comment-like bodies before scanning element tags."""
+    data = b"\n".join(lines)
+    masked = bytearray(data)
+
+    def hide(start: int, finish: int) -> None:
+        for offset in range(start, finish):
+            if masked[offset] != ord("\n"):
+                masked[offset] = ord(" ")
+
+    regions = (
+        (b"<!--", b"-->"),
+        (b"<?", b"?>"),
+        (b"<![CDATA[", b"]]>"),
+    )
+    for opener, closer in regions:
+        offset = 0
+        while True:
+            start = data.find(opener, offset)
+            if start < 0:
+                break
+            end = data.find(closer, start + len(opener))
+            finish = len(data) if end < 0 else end + len(closer)
+            hide(start, finish)
+            offset = finish
+    for declaration in re.finditer(rb"<![A-Z][^>]*(?:>|$)", data, re.S):
+        hide(declaration.start(), declaration.end())
+    for destination in re.finditer(
+        rb"\]\([ \t]*<[^>\r\n]*>[ \t]*(?:[\"'][^\r\n)]*[\"'][ \t]*)?\)",
+        data,
+    ):
+        hide(destination.start(), destination.end())
+    for label in re.finditer(rb"\]\[[^\]\r\n]*\]", data):
+        hide(label.start(), label.end())
+    unbracketed_destination = (
+        rb"(?:[^ \t\r\n()\\]|\\.|\((?:[^()\r\n\\]|\\.)*\))+"
+    )
+    title_double = rb'"[^"\r\n]*(?:\r?\n(?![ \t]*\r?$)[^"\r\n]*)*"'
+    title_single = rb"'[^'\r\n]*(?:\r?\n(?![ \t]*\r?$)[^'\r\n]*)*'"
+    title_parenthesized = (
+        rb"\([^()\r\n]*(?:\r?\n(?![ \t]*\r?$)[^()\r\n]*)*\)"
+    )
+    link_title = (
+        rb"(?:" + title_double + rb"|" + title_single + rb"|" + title_parenthesized + rb")"
+    )
+    for destination in re.finditer(
+        rb"\]\([ \t]*"
+        + unbracketed_destination
+        + rb"(?:[ \t]+"
+        + link_title
+        + rb")?[ \t]*\)",
+        data,
+    ):
+        hide(destination.start(), destination.end())
+    reference_destination = (
+        rb"(?:<[^>\r\n]*>|" + unbracketed_destination + rb")"
+    )
+    for destination in re.finditer(
+        rb"(?m)^[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*"
+        + reference_destination
+        + rb"[ \t]*\r?\n[ ]{0,3}"
+        + link_title
+        + rb"[ \t]*$",
+        data,
+    ):
+        hide(destination.start(), destination.end())
+    for destination in re.finditer(
+        rb"(?m)^[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*<[^>\r\n]*>", data
+    ):
+        hide(destination.start(), destination.end())
+    for destination in re.finditer(
+        rb"(?m)^[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*"
+        + unbracketed_destination
+        + rb"(?:[ \t]+"
+        + link_title
+        + rb")?[ \t]*$",
+        data,
+    ):
+        hide(destination.start(), destination.end())
+    for offset, byte in enumerate(data):
+        if byte != ord("<"):
+            continue
+        slash_count = 0
+        previous = offset - 1
+        while previous >= 0 and data[previous] == ord("\\"):
+            slash_count += 1
+            previous -= 1
+        if slash_count % 2:
+            masked[offset] = ord(" ")
+    return bytes(masked).split(b"\n")
+
+
+def normalized_claim_tokens(
+    data: bytes, *, preserve_indentation: bool = True
+) -> bytes:
+    """Normalize spacing/carrier markers while retaining all claim bytes."""
+    carrier_free: list[bytes] = []
+    for line in data.split(b"\n"):
+        leading = re.match(rb"[ \t]*", line)
+        assert leading is not None
+        indentation = len(leading.group(0).expandtabs(4))
+        stripped = line[leading.end() :]
+        stripped = re.sub(
+            rb"^(?://[/!]?|/\*+|--+)\s*", b"", stripped, count=1
+        )
+        stripped = re.sub(rb"\s*\*/\s*$", b"", stripped)
+        if stripped.strip():
+            indentation_marker = (
+                f"<indent:{indentation}>".encode()
+                if preserve_indentation
+                else b""
+            )
+            carrier_free.append(indentation_marker + stripped)
+        else:
+            carrier_free.append(b"")
+    return re.sub(rb"\s+", b" ", b"\n".join(carrier_free)).strip()
+
+
+def claim_context_bounds(
+    lines: list[bytes], site: int, *, markdown: bool = True
+) -> tuple[int, int]:
+    """Return the Markdown/code paragraph that contains a citation site."""
+    stripped = lines[site].lstrip()
+    if markdown and stripped.startswith(b">"):
+        return site, site + 1
+    if markdown and re.match(rb"(?:\||#{1,6}\s)", stripped):
+        return site, site + 1
+
+    start = site
+    while start and lines[start - 1].strip():
+        start -= 1
+    end = min(site + 1, len(lines))
+    while end < len(lines) and lines[end].strip():
+        end += 1
+
+    if not markdown:
+        return start, end
+
+    list_marker = re.compile(rb"^\s*[-+*]\s+")
+    list_start = next(
+        (index for index in range(site, start - 1, -1) if list_marker.match(lines[index])),
+        None,
+    )
+    if list_start is None:
+        return start, end
+    list_end = list_start + 1
+    while (
+        list_end < len(lines)
+        and lines[list_end].strip()
+        and not list_marker.match(lines[list_end])
+    ):
+        list_end += 1
+    return list_start, list_end
+
+
+def advance_html_block_stack(
+    line: bytes,
+    index: int,
+    stack: list[tuple[bytes, int]],
+) -> bool:
+    """Update HTML element ancestry and report whether this line is structural."""
+    was_active = bool(stack)
+    saw_tag = False
+    multiline_open = re.search(
+        rb"<([A-Za-z][A-Za-z0-9-]*)(?=[ \t]|$)", line
+    )
+    if (
+        multiline_open is not None
+        and b">" not in line[multiline_open.start() :]
+    ):
+        name = multiline_open.group(1).lower()
+        if name not in HTML_VOID_TAGS:
+            stack.append((name, index))
+            saw_tag = True
+    for tag_match in HTML_TAG_RE.finditer(line):
+        closing, raw_name = tag_match.group(1), tag_match.group(2)
+        name = raw_name.lower()
+        saw_tag = True
+        if closing:
+            for stack_index in range(len(stack) - 1, -1, -1):
+                if stack[stack_index][0] == name:
+                    del stack[stack_index:]
+                    break
+        elif (
+            name not in HTML_VOID_TAGS
+            and not tag_match.group(0).rstrip().endswith(b"/>")
+        ):
+            stack.append((name, index))
+    return was_active or saw_tag or bool(stack)
+
+
+def close_html_element(stack: list[tuple[bytes, int]], name: bytes) -> None:
+    """Close the nearest matching HTML element without parsing opaque body text."""
+    for stack_index in range(len(stack) - 1, -1, -1):
+        if stack[stack_index][0] == name:
+            del stack[stack_index:]
+            return
+
+
+def commonmark_raw_html_start(
+    line: bytes, *, allow_type7: bool = True
+) -> str | None:
+    """Return the CommonMark HTML-block end condition started by this line."""
+    match = re.match(rb"^[ ]{0,3}(.*)$", line)
+    if match is None:
+        return None
+    content = match.group(1)
+    if re.match(rb"<(?:pre|script|style|textarea)(?:[ \t>]|$)", content, re.I):
+        return "raw-tag"
+    if content.startswith(b"<!--"):
+        return "comment"
+    if content.startswith(b"<?"):
+        return "processing"
+    if content.startswith(b"<![CDATA["):
+        return "cdata"
+    if re.match(rb"<![A-Z]", content):
+        return "declaration"
+    block_tag = re.match(
+        rb"</?([A-Za-z][A-Za-z0-9-]*)(?=[ \t]|/?>|$)", content
+    )
+    if block_tag is not None and block_tag.group(1).lower() in COMMONMARK_TYPE6_TAGS:
+        return "blank"
+    if allow_type7 and (
+        COMMONMARK_COMPLETE_OPEN_TAG_RE.match(line)
+        or COMMONMARK_COMPLETE_CLOSE_TAG_RE.match(line)
+    ):
+        return "blank"
+    return None
+
+
+def commonmark_raw_html_ends(kind: str, line: bytes) -> bool:
+    """Return whether a CommonMark HTML block ends on this line."""
+    if kind == "raw-tag":
+        return re.search(rb"</(?:pre|script|style|textarea)>", line, re.I) is not None
+    if kind == "comment":
+        return b"-->" in line
+    if kind == "processing":
+        return b"?>" in line
+    if kind == "cdata":
+        return b"]]>" in line
+    if kind == "declaration":
+        return b">" in line
+    assert kind == "blank"
+    return not line.strip()
+
+
+def markdown_fence_open(line: bytes) -> tuple[bytes, int] | None:
+    """Return a valid CommonMark fenced-code opener's kind and width."""
+    match = re.match(rb"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
+    if match is None:
+        return None
+    marker, info = match.group(1), match.group(2)
+    if marker.startswith(b"`") and b"`" in info:
+        return None
+    return marker[:1], len(marker)
+
+
+def claim_scope_indices(
+    lines: list[bytes],
+    start: int,
+    site: int,
+    *,
+    markdown: bool = True,
+    structural_lines: list[bytes] | None = None,
+    html_scan_lines: list[bytes] | None = None,
+) -> list[int]:
+    """Return enclosing Markdown structures that affect a claim's meaning."""
+    if not markdown:
+        return []
+    if structural_lines is None:
+        structural_lines = mask_markdown_code_spans(lines)
+    if html_scan_lines is None:
+        html_scan_lines = mask_inline_html_opaque_regions(structural_lines)
+    enclosures: list[int] = []
+    if lines[site].lstrip().startswith(b">"):
+        quote_start = site
+        while quote_start and lines[quote_start - 1].lstrip().startswith(b">"):
+            quote_start -= 1
+        if quote_start != site:
+            enclosures.append(quote_start)
+    active_fence: tuple[bytes, int, int] | None = None
+    active_raw_html: tuple[str, int, bytes | None] | None = None
+    active_html_blocks: list[tuple[bytes, int]] = []
+    scope_list_indent: int | None = None
+    scope_list_start: int | None = None
+    scope_paragraph_open = False
+    for index, line in enumerate(structural_lines[: site + 1]):
+        quote_line = strip_blockquote_containers(line)
+        html_quote_line = strip_blockquote_containers(html_scan_lines[index])
+        leading = re.match(rb"^[ \t]*", quote_line)
+        assert leading is not None
+        indentation = len(leading.group(0).expandtabs(4))
+        if (
+            scope_list_indent is not None
+            and quote_line.strip()
+            and indentation < scope_list_indent
+        ):
+            scope_list_indent = None
+            scope_list_start = None
+        list_item = re.match(
+            rb"^[ ]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+", quote_line
+        )
+        structural_line = quote_line
+        html_element_line = html_quote_line
+        if list_item is not None:
+            scope_list_indent = len(list_item.group(0).expandtabs(4))
+            scope_list_start = index
+            structural_line = quote_line[list_item.end() :]
+            html_element_line = html_quote_line[list_item.end() :]
+        elif scope_list_indent is not None and indentation >= scope_list_indent:
+            structural_line = strip_indentation(quote_line, scope_list_indent)
+            html_element_line = strip_indentation(
+                html_quote_line, scope_list_indent
+            )
+        fence = markdown_fence_open(structural_line)
+        fence_close = re.match(
+            rb"^[ ]{0,3}(`{3,}|~{3,})[ \t]*$", structural_line
+        )
+        if active_fence is not None:
+            if (
+                fence_close is not None
+                and fence_close.group(1)[:1] == active_fence[0]
+                and len(fence_close.group(1)) >= active_fence[1]
+            ):
+                active_fence = None
+            scope_paragraph_open = False
+            continue
+        if active_raw_html is not None:
+            raw_kind, _, raw_name = active_raw_html
+            if raw_kind == "blank":
+                advance_html_block_stack(
+                    html_element_line, index, active_html_blocks
+                )
+            if commonmark_raw_html_ends(raw_kind, structural_line):
+                if raw_kind == "raw-tag" and raw_name is not None:
+                    close_html_element(active_html_blocks, raw_name)
+                active_raw_html = None
+            scope_paragraph_open = False
+            continue
+        structural_leading = re.match(rb"^[ \t]*", structural_line)
+        assert structural_leading is not None
+        if len(structural_leading.group(0).expandtabs(4)) >= 4:
+            scope_paragraph_open = False
+            continue
+        if fence is not None:
+            active_fence = (fence[0], fence[1], index)
+            scope_paragraph_open = False
+            continue
+        started_raw_html = commonmark_raw_html_start(
+            structural_line, allow_type7=not scope_paragraph_open
+        )
+        if started_raw_html is not None:
+            raw_name: bytes | None = None
+            if started_raw_html == "raw-tag":
+                raw_match = re.match(
+                    rb"^[ ]{0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)",
+                    structural_line,
+                    re.I,
+                )
+                assert raw_match is not None
+                raw_name_match = re.match(
+                    rb"^[ ]{0,3}<([A-Za-z]+)", structural_line
+                )
+                assert raw_name_match is not None
+                element_name = raw_name_match.group(1).lower()
+                active_html_blocks.append((element_name, index))
+                raw_name = element_name
+                if commonmark_raw_html_ends(started_raw_html, structural_line):
+                    close_html_element(active_html_blocks, element_name)
+            elif started_raw_html == "blank":
+                advance_html_block_stack(
+                    html_element_line, index, active_html_blocks
+                )
+            if not commonmark_raw_html_ends(started_raw_html, structural_line):
+                active_raw_html = (started_raw_html, index, raw_name)
+            scope_paragraph_open = False
+            continue
+        advance_html_block_stack(html_element_line, index, active_html_blocks)
+        if not structural_line.strip() or re.match(
+            rb"^[ ]{0,3}#{1,6}(?:[ \t]+|$)", structural_line
+        ):
+            scope_paragraph_open = False
+        else:
+            scope_paragraph_open = True
+    if active_fence is not None:
+        enclosures.append(active_fence[2])
+    if active_raw_html is not None:
+        enclosures.append(active_raw_html[1])
+    if scope_list_start is not None and scope_list_start < start:
+        enclosures.append(scope_list_start)
+    enclosures.extend(index for _, index in active_html_blocks)
+
+    heading_entries: list[tuple[int, list[int]]] = []
+    active_html_heading: tuple[int, int] | None = None
+    heading_fence: tuple[bytes, int, int | None] | None = None
+    raw_html_kind: str | None = None
+    raw_html_container_indent: int | None = None
+    active_list_indent: int | None = None
+    paragraph_open = False
+    for index, line in enumerate(structural_lines[:start]):
+        container_line = strip_blockquote_containers(line)
+        leading = re.match(rb"^[ \t]*", container_line)
+        assert leading is not None
+        indentation = len(leading.group(0).expandtabs(4))
+        if heading_fence is not None:
+            container_indent = heading_fence[2]
+            if (
+                container_indent is not None
+                and container_line.strip()
+                and indentation < container_indent
+            ):
+                heading_fence = None
+            else:
+                fence_line = (
+                    strip_indentation(container_line, container_indent)
+                    if container_indent is not None
+                    else container_line
+                )
+                fence_close = re.match(
+                    rb"^[ ]{0,3}(`{3,}|~{3,})[ \t]*$", fence_line
+                )
+                if (
+                    fence_close is not None
+                    and fence_close.group(1)[:1] == heading_fence[0]
+                    and len(fence_close.group(1)) >= heading_fence[1]
+                ):
+                    heading_fence = None
+                paragraph_open = False
+                continue
+        if raw_html_kind is not None:
+            if (
+                raw_html_container_indent is not None
+                and container_line.strip()
+                and indentation < raw_html_container_indent
+            ):
+                raw_html_kind = None
+                raw_html_container_indent = None
+            else:
+                if commonmark_raw_html_ends(raw_html_kind, container_line):
+                    raw_html_kind = None
+                    raw_html_container_indent = None
+                paragraph_open = False
+                continue
+        if (
+            active_list_indent is not None
+            and container_line.strip()
+            and indentation < active_list_indent
+        ):
+            active_list_indent = None
+        list_item = re.match(
+            rb"^[ ]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+", container_line
+        )
+        structural_line = container_line
+        if list_item is not None:
+            active_list_indent = len(list_item.group(0).expandtabs(4))
+            structural_line = container_line[list_item.end() :]
+        elif active_list_indent is not None and indentation >= active_list_indent:
+            structural_line = strip_indentation(container_line, active_list_indent)
+        fence = markdown_fence_open(structural_line)
+        if active_html_heading is not None:
+            level, opening_index = active_html_heading
+            if re.search(
+                rb"</\s*h" + str(level).encode() + rb"\s*>",
+                structural_line,
+                re.I,
+            ):
+                heading_entries.append(
+                    (level, list(range(opening_index, index + 1)))
+                )
+                active_html_heading = None
+            paragraph_open = False
+            continue
+        if fence is not None:
+            heading_fence = (fence[0], fence[1], active_list_indent)
+            paragraph_open = False
+            continue
+        html_match = re.match(
+            rb"^[ ]{0,3}<h([1-6])(?=[ \t]|/?>|$)", structural_line, re.I
+        )
+        if html_match is not None:
+            level = int(html_match.group(1))
+            if re.search(
+                rb"</\s*h" + str(level).encode() + rb"\s*>",
+                structural_line,
+                re.I,
+            ):
+                heading_entries.append((level, [index]))
+            else:
+                active_html_heading = (level, index)
+            paragraph_open = False
+            continue
+        started_raw_html = commonmark_raw_html_start(
+            structural_line, allow_type7=not paragraph_open
+        )
+        if started_raw_html is not None:
+            if not commonmark_raw_html_ends(started_raw_html, structural_line):
+                raw_html_kind = started_raw_html
+                raw_html_container_indent = active_list_indent
+            paragraph_open = False
+            continue
+        atx_match = re.match(
+            rb"^[ ]{0,3}(#{1,6})(?:[ \t]+|$)", structural_line
+        )
+        if atx_match is not None:
+            heading_entries.append((len(atx_match.group(1)), [index]))
+            paragraph_open = False
+            continue
+        setext_match = re.match(rb"^[ ]{0,3}(=+|-+)[ \t]*$", structural_line)
+        if setext_match is not None and paragraph_open and index:
+            level = 1 if setext_match.group(1).startswith(b"=") else 2
+            heading_entries.append((level, [index - 1, index]))
+            paragraph_open = False
+            continue
+        paragraph_open = bool(structural_line.strip())
+
+    if active_html_heading is not None:
+        level, opening_index = active_html_heading
+        heading_entries.append((level, list(range(opening_index, start))))
+
+    headings: list[int] = []
+    parent_level = 7
+    for level, indices in reversed(heading_entries):
+        if level < parent_level:
+            headings.extend(reversed(indices))
+            parent_level = level
+            if level == 1:
+                break
+    headings.reverse()
+
+    table_headers: list[int] = []
+    if lines[site].lstrip().startswith(b"|"):
+        table_start = site
+        while table_start and lines[table_start - 1].lstrip().startswith(b"|"):
+            table_start -= 1
+        if table_start < site:
+            table_headers = list(range(table_start, min(table_start + 2, site)))
+    return sorted(set(enclosures + headings + table_headers))
+
+
 def citation_claim_contexts(
-    data: bytes, citations: list[Citation]
+    data: bytes, citations: list[Citation], *, markdown: bool = True
 ) -> dict[int, str]:
     """Bind citations to nearby carrier text without hashing citation bytes."""
+    cache_key = (
+        hashlib.sha256(data).digest(),
+        markdown,
+        tuple(
+            (citation.begin, citation.finish, citation.carrier_line)
+            for citation in citations
+        ),
+    )
+    cached = CLAIM_CONTEXT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy()
     masked = bytearray(data)
     for candidate in citations:
         for index in range(candidate.begin, candidate.finish):
@@ -258,22 +1012,40 @@ def citation_claim_contexts(
                 masked[index] = ord(" ")
     lines = byte_lines(bytes(masked))
     original_lines = byte_lines(data)
+    structural_lines = (
+        mask_markdown_code_spans(original_lines) if markdown else original_lines
+    )
+    html_scan_lines = (
+        mask_inline_html_opaque_regions(structural_lines)
+        if markdown
+        else structural_lines
+    )
 
     contexts: dict[int, str] = {}
     for citation in citations:
         site = citation.carrier_line - 1
-        start = site
-        while start and original_lines[start - 1].strip():
-            start -= 1
-        end = min(site + 1, len(lines))
-        while end < len(lines) and original_lines[end].strip():
-            end += 1
+        start, end = claim_context_bounds(original_lines, site, markdown=markdown)
         # Wrapping a citation changes comment-marker and punctuation placement,
         # so the binding uses the words and identifiers in its logical carrier
         # paragraph. Citation moves across paragraphs still fail closed.
-        paragraph = b" ".join(lines[start:end])
-        words = re.sub(rb"[^A-Za-z0-9_#/@.-]+", b" ", paragraph)
-        contexts[citation.begin] = sha256(re.sub(rb"\s+", b" ", words).strip())
+        scope = [
+            lines[index]
+            for index in claim_scope_indices(
+                original_lines,
+                start,
+                site,
+                markdown=markdown,
+                structural_lines=structural_lines,
+                html_scan_lines=html_scan_lines,
+            )
+        ]
+        paragraph = b"\n".join(scope + [b"\0"] + lines[start:end])
+        # Paragraph binding tolerates reflow; physical indentation is enforced
+        # separately by citation_line_bindings on the citation-local claim.
+        contexts[citation.begin] = sha256(
+            normalized_claim_tokens(paragraph, preserve_indentation=False)
+        )
+    CLAIM_CONTEXT_CACHE[cache_key] = contexts.copy()
     return contexts
 
 
@@ -283,9 +1055,9 @@ def citation_claim_context(data: bytes, citation: Citation) -> str:
 
 
 def citation_claim_bindings(
-    data: bytes, citations: list[Citation]
+    data: bytes, citations: list[Citation], *, markdown: bool = True
 ) -> dict[int, tuple[str, int]]:
-    contexts = citation_claim_contexts(data, citations)
+    contexts = citation_claim_contexts(data, citations, markdown=markdown)
     ordinals: Counter[str] = Counter()
     bindings: dict[int, tuple[str, int]] = {}
     for citation in citations:
@@ -295,39 +1067,126 @@ def citation_claim_bindings(
     return bindings
 
 
+def comment_carrier_marker(line: bytes) -> bytes:
+    """Return a stable tag for a line's documentation/comment carrier."""
+    stripped = line.lstrip()
+    for prefix, marker in (
+        (b"///", b"rustdoc-outer"),
+        (b"//!", b"rustdoc-inner"),
+        (b"//", b"line-comment"),
+        (b"/**", b"block-doc-outer"),
+        (b"/*!", b"block-doc-inner"),
+        (b"/*", b"block-comment"),
+        (b"--", b"sql-comment"),
+    ):
+        if stripped.startswith(prefix):
+            return b"<carrier:" + marker + b">"
+    return b""
+
+
 def citation_line_bindings(
     data: bytes, citations: list[Citation]
 ) -> dict[int, tuple[str, int]]:
-    """Bind citations to their physical claim line, independent of line number."""
+    """Bind citations to local claim text, independent of line and wrapping.
+
+    Inline whitespace changes and one leading code-comment marker do not
+    participate; physical line indentation and all other claim bytes do. The
+    content before a citation's opening and after its closing is hashed as an
+    ordered, line-local pair. A citation-only line binds to its adjacent claim
+    text; when the preceding line is only structural punctuation, the following
+    declaration participates too. A leading citation after a completed claim
+    binds backward. Moving evidence to another claim or changing indentation,
+    words, punctuation, Unicode symbols, grouping, or operators fails.
+    """
+    cache_key = (
+        hashlib.sha256(data).digest(),
+        tuple(
+            (citation.begin, citation.finish, citation.carrier_line)
+            for citation in citations
+        ),
+    )
+    cached = CLAIM_LINE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy()
     masked = bytearray(data)
     for citation in citations:
         for index in range(citation.begin, citation.finish):
             if masked[index] not in b"\r\n":
                 masked[index] = ord(" ")
-    lines = byte_lines(bytes(masked))
+    masked_data = bytes(masked)
+    lines = byte_lines(masked_data)
+    original_lines = byte_lines(data)
+    line_starts: list[int] = []
+    offset = 0
+    for line in lines:
+        line_starts.append(offset)
+        offset += len(line) + 1
+
     ordinals: Counter[str] = Counter()
     bindings: dict[int, tuple[str, int]] = {}
     for citation in citations:
         site = citation.carrier_line - 1
-        line = lines[site]
-        context_lines = [line]
-        if re.search(rb"[A-Za-z0-9_]", line) is None:
-            before = next(
-                (lines[index] for index in range(site - 1, -1, -1) if lines[index].strip()),
-                b"",
-            )
-            after = next(
-                (
-                    lines[index]
-                    for index in range(site + 1, len(lines))
-                    if lines[index].strip()
-                ),
-                b"",
-            )
-            context_lines = [before, line, after]
-        context = sha256(re.sub(rb"\s+", b" ", b"\n".join(context_lines)).strip())
+        finish = data.count(b"\n", 0, citation.finish)
+        opening_marker = comment_carrier_marker(original_lines[site])
+        closing_marker = comment_carrier_marker(original_lines[finish])
+        opening_start = line_starts[site]
+        closing_end = line_starts[finish] + len(lines[finish])
+        prefix = normalized_claim_tokens(masked_data[opening_start : citation.begin])
+        suffix = normalized_claim_tokens(
+            masked_data[citation.finish : closing_end], preserve_indentation=False
+        )
+        previous = b""
+        previous_completed = False
+        previous_has_words = False
+        for index in range(site - 1, -1, -1):
+            if not original_lines[index].strip():
+                break
+            candidate = normalized_claim_tokens(lines[index])
+            if candidate:
+                previous = candidate
+                previous_completed = (
+                    re.search(rb"[.!?][`*_)}\]]*\s*$", lines[index]) is not None
+                )
+                previous_has_words = (
+                    re.search(
+                        rb"[A-Za-z0-9_]",
+                        re.sub(rb"^<indent:\d+>", b"", candidate),
+                    )
+                    is not None
+                )
+                break
+        following = b""
+        for index in range(finish + 1, len(lines)):
+            if not original_lines[index].strip():
+                break
+            candidate = normalized_claim_tokens(lines[index])
+            if re.search(
+                rb"[A-Za-z0-9_]", re.sub(rb"^<indent:\d+>", b"", candidate)
+            ) is not None:
+                following = candidate
+                break
+        if not prefix and previous and (suffix and previous_completed):
+            prefix = previous
+            suffix = b""
+        elif not prefix and not suffix:
+            if previous and previous_has_words:
+                prefix = previous
+            elif previous or following:
+                prefix = previous
+                suffix = following
+        claim = (
+            opening_marker
+            + b"\0"
+            + closing_marker
+            + b"\0"
+            + prefix
+            + b"\0"
+            + suffix
+        )
+        context = sha256(claim)
         bindings[citation.begin] = (context, ordinals[context])
         ordinals[context] += 1
+    CLAIM_LINE_CACHE[cache_key] = bindings.copy()
     return bindings
 
 
@@ -595,6 +1454,10 @@ def carrier_class(path: str, citation: Citation) -> str:
 
 
 def build_baseline(base: str, spec: dict[str, Any]) -> Baseline:
+    cache_key = (base, sha256(json.dumps(spec, sort_keys=True).encode()))
+    cached = BASELINE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     key = spec["key"]
     old_short = spec["old_commit"][:7]
     raw_tag = f"{key}@{old_short}".encode()
@@ -614,7 +1477,10 @@ def build_baseline(base: str, spec: dict[str, Any]) -> Baseline:
         raw_count += carrier_raw
         exact_count += data.count(exact_tag)
         citations = parse_citations(data, loose=True)
-        claim_bindings = citation_claim_bindings(data, citations)
+        claim_bindings = citation_claim_bindings(
+            data, citations, markdown=carrier.endswith(".md")
+        )
+        claim_line_bindings = citation_line_bindings(data, citations)
         selected = [
             citation
             for citation in citations
@@ -705,6 +1571,8 @@ def build_baseline(base: str, spec: dict[str, Any]) -> Baseline:
                 "baseline_canonical": citation.strict,
                 "claim_context_sha256": claim_bindings[citation.begin][0],
                 "claim_context_ordinal": claim_bindings[citation.begin][1],
+                "claim_line_sha256": claim_line_bindings[citation.begin][0],
+                "claim_line_ordinal": claim_line_bindings[citation.begin][1],
                 "old": {
                     **citation.target(),
                     "commit": spec["old_commit"],
@@ -716,7 +1584,7 @@ def build_baseline(base: str, spec: dict[str, Any]) -> Baseline:
             rows.append(row)
 
     rows.sort(key=lambda row: row["id"])
-    return Baseline(
+    baseline = Baseline(
         commit=base,
         rows=rows,
         raw_count=raw_count,
@@ -724,6 +1592,8 @@ def build_baseline(base: str, spec: dict[str, Any]) -> Baseline:
         parsed_count=parsed_count,
         noncanonical_count=noncanonical_count,
     )
+    BASELINE_CACHE[cache_key] = baseline
+    return baseline
 
 
 def json_line(row: dict[str, Any]) -> str:
@@ -1250,7 +2120,14 @@ def final_citation_accounting(
         )
 
     base_current: dict[
-        str, Counter[tuple[tuple[str, int], tuple[str, str, int, int, str]]]
+        str,
+        Counter[
+            tuple[
+                tuple[str, int],
+                tuple[str, int],
+                tuple[str, str, int, int, str],
+            ]
+        ],
     ] = defaultdict(Counter)
     pin_manifest_base: Counter[
         tuple[tuple[str, int], tuple[str, str, int, int, str]]
@@ -1259,19 +2136,26 @@ def final_citation_accounting(
         if excluded(carrier):
             continue
         data = blob(base, carrier)
-        citations = parse_citations(data, loose=False)
-        bindings = citation_line_bindings(data, citations)
+        citations = parse_citations(data, loose=True)
+        line_bindings = citation_line_bindings(data, citations)
+        paragraph_bindings = citation_claim_bindings(
+            data, citations, markdown=carrier.endswith(".md")
+        )
         for citation in citations:
             if pin_manifest_authority(carrier, citation):
                 pin_manifest_base[
-                    (bindings[citation.begin], citation_target(citation))
+                    (line_bindings[citation.begin], citation_target(citation))
                 ] += 1
                 continue
             pin = governed_pins.get(citation.key)
             if pin is None or not pin.startswith(citation.short):
                 continue
             base_current[carrier][
-                (bindings[citation.begin], citation_target(citation))
+                (
+                    line_bindings[citation.begin],
+                    paragraph_bindings[citation.begin],
+                    citation_target(citation),
+                )
             ] += 1
 
     accounting = {
@@ -1301,10 +2185,16 @@ def final_citation_accounting(
     for carrier, citations in final_by_carrier.items():
         if excluded(carrier):
             continue
-        bindings = citation_line_bindings(final_data[carrier], citations)
+        line_bindings = citation_line_bindings(final_data[carrier], citations)
+        paragraph_bindings = citation_claim_bindings(
+            final_data[carrier], citations, markdown=carrier.endswith(".md")
+        )
         for index, citation in enumerate(citations):
             if pin_manifest_authority(carrier, citation):
-                occurrence = (bindings[citation.begin], citation_target(citation))
+                occurrence = (
+                    line_bindings[citation.begin],
+                    citation_target(citation),
+                )
                 if pin_manifest_base[occurrence]:
                     pin_manifest_base[occurrence] -= 1
                     accounting["pin_manifest_authority"] += 1
@@ -1323,7 +2213,11 @@ def final_citation_accounting(
                 accounting["historical_total"] += 1
             if index in used_final.get(carrier, set()):
                 continue
-            occurrence = (bindings[citation.begin], citation_target(citation))
+            occurrence = (
+                line_bindings[citation.begin],
+                paragraph_bindings[citation.begin],
+                citation_target(citation),
+            )
             if base_current[carrier][occurrence]:
                 base_current[carrier][occurrence] -= 1
                 if citation.key == current_key:
@@ -1336,7 +2230,7 @@ def final_citation_accounting(
                 f"citation: {citation.raw.decode(errors='replace')}"
             )
     for carrier, occurrences in sorted(base_current.items()):
-        for (_, target), count in occurrences.items():
+        for (_, _, target), count in occurrences.items():
             if count:
                 key, path, start, end, short = target
                 errors.append(
@@ -1708,12 +2602,18 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
 
     final_by_carrier: dict[str, list[Citation]] = {}
     final_binding_by_carrier: dict[str, dict[int, tuple[str, int]]] = {}
+    final_line_binding_by_carrier: dict[str, dict[int, tuple[str, int]]] = {}
     final_data: dict[str, bytes] = {}
     for carrier in revision_paths(head):
         data = worktree_or_blob(head, carrier)
         final_data[carrier] = data
         final_by_carrier[carrier] = parse_citations(data, loose=True)
         final_binding_by_carrier[carrier] = citation_claim_bindings(
+            data,
+            final_by_carrier[carrier],
+            markdown=carrier.endswith(".md"),
+        )
+        final_line_binding_by_carrier[carrier] = citation_line_bindings(
             data, final_by_carrier[carrier]
         )
 
@@ -1798,26 +2698,50 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
             expected["end"],
             expected_short,
         )
+        target_candidates = [
+            (index, citation)
+            for index, citation in enumerate(candidates)
+            if index not in used_final[carrier]
+            and citation_target(citation) == wanted
+        ]
         selected_index = next(
             (
                 index
-                for index, citation in enumerate(candidates)
-                if index not in used_final[carrier]
-                and final_binding_by_carrier[carrier][citation.begin]
+                for index, citation in target_candidates
+                if final_binding_by_carrier[carrier][citation.begin]
                 == (row["claim_context_sha256"], row["claim_context_ordinal"])
-                and (
-                    citation.key,
-                    citation.path,
-                    citation.start,
-                    citation.end,
-                    citation.short,
-                )
-                == wanted
+                and final_line_binding_by_carrier[carrier][citation.begin]
+                == (row["claim_line_sha256"], row["claim_line_ordinal"])
             ),
             None,
         )
         if selected_index is None:
-            errors.append(f"{row['id']}: final target missing: {wanted!r}")
+            line_candidates = [
+                (index, citation)
+                for index, citation in target_candidates
+                if final_line_binding_by_carrier[carrier][citation.begin]
+                == (row["claim_line_sha256"], row["claim_line_ordinal"])
+            ]
+            if target_candidates and not line_candidates:
+                lines = ", ".join(
+                    str(citation.carrier_line)
+                    for _, citation in target_candidates
+                )
+                errors.append(
+                    f"{row['id']}: final claim-line binding mismatch: "
+                    f"{carrier}:L{lines}"
+                )
+            elif line_candidates:
+                lines = ", ".join(
+                    str(citation.carrier_line)
+                    for _, citation in line_candidates
+                )
+                errors.append(
+                    f"{row['id']}: final claim-context binding mismatch: "
+                    f"{carrier}:L{lines}"
+                )
+            else:
+                errors.append(f"{row['id']}: final target missing: {wanted!r}")
             continue
         used_final[carrier].add(selected_index)
         final = candidates[selected_index]
@@ -1839,6 +2763,12 @@ def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
                     final.begin
                 ][0],
                 "final_claim_context_ordinal": final_binding_by_carrier[carrier][
+                    final.begin
+                ][1],
+                "final_claim_line_sha256": final_line_binding_by_carrier[carrier][
+                    final.begin
+                ][0],
+                "final_claim_line_ordinal": final_line_binding_by_carrier[carrier][
                     final.begin
                 ][1],
                 "evidence_relation": evidence_relation,
