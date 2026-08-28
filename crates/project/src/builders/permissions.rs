@@ -88,8 +88,7 @@ pub(super) async fn build(
             SELECT DISTINCT ON (event.resource_id)
                    event.resource_id, event.event_kind, event.after_state
             FROM project_events event
-            WHERE event.resource_id IS NOT NULL
-              AND (
+            WHERE event.resource_id IS NOT NULL AND (
                   (
                       event.event_kind IN (
                           'RegistrationGranted', 'RegistrationReserved', 'RegistrationRenewed'
