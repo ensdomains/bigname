@@ -31,7 +31,6 @@ use topology::{
     append_resolver_discovery_closures, append_terminal_boundaries,
     append_token_discovery_closures, append_v2_name_transitions, discovery_observation_key,
 };
-
 pub(super) fn boundary_expiration(
     transition: V2NameTransition,
     released_at: i64,
@@ -522,9 +521,8 @@ fn label_event(
                 source_kind: format!("{}_registry_suffix", selected.event.name),
             });
         }
-        let registry = raw.emitting_address.to_ascii_lowercase();
         let transition = V2NameTransition {
-            registry: registry.clone(),
+            registry: raw.emitting_address.to_ascii_lowercase(),
             registry_contract_instance_id: linked.registry_contract_instance_id,
             token_id: token_id.clone(),
             expiry: linked.expiry,
@@ -541,9 +539,11 @@ fn label_event(
         };
         let mut retirement =
             topology::boundary_expiration(transition, raw.block_timestamp.unix_timestamp())?;
+        let resource_only =
+            matches!(retirement.events.first(), Some(event) if event.logical_name_id.is_none());
+        state.mark_v2_expiry_retirement(&raw.emitting_address, &token_id, resource_only);
         retirement.boundary_events.append(&mut retirement.events);
         output.append(&mut retirement);
-        state.mark_v2_expiry_retirement(&raw.emitting_address, &token_id, true);
     }
     let mut candidates = linked.resolver_discovery_aliases.clone();
     candidates.insert(token_id.clone());
