@@ -185,6 +185,7 @@ async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, dept
     await_quiet(pool).await?;
     configure_graph(pool, frontier, depth).await?;
     let mut tx = pool.begin().await?;
+    if !head && frontier > 1 { sqlx::query("SET LOCAL statement_timeout = '60s'").execute(&mut *tx).await?; }
     if head { head_tables(&mut tx).await? } else { base_tables(&mut tx).await? }
     reset(&mut tx, head, frontier, depth).await?;
     let fresh = Instant::now();
@@ -244,7 +245,7 @@ async fn issue_435_measurement() -> Result<()> {
     seed_v2(&pool).await?;
     let mut base_cells = Vec::new();
     for &(frontier, depth) in if head_only { &[][..] } else { &[(1, 1), (100, 3), (1000, 8)] } {
-        base_cells.push(measure(&pool, &base, false, frontier, depth, 20).await?);
+        base_cells.push(match measure(&pool, &base, false, frontier, depth, 20).await { Ok(cell) => cell, Err(error) if error.to_string().contains("canceling statement due to statement timeout") => json!({"frontier":frontier,"depth":depth,"timed_out_ms":60_000,"result":"one base closure statement exceeded the timeout; no latency substituted"}), Err(error) => return Err(error) });
     }
     let base_v2_cell = if head_only { Value::Null } else { measure(&pool, &base_v2, false, 1, 1, 20).await? };
     let migrations = build_indexes(&pool).await?;
@@ -263,7 +264,7 @@ async fn issue_435_measurement() -> Result<()> {
     let nonblank = measure(&pool, &nonblank_mutation, true, 1, 1, 0).await?;
     let load_10m_seconds = load(&pool, scale, scale).await?;
     let head_10m = measure(&pool, &head, true, 1000, 8, 20).await?;
-    let base_10m = if head_only { Value::Null } else { raw_sql(&INDEXES.iter().map(|(_, index)| format!("DROP INDEX {index};")).collect::<String>()).execute(&pool).await?; measure(&pool, &base, false, 1000, 8, 20).await? };
+    let base_10m = if head_only { Value::Null } else { raw_sql(&INDEXES.iter().map(|(_, index)| format!("DROP INDEX {index};")).collect::<String>()).execute(&pool).await?; match measure(&pool, &base, false, 1000, 8, 20).await { Ok(cell) => cell, Err(error) if error.to_string().contains("canceling statement due to statement timeout") => json!({"frontier":1000,"depth":8,"timed_out_ms":60_000,"result":"one base closure statement exceeded the timeout; no latency substituted"}), Err(error) => return Err(error) } };
     let revision = String::from_utf8(Command::new("git").args(["rev-parse", "HEAD"]).output()?.stdout)?;
     let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/issue-435-evidence").join(revision.trim());
     fs::create_dir_all(&output)?;
