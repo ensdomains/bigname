@@ -10114,6 +10114,7 @@ fn contested_claim_path_survivor(output: &BatchOutput, boundary_block: i64) -> U
     replacement.resource_id
 }
 
+#[rustfmt::skip]
 fn contested_claim_path_input(
     raw_logs: Vec<RawLogInput>,
     prior_events: Vec<PriorEventInput>,
@@ -10142,18 +10143,8 @@ fn contested_claim_path_input(
             &["registry"][..],
             &["ParentChanged"][..],
         ),
-        (
-            "LabelReserved",
-            "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
-            &["registry"][..],
-            &["RegistrationReserved"][..],
-        ),
-        (
-            "ExpiryUpdated",
-            "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)",
-            &["registry"][..],
-            &["ExpiryChanged", "RegistrationRenewed"][..],
-        ),
+        ("LabelReserved", "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)", &["registry"][..], &["RegistrationReserved"][..]),
+        ("ExpiryUpdated", "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)", &["registry"][..], &["ExpiryChanged", "RegistrationRenewed"][..]),
     ];
     let root_events = [
         registry_events[0],
