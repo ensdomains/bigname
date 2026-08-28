@@ -9,12 +9,16 @@ const MAIN: &str = "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c
 const GENERIC: &str = "ens:0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const RESERVATION: &str = "ens:0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const MIXED: &str = "ens:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const STALE: &str = "ens:0x9cb584ed30b5117bbc56c87f872c05f1610a364fd208d84f6c5abbad3a80445c";
 const RESOURCE: &str = "b64d3841-80ce-5f90-bb3c-575c05361e16";
 const LINEAGE: &str = "27c01db8-d04a-5c85-af28-dfed7797bc79";
+const STALE_RESOURCE: &str = "8c8f423c-d6c0-555d-9837-133622ba82fe";
+const STALE_LINEAGE: &str = "964569a1-400a-5486-b262-5f5c03d56ada";
 const VERSION_RESOURCE: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 const VERSION_LINEAGE: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 const TOKEN: &str = "0x0000000000000000000000000000000000000000000000000000000000000065";
 const VERSION_TOKEN: &str = "0x0000000100000000000000000000000000000000000000000000000000000065";
+const STALE_TOKEN: &str = "0x0000000000000000000000000000000000000000000000000000000100000000";
 const REGISTRY: &str = "0x00000000000000000000000000000000000020aa";
 const OWNER: &str = "0x0000000000000000000000000000000000002011";
 const SUBJECT: &str = "0x0000000000000000000000000000000000002033";
@@ -127,13 +131,13 @@ async fn event(
     Ok(())
 }
 
-fn expired(expiry: i64) -> Value {
+fn expired(token: &str, expiry: i64) -> Value {
     json!({
         "source_event":"RegistryPathExpired",
         "derived_from":"interpreter_state",
         "terminal_reason":"registry_name_binding_expired",
         "registry":REGISTRY,
-        "token_id":TOKEN,
+        "token_id":token,
         "registry_contract_instance_id":"00000000-0000-0000-0000-000000000001",
         "expiry":expiry,
         "status":"released",
@@ -148,6 +152,10 @@ async fn seed(pool: &PgPool) -> Result<()> {
     assert_eq!(expected["logical_name_id"], MAIN); assert_eq!(expected["resource_id"], RESOURCE);
     assert_eq!(expected["token_lineage_id"], LINEAGE); assert_eq!(expected["token_id"], TOKEN);
     assert_eq!(expected["registry"], REGISTRY); assert_eq!(expected["expiry"], 1_800_000_000_i64);
+    let stale = &expected["already_expired_reservation"];
+    assert_eq!(stale["logical_name_id"], STALE); assert_eq!(stale["resource_id"], STALE_RESOURCE);
+    assert_eq!(stale["token_lineage_id"], STALE_LINEAGE); assert_eq!(stale["token_id"], STALE_TOKEN);
+    assert_eq!(stale["expiry"], 1_700_000_100_i64);
 
     for (block, timestamp) in [
         (100, 1_700_000_100_i64), (101, 1_800_000_000), (102, 1_800_000_001), (103, 1_900_000_000),
@@ -164,19 +172,20 @@ async fn seed(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
     }
-    let (h100, h102, h103) = (hash(100), hash(102), hash(103)); let (main_hash, generic_hash) = (MAIN.trim_start_matches("ens:"), GENERIC.trim_start_matches("ens:")); let (reservation_hash, mixed_hash) = (RESERVATION.trim_start_matches("ens:"), MIXED.trim_start_matches("ens:")); let (one, two, three, four) = (1_u64, 2_u64, 3_u64, 4_u64);
+    let (h100, h102, h103) = (hash(100), hash(102), hash(103)); let (main_hash, generic_hash) = (MAIN.trim_start_matches("ens:"), GENERIC.trim_start_matches("ens:")); let (reservation_hash, mixed_hash, stale_hash) = (RESERVATION.trim_start_matches("ens:"), MIXED.trim_start_matches("ens:"), STALE.trim_start_matches("ens:")); let (one, two, three, four) = (1_u64, 2_u64, 3_u64, 4_u64);
     raw_sql(&format!(
         "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
-         VALUES ('{LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{VERSION_LINEAGE}', '{CHAIN}', '{h103}', 103, 'canonical');
+         VALUES ('{LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{STALE_LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{VERSION_LINEAGE}', '{CHAIN}', '{h103}', 103, 'canonical');
          INSERT INTO resources (resource_id, token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
-         VALUES ('{RESOURCE}', '{LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{VERSION_RESOURCE}', '{VERSION_LINEAGE}', '{CHAIN}', '{h103}', 103, 'canonical');
+         VALUES ('{RESOURCE}', '{LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{STALE_RESOURCE}', '{STALE_LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{VERSION_RESOURCE}', '{VERSION_LINEAGE}', '{CHAIN}', '{h103}', 103, 'canonical');
          INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
              labelhashes, normalizer_version, visibility_state, chain_id, block_hash, block_number, canonicality_state)
          VALUES
            ('{MAIN}', 'ens', 'alice.eth', ARRAY['alice','eth'], '\\x05616c6963650365746800', '{main_hash}', ARRAY['0x{one:064x}','0x{two:064x}'], 'ensip15', 'active', '{CHAIN}', '{h100}', 100, 'canonical'),
            ('{GENERIC}', 'ens', 'generic.eth', ARRAY['generic','eth'], '\\x0767656e657269630365746800', '{generic_hash}', ARRAY['0x{two:064x}','0x{one:064x}'], 'ensip15', 'active', '{CHAIN}', '{h100}', 100, 'canonical'),
            ('{RESERVATION}', 'ens', 'reserved.eth', ARRAY['reserved','eth'], '\\x0872657365727665640365746800', '{reservation_hash}', ARRAY['0x{three:064x}','0x{two:064x}'], 'ensip15', 'active', '{CHAIN}', '{h100}', 100, 'canonical'),
-           ('{MIXED}', 'ens', 'mixed.eth', ARRAY['mixed','eth'], '\\x056d697865640365746800', '{mixed_hash}', ARRAY['0x{four:064x}','0x{two:064x}'], 'ensip15', 'active', '{CHAIN}', '{h100}', 100, 'canonical');
+           ('{MIXED}', 'ens', 'mixed.eth', ARRAY['mixed','eth'], '\\x056d697865640365746800', '{mixed_hash}', ARRAY['0x{four:064x}','0x{two:064x}'], 'ensip15', 'active', '{CHAIN}', '{h100}', 100, 'canonical'),
+           ('{STALE}', 'ens', 'stale.eth', ARRAY['stale','eth'], '\\x057374616c650365746800', '{stale_hash}', ARRAY['0x{four:064x}','0x{one:064x}'], 'ensip15', 'active', '{CHAIN}', '{h100}', 100, 'canonical');
          INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm,
              active_from, active_to, chain_id, block_hash, block_number, canonicality_state)
          VALUES
@@ -204,19 +213,22 @@ async fn seed(pool: &PgPool) -> Result<()> {
         event(pool, $name, $resource, $block, $log, $kind, $state).await?;
     }; }
     add!(MAIN, Some(RESOURCE), 100, Some(0), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000));
-    add!(MAIN, Some(RESOURCE), 100, Some(4), "PermissionChanged", permission);
+    add!(MAIN, Some(RESOURCE), 100, Some(4), "PermissionChanged", permission.clone());
     add!(RESERVATION, Some(RESOURCE), 100, Some(5), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
     add!(MIXED, Some(RESOURCE), 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
     event(pool, MIXED, None, 100, Some(7), "AuthorityTransferred", json!({"source_event":"NewOwner","owner":OWNER})).await?;
-    add!(MAIN, Some(RESOURCE), 101, None, "RegistrationReleased", expired(1_800_000_000));
+    add!(STALE, Some(STALE_RESOURCE), 100, Some(8), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN}));
+    add!(STALE, Some(STALE_RESOURCE), 100, Some(8), "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
+    add!(STALE, Some(STALE_RESOURCE), 100, Some(9), "PermissionChanged", permission);
+    add!(MAIN, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 101, Some(9), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
     add!(GENERIC, Some(RESOURCE), 101, Some(10), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"})); add!(MAIN, Some(RESOURCE), 101, Some(11), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"registered","expiry":1_800_000_000_i64,"token_id":TOKEN}));
-    add!(RESERVATION, Some(RESOURCE), 101, None, "RegistrationReleased", expired(1_800_000_000));
-    add!(MIXED, Some(RESOURCE), 101, None, "RegistrationReleased", expired(1_800_000_000));
+    add!(RESERVATION, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
+    add!(MIXED, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 102, Some(0), "RegistrationGranted", granted("ExpiryUpdated", TOKEN, 1_900_000_000));
     add!(MAIN, Some(RESOURCE), 102, Some(1), "ExpiryChanged", json!({"source_event":"ExpiryUpdated","expiry":1_900_000_000_i64,"token_id":TOKEN}));
     add!(RESERVATION, Some(RESOURCE), 102, Some(2), "RegistrationReserved", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64}));
-    add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
+    add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
     Ok(())
 }
 
@@ -258,6 +270,7 @@ async fn fresh(prefix: &str, target: i64) -> Result<(TestDatabase, PgPool)> {
 }
 
 #[tokio::test]
+#[rustfmt::skip]
 async fn expiry_permissions_and_names_converge_through_revival_and_version_bump() -> Result<()> {
     let (incremental_db, incremental) = database("v2_expiry_incremental").await?;
     seed(&incremental).await?;
@@ -272,22 +285,24 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(
-        live_state,
-        (
-            4,
-            1,
-            1,
-            Some("operator_approval_surfaces_not_ingested".into())
-        )
-    );
+    assert_eq!(live_state, (4, 1, 1, Some("operator_approval_surfaces_not_ingested".into())));
+    let stale_state: (i64, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
+                (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
+                (SELECT count(*) FROM permissions_current_resource_summary
+                 WHERE resource_id = $2::uuid),
+                (SELECT unsupported_reason FROM permissions_current_resource_summary
+                 WHERE resource_id = $2::uuid)",
+    )
+    .bind(STALE)
+    .bind(STALE_RESOURCE)
+    .fetch_one(&incremental)
+    .await?;
+    assert_eq!(stale_state, (0, 0, 1, Some("resource_permission_authority_not_projected".into())));
 
     let retired = run(&incremental, 101, Some(live)).await?;
     let (retired_db, retired_fresh) = fresh("v2_expiry_retired_fresh", 101).await?;
-    assert_eq!(
-        snapshot(&incremental).await?,
-        snapshot(&retired_fresh).await?
-    );
+    assert_eq!(snapshot(&incremental).await?, snapshot(&retired_fresh).await?);
     let retired_state: (i64, i64, i64, i64, i64, Option<String>) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE logical_name_id = $1),
                 count(*) FILTER (WHERE logical_name_id = $2),
@@ -305,17 +320,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(
-        retired_state,
-        (
-            0,
-            1,
-            0,
-            1,
-            0,
-            Some("operator_approval_surfaces_not_ingested".into())
-        )
-    );
+    assert_eq!(retired_state, (0, 1, 0, 1, 0, Some("operator_approval_surfaces_not_ingested".into())));
     let mixed: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT provenance -> 'authority_selection' ->> 'authority_arm',
                 declared_summary -> 'registration' ->> 'status',
@@ -343,10 +348,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
 
     let revived = run(&incremental, 102, Some(retired)).await?;
     let (revived_db, revived_fresh) = fresh("v2_expiry_revived_fresh", 102).await?;
-    assert_eq!(
-        snapshot(&incremental).await?,
-        snapshot(&revived_fresh).await?
-    );
+    assert_eq!(snapshot(&incremental).await?, snapshot(&revived_fresh).await?);
     let revival: (String, String, i64) = sqlx::query_as(
         "SELECT resource_id::text, token_lineage_id::text,
                 (SELECT count(*) FROM permissions_current
@@ -360,10 +362,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
 
     run(&incremental, 103, Some(revived)).await?;
     let (version_db, version_fresh) = fresh("v2_expiry_version_fresh", 103).await?;
-    assert_eq!(
-        snapshot(&incremental).await?,
-        snapshot(&version_fresh).await?
-    );
+    assert_eq!(snapshot(&incremental).await?, snapshot(&version_fresh).await?);
     let version: (String, i64, i64, i64, Option<String>) = sqlx::query_as(
         "SELECT (SELECT resource_id::text FROM name_current WHERE logical_name_id = $1),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
