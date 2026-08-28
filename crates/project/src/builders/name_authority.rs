@@ -31,23 +31,23 @@ pub(super) async fn build(
             FROM open_bindings
             GROUP BY logical_name_id
         ), event_arms AS (
-            SELECT event.logical_name_id, event.normalized_event_id,
-                   CASE
-                       WHEN event.source_family LIKE 'ens_v1_%' THEN 'ens_v1'
-                       WHEN event.source_family IN (
-                           'ens_v2_root_l1', 'ens_v2_registry_l1',
-                           'ens_v2_registrar_l1'
-                       ) THEN 'ens_v2'
-                       WHEN event.source_family LIKE 'basenames_%' THEN 'basenames'
-                   END AS authority_arm
-            FROM project_events event
-            WHERE event.logical_name_id IS NOT NULL
-              AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed',
-                  'RegistrationReleased', 'RegistrationReserved',
-                  'ExpiryChanged', 'AuthorityTransferred',
-                  'TokenControlTransferred', 'AuthorityEpochChanged'
-              )
+            SELECT event.logical_name_id, event.normalized_event_id, CASE WHEN event.source_family LIKE 'ens_v1_%' THEN 'ens_v1'
+                WHEN event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1') THEN 'ens_v2'
+                WHEN event.source_family LIKE 'basenames_%' THEN 'basenames' END AS authority_arm
+            FROM project_events event WHERE event.logical_name_id IS NOT NULL
+              AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged', 'AuthorityTransferred', 'TokenControlTransferred', 'AuthorityEpochChanged')
+              -- A [premigration reservation](../../../../docs/glossary.md#premigration-reservation) is resolver-bearing but not ENSv2 authority.
+              -- Batch premigration can either create an owner-zero reservation or only renew an existing reservation.
+              -- Registered ENSv2 expiry updates also emit the authority-bearing RegistrationRenewed sibling, so registry ExpiryChanged
+              -- must not vote independently. A reservation release likewise has no binding; a registered release retains its vote through the matching binding resource.
+              -- (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L48-L71 @ ens_v2@a971bd64)
+              -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+              -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+              AND NOT (event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1') AND (
+                  event.event_kind = 'ExpiryChanged' OR (event.event_kind = 'RegistrationReleased' AND NOT EXISTS (
+                      SELECT 1 FROM project_binding_candidates binding
+                      WHERE binding.logical_name_id = event.logical_name_id AND binding.authority_arm = 'ens_v2'
+                        AND binding.resource_id = event.resource_id))))
         ), event_arm_summary AS (
             SELECT logical_name_id,
                    count(DISTINCT authority_arm) AS arm_count,
