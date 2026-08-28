@@ -95,7 +95,7 @@ Stable identity for the backing authority object — the [anchor](glossary.md) f
 Stable identity for tokenized ownership history. Token IDs can change while the resource is unchanged; the lineage outlives the ID.
 
 - ENSv1: registry-only control has none. A registrar lease or wrapper position mints one. Renewal, transfer, expiry, and grace within the same anchor preserve it. Authority moving to a different tokenized anchor rotates it; returning to the prior tokenized anchor reactivates the prior lineage.
-- ENSv2: preserved across `TokenRegenerated`. Update the current token ID attribute and append the normalized event. Resource identity is anchored by upstream `eacVersionId`; tokens are versioned by `tokenVersionId`. Unregister/re-register increments both; regeneration increments only the token version.[^v2-pr-l28][^v2-pr-l203][^v2-pr-l237][^v2-pr-l241][^v2-pr-l242][^v2-pr-l451][^v2-pr-l461][^v2-pr-l542][^v2-pr-l547]
+- ENSv2: preserved across `TokenRegenerated`. Update the current token ID attribute and append the normalized event. Resource identity is anchored by upstream `eacVersionId`; tokens are versioned by `tokenVersionId`. Unregister/re-register of a registered entry increments both, while regeneration increments only the token version.[^v2-pr-l28][^v2-pr-l203][^v2-pr-l237][^v2-pr-l241][^v2-pr-l242][^v2-pr-l451][^v2-pr-l461][^v2-pr-l542][^v2-pr-l547] Releasing an owner-zero reservation and then registering it can instead preserve both versions, so the registration reuses the reservation resource. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L200-L206 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @ ens_v2@a971bd64)
 
 ### `contract_instance_id`
 
@@ -408,10 +408,14 @@ owner-zero reservation or extend an existing reservation's expiry, and the
 registry can return that reservation's resolver while it remains unexpired.
 (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L48-L71 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
-The registry permits unregistering either a registered or reserved entry; only
-a release whose resource had a matching [surface binding](glossary.md#surface-name-surface)
+The registry permits unregistering either a registered or reserved entry. An
+owner-zero reservation release and later registration can reuse the same
+resource because neither operation increments its version counters; therefore
+only a release whose resource had a matching
+[surface binding](glossary.md#surface-name-surface) at or before the release
 remains ENSv2 era evidence.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L206 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @ ens_v2@a971bd64)
 A real ENSv2 registration or binding still establishes ENSv2 authority.
 Therefore a live ENSv1 name plus only a premigration reservation selects ENSv1;
 a live ENSv1 name plus an actual ENSv2 registration remains unsupported without
