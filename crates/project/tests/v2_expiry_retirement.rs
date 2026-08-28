@@ -145,10 +145,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
                  chain_id, block_hash, block_number, block_timestamp, canonicality_state
              ) VALUES ($1, $2, $3, to_timestamp($4), 'canonical')",
         )
-        .bind(CHAIN)
-        .bind(hash(block))
-        .bind(block)
-        .bind(timestamp)
+        .bind(CHAIN).bind(hash(block)).bind(block).bind(timestamp)
         .execute(pool)
         .await?;
     }
@@ -196,7 +193,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     add!(MAIN, None, 100, Some(0), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 100, Some(1), "RegistrationGranted", granted("TokenResource", TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 100, Some(3), "ResolverChanged", json!({"source_event":"ResolverUpdated","resolver":OWNER}));
-    exact_events(pool, exact, 100, &["PermissionChanged"]).await?;
+    exact_events(pool, exact, 100, &["PermissionChanged"]).await?; add!(MAIN, None, 100, Some(12), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(MAIN, None, 100, None, "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
     add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
     add!(RESERVATION, None, 100, Some(5), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
     add!(RESERVATION, None, 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_900_000_000_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
@@ -262,7 +259,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     let (incremental_db, incremental) = database("v2_expiry_incremental").await?;
     seed(&incremental).await?;
     let live = run(&incremental, 100, None).await?;
-    let live_state: (i64, i64, i64, Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+    let live_state: (i64, i64, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $1::uuid),
                 (SELECT count(*) FROM permissions_current_resource_summary WHERE resource_id = $1::uuid),
@@ -270,13 +267,13 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
                  WHERE resource_id = $1::uuid),
                 (SELECT declared_summary -> 'registration' ->> 'status' FROM name_current WHERE logical_name_id = $2),
                 (SELECT declared_summary -> 'control' ->> 'status' FROM name_current WHERE logical_name_id = $2),
-                (SELECT declared_summary -> 'resolver' ->> 'address' FROM name_current WHERE logical_name_id = $2)",
+                (SELECT declared_summary -> 'resolver' ->> 'address' FROM name_current WHERE logical_name_id = $2),
+                (SELECT declared_summary -> 'registration' ->> 'latest_event_kind' FROM name_current WHERE logical_name_id = $2)",
     )
-    .bind(RESOURCE)
-    .bind(MAIN)
+    .bind(RESOURCE).bind(MAIN)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(live_state, (5, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into())));
+    assert_eq!(live_state, (5, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into()), Some("RegistrationGranted".into())));
     let stale_state: (i64, i64, i64, Option<String>) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
@@ -285,8 +282,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
                 (SELECT unsupported_reason FROM permissions_current_resource_summary
                  WHERE resource_id = $2::uuid)",
     )
-    .bind(STALE)
-    .bind(STALE_RESOURCE)
+    .bind(STALE).bind(STALE_RESOURCE)
     .fetch_one(&incremental)
     .await?;
     assert_eq!(stale_state, (0, 0, 1, Some("resource_permission_authority_not_projected".into())));
@@ -304,12 +300,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
                  WHERE resource_id = $5::uuid)
          FROM name_current",
     )
-    .bind(MAIN)
-    .bind(GENERIC)
-    .bind(RESERVATION)
-    .bind(MIXED)
-    .bind(RESOURCE)
-    .bind(DETACHED_RESOURCE)
+    .bind(MAIN).bind(GENERIC).bind(RESERVATION).bind(MIXED).bind(RESOURCE).bind(DETACHED_RESOURCE)
     .fetch_one(&incremental)
     .await?;
     assert_eq!(retired_state, (0, 1, 1, 1, 0, 0, Some("operator_approval_surfaces_not_ingested".into())));

@@ -214,7 +214,7 @@ pub(super) async fn build(
         LEFT JOIN project_resources resource ON resource.resource_id = binding.resource_id
         LEFT JOIN LATERAL (
             SELECT event.* FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
                   'RegistrationReserved'
@@ -227,7 +227,7 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT event.event_kind
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
                   'RegistrationReserved',
@@ -265,7 +265,7 @@ pub(super) async fn build(
               ON lineage.chain_id = event.chain_id
              AND lineage.block_number = event.block_number
              AND lineage.block_hash = event.block_hash
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
               AND event.event_kind = 'RegistrationGranted'
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
@@ -426,8 +426,7 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT event.*
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
-              AND event.after_state ? 'status'
+            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id) AND event.after_state ? 'status'
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,

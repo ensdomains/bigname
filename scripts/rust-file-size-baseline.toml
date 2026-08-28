@@ -37,7 +37,7 @@ justification = "The exact-name authority selector keeps proof, released tombsto
 
 [[files]]
 path = "crates/project/src/builders/name_current.rs"
-loc = 640
+loc = 639
 justification = "Current-name selection keeps authority-scoped lifecycle summaries and the narrowly provenance-gated ENSv2 expiry tombstone in one query so mixed-authority fallbacks and history-only retirement remain reviewable together."
 
 [[files]]
