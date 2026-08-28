@@ -37,9 +37,7 @@ pub(super) async fn build(
             FROM project_events event WHERE event.logical_name_id IS NOT NULL
               AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged', 'AuthorityTransferred', 'TokenControlTransferred', 'AuthorityEpochChanged')
               -- A [premigration reservation](../../../../docs/glossary.md#premigration-reservation) is resolver-bearing but not ENSv2 authority.
-              -- Batch premigration can either create an owner-zero reservation or only renew an existing reservation.
-              -- Registered ENSv2 expiry updates also emit the authority-bearing RegistrationRenewed sibling, so registry ExpiryChanged
-              -- must not vote independently. A reservation release likewise has no binding; a registered release retains its vote through the matching binding resource.
+              -- Its expiry maintenance cannot vote, and its release qualifies only from a matching binding at or before that release.
               -- (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L48-L71 @ ens_v2@a971bd64)
               -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
               -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
@@ -47,7 +45,9 @@ pub(super) async fn build(
                   event.event_kind = 'ExpiryChanged' OR (event.event_kind = 'RegistrationReleased' AND NOT EXISTS (
                       SELECT 1 FROM project_binding_candidates binding
                       WHERE binding.logical_name_id = event.logical_name_id AND binding.authority_arm = 'ens_v2'
-                        AND binding.resource_id = event.resource_id))))
+                        AND binding.resource_id = event.resource_id
+                        AND (binding.block_number, COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1), COALESCE((binding.provenance ->> 'log_index')::bigint, -1))
+                            <= (event.block_number, COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1))))))
         ), event_arm_summary AS (
             SELECT logical_name_id,
                    count(DISTINCT authority_arm) AS arm_count,
@@ -153,16 +153,16 @@ pub(super) async fn build(
             FROM project_events release
             WHERE release.logical_name_id IS NOT NULL
               AND release.resource_id IS NOT NULL
-              AND release.source_family IN (
-                  'ens_v2_root_l1', 'ens_v2_registry_l1',
-                  'ens_v2_registrar_l1'
-              )
+              AND release.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1',
+                                             'ens_v2_registrar_l1')
               AND release.event_kind = 'RegistrationReleased'
               AND EXISTS (
                   SELECT 1 FROM project_binding_candidates binding
                   WHERE binding.logical_name_id = release.logical_name_id
                     AND binding.authority_arm = 'ens_v2'
                     AND binding.resource_id = release.resource_id
+                    AND (binding.block_number, COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1), COALESCE((binding.provenance ->> 'log_index')::bigint, -1))
+                        <= (release.block_number, COALESCE(release.transaction_index, -1), COALESCE(release.log_index, -1))
               )
               AND NOT EXISTS (
                   SELECT 1 FROM project_binding_candidates predecessor
