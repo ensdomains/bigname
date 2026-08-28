@@ -104,16 +104,16 @@ availability rules. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrar
 Wrapped owner/operator outcomes follow the wrapper's approval and transfer
 checks. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L169 @ ens_v1@91c966f)
 The `U-*`/`X-U-*` and `W-*`/`X-W-*` rows use the unwrapped and wrapper injection
-branches of the unlocked controller. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L85-L165 @ ens_v2@ccaeb58)
+branches of the unlocked controller. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L85-L165 @ ens_v2@a971bd64)
 The `L-*`/`X-L-*`, `C-*`, and `H-*` rows use the locked controller and receiver
-branches. (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L81-L114 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L104-L207 @ ens_v2@ccaeb58)
+branches. (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L81-L114 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L104-L207 @ ens_v2_sepolia_20260629@ccaeb58)
 The helper batch owner/refusal outcomes use its explicit owner-or-approved
-check. (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L178-L200 @ ens_v2@ccaeb58)
+check. (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L178-L200 @ ens_v2_sepolia_20260629@ccaeb58)
 The `G-*` rows use the Graveyard cleanup and self-claim rules, while the `R-*`
-rows use the synchronized ENSv1 renewal bridge. (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L99-L170 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106-L146 @ ens_v2@ccaeb58)
+rows use the synchronized ENSv1 renewal bridge. (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L98-L169 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106-L146 @ ens_v2_sepolia_20260629@ccaeb58)
 The reservation and ordinary registry outcomes in the `P-*` rows follow the
-batch registrar and permissioned-registry state transitions. (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L43-L70 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L181-L220 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L407-L475 @ ens_v2@ccaeb58)
+batch registrar and permissioned-registry state transitions. (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L43-L70 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L179-L218 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L478 @ ens_v2@a971bd64)

@@ -18257,11 +18257,11 @@ async fn seed_dual_open_cross_arm_fixture(
     v2_block: i64,
 ) -> Result<String> {
     seed_raw_registration_fixture(pool, chain).await?;
-    // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L25 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L35-L38 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7-L17 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L423-L468 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629-L648 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L25 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L36-L39 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7-L17 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L426-L471 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L632-L651 @ ens_v2@a971bd64)
     insert_declared_source_manifest_events(
         pool,
         "ens",

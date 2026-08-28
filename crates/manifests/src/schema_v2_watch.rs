@@ -451,8 +451,8 @@ fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) ->
             // `RegistryCreated` admits a registry without a declaration role, and that registry
             // can emit `ResolverUpdated`. Keep this actual path distinct from the conservative
             // emitterless-rule placeholder.
-            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58)
-            // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@ccaeb58)
+            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@a971bd64)
+            // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L478 @ ens_v2@a971bd64)
             insert_discovery_rule(rules, manifest, rule, None, true, resolver_topic.clone(), 0);
         }
         for (address, start) in emitters {

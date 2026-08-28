@@ -921,15 +921,15 @@ Field ownership:
   entrypoint; the Sepolia evidence below explains its projected authority and
   the expected ENSv1-path behavior, not an active Sepolia verified route. An
   unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
-  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@ccaeb58)`,
+  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@a971bd64)`,
   an unlocked wrapped ENSv1→ENSv2 migration does the same
-  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2@ccaeb58)`,
+  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2@a971bd64)`,
   and the locked path clears it when the name permits that change
-  `(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L135-L144 @ ens_v2@ccaeb58)`.
+  `(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L135-L144 @ ens_v2_sepolia_20260629@ccaeb58)`.
   The deployment script installs the ENSv2-backed wildcard resolver at the
   ENSv1 `eth` node
-  `(upstream: .refs/ens_v2/contracts/deploy/00_ENSV2Resolver.ts:L60-L81 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L14 @ ens_v2@ccaeb58)`.
+  `(upstream: .refs/ens_v2_sepolia_20260629/contracts/deploy/00_ENSV2Resolver.ts:L60-L81 @ ens_v2_sepolia_20260629@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L14 @ ens_v2@a971bd64)`.
   The ENSv1 Universal Resolver walks up to an ancestor resolver
   `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
   and accepts that resolver through ENSIP-10
@@ -938,14 +938,14 @@ Field ownership:
   prove that path directly; the end-to-end suite defines the shared ENSv1 and
   ENSv2 resolution check and invokes it before and after ENSv1→ENSv2 migration
   of unwrapped, unlocked wrapped, and locked names
-  `(upstream: .refs/ens_v2/contracts/test/integration/ENSV2Resolver.test.ts:L94-L124 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L133-L147 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L451-L455 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L543-L550 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L603-L610 @ ens_v2@ccaeb58)`.
+  `(upstream: .refs/ens_v2_sepolia_20260629/contracts/test/integration/ENSV2Resolver.test.ts:L94-L124 @ ens_v2_sepolia_20260629@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L133-L147 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L454-L458 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L546-L553 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L606-L613 @ ens_v2@a971bd64)`.
   The `eth`-node redirect is scripted intent plus a deployed Sepolia resolver in
   the pinned checkout
-  `(upstream: .refs/ens_v2/contracts/deployments/sepolia/ENSV2Resolver.json:L2 @ ens_v2@ccaeb58)`;
+  `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ENSV2Resolver.json:L2 @ ens_v2@a971bd64)`;
   the [`ens_v2` pin](../.refs/MANIFEST.toml) is scoped to the admitted
   2026-06-29 Sepolia deployment's archived evidence (upstream's 2026-07-30
   redeploy is not admitted) and does not establish a Mainnet redirect
@@ -957,7 +957,7 @@ Field ownership:
   ENSv1→ENSv2 migration cannot clear it. When that entry names a listed
   PublicResolver, the ENSv1 side continues to serve its retained records while
   ENSv2 selects the replacement resolver
-  `(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L137-L175 @ ens_v2@ccaeb58)`.
+  `(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L137-L175 @ ens_v2_sepolia_20260629@ccaeb58)`.
   The ENSv1 PublicResolver derives ordinary write authority from the registry or
   wrapped token owner and their approvals, while separately authorizing its
   trusted ETH controller and reverse registrar
@@ -1164,7 +1164,7 @@ Field ownership:
   `/v2/events` or product-history response; only slice 2 changes visibility.
   The shared visibility predicate runs before keyset pagination, page-size
   limiting, cursor construction, and product-type mapping.
-  (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L228 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L229 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L161 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L163 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L28 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L226 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L160 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L162 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L169 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64)
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: event rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot

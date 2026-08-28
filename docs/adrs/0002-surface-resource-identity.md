@@ -82,7 +82,7 @@ ENSv1 authority-anchor rules:
 - keep the active `resource_id` while the same ENSv1 authority anchor stays authoritative across transfer, renewal, expiry, grace, fuse, resolver changes, or controller changes that do not diverge from the current tokenized holder
 - rotate the active `resource_id` when authority moves to a different ENSv1 anchor; wrap, unwrap, re-registration, and live registrar registry-owner divergence are the important cases
 - if the exact prior ENSv1 authority anchor becomes authoritative again, reuse its prior `resource_id`; exact means the prior anchor itself, not a different holder / controller and not a released or re-registered lease
-- if no prior registrar identity was materialized because the [deployment profile](../glossary.md#deployment-profile) retains numeric BaseRegistrar registration events only as evidence for a candidate [ENSv1→ENSv2 migration boundary](../glossary.md#migration-boundary), the ordered `NameUnwrapped` then BaseRegistrar `Transfer` establishes the registrar `resource_id` and `token_lineage_id` at that transfer; later transfers and replay reuse them, without retroactively creating an ordinary registration row. A completed `syncWrapper` [ENSv1→ENSv2 migration correlation group](../glossary.md#migration-correlation-group) may refine the registrar expiry used only when that transfer first materializes the missing identity; multiple completed groups retain the monotone maximum correlated expiry, and the retained correlated state does not update ordinary NameWrapper normalized events or NameWrapper state. That maximum is safe across full lapse and re-registration because BaseRegistrar accepts a successor registration only after the predecessor expiry plus grace, then writes a strictly later `block.timestamp + duration` expiry. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
+- if no prior registrar identity was materialized because the [deployment profile](../glossary.md#deployment-profile) retains numeric BaseRegistrar registration events only as evidence for a candidate [ENSv1→ENSv2 migration boundary](../glossary.md#migration-boundary), the ordered `NameUnwrapped` then BaseRegistrar `Transfer` establishes the registrar `resource_id` and `token_lineage_id` at that transfer; later transfers and replay reuse them, without retroactively creating an ordinary registration row. A completed `syncWrapper` [ENSv1→ENSv2 migration correlation group](../glossary.md#migration-correlation-group) may refine the registrar expiry used only when that transfer first materializes the missing identity; multiple completed groups retain the monotone maximum correlated expiry, and the retained correlated state does not update ordinary NameWrapper normalized events or NameWrapper state. That maximum is safe across full lapse and re-registration because BaseRegistrar accepts a successor registration only after the predecessor expiry plus grace, then writes a strictly later `block.timestamp + duration` expiry. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
 - effective permissions and permission history are keyed to the authoritative `resource_id`, not to the surface text
 - when the same ENSv1 anchor remains authoritative, resource-centric permission continuity stays on that `resource_id`; when authority moves to a different anchor, resource-centric permission reads do not merge predecessor and successor resources
 - direct registry-only control has no active `token_lineage_id`
@@ -149,25 +149,7 @@ in as an ignored collision probe). The resolver stores records by node and
 version. `setName` passes part zero,
 selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no
-current registry-registration lookup. (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L127-L133 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L77-L85 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L178-L186 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L467-L472 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L66-L78
-@ ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L192 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L374-L382 @
-ens_v2@ccaeb58) (upstream:
-.refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L443-L455 @
-ens_v2@ccaeb58)
+current registry-registration lookup. (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L127-L133 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L77-L85 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L178-L186 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L467-L472 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L66-L78 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L185-L192 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L374-L382 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L443-L455 @ ens_v2@a971bd64)
 
 An ownerless version-zero ENSv2 reservation establishes an unbound registry-entry
 `resource_id` and token-lineage identity before any token mint. Their existence
@@ -175,10 +157,10 @@ alone is not a registration, current authority, or `SurfaceBinding`. A later
 successful claim for that registry entry reuses the identities, and its
 `TokenResource` emission confirms the resource. A reservation whose version
 bits prevent deriving that resource remains resource-less.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L468 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L629-L647 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L25-L34 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L632-L650 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@a971bd64)
 
 ### Token regeneration with stable authority
 

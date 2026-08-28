@@ -49,6 +49,14 @@ authoritative_for = [
   "ENSv2-specific rules in docs/adrs/0002-surface-resource-identity.md § ENSv2 linked surfaces",
 ]
 
+[refs.ens_v2_sepolia_20260629]
+repo = "https://github.com/ensdomains/contracts-v2"
+commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"
+purpose = "Historical Solidity source evidence for the admitted 2026-06-29 old-model Sepolia deployment; claims cite it because #565 owns deprecation of that deployment's old contract behavior, regardless of whether individual lines survive in the current ENSv2 source tree, and it is not authority for future ENSv2 deployments or current-model admission."
+authoritative_for = [
+  "Historical implementation behavior of the admitted 2026-06-29 old-model Sepolia families, only where archived ABI artifacts do not directly prove the claim",
+]
+
 [refs.ens_v2_sepolia_dev]
 repo = "https://github.com/ensdomains/contracts-v2"
 commit = "554c309b0df391fb72b0de6c398a9f9258f7451f"

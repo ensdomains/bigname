@@ -1,0 +1,1849 @@
+#!/usr/bin/env python3
+"""Focused fixtures for check-upstream-rotation."""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.dont_write_bytecode = True
+
+
+SCRIPT = Path(__file__).with_name("check-upstream-rotation")
+REPO = SCRIPT.parent.parent
+ROTATION_BASE = "e1833238e0c502ed744e24d5feaaffde7b858c74"
+ROTATION_RESULT = "6bbc932c05eb60a377b5053f78088ce224c02014"
+ROTATION_SPEC_PATH = SCRIPT.parent / "upstream-rotations/ens_v2-ccaeb58-a971bd64.toml"
+LOADER = importlib.machinery.SourceFileLoader("check_upstream_rotation", str(SCRIPT))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+assert SPEC is not None
+rotation = importlib.util.module_from_spec(SPEC)
+sys.modules[LOADER.name] = rotation
+LOADER.exec_module(rotation)
+
+
+def cite(path: str, lines: str = "L1", tag: str = "a971bd64") -> bytes:
+    return (
+        f"(upstream: .refs/ens_v2/{path}:{lines} @ ens_v2@{tag})"
+    ).encode()
+
+
+def git_bytes(*args: str) -> bytes:
+    return subprocess.run(
+        ["git", *args], cwd=REPO, check=True, capture_output=True
+    ).stdout
+
+
+def commit_blob(parent: str, path: str, data: bytes, message: str) -> str:
+    """Create an unreferenced fixture commit without moving the worktree."""
+    with tempfile.TemporaryDirectory() as temporary:
+        environment = os.environ.copy()
+        environment["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
+        environment["GIT_AUTHOR_NAME"] = "Rotation fixture"
+        environment["GIT_AUTHOR_EMAIL"] = "fixture@example.com"
+        environment["GIT_COMMITTER_NAME"] = "Rotation fixture"
+        environment["GIT_COMMITTER_EMAIL"] = "fixture@example.com"
+        subprocess.run(
+            ["git", "read-tree", parent], cwd=REPO, env=environment, check=True
+        )
+        object_id = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"],
+            cwd=REPO,
+            env=environment,
+            input=data,
+            check=True,
+            capture_output=True,
+        ).stdout.decode().strip()
+        subprocess.run(
+            ["git", "update-index", "--add", "--cacheinfo", "100644", object_id, path],
+            cwd=REPO,
+            env=environment,
+            check=True,
+        )
+        tree = subprocess.run(
+            ["git", "write-tree"],
+            cwd=REPO,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        return subprocess.run(
+            ["git", "commit-tree", tree, "-p", parent, "-m", message],
+            cwd=REPO,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+
+class CitationParserTests(unittest.TestCase):
+    def test_multiple_citations_and_ranges_on_one_line(self) -> None:
+        data = cite("a.sol") + b" " + cite("b.sol", "L2-L4")
+        parsed = rotation.parse_citations(data, loose=False)
+        self.assertEqual([(row.start, row.end) for row in parsed], [(1, 1), (2, 4)])
+        unusual = b"one\x0bstill-one\ntwo\r\nthree"
+        self.assertEqual(
+            rotation.byte_lines(unusual),
+            [b"one\x0bstill-one", b"two\r", b"three"],
+        )
+        self.assertEqual(rotation.excerpt(unusual, 1, 1), b"one\x0bstill-one\n")
+        self.assertEqual(rotation.excerpt(unusual, 2, 2), b"two\r\n")
+
+    def test_worktree_inventory_includes_untracked_verifier_deliverables(self) -> None:
+        self.assertIn(
+            "scripts/test-check-upstream-rotation",
+            rotation.revision_paths("WORKTREE"),
+        )
+
+    def test_malformed_old_tag_is_in_raw_census_but_not_strict_parser(self) -> None:
+        old_tag = b"ens_v2@" + b"ccaeb58"
+        data = (
+            b"(upstream:\n.refs/ens_v2/contracts/src/Foo.sol:L7 @\n"
+            + old_tag
+            + b")"
+        )
+        self.assertEqual(data.count(old_tag), 1)
+        self.assertEqual(rotation.parse_citations(data, loose=False), [])
+        loose = rotation.parse_citations(data, loose=True)
+        self.assertEqual(len(loose), 1)
+        self.assertFalse(loose[0].strict)
+
+        for malformed_tag in ("A971BD64", "not-a-sha", "", "z" * 65):
+            malformed = cite("contracts/src/Foo.sol", tag=malformed_tag)
+            self.assertEqual(rotation.parse_citations(malformed, loose=False), [])
+            recovered = rotation.parse_citations(malformed, loose=True)
+            self.assertEqual(len(recovered), 1)
+            self.assertFalse(recovered[0].strict)
+
+        malformed_markers = (
+            cite("contracts/src/Foo.sol", tag="a971 bd64"),
+            cite("contracts/src/Foo.sol").replace(b"@ ens_v2@", b"@ ens-v2@"),
+        )
+        for malformed in malformed_markers:
+            with mock.patch.object(
+                rotation, "manifest_refs", return_value={"ens_v2": {"commit": "x"}}
+            ), mock.patch.object(
+                rotation, "revision_paths", return_value=["docs/malformed.md"]
+            ), mock.patch.object(
+                rotation, "worktree_or_blob", return_value=malformed
+            ):
+                _, errors = rotation.validate_final_citations(
+                    "WORKTREE", {"ens_v2"}, []
+                )
+            self.assertTrue(errors)
+
+    def test_historical_ref_is_canonical(self) -> None:
+        data = (
+            b"(upstream: .refs/"
+            + b"ens_v2_sepolia_20260629/contracts/src/Foo.sol:L9 "
+            + b"@ ens_v2_sepolia_20260629@ccaeb58)"
+        )
+        parsed = rotation.parse_citations(data, loose=False)
+        self.assertEqual(parsed[0].key, "ens_v2_sepolia_20260629")
+
+
+class MappingTests(unittest.TestCase):
+    def test_git_hunks_map_insertions_and_deletions(self) -> None:
+        self.assertEqual(
+            rotation.equal_line_map_from_hunks(5, 5, [(2, 1, 1, 0), (4, 0, 4, 1)]),
+            {1: 1, 3: 2, 4: 3, 5: 5},
+        )
+
+    def test_git_hunk_insertion_at_start(self) -> None:
+        self.assertEqual(
+            rotation.equal_line_map_from_hunks(2, 3, [(0, 0, 1, 1)]),
+            {1: 2, 2: 3},
+        )
+
+    def test_same_line_tag_refresh(self) -> None:
+        self.assertEqual(rotation.mapped_range({1: 1, 2: 2}, 2, 2), (2, 2))
+
+    def test_inserted_line_reanchor(self) -> None:
+        self.assertEqual(rotation.mapped_range({1: 1, 2: 3}, 2, 2), (3, 3))
+
+    def test_noncontiguous_duplicate_line_mapping_is_rejected(self) -> None:
+        self.assertIsNone(rotation.mapped_range({1: 2, 2: 4}, 1, 2))
+
+    def test_deployment_suffix_remap(self) -> None:
+        old_prefix = "contracts/deployments/sepolia/"
+        archive = "contracts/deployments/sepolia-20260629-r1/"
+        old = old_prefix + "nested/RootRegistry.json"
+        self.assertEqual(archive + old.removeprefix(old_prefix), archive + "nested/RootRegistry.json")
+
+    def test_full_file_archive_mismatch_is_visible(self) -> None:
+        self.assertNotEqual(rotation.sha256(b"old\n"), rotation.sha256(b"changed\n"))
+
+    def test_rewrite_refuses_a_nonbaseline_carrier(self) -> None:
+        self.assertEqual(
+            rotation.rewrite_input_mismatch("docs/example.md", b"base", b"edited"),
+            "docs/example.md",
+        )
+
+    def test_claim_context_binds_the_citation_to_nearby_text(self) -> None:
+        first = b"first claim " + cite("a.sol") + b"\n\nsecond claim\n"
+        moved = b"first claim\n\nsecond claim " + cite("a.sol") + b"\n"
+        first_citation = rotation.parse_citations(first, loose=True)[0]
+        moved_citation = rotation.parse_citations(moved, loose=True)[0]
+        self.assertNotEqual(
+            rotation.citation_claim_context(first, first_citation),
+            rotation.citation_claim_context(moved, moved_citation),
+        )
+
+    def test_claim_normalization_retains_operator_after_comment_marker(self) -> None:
+        self.assertNotEqual(
+            rotation.normalized_claim_tokens(b"// + duration"),
+            rotation.normalized_claim_tokens(b"// - duration"),
+        )
+
+    def test_claim_normalization_retains_star_list_indentation(self) -> None:
+        self.assertNotEqual(
+            rotation.normalized_claim_tokens(b"* claim"),
+            rotation.normalized_claim_tokens(b"    * claim"),
+        )
+
+    def test_claim_normalization_distinguishes_quote_and_star_list_markers(self) -> None:
+        self.assertNotEqual(
+            rotation.normalized_claim_tokens(b"> claim"),
+            rotation.normalized_claim_tokens(b"* claim"),
+        )
+
+    def test_commonmark_raw_html_forms_are_recognized(self) -> None:
+        cases = {
+            b"<address>": "blank",
+            b"<custom data-kind='evidence'>": "blank",
+            b"<?audit": "processing",
+            b"<!AUDIT": "declaration",
+            b"<![CDATA[": "cdata",
+        }
+        for line, expected in cases.items():
+            with self.subTest(line=line):
+                self.assertEqual(rotation.commonmark_raw_html_start(line), expected)
+        self.assertIsNone(
+            rotation.commonmark_raw_html_start(b"<script/>", allow_type7=False)
+        )
+        self.assertIsNone(rotation.commonmark_raw_html_start(b"</custom attr>"))
+        self.assertEqual(rotation.commonmark_raw_html_start(b"</custom>"), "blank")
+        self.assertIsNone(rotation.commonmark_raw_html_start(b"<!lowercase"))
+        self.assertFalse(rotation.commonmark_raw_html_ends("raw-tag", b"</script >"))
+        self.assertIsNone(rotation.markdown_fence_open(b"```invalid`info"))
+
+    def test_claim_binding_rejects_a_same_paragraph_target_swap(self) -> None:
+        original = b"[^a]: " + cite("a.sol") + b"\n[^b]: " + cite("b.sol") + b"\n"
+        swapped = b"[^a]: " + cite("b.sol") + b"\n[^b]: " + cite("a.sol") + b"\n"
+        original_citations = rotation.parse_citations(original, loose=True)
+        swapped_citations = rotation.parse_citations(swapped, loose=True)
+        original_bindings = rotation.citation_claim_bindings(
+            original, original_citations
+        )
+        swapped_bindings = rotation.citation_claim_bindings(swapped, swapped_citations)
+        original_a = next(row for row in original_citations if row.path == "a.sol")
+        swapped_a = next(row for row in swapped_citations if row.path == "a.sol")
+        self.assertNotEqual(
+            original_bindings[original_a.begin], swapped_bindings[swapped_a.begin]
+        )
+        self.assertIsNone(
+            rotation.rewrite_input_mismatch("docs/example.md", b"base", b"base")
+        )
+
+
+class ClaimBindingVerifyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.spec = rotation.load_spec(ROTATION_SPEC_PATH)
+        cls.head = ROTATION_RESULT
+
+    def verify_head(self, head: str) -> str:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            rotation, "fingerprint_report", return_value="fixture fingerprint\n"
+        ), mock.patch.object(rotation, "write_reports"), mock.patch.object(
+            rotation, "write_review_reports"
+        ):
+            return rotation.verify(
+                ROTATION_BASE, head, self.spec, Path(temporary)
+            )
+
+    def test_verify_rejects_same_paragraph_reattachment(self) -> None:
+        path = "docs/architecture.md"
+        citation = cite(
+            "contracts/src/registry/PermissionedRegistry.sol", "L113"
+        )
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        self.assertIn(citation, lines[480])
+        lines[480] = lines[480].replace(b" " + citation, b"")
+        lines[481] += b" " + citation
+        fixture = commit_blob(
+            self.head, path, b"\n".join(lines), "fixture: reattach citation"
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-line binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_same_line_reattachment(self) -> None:
+        path = "docs/architecture.md"
+        citation = cite(
+            "contracts/src/registry/interfaces/IRegistryEvents.sol", "L9"
+        )
+        data = git_bytes("show", f"{self.head}:{path}")
+        destination = b"The admission does not require a parent link."
+        self.assertEqual(data.count(citation), 1)
+        self.assertEqual(data.count(destination), 1)
+        changed = data.replace(b" " + citation, b"", 1).replace(
+            destination, destination + b" " + citation, 1
+        )
+        fixture = commit_blob(
+            self.head, path, changed, "fixture: reattach citation on claim line"
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-line binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_same_sentence_clause_reattachment(self) -> None:
+        path = "AGENTS.md"
+        archive = cite(
+            "contracts/deployments/sepolia-20260629-r1/.deployment.json", "L4"
+        )
+        live = cite("contracts/deployments/sepolia/.deployment.json", "L4")
+        data = git_bytes("show", f"{self.head}:{path}")
+        self.assertEqual(data.count(archive), 1)
+        self.assertEqual(data.count(live), 1)
+        changed = data.replace(b" " + archive, b"", 1).replace(
+            b" " + live, b" " + archive + b" " + live, 1
+        )
+        fixture = commit_blob(
+            self.head, path, changed, "fixture: reattach citation across clause"
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "undispositioned governed citation"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_operator_only_claim_flip(self) -> None:
+        path = "docs/manifests.md"
+        data = git_bytes("show", f"{self.head}:{path}")
+        before = b"`start_block = 11163391`"
+        after = b"`start_block != 11163391`"
+        self.assertEqual(data.count(before), 1)
+        fixture = commit_blob(
+            self.head,
+            path,
+            data.replace(before, after),
+            "fixture: flip claim operator",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-line binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_arithmetic_operator_flip(self) -> None:
+        path = "docs/manifests.md"
+        data = git_bytes("show", f"{self.head}:{path}")
+        before = b"block.timestamp + duration"
+        after = b"block.timestamp - duration"
+        self.assertEqual(data.count(before), 1)
+        fixture = commit_blob(
+            self.head,
+            path,
+            data.replace(before, after),
+            "fixture: flip arithmetic claim operator",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_leading_dot_removal(self) -> None:
+        path = "docs/architecture.md"
+        data = git_bytes("show", f"{self.head}:{path}")
+        before = b"second-level `.eth` name"
+        after = b"second-level `eth` name"
+        self.assertEqual(data.count(before), 1)
+        fixture = commit_blob(
+            self.head,
+            path,
+            data.replace(before, after),
+            "fixture: remove semantic leading dot",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_period_reassignment(self) -> None:
+        path = "docs/upstream.md"
+        citation = cite(
+            "contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol",
+            "L176",
+        )
+        data = git_bytes("show", f"{self.head}:{path}")
+        before = citation + b"`. ENSv2 registry renewal"
+        after = b". `" + citation + b"` ENSv2 registry renewal"
+        self.assertEqual(data.count(before), 1)
+        fixture = commit_blob(
+            self.head,
+            path,
+            data.replace(before, after),
+            "fixture: move sentence period across citation",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "undispositioned governed citation"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_preexisting_citation_paragraph_relocation(self) -> None:
+        path = "docs/manifests.md"
+        citation = cite(
+            "contracts/src/registry/PermissionedRegistry.sol", "L142-L146"
+        )
+        data = git_bytes("show", f"{self.head}:{path}")
+        self.assertEqual(data.count(citation), 1)
+        changed = (
+            data.replace(b" " + citation, b"", 1)
+            + b"\nregistry "
+            + citation
+            + b".\n"
+        )
+        fixture = commit_blob(
+            self.head,
+            path,
+            changed,
+            "fixture: relocate pre-existing citation to another paragraph",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "undispositioned governed citation"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_citation_before_declaration_relocation(self) -> None:
+        path = "apps/phase-runner/tests/production_interpret.rs"
+        citation = cite(
+            "contracts/src/registry/interfaces/IRegistryEvents.sol", "L56-L60"
+        )
+        data = git_bytes("show", f"{self.head}:{path}")
+        citation_line = b"            // " + citation + b"\n"
+        destination = (
+            b'                "normalized_events": ["RegistrationGranted"]\n'
+            b"            },\n"
+        )
+        self.assertEqual(data.count(citation_line), 1)
+        self.assertEqual(data.count(destination), 1)
+        changed = data.replace(citation_line, b"", 1).replace(
+            destination, destination + citation_line, 1
+        )
+        fixture = commit_blob(
+            self.head,
+            path,
+            changed,
+            "fixture: relocate citation before another declaration",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-line binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_table_row_section_relocation(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        row_index = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(b"| Unlocked migration controller |")
+        )
+        row = lines.pop(row_index)
+        heading = lines.index(b"### Basenames mainnet")
+        lines.insert(heading + 1, row)
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: move ENSv2 table row under Basenames",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_markdown_code_block_reclassification(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        self.assertTrue(lines[480].startswith(b"- `RegistryCreated()`"))
+        lines[480] = b"    " + lines[480]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reclassify citation claim as Markdown code",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-line binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_indented_prose_code_block_reclassification(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        self.assertTrue(lines[309].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[309] = b"    " + lines[309]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reclassify cited prose as Markdown code",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-line binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_blockquote_to_star_list_reclassification(self) -> None:
+        path = "docs/upstream.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        heading = (
+            "> **ENSv2 max-expiry projection narrowing** — bigname current "
+            "projections expose expiry timestamps as finite Unix-second values "
+            "or `null`; they do not fabricate far-future dates for "
+            "`type(uint64).max`."
+        ).encode()
+        start = lines.index(heading)
+        for index in range(start, start + 5):
+            self.assertTrue(lines[index].startswith(b"> "))
+            lines[index] = b"* " + lines[index].removeprefix(b"> ")
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reclassify divergence quote as a star list",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "undispositioned governed citation"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_blockquote_evidence_moved_between_divergences(self) -> None:
+        path = "docs/upstream.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        source = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(
+                b"> **Upstream**: ENSv2 reverse registration explicitly uses"
+            )
+        )
+        evidence = lines.pop(source)
+        destination = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(b"> **ENS Universal Resolver proxy entrypoint")
+        )
+        lines.insert(destination + 1, evidence)
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: move evidence into another divergence",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "undispositioned governed citation"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_fenced_code_enclosure(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"```text", b""]
+        lines[site + 3 : site + 3] = [b"", b"```"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: enclose cited claim in a Markdown fence",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_does_not_close_fence_with_info_text(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        claim = lines.pop(site)
+        lines.extend(
+            [b"", b"```text", b"```not-a-closing-fence", b"## Discovery graph", claim]
+        )
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: move cited claim after a non-closing fence line",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_does_not_close_raw_html_with_spaced_end_tag(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        claim = lines.pop(site)
+        lines.extend(
+            [b"", b"<script>", b"</script >", b"## Discovery graph", claim]
+        )
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: keep raw HTML open across a spaced end tag",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_html_comment_enclosure(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"<!--", b""]
+        lines[site + 3 : site + 3] = [b"", b"-->"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: hide cited claim in an HTML comment",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_collapsed_details_enclosure(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"<details>", b"<summary>Archived note</summary>", b""]
+        lines[site + 4 : site + 4] = [b"", b"</details>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: hide cited claim in collapsed details",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_custom_html_element_enclosure(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"<evidence-note>", b""]
+        lines[site + 3 : site + 3] = [b"", b"</evidence-note>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: enclose cited claim in a custom HTML element",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_multiline_html_element_enclosure(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"<div", b' class="unrelated-claim">', b""]
+        lines[site + 4 : site + 4] = [b"", b"</div>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: enclose cited claim with a multiline HTML opener",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_multiline_inline_html_enclosure(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"<a", b' href="#unrelated-claim">', b""]
+        lines[site + 4 : site + 4] = [b"", b"</a>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: enclose cited claim with multiline inline HTML",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_prose_prefixed_multiline_html_enclosure(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 309
+        self.assertTrue(lines[site].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[site:site] = [
+            b"Prefix x > y <a",
+            b' href="#unrelated-claim">',
+            b"",
+        ]
+        lines[site + 4 : site + 4] = [b"", b"</a>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: enclose cited claim with prose-prefixed multiline HTML",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_inline_html_element_enclosure(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b'Prefix <a href="#unrelated-claim">', b""]
+        lines[site + 3 : site + 3] = [b"", b"</a>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: enclose cited claim with inline HTML",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_multiline_code_span_html_close(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"<div>", b"", b"`literal", b"</div>`", b""]
+        lines[site + 6 : site + 6] = [b"", b"</div>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close in a multiline code span",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_html_comment_element_close(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [
+            b"<div>",
+            b"",
+            b"Prefix <!-- </div> -->",
+            b"",
+        ]
+        lines[site + 5 : site + 5] = [b"", b"</div>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close in a comment",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_indented_code_element_close(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 309
+        self.assertTrue(lines[site].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[site:site] = [
+            b"<details><summary>Unrelated cache policy</summary>",
+            b"",
+            b"    </details>",
+            b"",
+        ]
+        lines[site + 5 : site + 5] = [b"", b"</details>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close in indented code",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_backslash_escaped_element_close(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 309
+        self.assertTrue(lines[site].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[site:site] = [
+            b"<details><summary>Unrelated cache policy</summary>",
+            b"",
+            rb"\</details>",
+            b"",
+        ]
+        lines[site + 5 : site + 5] = [b"", b"</details>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close behind a Markdown escape",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_link_destination_element_close(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 309
+        self.assertTrue(lines[site].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[site:site] = [
+            b"<details><summary>Unrelated cache policy</summary>",
+            b"",
+            b"[fake close](</details>)",
+            b"",
+        ]
+        lines[site + 5 : site + 5] = [b"", b"</details>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close in a Markdown link destination",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_unbracketed_link_destination_element_close(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 309
+        self.assertTrue(lines[site].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[site:site] = [
+            b"<details><summary>Unrelated cache policy</summary>",
+            b"",
+            b"[fake close](x</details>y)",
+            b"",
+        ]
+        lines[site + 5 : site + 5] = [b"", b"</details>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close in an unbracketed link destination",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_reference_title_element_close(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 309
+        self.assertTrue(lines[site].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[site:site] = [
+            b"<details><summary>Unrelated cache policy</summary>",
+            b"",
+            b"[fake-close]: target",
+            b'"literal </details>"',
+            b"",
+        ]
+        lines[site + 6 : site + 6] = [b"", b"</details>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close in a reference title",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_multiline_reference_title_element_close(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 309
+        self.assertTrue(lines[site].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[site:site] = [
+            b"<details><summary>Unrelated cache policy</summary>",
+            b"",
+            b"[fake-close]: target",
+            b'"title begins',
+            b'second </details>"',
+            b"",
+        ]
+        lines[site + 7 : site + 7] = [b"", b"</details>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close in a multiline reference title",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_reference_label_element_close(self) -> None:
+        path = "docs/manifests.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 309
+        self.assertTrue(lines[site].startswith(b"ENSv2 terminal lifecycle events"))
+        lines[site:site] = [
+            b"<details><summary>Unrelated cache policy</summary>",
+            b"",
+            b"[</details>]: target",
+            b"[fake close][</details>]",
+            b"",
+        ]
+        lines[site + 6 : site + 6] = [b"", b"</details>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: put a fake HTML close in a reference label",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_custom_html_enclosure_inside_blockquote(self) -> None:
+        path = "docs/upstream.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(
+                b'> **Upstream**: `WrapperRegistry` documents itself as'
+            )
+        )
+        lines[site:site] = [b"> <evidence-note>", b">"]
+        lines[site + 3 : site + 3] = [b">", b"> </evidence-note>"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: enclose quoted evidence in a custom HTML element",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "undispositioned governed citation"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_heading_reassignment_inside_blockquote(self) -> None:
+        path = "docs/upstream.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(
+                b'> **Upstream**: `WrapperRegistry` documents itself as'
+            )
+        )
+        lines[site:site] = [b"> ## Unrelated evidence subsection"]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reassign quoted evidence under a nested heading",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "undispositioned governed citation"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_blank_separated_list_parent_reassignment(self) -> None:
+        path = "docs/api-v2-routes.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 870
+        self.assertEqual(
+            lines[site], b"  separately observed wildcard names can have projected surfaces."
+        )
+        lines[site] = (
+            b"- Unrelated cache policy: the following evidence paragraph belongs here."
+        )
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reassign evidence to a sibling list item",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_raw_html_heading_reassignment(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"<h3>Unrelated section</h3>", b""]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reassign cited claim under a raw HTML heading",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_recognizes_multiline_html_heading_reassignment(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [
+            b"<h2",
+            b">Unrelated subsection</h2>",
+            b"",
+        ]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reassign cited claim under a multiline HTML heading",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_indented_code_that_looks_like_a_heading(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        claim = lines.pop(site)
+        lines.extend(
+            [
+                b"",
+                b"## Unrelated subsection",
+                b"",
+                b"    ## Discovery graph",
+                b"",
+                claim,
+            ]
+        )
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: ignore heading text inside indented code",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ignores_hidden_heading_when_binding_claim_scope(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        claim = lines.pop(site)
+        lines.extend(
+            [
+                b"",
+                b"<address>",
+                b"## Discovery graph",
+                b"</address>",
+                b"",
+                claim,
+            ]
+        )
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: move cited claim after hidden heading text",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_does_not_start_type7_html_inside_paragraph(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [
+            b"Paragraph prefix keeps the next type-7 tag inline.",
+            b"<custom>",
+            b"## Unrelated subsection",
+            b"",
+        ]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: keep a type-7 tag inline with its paragraph",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_attributes_on_type7_closing_tag(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [
+            b"</custom attr>",
+            b"## Unrelated subsection",
+            b"",
+        ]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reject attributes on a type-7 closing tag",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_requires_uppercase_html_declaration_start(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [
+            b"<!foo",
+            b"## Unrelated subsection",
+            b">",
+            b"",
+        ]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: require an uppercase HTML declaration start",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_ends_raw_html_at_list_container_boundary(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [
+            b"- container boundary probe",
+            b"",
+            b"  <script>",
+            b"  raw body",
+            b"## Unrelated subsection",
+            b"</script>",
+            b"",
+        ]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: end raw HTML at a list container boundary",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_does_not_accept_bare_slash_as_html_tag_delimiter(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [
+            b"<div/not-a-tag",
+            b"## Unrelated subsection",
+            b"",
+        ]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reject a bare slash as an HTML tag delimiter",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_recognizes_raw_html_after_list_marker(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [
+            b"## Unrelated subsection",
+            b"",
+            b"- <script>",
+            b"  ## Discovery graph",
+            b"  </script>",
+            b"",
+        ]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: recognize raw HTML after a list marker",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_recognizes_html_heading_after_list_marker(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"- <h2>Unrelated subsection</h2>", b""]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: recognize an HTML heading after a list marker",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_setext_heading_reassignment(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"Unrelated subsection", b"--------------------", b""]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reassign cited claim under a Setext heading",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_recognizes_empty_atx_heading_reassignment(self) -> None:
+        path = "docs/architecture.md"
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = 480
+        self.assertTrue(lines[site].startswith(b"- `RegistryCreated()`"))
+        lines[site:site] = [b"##", b""]
+        fixture = commit_blob(
+            self.head,
+            path,
+            b"\n".join(lines),
+            "fixture: reassign cited claim under an empty ATX heading",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_toml_multiline_claim_change(self) -> None:
+        path = "manifests/sepolia/ethereum/ens/ens_v2_migration_l1/v1.toml"
+        data = git_bytes("show", f"{self.head}:{path}")
+        before = b"# Constructor argument 7 of the declared ETHRenewerV1"
+        after = b"# Constructor argument 8 of the declared ETHRenewerV1"
+        self.assertEqual(data.count(before), 1)
+        fixture = commit_blob(
+            self.head,
+            path,
+            data.replace(before, after),
+            "fixture: change multiline TOML citation claim",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-context binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_rustdoc_citation_demotion(self) -> None:
+        path = "crates/interpret/src/write/identity/transition.rs"
+        data = git_bytes("show", f"{self.head}:{path}")
+        citation = cite(
+            "contracts/src/migration/UnlockedMigrationController.sol", "L111"
+        )
+        before = b"/// " + citation
+        after = b"// " + citation
+        self.assertEqual(data.count(before), 1)
+        fixture = commit_blob(
+            self.head,
+            path,
+            data.replace(before, after),
+            "fixture: demote Rustdoc citation to plain comment",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-line binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_rejects_unicode_direction_flip(self) -> None:
+        path = "docs/architecture.md"
+        data = git_bytes("show", f"{self.head}:{path}")
+        before = "`TokenControlTransferred` ← each".encode()
+        after = "`TokenControlTransferred` → each".encode()
+        self.assertEqual(data.count(before), 1)
+        fixture = commit_blob(
+            self.head,
+            path,
+            data.replace(before, after),
+            "fixture: reverse mapping direction",
+        )
+        with self.assertRaisesRegex(
+            rotation.RotationError, "final claim-line binding mismatch"
+        ):
+            self.verify_head(fixture)
+
+    def test_verify_accepts_citation_wrapping_only(self) -> None:
+        path = "docs/architecture.md"
+        citation = cite(
+            "contracts/src/registry/PermissionedRegistry.sol", "L113"
+        )
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        self.assertIn(citation, lines[480])
+        lines[480] = lines[480].replace(b" " + citation, b"")
+        lines.insert(481, b"  " + citation)
+        fixture = commit_blob(
+            self.head, path, b"\n".join(lines), "fixture: wrap citation"
+        )
+        self.verify_head(fixture)
+
+    def test_verify_accepts_prefix_citation_wrapping(self) -> None:
+        path = "docs/manifests.md"
+        citation = (
+            b"("
+            + b"upstream:"
+            + b" .re"
+            + b"fs/ens_v2_sepolia_20260629/contracts/src/registrar/"
+            + b"ETHRenewerV1.sol:L106-L111 @ ens_v2_sepolia_20260629@"
+            + b"ccaeb58)"
+        )
+        lines = git_bytes("show", f"{self.head}:{path}").split(b"\n")
+        site = next(index for index, line in enumerate(lines) if line.startswith(citation))
+        lines[site] = lines[site].removeprefix(citation + b" ")
+        lines.insert(site, citation)
+        fixture = commit_blob(
+            self.head, path, b"\n".join(lines), "fixture: wrap prefix citation"
+        )
+        self.verify_head(fixture)
+
+    def test_verify_accepts_shared_line_noncanonical_citation(self) -> None:
+        governed = b"stable claim " + cite("tracked.sol")
+        noncanonical = (
+            b"(upstream:  .refs/ens_v1/legacy.sol:L1 @ ens_v1@91c966f)"
+        )
+        data = governed + b" " + noncanonical
+        baseline = rotation.Baseline("base", [], 0, 0, 0, 0)
+        spec = {
+            "key": "ens_v2",
+            "old_commit": "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92",
+            "new_commit": "a971bd6449154045e2b26ff13d0e56027452f407",
+            "expected_old_tag_occurrences": 0,
+            "expected_same_line_tag_refreshes": 0,
+            "expected_changed_occurrences": 0,
+            "old_deployment_prefix": "contracts/deployments/sepolia/",
+            "archive_deployment_prefix": "contracts/deployments/archive/",
+        }
+        refs = {
+            "ens_v2": {"commit": spec["new_commit"]},
+            "ens_v2_sepolia_20260629": {"commit": spec["old_commit"]},
+        }
+        manifest = {"schema_version": 1, "refs": refs}
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.multiple(
+            rotation,
+            build_baseline=mock.DEFAULT,
+            revision_paths=mock.DEFAULT,
+            worktree_or_blob=mock.DEFAULT,
+            manifest_document=mock.DEFAULT,
+            production_delta_errors=mock.DEFAULT,
+            tracked_paths=mock.DEFAULT,
+            blob=mock.DEFAULT,
+            git_file_for_key=mock.DEFAULT,
+            report_revision=mock.DEFAULT,
+            write_reports=mock.DEFAULT,
+            write_review_reports=mock.DEFAULT,
+            fingerprint_report=mock.DEFAULT,
+        ) as patched:
+            patched["build_baseline"].return_value = baseline
+            patched["revision_paths"].return_value = ["docs/shared.md"]
+            patched["worktree_or_blob"].return_value = data
+            patched["manifest_document"].return_value = manifest
+            patched["production_delta_errors"].return_value = ([], [])
+            patched["tracked_paths"].return_value = ["docs/shared.md"]
+            patched["blob"].return_value = data
+            patched["git_file_for_key"].return_value = b"evidence\n"
+            patched["report_revision"].return_value = "head"
+            patched["fingerprint_report"].return_value = "fixture fingerprint\n"
+            rotation.verify("base", "head", spec, Path(temporary))
+
+
+class ProductionDeltaTests(unittest.TestCase):
+    def test_rust_identifier_boundaries_are_tokens(self) -> None:
+        separated = b"fn f(){let mut x=1;}"
+        merged = b"fn f(){let mutx=1;}"
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(separated),
+            rotation.rust_without_comments_and_space(merged),
+        )
+
+    def test_rust_joint_operator_boundaries_are_tokens(self) -> None:
+        separated = b"fn f(){let x=a > > b;}"
+        joint = b"fn f(){let x=a >> b;}"
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(separated),
+            rotation.rust_without_comments_and_space(joint),
+        )
+
+    def test_rust_numeric_literal_boundaries_are_tokens(self) -> None:
+        separated = b"fn f(){let x=1 . 2;}"
+        float_literal = b"fn f(){let x=1.2;}"
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(separated),
+            rotation.rust_without_comments_and_space(float_literal),
+        )
+
+    def test_nested_rust_block_comments_are_removed(self) -> None:
+        before = b"fn f(){/* outer /* old */ tail */let x=1;}"
+        after = b"fn f(){/* outer /* new citation */ tail */let x=1;}"
+        self.assertEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_raw_string_comment_lookalikes_remain_tokens(self) -> None:
+        before = b'fn f(){let x=r#"// old /* text */"#;}'
+        after = b'fn f(){let x=r#"// new /* text */"#;}'
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_sql_dash_comments_in_proven_query_literal_are_metadata(self) -> None:
+        before = b'fn f(){let x=r#"SELECT x\n-- ' + cite("a.sol", tag="1111111") + b'\nFROM t"#;}'
+        after = b'fn f(){let x=r#"SELECT x\n-- ' + cite("a.sol", tag="2222222") + b'\nFROM t"#;}'
+        self.assertEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_non_citation_sql_comment_changes_remain_tokens(self) -> None:
+        before = b'fn f(){let x=r#"SELECT x\n-- old explanation\nFROM t"#;}'
+        after = b'fn f(){let x=r#"SELECT x\n-- new explanation\nFROM t"#;}'
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_sql_comment_prose_beside_a_citation_remains_a_token(self) -> None:
+        before = (
+            b'fn f(){let x=r#"SELECT x\n-- old explanation '
+            + cite("a.sol", tag="1111111")
+            + b'\nFROM t"#;}'
+        )
+        after = (
+            b'fn f(){let x=r#"SELECT x\n-- changed explanation '
+            + cite("a.sol", tag="2222222")
+            + b'\nFROM t"#;}'
+        )
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_sql_executable_changes_remain_tokens(self) -> None:
+        before = b'fn f(){let x=r#"SELECT x FROM t"#;}'
+        after = b'fn f(){let x=r#"SELECT y FROM t"#;}'
+        self.assertNotEqual(
+            rotation.rust_without_comments_and_space(before),
+            rotation.rust_without_comments_and_space(after),
+        )
+
+    def test_toml_comments_and_inline_comments_do_not_change_values(self) -> None:
+        before = tomllib.loads("# old\na = 1 # old inline\n")
+        after = tomllib.loads("# new\na = 1 # new inline\n")
+        self.assertEqual(before, after)
+
+    def test_fixture_json_citations_are_scrubbed_but_values_are_not(self) -> None:
+        before = {"upstream_citations": ["old"], "value": 1}
+        after = {"upstream_citations": ["new"], "value": 1}
+        changed = {"upstream_citations": ["new"], "value": 2}
+        self.assertEqual(
+            rotation.scrub_fixture_citations(before),
+            rotation.scrub_fixture_citations(after),
+        )
+        self.assertNotEqual(
+            rotation.scrub_fixture_citations(before),
+            rotation.scrub_fixture_citations(changed),
+        )
+
+
+class PolicyTests(unittest.TestCase):
+    def test_final_validation_rejects_untracked_path_absent_at_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / ".refs" / "ens_v2"
+            checkout.mkdir(parents=True)
+            subprocess.run(["git", "init", "--quiet"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "fixture@example.com"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Fixture"], cwd=checkout, check=True
+            )
+            (checkout / "tracked.sol").write_bytes(b"tracked\n")
+            subprocess.run(["git", "add", "tracked.sol"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "commit", "--quiet", "-m", "fixture"],
+                cwd=checkout,
+                check=True,
+            )
+            pin = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            (checkout / "untracked.sol").write_bytes(b"not committed\n")
+
+            with mock.patch.object(rotation, "ROOT", root):
+                with self.assertRaises(rotation.RotationError):
+                    rotation.git_file_for_key("ens_v2", pin, "untracked.sol")
+
+        dirty = subprocess.CompletedProcess(
+            args=["git", "status"], returncode=0, stdout=" M file\n", stderr=""
+        )
+        with mock.patch.object(rotation, "run", return_value=dirty):
+            with self.assertRaisesRegex(
+                rotation.RotationError, "requires a committed head"
+            ):
+                rotation.fingerprint_report("base", "WORKTREE", [])
+        with mock.patch.object(
+            rotation, "resolve_revision", return_value="resolved-head"
+        ):
+            self.assertEqual(rotation.report_revision("WORKTREE"), "resolved-head")
+
+    def test_verify_rejects_extra_undispositioned_governed_citation(self) -> None:
+        base_citation = b"value == zero " + cite("tracked.sol")
+        extra = b"value != zero " + cite("tracked.sol")
+        parsed = rotation.parse_citations(extra, loose=False)
+        baseline = rotation.Baseline(
+            commit="base",
+            rows=[],
+            raw_count=0,
+            exact_count=0,
+            parsed_count=0,
+            noncanonical_count=0,
+        )
+        spec = {
+            "key": "ens_v2",
+            "old_commit": "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92",
+            "new_commit": "a971bd6449154045e2b26ff13d0e56027452f407",
+            "expected_old_tag_occurrences": 0,
+            "expected_same_line_tag_refreshes": 0,
+            "expected_changed_occurrences": 0,
+            "old_deployment_prefix": "contracts/deployments/sepolia/",
+            "archive_deployment_prefix": "contracts/deployments/archive/",
+        }
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.multiple(
+            rotation,
+            build_baseline=mock.DEFAULT,
+            revision_paths=mock.DEFAULT,
+            worktree_or_blob=mock.DEFAULT,
+            manifest_document=mock.DEFAULT,
+            manifest_refs=mock.DEFAULT,
+            validate_final_citations=mock.DEFAULT,
+            production_delta_errors=mock.DEFAULT,
+            tracked_paths=mock.DEFAULT,
+            blob=mock.DEFAULT,
+            write_reports=mock.DEFAULT,
+            write_review_reports=mock.DEFAULT,
+            fingerprint_report=mock.DEFAULT,
+        ) as patched:
+            patched["build_baseline"].return_value = baseline
+            patched["revision_paths"].return_value = ["docs/extra.md"]
+            patched["worktree_or_blob"].return_value = extra
+            patched["manifest_refs"].return_value = {
+                "ens_v2": {"commit": spec["new_commit"]},
+                "ens_v2_sepolia_20260629": {"commit": spec["old_commit"]},
+            }
+            patched["manifest_document"].return_value = {
+                "schema_version": 1,
+                "refs": patched["manifest_refs"].return_value,
+            }
+            patched["validate_final_citations"].return_value = (parsed, [])
+            patched["production_delta_errors"].return_value = ([], [])
+            patched["tracked_paths"].return_value = ["docs/extra.md"]
+            patched["blob"].return_value = base_citation
+            patched["fingerprint_report"].return_value = "unchanged\n"
+            with self.assertRaises(rotation.RotationError):
+                rotation.verify("base", "WORKTREE", spec, Path(temporary))
+
+        citation_only_base = b"first claim\n" + cite("tracked.sol")
+        citation_only_final = b"different claim\n" + cite("tracked.sol")
+        citation_only_parsed = rotation.parse_citations(
+            citation_only_final, loose=False
+        )
+        with mock.patch.object(
+            rotation, "tracked_paths", return_value=["docs/citation-only.md"]
+        ), mock.patch.object(rotation, "blob", return_value=citation_only_base):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {"docs/citation-only.md": citation_only_final},
+                {"docs/citation-only.md": citation_only_parsed},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+        historical = (
+            b"historical claim (upstream: .refs/"
+            b"ens_v2_sepolia_20260629/contracts/src/Legacy.sol:L1 "
+            b"@ ens_v2_sepolia_20260629@ccaeb58)"
+        )
+        historical_citations = rotation.parse_citations(historical, loose=False)
+        with mock.patch.object(rotation, "tracked_paths", return_value=[]):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {"docs/historical.md": historical},
+                {"docs/historical.md": historical_citations},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+        deleted_base = b"retained claim " + cite("tracked.sol")
+        with mock.patch.object(
+            rotation, "tracked_paths", return_value=["docs/deleted.md"]
+        ), mock.patch.object(rotation, "blob", return_value=deleted_base):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {"docs/deleted.md": b"retained claim without evidence"},
+                {"docs/deleted.md": []},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+        authority = cite(
+            "contracts/deployments/archive/.deployment.json", "L4"
+        )
+        duplicate_authority = authority + b"\n" + authority
+        duplicate_parsed = rotation.parse_citations(
+            duplicate_authority, loose=False
+        )
+        with mock.patch.object(rotation, "tracked_paths", return_value=[]):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {".refs/MANIFEST.toml": duplicate_authority},
+                {".refs/MANIFEST.toml": duplicate_parsed},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+        manifest_extra = b"extra authority " + cite("tracked.sol")
+        manifest_parsed = rotation.parse_citations(manifest_extra, loose=False)
+        with mock.patch.object(rotation, "tracked_paths", return_value=[]):
+            _, errors = rotation.final_citation_accounting(
+                "base",
+                spec,
+                {},
+                [],
+                {".refs/MANIFEST.toml": manifest_extra},
+                {".refs/MANIFEST.toml": manifest_parsed},
+                {},
+                [],
+            )
+        self.assertTrue(errors)
+
+    def test_manifest_tag_mismatch(self) -> None:
+        commit = "a971bd6449154045e2b26ff13d0e56027452f407"
+        self.assertTrue(commit.startswith("a971bd64"))
+        self.assertFalse(commit.startswith("ccaeb58"))
+        rotation_spec = {
+            "key": "ens_v2",
+            "new_commit": commit,
+            "old_commit": "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92",
+        }
+        mismatched_refs = {
+            "ens_v2": {"commit": commit[:8] + "f" * 32},
+            "ens_v2_sepolia_20260629": {
+                "commit": rotation_spec["old_commit"]
+            },
+        }
+        self.assertTrue(rotation.manifest_pin_errors(mismatched_refs, rotation_spec))
+        base_refs = {
+            "ens_v2": {
+                "repo": "https://github.com/ensdomains/contracts-v2",
+                "commit": commit,
+                "purpose": "current",
+                "authoritative_for": ["current"],
+            }
+        }
+        drifted_refs = {
+            **base_refs,
+            "ens_v2": {**base_refs["ens_v2"], "repo": "https://example.invalid"},
+        }
+        self.assertTrue(
+            rotation.manifest_metadata_errors(base_refs, drifted_refs, rotation_spec)
+        )
+        self.assertTrue(
+            rotation.manifest_top_level_errors(
+                {"schema_version": 1, "refs": base_refs},
+                {"schema_version": 999, "refs": base_refs},
+            )
+        )
+
+        row = {
+            "id": "0" * 64,
+            "carrier_path": "docs/example.md",
+            "carrier_line": 1,
+            "disposition": "archive_repoint",
+            "evidence_relation": "direct",
+            "old": {"path": "old.sol", "start": 1, "end": 1},
+            "new": {
+                "key": "ens_v2",
+                "commit": "a971bd64",
+                "path": "new.sol",
+                "start": 1,
+                "end": 1,
+            },
+        }
+        baseline = rotation.Baseline("base", [row], 1, 1, 1, 0)
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            rotation, "git_file", return_value=b"line\n"
+        ), mock.patch.object(
+            rotation, "git_file_for_key", return_value=b"line\n"
+        ), mock.patch.object(
+            rotation,
+            "manifest_refs",
+            return_value={"ens_v2": {"commit": commit}},
+        ) as refs:
+            rotation.write_review_reports(
+                Path(temporary),
+                baseline,
+                [row],
+                {},
+                {"old_commit": "old", "new_commit": commit},
+                "head",
+            )
+        refs.assert_called_with("head")
+
+    def test_live_deployment_citation_outside_allowlist(self) -> None:
+        allowed = {
+            (
+                "AGENTS.md",
+                46,
+                "contracts/deployments/sepolia/.deployment.json",
+                4,
+                4,
+                "a971bd64",
+            )
+        }
+        candidate = (
+            "manifests/ens.toml",
+            10,
+            "contracts/deployments/sepolia/.deployment.json",
+            4,
+            4,
+            "a971bd64",
+        )
+        self.assertNotIn(candidate, allowed)
+
+    def test_deleted_tier3_has_no_final_target(self) -> None:
+        citation_bytes = cite("obsolete.sol")
+        entry = {
+            "action": "deprecated_claim_deleted",
+            "handoff_issue": "#565",
+            "deleted_claim_text": (b"obsolete claim " + citation_bytes).decode(),
+        }
+        self.assertEqual(entry["action"], "deprecated_claim_deleted")
+        self.assertEqual(entry["handoff_issue"], "#565")
+        self.assertTrue(rotation.deleted_claim_is_absent(entry, b"retained text"))
+        self.assertFalse(
+            rotation.deleted_claim_is_absent(
+                entry, b"obsolete claim " + citation_bytes
+            )
+        )
+        citation = rotation.parse_citations(citation_bytes, loose=True)[0]
+        self.assertEqual(
+            rotation.deleted_claim_replacement(
+                entry, b"prefix obsolete claim " + citation_bytes + b" suffix", citation
+            ),
+            (7, 22 + len(citation_bytes), b""),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

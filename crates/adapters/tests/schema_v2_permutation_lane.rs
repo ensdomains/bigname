@@ -1311,8 +1311,7 @@ fn assert_v2_regeneration_collision_output(output: &BatchOutput, collision: bool
 }
 
 /// `clearRecords` emits `VersionChanged` for the node after incrementing its record version.
-/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @
-/// ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L247-L254 @ ens_v2_sepolia_20260629@ccaeb58)
 #[test]
 fn v2_unregistered_record_version_name_link_is_batch_grid_independent() -> Result<()> {
     let checked_in = checked_in_manifests()?;
