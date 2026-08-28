@@ -195,7 +195,6 @@ async fn seed(pool: &PgPool) -> Result<()> {
     ))
     .execute(pool)
     .await?;
-
     let granted = |source: &str, token: &str, expiry: i64| json!({
         "source_event":source, "status":"registered", "authority_kind":"ens_v2_registry",
         "registrant":OWNER, "expiry":expiry, "token_id":token,
@@ -212,6 +211,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
         event(pool, $name, $resource, $block, $log, $kind, $state).await?;
     }; }
     add!(MAIN, Some(RESOURCE), 100, Some(0), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000));
+    add!(MAIN, Some(RESOURCE), 100, Some(3), "ResolverChanged", json!({"source_event":"ResolverUpdated","resolver":OWNER}));
     add!(MAIN, Some(RESOURCE), 100, Some(4), "PermissionChanged", permission.clone());
     add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64})); add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
     add!(RESERVATION, Some(RESOURCE), 100, Some(5), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
@@ -231,7 +231,6 @@ async fn seed(pool: &PgPool) -> Result<()> {
     add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
     Ok(())
 }
-
 async fn run(pool: &PgPool, target: i64, resume: Option<Marker>) -> Result<Marker> {
     Ok(Engine::new(pool.clone())
         .run_batch(BatchRequest {
@@ -271,21 +270,26 @@ async fn fresh(prefix: &str, target: i64) -> Result<(TestDatabase, PgPool)> {
 
 #[tokio::test]
 #[rustfmt::skip]
+#[allow(clippy::type_complexity)]
 async fn expiry_permissions_and_names_converge_through_revival_and_version_bump() -> Result<()> {
     let (incremental_db, incremental) = database("v2_expiry_incremental").await?;
     seed(&incremental).await?;
     let live = run(&incremental, 100, None).await?;
-    let live_state: (i64, i64, i64, Option<String>) = sqlx::query_as(
+    let live_state: (i64, i64, i64, Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $1::uuid),
                 (SELECT count(*) FROM permissions_current_resource_summary WHERE resource_id = $1::uuid),
                 (SELECT unsupported_reason FROM permissions_current_resource_summary
-                 WHERE resource_id = $1::uuid)",
+                 WHERE resource_id = $1::uuid),
+                (SELECT declared_summary -> 'registration' ->> 'status' FROM name_current WHERE logical_name_id = $2),
+                (SELECT declared_summary -> 'control' ->> 'status' FROM name_current WHERE logical_name_id = $2),
+                (SELECT declared_summary -> 'resolver' ->> 'address' FROM name_current WHERE logical_name_id = $2)",
     )
     .bind(RESOURCE)
+    .bind(MAIN)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(live_state, (4, 1, 1, Some("operator_approval_surfaces_not_ingested".into())));
+    assert_eq!(live_state, (4, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into())));
     let stale_state: (i64, i64, i64, Option<String>) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
@@ -299,7 +303,6 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .fetch_one(&incremental)
     .await?;
     assert_eq!(stale_state, (0, 0, 1, Some("resource_permission_authority_not_projected".into())));
-
     let retired = run(&incremental, 101, Some(live)).await?;
     let (retired_db, retired_fresh) = fresh("v2_expiry_retired_fresh", 101).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&retired_fresh).await?);
@@ -345,7 +348,6 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .fetch_one(&incremental)
     .await?;
     assert_eq!(retained, (1, 1, 1));
-
     let revived = run(&incremental, 102, Some(retired)).await?;
     let (revived_db, revived_fresh) = fresh("v2_expiry_revived_fresh", 102).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&revived_fresh).await?);
@@ -359,7 +361,6 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .fetch_one(&incremental)
     .await?;
     assert_eq!(revival, (RESOURCE.into(), LINEAGE.into(), 1));
-
     run(&incremental, 103, Some(revived)).await?;
     let (version_db, version_fresh) = fresh("v2_expiry_version_fresh", 103).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&version_fresh).await?);

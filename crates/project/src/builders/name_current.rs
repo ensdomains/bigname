@@ -622,8 +622,7 @@ pub(super) async fn build(
               AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired'
               AND registration_current.after_state ->> 'derived_from' = 'interpreter_state'
               AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
-              AND COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2'
-              AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id),
+              AND COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id),
               FALSE
           )
         ORDER BY surface.logical_name_id
