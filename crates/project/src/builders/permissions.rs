@@ -98,7 +98,8 @@ pub(super) async fn build(
                           'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
                       )
                       AND (event.event_kind <> 'RegistrationRenewed'
-                           OR event.after_state ->> 'revived_from_expiry' = 'true')
+                           OR (event.after_state ->> 'revived_from_expiry' = 'true' AND
+                               event.after_state ->> 'status' = 'reserved' AND event.after_state ->> 'reservation_resource' = 'true'))
                   )
                   OR (
                       event.event_kind = 'RegistrationReleased'
