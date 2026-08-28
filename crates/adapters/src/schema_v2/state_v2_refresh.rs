@@ -29,8 +29,8 @@ impl State {
     }
 
     #[rustfmt::skip]
-    pub(in crate::schema_v2) fn mark_v2_expiry_retirement(&mut self, emitter: &str, token_id: &str, emitted: bool) {
-        if let Some(token) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) { token.expiry_retirement_emitted = emitted; }
+    pub(in crate::schema_v2) fn mark_v2_expiry_retirement(&mut self, emitter: &str, token_id: &str, resource_only: bool) {
+        if let Some(token) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) { token.expiry_retirement_emitted = true; token.resource_expiry_retirement_emitted = resource_only; }
     }
 
     pub(in crate::schema_v2) fn refresh_dirty_v2_names(
@@ -308,6 +308,8 @@ impl State {
                 current.shadow_name = shadow_name;
                 if expiry_retirement || current_logical_name_id.is_some() {
                     current.expiry_retirement_emitted = expiry_retirement;
+                    current.resource_expiry_retirement_emitted =
+                        expiry_retirement && resource_retirement;
                 }
                 if let Some(logical_name_id) = current_logical_name_id {
                     current.last_logical_name_id = Some(logical_name_id);

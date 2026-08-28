@@ -29,6 +29,7 @@ pub(in crate::schema_v2) struct V2TokenState {
     pub shadow_name: Option<V2RawNameState>,
     pub last_logical_name_id: Option<String>,
     pub expiry_retirement_emitted: bool,
+    pub resource_expiry_retirement_emitted: bool,
     pub registration: Option<Value>,
     pub upstream_resource: Option<String>,
     pub resource_id: Option<Uuid>,
@@ -256,7 +257,6 @@ impl State {
         let namehash = crate::schema_v2::common::namehash_raw(labels.iter().map(Vec::as_slice));
         Some((labels, namehash))
     }
-
     pub(in crate::schema_v2) fn set_v2_parent_claim(
         &mut self,
         registry: &str,
@@ -277,7 +277,6 @@ impl State {
         }
         self.mark_v2_registry_dirty(&registry);
     }
-
     pub(in crate::schema_v2) fn set_v2_expiry(
         &mut self,
         emitter: &str,
@@ -289,7 +288,9 @@ impl State {
         if let Some(entry) = self.v2_tokens.get_mut(&key) {
             previous_expiry = entry.expiry;
             entry.expiry = Some(expiry);
-            entry.expiry_retirement_emitted &= entry.last_logical_name_id.is_some();
+            entry.expiry_retirement_emitted &=
+                entry.last_logical_name_id.is_some() && !entry.resource_expiry_retirement_emitted;
+            entry.resource_expiry_retirement_emitted = false;
             if let Some(registration) = entry.registration.as_mut()
                 && let Some(registration) = registration.as_object_mut()
             {
@@ -301,7 +302,6 @@ impl State {
         self.replace_v2_expiry_index(&key, previous_expiry, Some(expiry));
         self.mark_v2_token_component_dirty(&key);
     }
-
     pub(in crate::schema_v2) fn transfer_v2_registrant(
         &mut self,
         emitter: &str,

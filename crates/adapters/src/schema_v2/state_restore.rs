@@ -123,7 +123,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             if expiry_retirement_is_projection_only(event)
                 && let Some(token) = token
             {
-                state.mark_v2_expiry_retirement(emitter, token, true);
+                state.mark_v2_expiry_retirement(emitter, token, event.logical_name_id.is_none());
             }
             if !matches!(
                 event

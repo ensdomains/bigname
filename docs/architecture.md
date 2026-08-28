@@ -649,20 +649,11 @@ An ENSv2 registry token stops contributing to every current surface when an inte
 
 For retained entries, retirement runs before the first raw log of the first interpreted block whose timestamp reaches the expiry. An ordered retained-expiry index selects only tokens that crossed the expiry boundary, and Interpret materializes the affected descendants as ordinary normalized lifecycle and pointer-clearing deltas. Wall-clock time, physical batch boundaries, read-time expiry filters, and per-read ancestor walks do not participate. Premigration reservations use the same rule: expiry removes the reservation and its mirror resolver from current surfaces without creating an ENSv2 authority binding.
 
-An ownerless reservation may also be observed with a nonzero expiry already at
-or before its event block timestamp. Interpret retains the raw reservation and
-then emits its state-derived release in the same block with block-only provenance and no invented transaction or log position. Normalized output retains the release after the reservation, but public history does not infer an intra-block raw-log position. It never enters current state. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L465 @ ens_v2@a971bd64)
+An ownerless reservation may also be observed with a nonzero expiry already at or before its event block timestamp. Interpret retains the raw reservation and then emits its state-derived release in the same block with block-only provenance and no invented transaction or log position. Normalized output retains the release after the reservation, but public history does not infer an intra-block raw-log position. It never enters current state. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L465 @ ens_v2@a971bd64)
 
-Interpret and Project may land as separate deployment slices, but this
-combined [interpreter content hash](glossary.md#interpreter-content-hash)
-rollout is not serving-eligible until both are present and the retained range
-has been interpreted and projected coherently. Deployments must not serve the
-newly interpreted range between those slices.
+Interpret and Project may land as separate deployment slices, but this combined [interpreter content hash](glossary.md#interpreter-content-hash) rollout is not serving-eligible until both are present and the retained range has been interpreted and projected coherently. Deployments must not serve the newly interpreted range between those slices.
 
-Expiry retirement is computed and non-destructive. Interpret retains the token,
-registration or reservation payload, resource and token lineage, resolver,
-subregistry, and descendant topology. Any later observed renewal of the same
-token ID can therefore revive the same registration and reconnect its retained
+Expiry retirement is computed and non-destructive. Interpret retains the token, registration or reservation payload, resource and token lineage, resolver, subregistry, and descendant topology. Any later observed renewal of the same token ID can therefore revive the same registration and reconnect its retained
 subtree; bigname assumes no grace duration. Registry revival is role-gated but
 has no time-bound check, while the grace period belongs to registrar policy.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
