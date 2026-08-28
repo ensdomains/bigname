@@ -28,10 +28,6 @@ type Row = (
     serde_json::Value,
 );
 
-#[cfg(test)]
-#[rustfmt::skip]
-mod tests { #[test] fn prior_restore_orders_same_block_state_by_normalized_emission() { assert!(include_str!("prior.rs").contains("ORDER BY ranked.block_number, ranked.normalized_event_id")); } }
-
 pub(crate) async fn prior_state_values(
     pool: &PgPool,
     chain_id: &str,
@@ -286,3 +282,7 @@ pub(super) async fn state_values(
         })
         .collect())
 }
+
+#[cfg(test)]
+#[rustfmt::skip]
+mod tests { #[test] fn prior_restore_orders_same_block_state_by_normalized_emission() { assert!(include_str!("prior.rs").contains("ORDER BY ranked.block_number, ranked.normalized_event_id")); } }
