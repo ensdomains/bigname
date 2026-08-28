@@ -2,8 +2,6 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
-pub(crate) const TOPOLOGY_JIT_SETTING_SQL: &str = "SET LOCAL jit = off";
-
 pub(super) async fn close(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -12,7 +10,11 @@ pub(super) async fn close(
     // Frontier probes return few rows through endpoint indexes, but PostgreSQL can price the
     // combined branches above jit_above_cost on a large history. Compiling every iteration then
     // costs more than the indexed work, so keep JIT off only while topology scope is closed.
-    sqlx::query(TOPOLOGY_JIT_SETTING_SQL)
+    let previous_jit = sqlx::query_scalar::<_, String>("SHOW jit")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to read topology JIT", error))?;
+    sqlx::query("SET LOCAL jit = off")
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to disable topology JIT", error))?;
@@ -82,7 +84,16 @@ pub(super) async fn close(
         .await
         .map_err(|error| ProjectError::database("failed to queue topology candidates", error))?;
     }
-    sqlx::query("SET LOCAL jit = DEFAULT")
+    restore_jit(transaction, &previous_jit).await?;
+    Ok(())
+}
+
+async fn restore_jit(
+    transaction: &mut Transaction<'_, Postgres>,
+    previous_jit: &str,
+) -> Result<()> {
+    sqlx::query("SELECT set_config('jit', $1, true)")
+        .bind(previous_jit)
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to restore transaction JIT", error))?;
@@ -469,7 +480,22 @@ async fn include_v2_event_edges(
 
 #[cfg(test)]
 mod tests {
-    use super::V1_EVENT_EDGE_SQLS;
+    use super::{V1_EVENT_EDGE_SQLS, restore_jit};
+
+    #[sqlx::test]
+    #[rustfmt::skip]
+    async fn jit_restoration_preserves_session_and_local_values(pool: sqlx::PgPool) -> anyhow::Result<()> {
+        let mut transaction = pool.begin().await?;
+        sqlx::query("SET SESSION jit = off").execute(&mut *transaction).await?;
+        for expected in ["off", "on"] {
+            if expected == "on" { sqlx::query("SET LOCAL jit = on").execute(&mut *transaction).await?; }
+            let previous = sqlx::query_scalar::<_, String>("SHOW jit").fetch_one(&mut *transaction).await?;
+            sqlx::query("SET LOCAL jit = off").execute(&mut *transaction).await?;
+            restore_jit(&mut transaction, &previous).await?;
+            assert_eq!(sqlx::query_scalar::<_, String>("SHOW jit").fetch_one(&mut *transaction).await?, expected);
+        }
+        Ok(())
+    }
 
     const AFTER_NODE_MIGRATION: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

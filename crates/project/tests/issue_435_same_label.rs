@@ -219,27 +219,12 @@ async fn run(pool: &PgPool, target: i64, previous: Option<i64>) -> Result<()> {
     Ok(())
 }
 
+#[rustfmt::skip]
 async fn normalize(pool: &PgPool) -> Result<()> {
-    for table in [
-        "name_current",
-        "children_current",
-        "permissions_current",
-        "record_inventory_current",
-        "resolver_current",
-        "address_names_current",
-    ] {
-        sqlx::query(&format!(
-            "UPDATE {table} SET last_recomputed_at = to_timestamp(0), inserted_at = to_timestamp(0)"
-        ))
-        .execute(pool)
-        .await?;
+    for table in ["name_current", "children_current", "permissions_current", "record_inventory_current", "resolver_current", "address_names_current"] {
+        sqlx::query(&format!("UPDATE {table} SET last_recomputed_at = to_timestamp(0), inserted_at = to_timestamp(0)")).execute(pool).await?;
     }
-    sqlx::query(
-        "UPDATE permissions_current_resource_summary
-         SET last_recomputed_at = to_timestamp(0)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE permissions_current_resource_summary SET last_recomputed_at = to_timestamp(0)").execute(pool).await?;
     Ok(())
 }
 
