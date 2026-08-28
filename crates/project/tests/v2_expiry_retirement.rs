@@ -14,6 +14,8 @@ const RESOURCE: &str = "b64d3841-80ce-5f90-bb3c-575c05361e16";
 const LINEAGE: &str = "27c01db8-d04a-5c85-af28-dfed7797bc79";
 const STALE_RESOURCE: &str = "8c8f423c-d6c0-555d-9837-133622ba82fe";
 const STALE_LINEAGE: &str = "964569a1-400a-5486-b262-5f5c03d56ada";
+const GENERIC_RESOURCE: &str = "abababab-abab-abab-abab-abababababab";
+const GENERIC_LINEAGE: &str = "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd";
 const VERSION_RESOURCE: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 const VERSION_LINEAGE: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 const TOKEN: &str = "0x0000000000000000000000000000000000000000000000000000000000000065";
@@ -174,9 +176,9 @@ async fn seed(pool: &PgPool) -> Result<()> {
     let (h100, h102, h103) = (hash(100), hash(102), hash(103)); let (main_hash, generic_hash) = (MAIN.trim_start_matches("ens:"), GENERIC.trim_start_matches("ens:")); let (reservation_hash, mixed_hash, stale_hash) = (RESERVATION.trim_start_matches("ens:"), MIXED.trim_start_matches("ens:"), STALE.trim_start_matches("ens:")); let (one, two, three, four) = (1_u64, 2_u64, 3_u64, 4_u64);
     raw_sql(&format!(
         "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
-         VALUES ('{LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{STALE_LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{VERSION_LINEAGE}', '{CHAIN}', '{h103}', 103, 'canonical');
+         VALUES ('{LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{STALE_LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{GENERIC_LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{VERSION_LINEAGE}', '{CHAIN}', '{h103}', 103, 'canonical');
          INSERT INTO resources (resource_id, token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
-         VALUES ('{RESOURCE}', '{LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{STALE_RESOURCE}', '{STALE_LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{VERSION_RESOURCE}', '{VERSION_LINEAGE}', '{CHAIN}', '{h103}', 103, 'canonical');
+         VALUES ('{RESOURCE}', '{LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{STALE_RESOURCE}', '{STALE_LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{GENERIC_RESOURCE}', '{GENERIC_LINEAGE}', '{CHAIN}', '{h100}', 100, 'canonical'), ('{VERSION_RESOURCE}', '{VERSION_LINEAGE}', '{CHAIN}', '{h103}', 103, 'canonical');
          INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
              labelhashes, normalizer_version, visibility_state, chain_id, block_hash, block_number, canonicality_state)
          VALUES
@@ -189,7 +191,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
              active_from, active_to, chain_id, block_hash, block_number, canonicality_state)
          VALUES
            ('6347b94d-744e-5e3c-a8a9-38cefbcf0e25', '{MAIN}', '{RESOURCE}', 'declared_registry_path', 'ens_v2', to_timestamp(1700000100), to_timestamp(1800000000), '{CHAIN}', '{h100}', 100, 'canonical'),
-           ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '{GENERIC}', '{RESOURCE}', 'declared_registry_path', 'ens_v2', to_timestamp(1700000100), to_timestamp(1800000000), '{CHAIN}', '{h100}', 100, 'canonical'),
+           ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '{GENERIC}', '{GENERIC_RESOURCE}', 'declared_registry_path', 'ens_v2', to_timestamp(1700000100), to_timestamp(1800000000), '{CHAIN}', '{h100}', 100, 'canonical'),
            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '{MAIN}', '{RESOURCE}', 'declared_registry_path', 'ens_v2', to_timestamp(1800000001), to_timestamp(1900000000), '{CHAIN}', '{h102}', 102, 'canonical'),
            ('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', '{MAIN}', '{VERSION_RESOURCE}', 'declared_registry_path', 'ens_v2', to_timestamp(1900000000), NULL, '{CHAIN}', '{h103}', 103, 'canonical')",
     ))
@@ -215,6 +217,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     add!(MAIN, Some(RESOURCE), 100, Some(4), "PermissionChanged", permission.clone());
     add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64})); add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
     add!(RESERVATION, Some(RESOURCE), 100, Some(5), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
+    add!(RESERVATION, Some(STALE_RESOURCE), 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_900_000_000_i64}));
     add!(MIXED, Some(RESOURCE), 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
     event(pool, MIXED, None, 100, Some(7), "AuthorityTransferred", json!({"source_event":"NewOwner","owner":OWNER})).await?;
     add!(STALE, Some(STALE_RESOURCE), 100, Some(8), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN}));
@@ -222,7 +225,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     add!(STALE, Some(STALE_RESOURCE), 100, Some(9), "PermissionChanged", permission);
     add!(MAIN, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 101, Some(9), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
-    add!(GENERIC, Some(RESOURCE), 101, Some(10), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"})); add!(MAIN, Some(RESOURCE), 101, Some(11), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"registered","expiry":1_800_000_000_i64,"token_id":TOKEN}));
+    add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(9), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000)); add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(10), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"})); add!(MAIN, Some(RESOURCE), 101, Some(11), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"registered","expiry":1_800_000_000_i64,"token_id":TOKEN}));
     add!(RESERVATION, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
     add!(MIXED, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 102, Some(0), "RegistrationGranted", granted("ExpiryUpdated", TOKEN, 1_900_000_000));
@@ -323,7 +326,9 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(retired_state, (0, 1, 0, 1, 0, Some("operator_approval_surfaces_not_ingested".into())));
+    assert_eq!(retired_state, (0, 1, 1, 1, 0, Some("operator_approval_surfaces_not_ingested".into())));
+    let generic: (Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT declared_summary -> 'registration' ->> 'status', declared_summary -> 'control' ->> 'status', declared_summary -> 'resolver' ->> 'address' FROM name_current WHERE logical_name_id = $1").bind(GENERIC).fetch_one(&incremental).await?;
+    assert_eq!(generic, (Some("released".into()), Some("unregistered".into()), None));
     let mixed: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT provenance -> 'authority_selection' ->> 'authority_arm',
                 declared_summary -> 'registration' ->> 'status',
@@ -378,17 +383,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(VERSION_RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(
-        version,
-        (
-            VERSION_RESOURCE.into(),
-            0,
-            0,
-            1,
-            Some("operator_approval_surfaces_not_ingested".into()),
-        )
-    );
-
+    assert_eq!(version, (VERSION_RESOURCE.into(), 0, 0, 1, Some("operator_approval_surfaces_not_ingested".into())));
     version_db.cleanup().await?;
     revived_db.cleanup().await?;
     retired_db.cleanup().await?;

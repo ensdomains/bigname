@@ -229,25 +229,27 @@ pub(super) async fn build(
         ) registration_latest ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.event_kind, event.after_state, event.resource_id
-            FROM project_events event
+            FROM (SELECT DISTINCT ON (event.resource_id) event.* FROM project_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND (
-                  (
-                      event.event_kind IN (
-                          'RegistrationGranted', 'RegistrationReserved'
-                      )
-                      AND event.source_family IN (
-                          'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
-                      )
-                  )
-                  OR (
-                      event.event_kind = 'RegistrationReleased'
+                  (event.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
+                      AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'))
+                  OR (event.event_kind = 'RegistrationReleased'
                       AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
                       AND event.after_state ->> 'derived_from' = 'interpreter_state'
-                      AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
-                  )
+                      AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
               )
-            ORDER BY event.block_number DESC NULLS LAST,
+              AND (event.event_kind = 'RegistrationReleased' OR NOT EXISTS (
+                  SELECT 1 FROM project_events terminal
+                  WHERE terminal.logical_name_id = event.logical_name_id
+                    AND terminal.resource_id IS NOT DISTINCT FROM event.resource_id
+                    AND terminal.event_kind = 'RegistrationReleased'
+                    AND ROW(COALESCE(terminal.block_number, -1), COALESCE(terminal.transaction_index, -1), COALESCE(terminal.log_index, -1)) >= ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1))
+              ))
+            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST, (event.event_kind = 'RegistrationReleased') DESC,
+                     event.normalized_event_id DESC) event
+            ORDER BY (event.event_kind = 'RegistrationReleased'), event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
             LIMIT 1
