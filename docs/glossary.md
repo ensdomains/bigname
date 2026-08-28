@@ -49,6 +49,17 @@ behind a `resource_id`; the id survives changes within one anchor and rotates
 when authority moves to a different anchor. An *observation anchor* is the
 exact chain/block identity a stored row was observed at.
 
+<a id="serving-resource"></a>
+**Serving resource** — the typed `resource_id` reference used to select resolver and record data
+when a name has no current control binding. It preserves event-derived read reachability only: it
+does not establish a registration, authority, address-to-name relation, or permission grant.
+
+<a id="getter-visible-owner"></a>
+**Getter-visible owner** — the registry owner address that an on-chain owner getter would return
+for a clean event word. It preserves the literal event word separately, but treats a current
+Solidity-registry emitter stored as its own owner as zero for control selection. Historical owner
+words that fail the existing masked-address check have no getter-visible owner.
+
 **Authority epoch** (`authority_epoch`) — the interval during which one
 protocol arm supplies every current field for one logical name. For `ens`
 names the selected `authority_arm` is `ens_v1` or `ens_v2`; `basenames`

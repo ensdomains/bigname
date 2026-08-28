@@ -89,6 +89,27 @@ pub const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
           )
       )
   )
+  AND (
+      nc.serving_resource_id IS NULL
+      OR EXISTS (
+          SELECT 1
+          FROM bigname_phase.resources serving_resource
+          JOIN bigname_phase.chain_lineage serving_resource_lineage
+            ON serving_resource_lineage.chain_id = serving_resource.chain_id
+           AND serving_resource_lineage.block_hash = serving_resource.block_hash
+          WHERE serving_resource.resource_id = nc.serving_resource_id
+            AND serving_resource.canonicality_state IN (
+                'canonical'::bigname_phase.canonicality_state,
+                'safe'::bigname_phase.canonicality_state,
+                'finalized'::bigname_phase.canonicality_state
+            )
+            AND serving_resource_lineage.canonicality_state IN (
+                'canonical'::bigname_phase.canonicality_state,
+                'safe'::bigname_phase.canonicality_state,
+                'finalized'::bigname_phase.canonicality_state
+            )
+      )
+  )
 "#;
 
 pub const DEFAULT_NAME_CURRENT_LINEAGE_JOINS: &str = r#"
@@ -206,6 +227,7 @@ pub async fn load_name_current(
             nc.namehash,
             nc.surface_binding_id,
             nc.resource_id,
+            nc.serving_resource_id,
             nc.token_lineage_id,
             nc.binding_kind,
             nc.declared_summary,
@@ -268,6 +290,7 @@ pub async fn load_name_current_by_logical_name_ids(
             nc.namehash,
             nc.surface_binding_id,
             nc.resource_id,
+            nc.serving_resource_id,
             nc.token_lineage_id,
             nc.binding_kind,
             nc.declared_summary,
@@ -338,6 +361,7 @@ pub async fn load_current_names_by_resource_ids(
             nc.namehash,
             nc.surface_binding_id,
             nc.resource_id,
+            nc.serving_resource_id,
             nc.token_lineage_id,
             nc.binding_kind,
             nc.declared_summary,

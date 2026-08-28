@@ -194,6 +194,12 @@ coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
 in [`architecture.md`](architecture.md#identity-strategy).
+`name_current.resource_id` identifies the current control or registration resource. The nullable
+`name_current.serving_resource_id` identifies a separate, event-derived resolver and record-serving
+[serving resource](glossary.md#serving-resource) when no control binding is open. It is not a binding, registration,
+address relation, or permission authority. Resolver and record readers use
+`COALESCE(serving_resource_id, resource_id)`; control, relation, and permission builders use only
+`resource_id`.
 Its projection provenance stores the [source family](glossary.md#source-family)
 of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's
@@ -336,6 +342,10 @@ latest retained linked resolver event whose name has a readable canonical
 surface staged at the target, with fallback to an earlier linked event when a
 later event's name lacks such a surface. A selected zero-address resolver
 suppresses inventory rather than falling back to an older nonzero event. It
+remains resource-keyed when a registry-only name loses control: an event-linked nonzero registry
+resolver may keep that resource reachable through `name_current.serving_resource_id` while the
+control resource and binding stay null. This evidence is derived entirely from normalized events;
+Project and API serving perform no live registry or resolver read. It
 also records the selected resolver's record boundary, explicit gaps,
 unsupported families, and any retained indexed values. The record event need
 not carry that resource: Project normally joins its `logical_name_id` and

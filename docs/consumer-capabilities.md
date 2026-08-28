@@ -192,6 +192,17 @@ Sepolia distinction above is unchanged.
 
 ## ENSv1→ENSv2 delivery slices
 
+Registry-only ENSv1 and Basenames names with [getter-visible owner](glossary.md#getter-visible-owner) zero form one
+cohesive read capability. Exact-name detail is supported and unregistered;
+indexed records are supported when the retained [serving resource](glossary.md#serving-resource) has inventory;
+verified and auto records follow the ordinary lookup capability; direct
+subnames include a read-only row only while a current nonzero event-linked
+resolver exists; and resolver `bound_names` remains subject to the resolver
+family's existing binding-enumeration capability. Registration/control fields,
+address-name relations, and owner-derived permissions stay absent. A resolver
+selection observed only before the name surface and never repeated remains out
+of scope under the documented #613 caveat.
+
 Each slice includes its behavior tests and fixture provenance. Counts are
 estimated hand-written production files; test fixtures, test-only harness
 files, and docs are not included. Rows before “Final activation” describe the

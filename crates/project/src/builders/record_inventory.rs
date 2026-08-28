@@ -314,12 +314,26 @@ pub(super) async fn build(
             canonicality_summary, manifest_version
         )
         SELECT pointer.resource_id,
-               concat_ws(':',
-                   pointer.logical_name_id,
-                   pointer.resource_id::text,
-                   COALESCE(version.normalized_event_id, 0)::text,
-                   boundary.block_number::text,
-                   boundary.block_hash
+               concat(
+                   octet_length(pointer.logical_name_id), ':',
+                   pointer.logical_name_id, ';',
+                   octet_length(pointer.resource_id::text), ':',
+                   pointer.resource_id::text, ';',
+                   octet_length(COALESCE(version.normalized_event_id::text, '')), ':',
+                   COALESCE(version.normalized_event_id::text, ''), ';',
+                   octet_length(CASE
+                       WHEN version.normalized_event_id IS NOT NULL
+                           THEN 'RecordVersionChanged'
+                       ELSE ''
+                   END), ':',
+                   CASE WHEN version.normalized_event_id IS NOT NULL
+                       THEN 'RecordVersionChanged' ELSE '' END, ';',
+                   octet_length($1::text), ':', $1::text, ';',
+                   octet_length(boundary.block_number::text), ':',
+                   boundary.block_number::text, ';',
+                   octet_length(boundary.block_hash), ':', boundary.block_hash, ';',
+                   octet_length(to_jsonb(boundary.block_timestamp) #>> '{}'), ':',
+                   to_jsonb(boundary.block_timestamp) #>> '{}', ';'
                ),
                jsonb_build_object(
                    'logical_name_id', pointer.logical_name_id,

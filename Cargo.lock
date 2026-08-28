@@ -1844,6 +1844,7 @@ dependencies = [
  "anyhow",
  "bigname-domain",
  "bigname-lookup",
+ "bigname-storage",
  "bigname-test-support",
  "serde_json",
  "sqlx",

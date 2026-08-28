@@ -34,6 +34,8 @@ pub(crate) async fn initialize(
 
     stage_changed_events(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_direct_scope(transaction, chain_id, window.from_block, window.to_block).await?;
+    inventory::include_changed_record_consumers(transaction, chain_id, target.number).await?;
+    include_registry_resolver_parent_names(transaction, chain_id, target.number).await?;
     authority::include_changed_child_proofs(
         transaction,
         chain_id,
@@ -66,8 +68,6 @@ pub(crate) async fn initialize(
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
-    // Topology must consume names added by time boundaries and resolver binding closure before
-    // event-history staging begins.
     // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
     authority::include_topology_dependents(transaction, chain_id, target.number).await?;
@@ -77,6 +77,81 @@ pub(crate) async fn initialize(
     resolver::classify_unchanged(transaction, chain_id).await?;
     resolver::include_permission_resources(transaction, chain_id, target.number).await?;
     retracted::consume(transaction, chain_id, window.from_block, window.to_block).await?;
+    Ok(())
+}
+
+async fn include_registry_resolver_parent_names(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_scope_names
+         SELECT DISTINCT edge.namespace || ':' || lower(edge.after_state ->> 'node')
+         FROM project_changed_events pointer
+         JOIN normalized_events edge
+           ON edge.chain_id = pointer.chain_id
+          AND edge.namespace = pointer.namespace
+          AND edge.event_kind = 'SubregistryChanged'
+          AND edge.source_family IN (
+              'ens_v1_registry_l1', 'basenames_base_registry'
+          )
+          AND edge.after_state ->> 'child_node' IS NOT NULL
+          AND pointer.logical_name_id = edge.namespace || ':' ||
+              lower(edge.after_state ->> 'child_node')
+         JOIN LATERAL (
+             SELECT owner.after_state ->> 'owner_getter' AS owner_getter
+             FROM normalized_events owner
+             JOIN chain_lineage owner_lineage
+               ON owner_lineage.chain_id = owner.chain_id
+              AND owner_lineage.block_number = owner.block_number
+              AND owner_lineage.block_hash = owner.block_hash
+             WHERE owner.chain_id = pointer.chain_id
+               AND (
+                   owner.logical_name_id = pointer.logical_name_id
+                   OR (
+                       owner.logical_name_id IS NULL
+                       AND owner.resource_id = pointer.resource_id
+                   )
+               )
+               AND owner.event_kind = 'AuthorityTransferred'
+               AND owner.source_family IN (
+                   'ens_v1_registry_l1', 'basenames_base_registry'
+               )
+               AND owner.block_number <= $2
+               AND owner.consumer_visibility = 'activated'
+               AND owner.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND owner_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+             ORDER BY owner.block_number DESC NULLS LAST,
+                      owner.transaction_index DESC NULLS LAST,
+                      owner.log_index DESC NULLS LAST,
+                      owner.event_identity DESC
+             LIMIT 1
+         ) ownership ON ownership.owner_getter =
+             '0x0000000000000000000000000000000000000000'
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = edge.chain_id
+          AND lineage.block_number = edge.block_number
+          AND lineage.block_hash = edge.block_hash
+         WHERE pointer.event_kind = 'ResolverChanged'
+           AND pointer.source_family IN (
+               'ens_v1_registry_l1', 'basenames_base_registry'
+           )
+           AND pointer.logical_name_id IS NOT NULL
+           AND edge.block_number <= $2
+           AND edge.consumer_visibility = 'activated'
+           AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND NULLIF(edge.after_state ->> 'node', '') IS NOT NULL
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to scope registry-resolver parent names", error)
+    })?;
     Ok(())
 }
 
@@ -179,7 +254,7 @@ async fn seed_direct_scope(
                     (event.before_state ->> 'node'),
                     (event.before_state ->> 'child_node')
          ) candidate(node)
-         WHERE event.event_kind = 'SubregistryChanged'
+         WHERE event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
            AND event.source_family IN (
                'ens_v1_registry_l1', 'basenames_base_registry'
            )
@@ -463,6 +538,7 @@ async fn close_binding_scope(
     target: &Marker,
 ) -> Result<()> {
     authority::include_latest_arm_resources(transaction, chain_id, target.number).await?;
+    resolver::include_registry_read_anchors(transaction, chain_id, target.number).await?;
     sqlx::query(
         "INSERT INTO project_scope_resources
          SELECT binding.resource_id

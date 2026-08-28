@@ -32,7 +32,11 @@ impl State {
             v1_expiries: OrdSet::new(),
             v1_registry_authorities: OrdMap::new(),
             v1_registry_owners: OrdMap::new(),
+            v1_registry_owner_words: OrdMap::new(),
+            v1_registry_owner_reasons: OrdMap::new(),
+            v1_registry_read_anchors: OrdMap::new(),
             v1_resolvers: OrdMap::new(),
+            v1_resolver_links: OrdMap::new(),
             v1_migrated_nodes: OrdSet::new(),
             v1_materialized_surfaces: OrdSet::new(),
             known_surfaces: OrdSet::new(),
@@ -98,7 +102,11 @@ impl State {
         self.v1_expiries = replayed.v1_expiries;
         self.v1_registry_authorities = replayed.v1_registry_authorities;
         self.v1_registry_owners = replayed.v1_registry_owners;
+        self.v1_registry_owner_words = replayed.v1_registry_owner_words;
+        self.v1_registry_owner_reasons = replayed.v1_registry_owner_reasons;
+        self.v1_registry_read_anchors = replayed.v1_registry_read_anchors;
         self.v1_resolvers = replayed.v1_resolvers;
+        self.v1_resolver_links = replayed.v1_resolver_links;
         self.v1_migrated_nodes = replayed.v1_migrated_nodes;
         self.v1_materialized_surfaces = replayed.v1_materialized_surfaces;
     }

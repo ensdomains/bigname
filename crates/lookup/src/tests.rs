@@ -1697,6 +1697,45 @@ async fn closed_surface_binding_is_not_readable() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn event_linked_ownerless_name_loads_verified_snapshot_without_control_binding()
+-> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_fixture_ownerless(&fixture).await?;
+
+    let snapshot =
+        crate::store::load_snapshot(fixture.pool(), &lookup_request(&fixture.logical_name_id)?)
+            .await?;
+    assert_eq!(snapshot.resolver_chain_id, ETHEREUM);
+    assert_eq!(
+        snapshot.indexed_answer(&RecordSelector::parse("text:url")?),
+        Some(json!({"status":"success", "value":INDEXED_VALUE}))
+    );
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.records[0].value, Some(json!(LIVE_VALUE)));
+    fixture.cleanup().await?;
+    assert_hash_pinned(&join_rpc(rpc_handle).await?, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn basenames_event_linked_ownerless_name_reaches_verified_provider() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(
+        encoded_basenames_text_result(LIVE_VALUE),
+    )])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+    make_fixture_ownerless(&fixture).await?;
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.records[0].value, Some(json!(LIVE_VALUE)));
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
 async fn indexed_inventory_requires_readable_resource_lineage() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
         INDEXED_VALUE,
@@ -3111,6 +3150,23 @@ async fn run_lookup(fixture: &Fixture, rpc_url: &str) -> crate::Result<LookupRes
 
 fn lookup_request(logical_name_id: &str) -> crate::Result<LookupRequest> {
     LookupRequest::new(logical_name_id, ["text:url"])
+}
+
+async fn make_fixture_ownerless(fixture: &Fixture) -> AnyResult<()> {
+    sqlx::query(
+        "UPDATE name_current
+         SET serving_resource_id = resource_id,
+             surface_binding_id = NULL,
+             resource_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL",
+    )
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query("UPDATE resources SET token_lineage_id = NULL")
+        .execute(fixture.pool())
+        .await?;
+    Ok(())
 }
 
 async fn ledger_count(pool: &PgPool) -> AnyResult<i64> {

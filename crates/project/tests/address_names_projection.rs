@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, RunMode};
+use bigname_storage::load_record_inventory_current_with_anchor_fallback;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::json;
 use sqlx::{PgPool, raw_sql};
@@ -23,6 +24,18 @@ const MASKED_BINDING: &str = "33333333-3333-3333-3333-333333333333";
 const CONTROL_BINDING: &str = "44444444-4444-4444-4444-444444444444";
 const PRIOR_CONTROLLER: &str = "0x11111111111111111111111111111111111111Aa";
 const CONTROL_OWNER: &str = "0x22222222222222222222222222222222222222Bb";
+const OWNERLESS_NAMEHASH: &str =
+    "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const OWNERLESS_LOGICAL: &str =
+    "ens:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const OWNERLESS_PARENT_HASH: &str =
+    "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const OWNERLESS_PARENT_LOGICAL: &str =
+    "ens:0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const OWNERLESS_RESOURCE: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+const OWNERLESS_BINDING: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+const REGISTRY_ADDRESS: &str = "0x9999999999999999999999999999999999999999";
+const RESOLVER_ADDRESS: &str = "0x8888888888888888888888888888888888888888";
 // Low-20-byte tail of the archived registry's dirty NewOwner log on mainnet.
 const MASKED_TAIL: &str = "0x3831343865616130313363333864316330663339";
 const MASKED_RAW: &str = "0x6330363834636235336331363831343865616130313363333864316330663339";
@@ -85,12 +98,34 @@ async fn migrated_pool() -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
+async fn run_project(
+    pool: &PgPool,
+    target_block: i64,
+    affected_from_block: i64,
+    resume_number: Option<i64>,
+) -> Result<()> {
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block,
+            affected_from_block,
+            affected_to_block: target_block,
+            resume_current: resume_number.map(|number| bigname_project::Marker {
+                number,
+                hash: block_hash(number),
+            }),
+            mode: RunMode::Normal,
+        })
+        .await?;
+    Ok(())
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!(r#""{}""#, identifier.replace('"', r#""""#))
 }
 
-async fn seed_chain(pool: &PgPool) -> Result<()> {
-    for number in [8_i64, 9, 10] {
+async fn seed_blocks(pool: &PgPool, numbers: impl IntoIterator<Item = i64>) -> Result<()> {
+    for number in numbers {
         sqlx::query(
             "INSERT INTO chain_lineage (
                  chain_id, block_hash, block_number, block_timestamp, canonicality_state
@@ -104,6 +139,10 @@ async fn seed_chain(pool: &PgPool) -> Result<()> {
         .await?;
     }
     Ok(())
+}
+
+async fn seed_chain(pool: &PgPool) -> Result<()> {
+    seed_blocks(pool, [8, 9, 10]).await
 }
 
 async fn seed_surface(
@@ -203,6 +242,110 @@ async fn seed_authority_transferred(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn seed_normalized_event(
+    pool: &PgPool,
+    identity: &str,
+    logical_name_id: Option<&str>,
+    resource: Option<&str>,
+    event_kind: &str,
+    source_family: &str,
+    block_number: i64,
+    log_index: i64,
+    after_state: serde_json::Value,
+    raw_fact_ref: serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             transaction_hash, transaction_index, log_index, derivation_kind,
+             canonicality_state, after_state, raw_fact_ref
+         ) VALUES (
+             $1, 'ens', $2, $3::uuid, $4, $5, 1, $6, $7, $8,
+             $9, 0, $10, 'ens_v1_unwrapped_authority', 'canonical', $11, $12
+         )",
+    )
+    .bind(identity)
+    .bind(logical_name_id)
+    .bind(resource)
+    .bind(event_kind)
+    .bind(source_family)
+    .bind(CHAIN)
+    .bind(block_number)
+    .bind(block_hash(block_number))
+    .bind(format!("0x{:064x}", 1_000 + log_index))
+    .bind(log_index)
+    .bind(after_state)
+    .bind(raw_fact_ref)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn serving_projection_snapshot(pool: &PgPool) -> Result<Vec<(String, serde_json::Value)>> {
+    let tables = [
+        ("name_current", "logical_name_id"),
+        (
+            "children_current",
+            "parent_logical_name_id, child_logical_name_id, surface_class",
+        ),
+        ("permissions_current", "resource_id, subject, scope"),
+        ("permissions_current_resource_summary", "resource_id"),
+        (
+            "record_inventory_current",
+            "resource_id, record_version_boundary_key",
+        ),
+        ("resolver_current", "chain_id, resolver_address"),
+        (
+            "address_names_current",
+            "address, logical_name_id, relation",
+        ),
+        ("primary_names_current", "address, coin_type, namespace"),
+    ];
+    let mut snapshot = Vec::with_capacity(tables.len());
+    for (table, order) in tables {
+        let statement = format!(
+            "SELECT COALESCE(jsonb_agg(
+                 to_jsonb(row) - 'last_recomputed_at' - 'inserted_at'
+                 ORDER BY {order}
+             ), '[]'::jsonb)
+             FROM {table} row"
+        );
+        snapshot.push((
+            table.to_owned(),
+            sqlx::query_scalar(&statement).fetch_one(pool).await?,
+        ));
+    }
+    Ok(snapshot)
+}
+
+async fn ownerless_serving_projection_snapshot(
+    pool: &PgPool,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    let mut snapshot = serving_projection_snapshot(pool).await?;
+    for (table, rows) in &mut snapshot {
+        let Some(rows) = rows.as_array_mut() else {
+            continue;
+        };
+        rows.retain(|row| match table.as_str() {
+            "name_current" => row["logical_name_id"] == OWNERLESS_LOGICAL,
+            "children_current" => row["child_logical_name_id"] == OWNERLESS_LOGICAL,
+            "permissions_current"
+            | "permissions_current_resource_summary"
+            | "record_inventory_current" => row["resource_id"] == OWNERLESS_RESOURCE,
+            "resolver_current" => row["resolver_address"] == RESOLVER_ADDRESS,
+            "address_names_current" => {
+                row["logical_name_id"] == OWNERLESS_LOGICAL
+                    || row["resource_id"] == OWNERLESS_RESOURCE
+            }
+            "primary_names_current" => false,
+            unexpected => panic!("unexpected serving projection table {unexpected}"),
+        });
+    }
+    Ok(snapshot)
+}
+
 #[tokio::test]
 async fn masked_owner_word_clears_the_effective_controller() -> Result<()> {
     let (database, pool) = migrated_pool().await?;
@@ -267,16 +410,7 @@ async fn masked_owner_word_clears_the_effective_controller() -> Result<()> {
     )
     .await?;
 
-    Engine::new(pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.to_owned(),
-            target_block: 10,
-            affected_from_block: 8,
-            affected_to_block: 10,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
+    run_project(&pool, 10, 8, None).await?;
 
     // Anti-vacuity: both names staged and projected.
     let staged_names: i64 = sqlx::query_scalar("SELECT count(*) FROM name_current")
@@ -340,6 +474,438 @@ async fn masked_owner_word_clears_the_effective_controller() -> Result<()> {
         json!(CONTROL_OWNER.to_lowercase())
     );
     assert!(control_summary.get("owner").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn registry_self_with_linked_resolver_serves_without_control() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        "ownerless-fixture.eth",
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1, 'ens', 'eth', ARRAY['eth'], '\\x00', $2, ARRAY[$2],
+             'test', 'active', $3, $4, 8, 'canonical'
+         )",
+    )
+    .bind(OWNERLESS_PARENT_LOGICAL)
+    .bind(OWNERLESS_PARENT_HASH)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings
+         SET active_to = '2026-08-01T00:00:09Z'
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(OWNERLESS_BINDING)
+    .execute(&pool)
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-resolver",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        8,
+        1,
+        json!({"node": OWNERLESS_NAMEHASH, "resolver": RESOLVER_ADDRESS}),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-child",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        9,
+        2,
+        json!({
+            "node": OWNERLESS_PARENT_HASH,
+            "child_node": OWNERLESS_NAMEHASH,
+            "labelhash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "owner": CONTROL_OWNER,
+            "owner_getter": CONTROL_OWNER
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-record",
+        Some(OWNERLESS_LOGICAL),
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        8,
+        2,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "record_family": "text",
+            "record_key": "text:description",
+            "selector_key": "description",
+            "value": "still readable"
+        }),
+        json!({"emitting_address": RESOLVER_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-self",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        9,
+        1,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "owner": REGISTRY_ADDRESS,
+            "owner_getter": "0x0000000000000000000000000000000000000000",
+            "owner_getter_reason": "registry_self",
+            "authority_kind": null
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    run_project(&pool, 9, 8, None).await?;
+    let initial_value: String = sqlx::query_scalar(
+        "SELECT entries -> 0 ->> 'value'
+         FROM record_inventory_current
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(initial_value, "still readable");
+
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-version",
+        None,
+        None,
+        "RecordVersionChanged",
+        "ens_v1_resolver_l1",
+        10,
+        1,
+        json!({"node": OWNERLESS_NAMEHASH, "record_version": "1"}),
+        json!({"emitting_address": RESOLVER_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-record-after-version",
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        10,
+        2,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "record_family": "text",
+            "record_key": "text:description",
+            "selector_key": "description",
+            "value": "readable after version"
+        }),
+        json!({"emitting_address": RESOLVER_ADDRESS}),
+    )
+    .await?;
+    run_project(&pool, 10, 10, Some(9)).await?;
+
+    let row_matches_contract: bool = sqlx::query_scalar(
+        "SELECT surface_binding_id IS NULL
+             AND resource_id IS NULL
+             AND binding_kind IS NULL
+             AND serving_resource_id = $2::uuid
+             AND support_status = 'supported'
+             AND unsupported_reason IS NULL
+             AND jsonb_typeof(declared_summary -> 'topology') = 'object'
+             AND declared_summary @> $3::jsonb
+             AND provenance @> $4::jsonb
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .bind(OWNERLESS_RESOURCE)
+    .bind(json!({
+        "registration":{"status":"unregistered"},
+        "control":{"status":"unregistered"},
+        "resolver":{"address":RESOLVER_ADDRESS},
+        "coverage":{
+            "status":"projected", "exhaustiveness":"not_asserted",
+            "enumeration_basis":"event_linked_registry_resolver"
+        }
+    }))
+    .bind(json!({"read_reachability":{
+        "basis":"retained_registry_resolver_pointer",
+        "owner_getter_reason":"registry_self"
+    }}))
+    .fetch_one(&pool)
+    .await?;
+    assert!(row_matches_contract);
+
+    let (inventory_boundary, topology_boundary, inventory): (
+        serde_json::Value,
+        serde_json::Value,
+        serde_json::Value,
+    ) = sqlx::query_as(
+        "SELECT inventory.record_version_boundary,
+                name.declared_summary #> '{topology,version_boundaries,record_version_boundary}',
+                inventory.entries
+         FROM record_inventory_current inventory
+         JOIN name_current name
+           ON name.serving_resource_id = inventory.resource_id
+         WHERE inventory.resource_id = $1::uuid",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(topology_boundary, inventory_boundary);
+    assert_eq!(inventory[0]["record_key"], "text:description");
+    assert_eq!(inventory[0]["value"], "readable after version");
+    let loaded = load_record_inventory_current_with_anchor_fallback(
+        &pool,
+        OWNERLESS_RESOURCE.parse()?,
+        &topology_boundary,
+    )
+    .await?
+    .expect("ownerless topology boundary loads its current inventory");
+    assert_eq!(loaded.entries[0]["value"], "readable after version");
+    let incremental_record_change = ownerless_serving_projection_snapshot(&pool).await?;
+    run_project(&pool, 10, 8, None).await?;
+    assert_eq!(
+        incremental_record_change,
+        ownerless_serving_projection_snapshot(&pool).await?,
+        "resource-less ownerless record changes diverged from a fresh Project rebuild across the eight serving tables"
+    );
+    let address_relations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM address_names_current WHERE logical_name_id = $1")
+            .bind(OWNERLESS_LOGICAL)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(address_relations, 0);
+    let effective_permissions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM permissions_current
+         WHERE resource_id = $1::uuid AND jsonb_array_length(effective_powers) > 0",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(effective_permissions, 0);
+
+    let child: (String, Option<String>) = sqlx::query_as(
+        "SELECT owner, registrant FROM children_current
+         WHERE parent_logical_name_id = $1 AND child_logical_name_id = $2",
+    )
+    .bind(OWNERLESS_PARENT_LOGICAL)
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(child.0, "0x0000000000000000000000000000000000000000");
+    assert_eq!(child.1, None);
+
+    seed_blocks(&pool, [11, 12]).await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-resolver-clear",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        11,
+        1,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "resolver": "0x0000000000000000000000000000000000000000"
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    run_project(&pool, 11, 11, Some(10)).await?;
+    let cleared: (Option<String>, Option<String>, i64, i64) = sqlx::query_as(
+        "SELECT serving_resource_id::text,
+                declared_summary #>> '{resolver,address}',
+                (SELECT count(*) FROM children_current
+                 WHERE child_logical_name_id = $1),
+                (SELECT count(*) FROM record_inventory_current
+                 WHERE resource_id = $2::uuid)
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cleared, (None, None, 0, 0));
+
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-resolver-reselected",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        12,
+        1,
+        json!({"node": OWNERLESS_NAMEHASH, "resolver": RESOLVER_ADDRESS}),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    run_project(&pool, 12, 12, Some(11)).await?;
+    let restored: (Option<String>, Option<String>, i64, i64) = sqlx::query_as(
+        "SELECT serving_resource_id::text,
+                declared_summary #>> '{resolver,address}',
+                (SELECT count(*) FROM children_current
+                 WHERE child_logical_name_id = $1),
+                (SELECT count(*) FROM record_inventory_current
+                 WHERE resource_id = $2::uuid)
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(restored.0.as_deref(), Some(OWNERLESS_RESOURCE));
+    assert_eq!(restored.1.as_deref(), Some(RESOLVER_ADDRESS));
+    assert_eq!((restored.2, restored.3), (1, 1));
+    let incremental = serving_projection_snapshot(&pool).await?;
+    run_project(&pool, 12, 8, None).await?;
+    assert_eq!(
+        incremental,
+        serving_projection_snapshot(&pool).await?,
+        "incremental ownerless clear/reselection diverged from a fresh Project rebuild across the eight serving tables"
+    );
+
+    seed_blocks(&pool, [13]).await?;
+    for (identity, resolver) in [
+        ("fixture:ownerless-resolver-z", RESOLVER_ADDRESS),
+        (
+            "fixture:ownerless-resolver-a",
+            "0x7777777777777777777777777777777777777777",
+        ),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            Some(OWNERLESS_LOGICAL),
+            Some(OWNERLESS_RESOURCE),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            13,
+            1,
+            json!({"node": OWNERLESS_NAMEHASH, "resolver": resolver}),
+            json!({"emitting_address": REGISTRY_ADDRESS}),
+        )
+        .await?;
+    }
+    run_project(&pool, 13, 13, Some(12)).await?;
+    let selected_resolver: String = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{resolver,address}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(selected_resolver, RESOLVER_ADDRESS);
+
+    seed_blocks(&pool, [14, 15]).await?;
+    for (identity, owner, getter, reason) in [
+        (
+            "fixture:ownerless-owner-z",
+            REGISTRY_ADDRESS,
+            "0x0000000000000000000000000000000000000000",
+            Some("registry_self"),
+        ),
+        (
+            "fixture:ownerless-owner-a",
+            CONTROL_OWNER,
+            CONTROL_OWNER,
+            None,
+        ),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            Some(OWNERLESS_LOGICAL),
+            Some(OWNERLESS_RESOURCE),
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            14,
+            1,
+            json!({
+                "node": OWNERLESS_NAMEHASH, "owner": owner,
+                "owner_getter": getter, "owner_getter_reason": reason
+            }),
+            json!({"emitting_address": REGISTRY_ADDRESS}),
+        )
+        .await?;
+    }
+    raw_sql(
+        "ALTER TABLE normalized_events ALTER COLUMN normalized_event_id DROP IDENTITY;
+         UPDATE normalized_events
+         SET normalized_event_id = CASE event_identity
+             WHEN 'fixture:ownerless-owner-a'
+                 THEN 900002
+             ELSE 900001 END
+         WHERE event_identity IN (
+             'fixture:ownerless-owner-a', 'fixture:ownerless-owner-z'
+         );
+         ALTER TABLE normalized_events ALTER COLUMN normalized_event_id
+             ADD GENERATED ALWAYS AS IDENTITY (START WITH 900003)",
+    )
+    .execute(&pool)
+    .await?;
+    run_project(&pool, 14, 14, Some(13)).await?;
+    sqlx::query(
+        "UPDATE name_current SET provenance = provenance || '{\"scope_poison\":true}'::jsonb
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_PARENT_LOGICAL)
+    .execute(&pool)
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:ownerless-resolver-parent-scope",
+        Some(OWNERLESS_LOGICAL),
+        Some(OWNERLESS_RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        15,
+        1,
+        json!({"node": OWNERLESS_NAMEHASH, "resolver": RESOLVER_ADDRESS}),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    run_project(&pool, 15, 15, Some(14)).await?;
+    let parent_rebuilt: bool = sqlx::query_scalar(
+        "SELECT NOT provenance ? 'scope_poison' FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_PARENT_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        parent_rebuilt,
+        "ownerless resolver change omitted its parent from incremental scope"
+    );
+    let incremental = serving_projection_snapshot(&pool).await?;
+    run_project(&pool, 15, 8, None).await?;
+    assert_eq!(incremental, serving_projection_snapshot(&pool).await?);
 
     database.cleanup().await?;
     Ok(())

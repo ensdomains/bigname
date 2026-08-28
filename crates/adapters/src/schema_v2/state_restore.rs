@@ -231,7 +231,16 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
         && event.logical_name_id.is_some()
         && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str)
     {
-        state.observe_v1_surface(&event.namespace, namehash);
+        if event
+            .after_state
+            .get("visibility_state")
+            .and_then(Value::as_str)
+            == Some("shadow")
+        {
+            state.observe_v1_surface(&event.namespace, namehash);
+        } else {
+            state.observe_v1_active_surface(&event.namespace, namehash);
+        }
     }
     if matches!(source_event, Some("NewOwner" | "Transfer"))
         && let Some(namehash) = event
@@ -243,34 +252,60 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
         if unmasked_word::body_has_unmasked_owner_word(&event.after_state) {
             state.forget_v1_registry_owner(&event.namespace, namehash);
         } else if let Some(owner) = event.after_state.get("owner").and_then(Value::as_str) {
-            state.set_v1_registry_owner(&event.namespace, namehash, owner.to_owned());
-            state.remember_v1_registry_authority(
+            let owner_getter = event
+                .after_state
+                .get("owner_getter")
+                .and_then(Value::as_str)
+                .unwrap_or(owner);
+            let owner_getter_reason = event
+                .after_state
+                .get("owner_getter_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            state.set_v1_registry_owner_views(
                 &event.namespace,
                 namehash,
-                super::state::V1NameState {
-                    logical_name_id: event
-                        .logical_name_id
-                        .clone()
-                        .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
-                    surface_known: event.logical_name_id.is_some(),
-                    resource_id: super::common::stable_uuid(&format!(
-                        "resource:registry-only:{}:{namehash}",
-                        event.chain_id
-                    )),
-                    token_lineage_id: None,
-                    authority_source_family: event.source_family.clone(),
-                    source_manifest_id: event.source_manifest_id,
-                    labelhash: event
-                        .after_state
-                        .get("labelhash")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    expiry: None,
-                    owner: Some(owner.to_owned()),
-                    authority_key: Some(format!("registry-only:{}:{namehash}", event.chain_id)),
-                    wrapper_fallback: false,
-                },
+                owner.to_owned(),
+                owner_getter.to_owned(),
+                owner_getter_reason,
             );
+            let anchor = super::state::V1RegistryReadAnchor {
+                logical_name_id: event
+                    .logical_name_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
+                surface_known: event.logical_name_id.is_some(),
+                resource_id: super::common::stable_uuid(&format!(
+                    "resource:registry-only:{}:{namehash}",
+                    event.chain_id
+                )),
+                source_family: event.source_family.clone(),
+                source_manifest_id: event.source_manifest_id,
+            };
+            state.remember_v1_registry_read_anchor(&event.namespace, namehash, anchor.clone());
+            if !owner_getter.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
+                state.remember_v1_registry_authority(
+                    &event.namespace,
+                    namehash,
+                    super::state::V1NameState {
+                        logical_name_id: anchor.logical_name_id,
+                        surface_known: anchor.surface_known,
+                        resource_id: anchor.resource_id,
+                        token_lineage_id: None,
+                        authority_source_family: event.source_family.clone(),
+                        source_manifest_id: event.source_manifest_id,
+                        labelhash: event
+                            .after_state
+                            .get("labelhash")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        expiry: None,
+                        owner: Some(owner_getter.to_owned()),
+                        authority_key: Some(format!("registry-only:{}:{namehash}", event.chain_id)),
+                        wrapper_fallback: false,
+                    },
+                );
+            }
         }
     }
     if source_event == Some("NewOwner") {
@@ -288,6 +323,16 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     if source_event == Some("NewResolver")
         && let Some(namehash) = event.after_state.get("node").and_then(Value::as_str)
     {
+        let registry_resource_id = super::common::stable_uuid(&format!(
+            "resource:registry-only:{}:{namehash}",
+            event.chain_id
+        ));
+        let already_registry_linked = state
+            .v1_resolver_link(&event.namespace, namehash)
+            .is_some_and(|link| link.resource_id == Some(registry_resource_id));
+        if already_registry_linked && event.resource_id != Some(registry_resource_id) {
+            return;
+        }
         let resolver = event
             .after_state
             .get("resolver")
@@ -296,7 +341,13 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                 !resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
             })
             .map(str::to_owned);
-        state.set_v1_resolver(&event.namespace, namehash, resolver);
+        state.set_v1_resolver_link(
+            &event.namespace,
+            namehash,
+            resolver,
+            event.resource_id,
+            event.logical_name_id.clone(),
+        );
     }
     if event.source_family == "ens_v1_wrapper_l1"
         && event.event_kind == "PermissionScopeChanged"

@@ -191,7 +191,10 @@ pub(crate) fn build_subname(
 ) -> Subname {
     let registration = name_registration_fields(name_row, &row.namespace);
     let (owner, registrant) = if name_row.is_some() {
-        (registration.owner, registration.registrant)
+        (
+            registration.owner.or_else(|| row.owner.clone()),
+            registration.registrant,
+        )
     } else {
         (row.owner.clone(), row.registrant.clone())
     };

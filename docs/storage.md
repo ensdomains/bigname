@@ -844,9 +844,12 @@ only when the selected pointer's source family is `ens_v1_registry_l1`,
 same pointer-family restriction. When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
-resource-less. This does not restore a current binding: name and record reads
-join inventory through `name_current.resource_id`, which remains null for the
-released or expired name. ENSv2 stores resolver records by node and version.
+resource-less. This does not restore a current binding. ENSv2 released or expired names have no
+[`serving_resource_id`](glossary.md#serving-resource), so their reads still find no current
+resource. Registry-only ENSv1 and Basenames names are different when a current nonzero resolver
+pointer remains event-linked: `name_current.resource_id` stays null while the serving resource
+joins resolver and inventory reads without creating control. ENSv2 stores resolver records by node
+and version.
 `setName` passes
 part zero, selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no

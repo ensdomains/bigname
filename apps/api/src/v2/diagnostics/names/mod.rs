@@ -219,6 +219,7 @@ fn test_name_row() -> NameCurrentRow {
         namehash: "namehash:alice.eth".to_owned(),
         surface_binding_id: Some(Uuid::from_u128(0x3300)),
         resource_id: Some(Uuid::from_u128(0x2200)),
+        serving_resource_id: None,
         token_lineage_id: Some(Uuid::from_u128(0x1100)),
         binding_kind: Some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
         declared_summary: json!({

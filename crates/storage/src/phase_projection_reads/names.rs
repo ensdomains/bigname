@@ -51,9 +51,15 @@ async fn load_phase_identity_records(
         .into_iter()
         .filter_map(|logical_name_id| {
             let row = name_rows.get(&logical_name_id)?.clone();
-            let record_inventory_current = row.resource_id.and_then(|resource_id| {
-                select_phase_inventory(inventories.get(&resource_id)?, &row.declared_summary)
-            });
+            let record_inventory_current =
+                row.serving_resource_id
+                    .or(row.resource_id)
+                    .and_then(|resource_id| {
+                        select_phase_inventory(
+                            inventories.get(&resource_id)?,
+                            &row.declared_summary,
+                        )
+                    });
             Some(IdentityNameRecordRow {
                 row,
                 record_inventory_current,
@@ -97,7 +103,8 @@ pub async fn load_phase_resolver_bound_name_rows(
     let query = format!(
         r#"
         SELECT nc.logical_name_id, nc.namespace, nc.raw_name, nc.namehash,
-               nc.surface_binding_id, nc.resource_id, nc.token_lineage_id,
+               nc.surface_binding_id, nc.resource_id, nc.serving_resource_id,
+               nc.token_lineage_id,
                nc.binding_kind, nc.declared_summary, nc.support_status,
                nc.unsupported_reason, nc.provenance, nc.chain_positions,
                nc.canonicality_summary, nc.manifest_version,
@@ -111,12 +118,20 @@ pub async fn load_phase_resolver_bound_name_rows(
           ON binding.surface_binding_id = nc.surface_binding_id
         LEFT JOIN bigname_phase.token_lineages token_lineage
           ON token_lineage.token_lineage_id = nc.token_lineage_id
+        LEFT JOIN bigname_phase.resolver_current resolver_capability
+          ON resolver_capability.chain_id = $1
+         AND lower(resolver_capability.resolver_address) = lower($2)
         {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
         WHERE nc.support_status IN ('supported', 'unsupported')
           AND nc.unsupported_reason IS DISTINCT FROM 'current_authority_not_projected'
           {DEFAULT_NAME_CURRENT_READ_FILTER}
           AND nc.declared_summary #>> '{{resolver,chain_id}}' = $1
           AND lower(nc.declared_summary #>> '{{resolver,address}}') = lower($2)
+          AND (
+              nc.resource_id IS NOT NULL
+              OR nc.serving_resource_id IS NULL
+              OR resolver_capability.declared_summary #>> '{{bindings,status}}' = 'supported'
+          )
           AND ($3::TEXT IS NULL OR nc.namespace = $3)
           AND (
               $4::TEXT IS NULL
@@ -164,7 +179,8 @@ async fn load_phase_name_rows(pool: &PgPool, logical_name_ids: &[String]) -> Res
     let query = format!(
         r#"
         SELECT nc.logical_name_id, nc.namespace, nc.raw_name, nc.namehash,
-               nc.surface_binding_id, nc.resource_id, nc.token_lineage_id,
+               nc.surface_binding_id, nc.resource_id, nc.serving_resource_id,
+               nc.token_lineage_id,
                nc.binding_kind, nc.declared_summary, nc.support_status,
                nc.unsupported_reason, nc.provenance, nc.chain_positions,
                nc.canonicality_summary, nc.manifest_version,
@@ -209,6 +225,7 @@ fn decode_identity_name(row: PgRow) -> Result<IdentityNameCurrentRow> {
         labelhash,
         labelhash_count,
         resource_id,
+        serving_resource_id: row.try_get("serving_resource_id")?,
         record_inventory_boundary_key: None,
         coverage: phase_coverage(&row)?,
         declared_summary,
@@ -233,6 +250,7 @@ fn decode_name_current(row: PgRow) -> Result<NameCurrentRow> {
         namehash: row.try_get("namehash")?,
         surface_binding_id: row.try_get("surface_binding_id")?,
         resource_id: row.try_get("resource_id")?,
+        serving_resource_id: row.try_get("serving_resource_id")?,
         token_lineage_id: row.try_get("token_lineage_id")?,
         binding_kind,
         declared_summary: row.try_get("declared_summary")?,
@@ -284,7 +302,7 @@ async fn load_phase_inventories<'a>(
     names: impl Iterator<Item = &'a IdentityNameCurrentRow>,
 ) -> Result<BTreeMap<Uuid, Vec<(Value, IdentityRecordInventoryRow)>>> {
     let resource_ids = names
-        .filter_map(|row| row.resource_id)
+        .filter_map(|row| row.serving_resource_id.or(row.resource_id))
         .collect::<BTreeSet<_>>();
     if resource_ids.is_empty() {
         return Ok(BTreeMap::new());

@@ -11,8 +11,73 @@ pub(super) async fn build(
 ) -> Result<()> {
     project_alias_topology(transaction).await?;
     project_wildcard_topology(transaction).await?;
+    project_ownerless_ens_topology(transaction).await?;
     project_basenames_transport(transaction, chain_id, target).await?;
     serialization::serialize_projected_topologies(transaction).await?;
+    Ok(())
+}
+
+async fn project_ownerless_ens_topology(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE project_stage_name_current name
+        SET declared_summary = jsonb_set(
+            name.declared_summary,
+            '{topology}',
+            jsonb_build_object(
+                'registry_path', '[]'::jsonb,
+                'subregistry_path', '[]'::jsonb,
+                'resolver_path', jsonb_build_array(jsonb_build_object(
+                    'logical_name_id', surface.logical_name_id,
+                    'namespace', surface.namespace,
+                    'normalized_name', surface.raw_name,
+                    'canonical_display_name', surface.raw_name,
+                    'resource_id', serving.serving_resource_id,
+                    'chain_id', resolver.chain_id,
+                    'address', resolver.after_state ->> 'resolver',
+                    'latest_event_kind', resolver.event_kind
+                )),
+                'wildcard', jsonb_build_object(
+                    'source', NULL, 'matched_labels', '[]'::jsonb
+                ),
+                'alias', jsonb_build_object(
+                    'final_target', NULL, 'hops', '[]'::jsonb
+                ),
+                'version_boundaries', jsonb_build_object(
+                    'topology_version_boundary', inventory.record_version_boundary,
+                    'record_version_boundary', inventory.record_version_boundary
+                ),
+                'transport', jsonb_build_object(
+                    'source_chain_id', NULL,
+                    'target_chain_id', NULL,
+                    'contract_address', NULL,
+                    'latest_event_kind', NULL
+                )
+            ),
+            true
+        )
+        FROM project_surfaces surface
+        JOIN project_name_serving serving
+          ON serving.logical_name_id = surface.logical_name_id
+        JOIN LATERAL (
+            SELECT event.*
+            FROM project_events event
+            WHERE event.normalized_event_id = serving.pointer_event_id
+              AND event.event_kind = 'ResolverChanged'
+              AND lower(COALESCE(event.after_state ->> 'resolver', '')) <>
+                  '0x0000000000000000000000000000000000000000'
+        ) resolver ON TRUE
+        JOIN project_stage_record_inventory_current inventory
+          ON inventory.resource_id = serving.serving_resource_id
+        WHERE name.logical_name_id = surface.logical_name_id
+          AND surface.namespace = 'ens'
+        "#,
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to build ownerless ENS name topology", error)
+    })?;
     Ok(())
 }
 
@@ -295,15 +360,18 @@ async fn project_basenames_transport(
             name.declared_summary,
             '{topology}',
             jsonb_build_object(
-                'registry_path', jsonb_build_array(jsonb_build_object(
-                    'logical_name_id', surface.logical_name_id,
-                    'namespace', surface.namespace,
-                    'normalized_name', surface.raw_name,
-                    'canonical_display_name', surface.raw_name,
-                    'namehash', surface.namehash,
-                    'resource_id', binding.resource_id,
-                    'binding_kind', binding.binding_kind
-                )),
+                'registry_path', CASE WHEN binding.establishes_control
+                    THEN jsonb_build_array(jsonb_build_object(
+                        'logical_name_id', surface.logical_name_id,
+                        'namespace', surface.namespace,
+                        'normalized_name', surface.raw_name,
+                        'canonical_display_name', surface.raw_name,
+                        'namehash', surface.namehash,
+                        'resource_id', binding.resource_id,
+                        'binding_kind', binding.binding_kind
+                    ))
+                    ELSE '[]'::jsonb
+                END,
                 'subregistry_path', '[]'::jsonb,
                 'resolver_path', jsonb_build_array(jsonb_build_object(
                     'logical_name_id', surface.logical_name_id,
@@ -361,9 +429,21 @@ async fn project_basenames_transport(
             name.manifest_version, execution_manifest.manifest_version
         )
         FROM project_surfaces surface
-        JOIN project_bindings binding
-          ON binding.logical_name_id = surface.logical_name_id
-         AND binding.binding_kind = 'declared_registry_path'
+        JOIN LATERAL (
+            SELECT control.resource_id, control.binding_kind, true AS establishes_control
+            FROM project_bindings control
+            WHERE control.logical_name_id = surface.logical_name_id
+              AND control.binding_kind = 'declared_registry_path'
+            UNION ALL
+            SELECT serving.serving_resource_id, NULL::text, false
+            FROM project_name_serving serving
+            WHERE serving.logical_name_id = surface.logical_name_id
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_bindings control
+                  WHERE control.logical_name_id = surface.logical_name_id
+              )
+            LIMIT 1
+        ) binding ON TRUE
         JOIN project_manifests execution_manifest
           ON execution_manifest.namespace = 'basenames'
          AND execution_manifest.source_family = 'basenames_execution'
@@ -413,7 +493,7 @@ async fn project_basenames_transport(
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+                     event.event_identity DESC
             LIMIT 1
         ) resolver ON TRUE
         JOIN LATERAL (
@@ -450,7 +530,7 @@ async fn project_basenames_transport(
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+                     event.event_identity DESC
             LIMIT 1
         ) boundary ON TRUE
         WHERE name.logical_name_id = surface.logical_name_id

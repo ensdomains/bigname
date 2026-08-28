@@ -201,6 +201,13 @@ fn schema_v2_companion(
             event.event_kind.as_str(),
             "AuthorityTransferred" | "PermissionChanged"
         )
+        || case_id == "ens_unwrapped_authority"
+            && event.event_kind == "ResolverChanged"
+            && event
+                .after_state
+                .get("source_event")
+                .and_then(Value::as_str)
+                == Some("NewResolver")
 }
 
 fn compatible_derivation(expected: &str, actual: &str) -> bool {
@@ -997,6 +1004,14 @@ fn assert_semantic_output(
                     && event.source_family == expected_family
                     && event.block_number == Some(expected_block)
                     && expected_event
+                        .get("resource_id")
+                        .and_then(Value::as_str)
+                        .is_none_or(|resource| {
+                            event
+                                .resource_id
+                                .is_some_and(|id| id.to_string() == resource)
+                        })
+                    && expected_event
                         .get("block_hash")
                         .and_then(Value::as_str)
                         .is_none_or(|hash| event.block_hash.as_deref() == Some(hash))
@@ -1344,6 +1359,9 @@ fn assert_resources(case_id: &str, expected: &[Value], actual: &BatchOutput) -> 
             | "ens_v1_new_owner_without_contract_discovery"
     ) {
         for resource in &actual.resources {
+            if case_id == "ens_unwrapped_authority" && resource.token_lineage_id.is_none() {
+                continue;
+            }
             resources
                 .entry(resource.resource_id)
                 .and_modify(|retained: &mut &bigname_adapters::schema_v2::Resource| {
@@ -2196,7 +2214,7 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
         .join("\n");
     assert_eq!(
         format!("{:#x}", keccak256(snapshot.as_bytes())),
-        "0x846cf25292542808d9a5c589687a20e63f87b0479602a935b4284dfdce020420",
+        "0xac19cb31201bebee2b745d3d4f713668db48cd7cefe11e7df6b6ba08920c7af0",
         "output minus the debug-only flag and the retained rows must equal the pre-retention snapshot"
     );
     Ok(())

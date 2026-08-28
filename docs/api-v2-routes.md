@@ -415,6 +415,9 @@ Field ownership:
   `current_authority_not_projected` remains `status=ok` for the identity and
   registration fields that can be served, but omits `resolver`; retained
   resolver-pointer evidence is not presented as current authority.
+  A registry-only V1 name whose [getter-visible owner](glossary.md#getter-visible-owner) is zero is instead supported and
+  unregistered. When a current event-linked nonzero registry resolver pointer survives, name
+  detail includes that resolver while registration and control fields remain absent.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -595,6 +598,10 @@ Field ownership:
   documented behavior: the response has no resolver values and reports each
   requested or inventory-derived key as `status=unsupported`
   with `inventory_not_available`.
+  A supported ownerless registry name does not enter that short circuit merely because its control
+  state is unregistered. Indexed reads use the [serving resource](glossary.md#serving-resource)'s inventory, verified reads select
+  the surviving resolver, and `source=auto` follows the ordinary indexed/verified blend. Owner zero
+  or registry-self alone therefore does not produce `inventory_not_available`.
   When current authority is projected but inventory is missing because resolver
   selection predates the [name surface](glossary.md#surface-name-surface) and
   was never repeated, `source=indexed` reports requested keys as
@@ -665,6 +672,10 @@ Field ownership:
   publication for that generation,
   so this route never chooses one by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
+  A V1 child with getter-visible owner zero is omitted unless a current
+  event-linked nonzero resolver independently establishes read reachability.
+  Such a row has owner zero and no registrant or control registration; clearing
+  the resolver removes it.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
 
 ### `GET /v2/names/{name}/history`
@@ -1268,8 +1279,10 @@ Field ownership:
   resolver listings rather than forced to `ok`. This nested collection adds no
   row-local mixed-authority status, so callers use name detail or batch lookup
   for the explicit coverage reason. A row classified as
-  `current_authority_not_projected` is also absent from `bound_names`; retained
-  resolver-pointer evidence does not establish listing membership.
+  `current_authority_not_projected` is absent from `bound_names`. A positively
+  classified ownerless registry row is different: its event-derived resolver
+  binding is eligible for `bound_names` only where that resolver family's
+  existing binding-enumeration capability is supported.
   `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
   while the corresponding `include=nodes`, `include=aliases`, and
   `include=roles` arrays are deterministic samples of at most 100 items. A

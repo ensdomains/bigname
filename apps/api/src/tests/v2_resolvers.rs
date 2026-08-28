@@ -632,6 +632,50 @@ async fn v2_get_resolver_rejects_bound_name_from_another_phase_snapshot() -> Res
 }
 
 #[tokio::test]
+async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+    sqlx::query(
+        r#"UPDATE bigname_phase.resolver_current
+         SET declared_summary = jsonb_set(
+             declared_summary, '{bindings,status}', '"unsupported"'::jsonb)
+         WHERE chain_id = 'ethereum-mainnet' AND resolver_address = lower($1)"#,
+    )
+    .bind(V2_RESOLVER_ADDRESS)
+    .execute(&database.pool)
+    .await?;
+    let updated = sqlx::query(
+        r#"UPDATE bigname_phase.name_current
+         SET serving_resource_id = resource_id, surface_binding_id = NULL,
+             resource_id = NULL, token_lineage_id = NULL, binding_kind = NULL,
+             declared_summary = jsonb_set(
+                 jsonb_set(declared_summary, '{registration,status}', '"unregistered"'::jsonb),
+                 '{control,status}', '"unregistered"'::jsonb)
+         WHERE raw_name = 'alpha.eth'"#,
+    )
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let names = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound_names data must be an array");
+    assert!(names.iter().all(|row| row["name"] != "alpha.eth"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_resolver_uses_dictionary_owner_and_registrant_precedence_for_bound_names(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

@@ -90,6 +90,11 @@ Stable identity for the backing authority object — the [anchor](glossary.md) f
 - For ENSv1, `resource_id` is the stable identity for the authority object: registry-only control, registrar-backed registration, or wrapper-backed control. Registry-only authority is scoped to the full node/namehash, not just the leftmost labelhash, so subnames with the same label under different parents never share a registry-only `resource_id`. The same `resource_id` persists across holder, resolver, expiry, grace, fuse, status, and non-divergent controller changes. It rotates when authority moves to a different anchor — the concrete authority object backing the name (direct registry control, a registrar lease, or a wrapper position). Rotation happens on a registry-only ↔ registrar ↔ wrapper move, a live registrar ↔ registry-owner divergence, or a full lapse + re-registration. Exact prior-anchor reuse applies only when that prior anchor becomes authoritative again, including unwrap back to the same registrar lease and registry-side convergence back to the same live unreleased registrar lease. If the deployment profile has no materialized prior registrar identity, the ordered `NameUnwrapped` then BaseRegistrar `Transfer` establishes it at that transfer and later replay reuses it. A completed `syncWrapper` [ENSv1→ENSv2 migration correlation group](glossary.md#migration-correlation-group) may refine the registrar expiry used only when that later transfer first materializes the missing registrar identity; multiple completed groups retain the monotone maximum correlated expiry, and that correlated state does not update ordinary NameWrapper normalized events or NameWrapper state. The maximum is safe across full lapse and re-registration because BaseRegistrar accepts re-registration only after the prior expiry plus grace and then writes a strictly later `block.timestamp + duration` expiry. After that fallback materializes the registrar identity, ordinary BaseRegistrar transfers continue to emit `fallback_from_wrapper: true` with `fallback_from` set to the current transfer sender so the latest transfer row can restore the identity by itself; a label-bearing registrar-controller registration or renewal replaces that fallback state. It does not imply that all registry owner / token holder convergence collapses history; post-release returns or different holders / controllers stay on distinct anchors. (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100-L103 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
 - For Basenames, `resource_id` anchors the Base-side authority object even when L1 compatibility transport is involved.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l13]
 
+A registry resource can remain the event-derived [serving resource](glossary.md#serving-resource)
+after its control binding closes. Resource identity alone never establishes current authority:
+control requires the selected binding, while resolver and record serving may use the separate typed
+reference documented in [`projections.md`](projections.md#exact-name-projection).
+
 ### `token_lineage_id`
 
 Stable identity for tokenized ownership history. Token IDs can change while the resource is unchanged; the lineage outlives the ID.
@@ -1084,7 +1089,7 @@ model was introduced, the Basenames `transport.contract_address` retained the
 checksummed manifest spelling; after the boundary re-derivation it is
 lowercase. The field set and nesting otherwise remain unchanged.
 
-- `registry_path` — ordered `NameRef` array from the requested surface toward declared registry authority. Never empty when `topology` is supported.
+- `registry_path` — ordered `NameRef` array from the requested surface toward declared registry authority. It is non-empty for authority-backed supported topology. A known-ownerless V1 name served only through an event-linked registry resolver keeps this array empty because its retained registry resource is not authority.
 - `subregistry_path` — toward the nearest declared subregistry ancestor. Empty when none participates.
 - `resolver_path` — ordered hops; each carries `logical_name_id`, `namespace`, `normalized_name`, `canonical_display_name`, `resource_id`, `chain_id`, `address`, `latest_event_kind`.
 - `wildcard` — `{source, matched_labels}`. `null/[]` means wildcard didn't participate.
@@ -1092,7 +1097,7 @@ lowercase. The field set and nesting otherwise remain unchanged.
 - `version_boundaries` — `{topology_version_boundary, record_version_boundary}` with `logical_name_id`, `resource_id`, `normalized_event_id`, `event_kind`, `chain_position`.
 - `transport` — `{source_chain_id, target_chain_id, contract_address, latest_event_kind}`. All `null` means no transport. For Basenames capability-promotion target paths, `source=base-mainnet, target=ethereum-mainnet` through the L1 Resolver.[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l34][^bn-readme-l69][^bn-readme-l70]
 
-The non-empty `registry_path` rule is a Project producer invariant, not a
+The authority-backed non-empty `registry_path` rule is a Project producer invariant, not a
 [verified lookup](glossary.md#verified-lookup) route discriminator. The shared classifier preserves the
 prior storage and lookup route matrix: it identifies direct, alias-only,
 wildcard-derived, and Basenames transport-assisted paths from the resolver,

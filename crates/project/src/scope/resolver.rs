@@ -2,6 +2,42 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES};
 
+pub(super) async fn include_registry_read_anchors(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_scope_resources
+         SELECT DISTINCT pointer.resource_id
+         FROM project_scope_names scope
+         JOIN normalized_events pointer USING (logical_name_id)
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = pointer.chain_id
+          AND lineage.block_number = pointer.block_number
+          AND lineage.block_hash = pointer.block_hash
+         WHERE pointer.chain_id = $1
+           AND pointer.block_number <= $2
+           AND pointer.event_kind = 'ResolverChanged'
+           AND pointer.source_family IN (
+               'ens_v1_registry_l1', 'basenames_base_registry'
+           )
+           AND pointer.resource_id IS NOT NULL
+           AND pointer.consumer_visibility = 'activated'
+           AND pointer.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to close registry read-anchor resource scope", error)
+    })?;
+    Ok(())
+}
+
 pub(super) async fn include_permission_resources(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

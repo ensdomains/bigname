@@ -35,6 +35,22 @@ pub(super) struct V1NameState {
     pub wrapper_fallback: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct V1RegistryReadAnchor {
+    pub logical_name_id: String,
+    pub resource_id: Uuid,
+    pub surface_known: bool,
+    pub source_family: String,
+    pub source_manifest_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct V1ResolverLink {
+    pub resolver_address: String,
+    pub resource_id: Option<Uuid>,
+    pub logical_name_id: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct V1WrapperData {
     pub fuses: u32,
@@ -89,7 +105,11 @@ pub(super) struct State {
     v1_expiries: OrdSet<(i64, String)>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
     v1_registry_owners: OrdMap<String, String>,
+    v1_registry_owner_words: OrdMap<String, String>,
+    v1_registry_owner_reasons: OrdMap<String, String>,
+    v1_registry_read_anchors: OrdMap<String, V1RegistryReadAnchor>,
     v1_resolvers: OrdMap<String, String>,
+    v1_resolver_links: OrdMap<String, V1ResolverLink>,
     v1_migrated_nodes: OrdSet<String>,
     v1_materialized_surfaces: OrdSet<String>,
     known_surfaces: OrdSet<String>,
@@ -148,6 +168,10 @@ impl State {
         if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
             registry.logical_name_id = logical_name_id.clone();
             registry.surface_known = surface_known;
+        }
+        if let Some(anchor) = self.v1_registry_read_anchors.get_mut(&key) {
+            anchor.logical_name_id = logical_name_id.clone();
+            anchor.surface_known |= surface_known;
         }
         self.v1_names.insert(
             key,
@@ -216,6 +240,10 @@ impl State {
             registry.surface_known = surface_known;
             registry.labelhash = value.labelhash.clone();
         }
+        if let Some(anchor) = self.v1_registry_read_anchors.get_mut(&key) {
+            anchor.logical_name_id = value.logical_name_id.clone();
+            anchor.surface_known |= surface_known;
+        }
         if make_current {
             self.v1_names.insert(key, value);
         }
@@ -265,6 +293,26 @@ impl State {
             .insert(v1_key(namespace, namehash), authority);
     }
 
+    pub(super) fn remember_v1_registry_read_anchor(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        anchor: V1RegistryReadAnchor,
+    ) {
+        self.v1_registry_read_anchors
+            .insert(v1_key(namespace, namehash), anchor);
+    }
+
+    pub(super) fn v1_registry_read_anchor(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<V1RegistryReadAnchor> {
+        self.v1_registry_read_anchors
+            .get(&v1_key(namespace, namehash))
+            .cloned()
+    }
+
     pub(super) fn v1_registry_authority(
         &self,
         namespace: &str,
@@ -275,14 +323,22 @@ impl State {
             .cloned()
     }
 
-    pub(super) fn set_v1_registry_owner(
+    pub(super) fn set_v1_registry_owner_views(
         &mut self,
         namespace: &str,
         namehash: &str,
-        owner: String,
+        owner_word: String,
+        owner_getter: String,
+        reason: Option<String>,
     ) -> Option<String> {
-        self.v1_registry_owners
-            .insert(v1_key(namespace, namehash), owner)
+        let key = v1_key(namespace, namehash);
+        let previous = self.v1_registry_owner_words.insert(key.clone(), owner_word);
+        self.v1_registry_owners.insert(key.clone(), owner_getter);
+        self.v1_registry_owner_reasons.remove(&key);
+        if let Some(reason) = reason {
+            self.v1_registry_owner_reasons.insert(key, reason);
+        }
+        previous
     }
 
     /// Forgets the registry owner of record and any remembered registry-direct authority for
@@ -291,11 +347,36 @@ impl State {
     pub(super) fn forget_v1_registry_owner(&mut self, namespace: &str, namehash: &str) {
         let key = v1_key(namespace, namehash);
         self.v1_registry_owners.remove(&key);
+        self.v1_registry_owner_words.remove(&key);
+        self.v1_registry_owner_reasons.remove(&key);
         self.v1_registry_authorities.remove(&key);
+        if self
+            .v1_registry_read_anchors
+            .get(&key)
+            .is_some_and(|anchor| !anchor.surface_known)
+        {
+            self.v1_registry_read_anchors.remove(&key);
+        }
     }
 
     pub(super) fn v1_registry_owner(&self, namespace: &str, namehash: &str) -> Option<String> {
         self.v1_registry_owners
+            .get(&v1_key(namespace, namehash))
+            .cloned()
+    }
+
+    pub(super) fn v1_registry_owner_word(&self, namespace: &str, namehash: &str) -> Option<String> {
+        self.v1_registry_owner_words
+            .get(&v1_key(namespace, namehash))
+            .cloned()
+    }
+
+    pub(super) fn v1_registry_owner_reason(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<String> {
+        self.v1_registry_owner_reasons
             .get(&v1_key(namespace, namehash))
             .cloned()
     }
@@ -402,18 +483,40 @@ impl State {
         Some((before, current.clone()))
     }
 
-    pub(super) fn set_v1_resolver(
+    pub(super) fn set_v1_resolver_link(
         &mut self,
         namespace: &str,
         namehash: &str,
         resolver: Option<String>,
-    ) -> Option<String> {
+        resource_id: Option<Uuid>,
+        logical_name_id: Option<String>,
+    ) -> Option<V1ResolverLink> {
         let key = v1_key(namespace, namehash);
-        let previous = self.v1_resolvers.remove(&key);
-        if let Some(resolver) = resolver {
-            self.v1_resolvers.insert(key, resolver);
+        let previous = self.v1_resolver_links.remove(&key);
+        self.v1_resolvers.remove(&key);
+        if let Some(resolver_address) = resolver {
+            self.v1_resolvers
+                .insert(key.clone(), resolver_address.clone());
+            self.v1_resolver_links.insert(
+                key,
+                V1ResolverLink {
+                    resolver_address,
+                    resource_id,
+                    logical_name_id,
+                },
+            );
         }
         previous
+    }
+
+    pub(super) fn v1_resolver_link(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<V1ResolverLink> {
+        self.v1_resolver_links
+            .get(&v1_key(namespace, namehash))
+            .cloned()
     }
 
     pub(super) fn v1_resolver(&self, namespace: &str, namehash: &str) -> Option<String> {

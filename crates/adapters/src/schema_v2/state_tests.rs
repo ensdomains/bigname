@@ -1,9 +1,33 @@
 use imbl::ordset::OrdSet;
 use uuid::Uuid;
 
-use super::{State, V1Release, v1_registration_is_live};
+use super::{State, V1RegistryReadAnchor, V1Release, v1_registration_is_live};
 
 const NAMESPACE: &str = "test";
+
+#[test]
+fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.remember_v1_registry_read_anchor(
+        NAMESPACE,
+        "node",
+        V1RegistryReadAnchor {
+            logical_name_id: "test:node".to_owned(),
+            resource_id: Uuid::from_u128(1),
+            surface_known: false,
+            source_family: "ens_v1_registry_l1".to_owned(),
+            source_manifest_id: Some(1),
+        },
+    );
+
+    state.observe_v1_active_surface(NAMESPACE, "node");
+
+    assert!(
+        state
+            .v1_registry_read_anchor(NAMESPACE, "node")
+            .is_some_and(|anchor| anchor.surface_known)
+    );
+}
 
 #[test]
 fn v1_release_order_matches_naive_scan_after_expiry_updates_and_removals() {
