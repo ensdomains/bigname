@@ -174,7 +174,7 @@ fn stats(mut times: Vec<f64>) -> Value {
 }
 
 #[rustfmt::skip]
-async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, depth: i64) -> Result<Value> {
+async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, depth: i64, samples: usize) -> Result<Value> {
     configure_graph(pool, frontier, depth).await?;
     let mut tx = pool.begin().await?;
     if head { head_tables(&mut tx).await? } else { base_tables(&mut tx).await? }
@@ -182,10 +182,9 @@ async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, dept
     let fresh = Instant::now();
     let (iterations, trace) = if head { head_once(&mut tx, sqls).await? } else { base_once(&mut tx, sqls).await? };
     let fresh_ms = fresh.elapsed().as_secs_f64() * 1000.0;
-    reset(&mut tx, head, frontier, depth).await?;
-    if head { head_once(&mut tx, sqls).await?; } else { base_once(&mut tx, sqls).await?; }
+    if samples > 0 { reset(&mut tx, head, frontier, depth).await?; if head { head_once(&mut tx, sqls).await?; } else { base_once(&mut tx, sqls).await?; } }
     let mut times = Vec::with_capacity(20);
-    for _ in 0..20 {
+    for _ in 0..samples {
         reset(&mut tx, head, frontier, depth).await?;
         let started = Instant::now();
         if head { head_once(&mut tx, sqls).await?; } else { base_once(&mut tx, sqls).await?; }
@@ -199,7 +198,8 @@ async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, dept
     let mut plan: Vec<Value> = Vec::new();
     for sql in sqls { plan.push(sqlx::query_scalar(&format!("{EXPLAIN} {sql}")).bind("issue-435-measurement").bind(435_i64).fetch_one(&mut *tx).await?); }
     tx.rollback().await?;
-    Ok(json!({"frontier":frontier,"depth":depth,"fresh_restored_ms":fresh_ms,"iterations":iterations,"iteration_trace":trace,"warm":stats(times),"plan":plan}))
+    let warm = if times.is_empty() { Value::Null } else { stats(times) };
+    Ok(json!({"frontier":frontier,"depth":depth,"fresh_restored_ms":fresh_ms,"iterations":iterations,"iteration_trace":trace,"warm":warm,"plan":plan}))
 }
 
 #[rustfmt::skip]
@@ -236,28 +236,28 @@ async fn issue_435_measurement() -> Result<()> {
     seed_v2(&pool).await?;
     let mut base_cells = Vec::new();
     for &(frontier, depth) in if head_only { &[][..] } else { &[(1, 1), (100, 3), (1000, 8)] } {
-        base_cells.push(measure(&pool, &base, false, frontier, depth).await?);
+        base_cells.push(measure(&pool, &base, false, frontier, depth, 20).await?);
     }
-    let base_v2_cell = if head_only { Value::Null } else { measure(&pool, &base_v2, false, 1, 1).await? };
+    let base_v2_cell = if head_only { Value::Null } else { measure(&pool, &base_v2, false, 1, 1, 20).await? };
     let migrations = build_indexes(&pool).await?;
     let mut head_cells = Vec::new();
     for (frontier, depth) in [(1, 1), (100, 3), (1000, 8)] {
-        head_cells.push(measure(&pool, &head, true, frontier, depth).await?);
+        head_cells.push(measure(&pool, &head, true, frontier, depth, 20).await?);
     }
-    let head_v2_cell = measure(&pool, &head_v2, true, 1, 1).await?;
+    let head_v2_cell = measure(&pool, &head_v2, true, 1, 1, 20).await?;
     if scale >= 5_000_000 { ensure!(serde_json::to_string(&head_v2_cell["plan"])?.contains(INDEXES[4].1), "v2 plan did not use pointer index"); }
     let exact_plan = serde_json::to_string(&head_cells[2]["plan"])?;
     if scale >= 5_000_000 {
         for (_, index) in &INDEXES[..4] { ensure!(exact_plan.contains(index), "plan did not use {index}"); }
     }
     let mut visibility_mutation = head.clone(); visibility_mutation[0] = visibility_mutation[0].replacen("  AND consumer_visibility = 'activated'\n", "", 1);
-    let mutation = measure(&pool, &visibility_mutation, true, 1, 1).await?;
+    let mutation = measure(&pool, &visibility_mutation, true, 1, 1, 0).await?;
     ensure!(!serde_json::to_string(&mutation["plan"])?.contains(INDEXES[0].1), "mismatched predicate retained after-node index");
     let mut nonblank_mutation = head.clone(); nonblank_mutation[0] = nonblank_mutation[0].replacen("  AND btrim(after_state ->> 'node') <> ''\n", "  AND NULLIF(after_state ->> 'node', '') IS NOT NULL\n", 1);
-    let nonblank = measure(&pool, &nonblank_mutation, true, 1, 1).await?;
+    let nonblank = measure(&pool, &nonblank_mutation, true, 1, 1, 0).await?;
     let load_10m_seconds = load(&pool, scale, scale).await?;
-    let head_10m = measure(&pool, &head, true, 1000, 8).await?;
-    let base_10m = if head_only { Value::Null } else { raw_sql(&INDEXES.iter().map(|(_, index)| format!("DROP INDEX {index};")).collect::<String>()).execute(&pool).await?; measure(&pool, &base, false, 1000, 8).await? };
+    let head_10m = measure(&pool, &head, true, 1000, 8, 20).await?;
+    let base_10m = if head_only { Value::Null } else { raw_sql(&INDEXES.iter().map(|(_, index)| format!("DROP INDEX {index};")).collect::<String>()).execute(&pool).await?; measure(&pool, &base, false, 1000, 8, 20).await? };
     let revision = String::from_utf8(Command::new("git").args(["rev-parse", "HEAD"]).output()?.stdout)?;
     let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/issue-435-evidence").join(revision.trim());
     fs::create_dir_all(&output)?;
