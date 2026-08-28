@@ -30,6 +30,61 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
 }
 
 #[test]
+fn zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfer() {
+    const NODE: &str = "node";
+    const OWNER: &str = "0x0000000000000000000000000000000000000001";
+    const ZERO: &str = "0x0000000000000000000000000000000000000000";
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.observe_v1_registrar(
+        NAMESPACE,
+        NODE,
+        format!("{NAMESPACE}:{NODE}"),
+        true,
+        Uuid::from_u128(1),
+        Uuid::from_u128(2),
+        "ens_v1_registrar_l1".to_owned(),
+        Some(1),
+        None,
+        Some(1_000),
+        Some(OWNER.to_owned()),
+        Some(format!("registrar:{NODE}")),
+        false,
+        true,
+    );
+    state.set_v1_registry_owner_views(
+        NAMESPACE,
+        NODE,
+        ZERO.to_owned(),
+        ZERO.to_owned(),
+        Some("literal_zero".to_owned()),
+    );
+    state.observe_v1_registry(
+        NAMESPACE,
+        NODE,
+        format!("{NAMESPACE}:{NODE}"),
+        true,
+        Uuid::from_u128(3),
+        "ens_v1_registry_l1".to_owned(),
+        Some(OWNER.to_owned()),
+        Some(format!("registry-only:{NODE}")),
+    );
+    assert!(
+        state.has_v1_registry_authority(NAMESPACE, NODE),
+        "the fixture deliberately retains the stale entry to mutation-pin the fallback guard"
+    );
+
+    let next = state.converge_v1_registrar_transfer(
+        NAMESPACE,
+        NODE,
+        1_000 + super::ENS_GRACE_PERIOD_SECS + 1,
+    );
+    assert!(
+        next.is_none(),
+        "a zero getter must not resurrect the stale pre-zero registry owner"
+    );
+}
+
+#[test]
 fn v1_release_order_matches_naive_scan_after_expiry_updates_and_removals() {
     let mut state = State::new(Vec::new(), Vec::new());
     observe_registrar(&mut state, "zeta", Some(100));

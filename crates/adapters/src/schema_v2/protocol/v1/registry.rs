@@ -457,44 +457,44 @@ pub(super) fn interpret(
             )
         });
         let resolver_anchor = registry_anchor.clone().or_else(|| control_anchor.clone());
-        let resolver_uses_read_anchor = registry_anchor.is_some();
-        let previous_resolver_link = state.set_v1_resolver_link(
-            &selected.source.namespace,
-            &affected_node,
-            resolver.clone(),
-            resolver_anchor
-                .as_ref()
-                .map(|(resource_id, _)| *resource_id),
-            resolver_anchor
-                .as_ref()
-                .and_then(|(_, logical_name_id)| logical_name_id.clone()),
-        );
-        let previous_resolver = previous_resolver_link
+        let event_anchor = control_anchor.as_ref().or(resolver_anchor.as_ref());
+        let previous_resolver = state
+            .set_v1_resolver_link(
+                &selected.source.namespace,
+                &affected_node,
+                resolver.clone(),
+                resolver_anchor
+                    .as_ref()
+                    .map(|(resource_id, _)| *resource_id),
+                resolver_anchor
+                    .as_ref()
+                    .and_then(|(_, logical_name_id)| logical_name_id.clone()),
+            )
             .as_ref()
             .map(|link| link.resolver_address.clone());
         if let Some(event) = output.events.first_mut() {
             event.explicit_before = Some(json!({"resolver":previous_resolver}));
-            if let Some((resource_id, logical_name_id)) = resolver_anchor {
-                event.resource_id = Some(resource_id);
-                event.logical_name_id = logical_name_id;
-                if resolver_uses_read_anchor {
-                    output.resources.push(ResourceDraft {
-                        resource_id,
-                        token_lineage_id: None,
-                    });
-                }
+            if let Some((resource_id, logical_name_id)) = event_anchor {
+                event.resource_id = Some(*resource_id);
+                event.logical_name_id = logical_name_id.clone();
             }
         }
-        if let (Some((control_resource_id, Some(control_logical_name_id))), Some((anchor_id, _))) =
-            (control_anchor, registry_anchor)
-            && control_resource_id != anchor_id
+        if let Some((resource_id, _)) = registry_anchor.as_ref() {
+            output.resources.push(ResourceDraft {
+                resource_id: *resource_id,
+                token_lineage_id: None,
+            });
+        }
+        if let (Some(control), Some(anchor)) = (&control_anchor, &registry_anchor)
+            && control.0 != anchor.0
+            && let Some(anchor_logical_name_id) = anchor.1.as_ref()
         {
             output.events.push(EventDraft {
                 event_kind: "ResolverChanged".to_owned(),
-                logical_name_id: Some(control_logical_name_id),
-                resource_id: Some(control_resource_id),
+                logical_name_id: Some(anchor_logical_name_id.clone()),
+                resource_id: Some(anchor.0),
                 identity_suffix: format!(
-                    "ResolverChanged:control:{}",
+                    "ResolverChanged:registry-read:{}",
                     resolver.as_deref().unwrap_or(ZERO_ADDRESS)
                 ),
                 explicit_before: Some(json!({"resolver":previous_resolver})),

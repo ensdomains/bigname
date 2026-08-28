@@ -3263,6 +3263,16 @@ async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
 async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> Result<()> {
     let (database, payload) =
         v2_subnames_payload("/v2/names/Parent.eth/subnames?page_size=3").await?;
+    let stored_owner: Option<String> = sqlx::query_scalar(
+        "SELECT owner FROM bigname_phase.children_current
+         WHERE decoded_name = 'gamma.parent.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(
+        stored_owner.as_deref(),
+        Some("0x00000000000000000000000000000000000000cc")
+    );
 
     assert_eq!(payload["page"]["page_size"], json!(3));
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -3300,6 +3310,10 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     assert_eq!(data[0]["expires_at"], json!("2027-01-02T03:04:05Z"));
     assert_eq!(data[1]["registration_status"], json!("released"));
     assert_eq!(data[2]["registration_status"], json!("unregistered"));
+    assert!(
+        data[2].get("owner").is_none(),
+        "a generic no-registration row must not inherit the children projection owner"
+    );
     assert!(data[0].get("subname_count").is_none());
     assert!(data[0].get("resolver").is_none());
     assert!(data[0].get("addresses").is_none());
@@ -3331,7 +3345,12 @@ async fn v2_get_subnames_keeps_zero_owner_for_ownerless_resolver_child() -> Resu
                                     WHERE raw_name = 'alpha.parent.eth'),
              declared_summary = jsonb_build_object(
                  'registration', jsonb_build_object('status', 'unregistered'),
-                 'control', jsonb_build_object('status', 'unregistered'))
+                 'control', jsonb_build_object('status', 'unregistered'),
+                 'coverage', jsonb_build_object(
+                     'status', 'projected',
+                     'exhaustiveness', 'not_asserted',
+                     'enumeration_basis', 'event_linked_registry_resolver',
+                     'unsupported_reason', NULL))
          WHERE raw_name = 'gamma.parent.eth'",
     )
     .execute(&database.pool)
@@ -5198,6 +5217,13 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
             ),
         ],
     )
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.children_current
+         SET owner = '0x00000000000000000000000000000000000000cc'
+         WHERE decoded_name = 'gamma.parent.eth'",
+    )
+    .execute(&database.pool)
     .await?;
     database
         .seed_snapshot_selector_chain_positions(&json!({

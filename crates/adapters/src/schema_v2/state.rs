@@ -313,13 +313,19 @@ impl State {
             .cloned()
     }
 
-    pub(super) fn v1_registry_authority(
-        &self,
-        namespace: &str,
-        namehash: &str,
-    ) -> Option<V1NameState> {
+    #[cfg(test)]
+    pub(super) fn has_v1_registry_authority(&self, namespace: &str, namehash: &str) -> bool {
         self.v1_registry_authorities
-            .get(&v1_key(namespace, namehash))
+            .contains_key(&v1_key(namespace, namehash))
+    }
+
+    fn v1_registry_authority_if_authentic(&self, key: &str) -> Option<V1NameState> {
+        self.v1_registry_owners
+            .get(key)
+            .filter(|owner| {
+                !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
+            })
+            .and_then(|_| self.v1_registry_authorities.get(key))
             .cloned()
     }
 
@@ -332,8 +338,13 @@ impl State {
         reason: Option<String>,
     ) -> Option<String> {
         let key = v1_key(namespace, namehash);
+        let owner_is_zero =
+            owner_getter.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000");
         let previous = self.v1_registry_owner_words.insert(key.clone(), owner_word);
         self.v1_registry_owners.insert(key.clone(), owner_getter);
+        if owner_is_zero {
+            self.v1_registry_authorities.remove(&key);
+        }
         self.v1_registry_owner_reasons.remove(&key);
         if let Some(reason) = reason {
             self.v1_registry_owner_reasons.insert(key, reason);
@@ -461,7 +472,7 @@ impl State {
         {
             Some(registrar)
         } else {
-            self.v1_registry_authority(namespace, namehash)
+            self.v1_registry_authority_if_authentic(&v1_key(namespace, namehash))
         };
         self.activate_v1_authority(namespace, namehash, next.clone());
         next
@@ -602,14 +613,7 @@ impl State {
                 )
         });
         if should_release_active {
-            let next_authority = self
-                .v1_registry_owners
-                .get(&key)
-                .filter(|owner| {
-                    !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-                })
-                .and_then(|_| self.v1_registry_authorities.get(&key))
-                .cloned();
+            let next_authority = self.v1_registry_authority_if_authentic(&key);
             self.activate_v1_authority(namespace, namehash, next_authority);
         }
     }
@@ -644,14 +648,7 @@ impl State {
                 continue;
             };
             let next_authority = if release_is_active {
-                let next = self
-                    .v1_registry_owners
-                    .get(&key)
-                    .filter(|owner| {
-                        !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-                    })
-                    .and_then(|_| self.v1_registry_authorities.get(&key))
-                    .cloned();
+                let next = self.v1_registry_authority_if_authentic(&key);
                 self.activate_v1_authority(namespace, namehash, next.clone());
                 next
             } else {

@@ -259,13 +259,20 @@ consumer-visible event set: ordinary rows and
 `consumer_visibility=activated` rows only. Candidate rows and
 `migration_event_associations` remain available to diagnostics. An association
 never removes or duplicates the independently admitted ordinary event it
-references. The
-visibility predicate is applied in storage selection before
-address-anchor derivation, selector construction, cursor validation, summary
-calculation, type filtering, keyset pagination, page-size limiting, or cursor
-construction, so candidate admission cannot broaden, shorten, or reorder a
-product page. Projection rows may supply readable names for result decoration,
-but the API does not synthesize history from current state.
+references. One V1 registry resolver log can have a registry-resource row for
+reads and a distinct control-resource row so both resource links survive
+replay. Product history returns the control-resource row once and suppresses the
+registry-read linkage row; raw diagnostics returns both normalized rows. Without
+a distinct control resource, the sole registry-resource row remains
+product-visible. Consumer visibility is applied before candidate evidence can
+contribute an address anchor and again when rows are selected. Name and resource
+anchors are constructed from readable bindings before row selection. Product
+duplicate suppression then runs before cursor validation, summary calculation,
+type filtering, keyset pagination, page-size limiting, or cursor construction,
+so neither candidate admission nor the extra resource link can broaden, shorten,
+or reorder a product page. Projection rows may supply readable names for result
+decoration, but the API does not synthesize history from current state.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
 
 For a slice-1 test re-walk that must not change product behavior at a fixed
 readable chain head, an outstanding product cursor backed by normalized-event

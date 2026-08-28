@@ -192,24 +192,6 @@ fn runner_accepts_derivation(runner: Runner, derivation: &str) -> bool {
             )
 }
 
-fn schema_v2_companion(
-    case_id: &str,
-    event: &bigname_adapters::schema_v2::NormalizedEvent,
-) -> bool {
-    case_id == "ens_v1_new_owner_without_contract_discovery"
-        && matches!(
-            event.event_kind.as_str(),
-            "AuthorityTransferred" | "PermissionChanged"
-        )
-        || case_id == "ens_unwrapped_authority"
-            && event.event_kind == "ResolverChanged"
-            && event
-                .after_state
-                .get("source_event")
-                .and_then(Value::as_str)
-                == Some("NewResolver")
-}
-
 fn compatible_derivation(expected: &str, actual: &str) -> bool {
     expected == actual
         || matches!(
@@ -1064,7 +1046,6 @@ fn assert_semantic_output(
         .filter(|(index, event)| {
             runner_accepts_derivation(case.runner, &event.derivation_kind)
                 && !event_matches.contains(index)
-                && !schema_v2_companion(case_id, event)
         })
         .map(|(_, event)| {
             format!(
