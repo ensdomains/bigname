@@ -1,46 +1,30 @@
 use super::*;
 
-#[test]
+#[test] #[rustfmt::skip]
 fn v2_expiry_live_predicate_retires_at_the_exact_boundary() {
-    let live = super::super::topology::v2_expiry_is_live;
-    assert!(live(Some(10), 9));
-    assert!(!live(Some(10), 10));
-    assert!(!live(Some(10), -1));
-    assert!(!live(None, 9));
+    let live = super::super::topology::v2_expiry_is_live; assert!(live(Some(10), 9)); assert!(!live(Some(10), 10)); assert!(!live(Some(10), -1)); assert!(!live(None, 9));
 }
 
-#[test]
-#[rustfmt::skip]
+#[test] #[rustfmt::skip]
 fn v2_direct_leaf_expiry_does_not_expire_its_suffix_anchor() {
-    let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"alpha", 10);
-    assert_eq!(state.refresh_dirty_v2_names(9).len(), 1);
-    assert!(state.v2_registry_suffix(ROOT, NAMESPACE, 10).is_some());
-    let retired = state.refresh_dirty_v2_names(10); assert_eq!(retired.len(), 1);
-    assert_eq!(retired[0].expiry, Some(10)); assert!(retired[0].previous.is_some());
-    assert!(retired[0].previous_shadow.is_none()); assert!(retired[0].current.is_none());
-    assert!(retired[0].current_shadow.is_none());
+    let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"alpha", 10); assert_eq!(state.refresh_dirty_v2_names(9).len(), 1); assert!(state.v2_registry_suffix(ROOT, NAMESPACE, 10).is_some());
+    let retired = state.refresh_dirty_v2_names(10); assert_eq!(retired.len(), 1); assert_eq!(retired[0].expiry, Some(10)); assert!(retired[0].previous.is_some());
+    assert!(retired[0].previous_shadow.is_none()); assert!(retired[0].current.is_none()); assert!(retired[0].current_shadow.is_none());
 }
 
-#[test]
-#[rustfmt::skip]
+#[test] #[rustfmt::skip]
 fn v2_expiry_crossing_ignores_many_unrelated_future_entries() {
     let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"crossing", 10);
     for ordinal in 2..=512 { install_token(&mut state, ROOT, &format!("0x{ordinal:064x}"), format!("future-{ordinal}").as_bytes(), 10_000); }
     state.refresh_dirty_v2_names(9); super::super::reset_v2_refresh_visits();
-    let transitions = state.refresh_dirty_v2_names(10);
-    assert_eq!(super::super::v2_refresh_visits(), 1); assert_eq!(transitions.len(), 1);
-    assert_eq!(transitions[0].token_id, "0x01");
+    let transitions = state.refresh_dirty_v2_names(10); assert_eq!(super::super::v2_refresh_visits(), 1); assert_eq!(transitions.len(), 1); assert_eq!(transitions[0].token_id, "0x01");
 }
 
-#[test]
-#[rustfmt::skip]
+#[test] #[rustfmt::skip]
 fn v2_detached_resource_expiry_emits_a_bindingless_release() {
-    let mut state = State::new(Vec::new(), Vec::new());
-    state.replace_v2_registration(ROOT, "0x01", Uuid::from_u128(1), NAMESPACE, b"reserved", 10, None);
-    state.attach_v2_unbound_resource(ROOT, "0x01", "resource".to_owned(), Uuid::from_u128(9), None);
+    let mut state = State::new(Vec::new(), Vec::new()); state.replace_v2_registration(ROOT, "0x01", Uuid::from_u128(1), NAMESPACE, b"reserved", 10, None); state.attach_v2_unbound_resource(ROOT, "0x01", "resource".to_owned(), Uuid::from_u128(9), None);
     state.set_v2_resolver(ROOT, "0x01", Some("0xresolver".to_owned())); state.set_v2_subregistry(ROOT, "0x01", Some(CHILD.to_owned()));
-    state.refresh_dirty_v2_names(9);
-    let transition = state.refresh_dirty_v2_names(10).into_iter().next().expect("reservation retires");
+    state.refresh_dirty_v2_names(9); let transition = state.refresh_dirty_v2_names(10).into_iter().next().expect("reservation retires");
     let interpreted = crate::schema_v2::protocol::v2_boundary_expiration(transition, 10).expect("retirement materializes");
     assert!(interpreted.binding_closures.is_empty());
     assert_eq!(interpreted.events.iter().map(|event| event.event_kind.as_str()).collect::<Vec<_>>(), ["RegistrationReleased", "ResolverChanged", "SubregistryChanged"]);
@@ -56,8 +40,7 @@ fn v2_detached_resource_expiry_emits_a_bindingless_release() {
     let mut ancestor = nested_state(10); ancestor.link_v2_resource(CHILD, "0x02", "resource".to_owned(), Uuid::from_u128(11), None); ancestor.set_v2_expiry(CHILD, "0x02", 20); ancestor.refresh_dirty_v2_names(9); assert!(ancestor.refresh_dirty_v2_names(10).iter().any(|transition| transition.registry == CHILD)); assert!(ancestor.refresh_dirty_v2_names(20).iter().all(|transition| transition.registry != CHILD)); ancestor.set_v2_expiry(CHILD, "0x02", 30); assert!(ancestor.refresh_dirty_v2_names(21).is_empty()); assert!(ancestor.refresh_dirty_v2_names(30).iter().all(|transition| transition.registry != CHILD));
 }
 
-#[test]
-#[rustfmt::skip]
+#[test] #[rustfmt::skip]
 fn v2_shadow_expiry_emits_a_registration_release_without_a_binding() {
     let mut state = anchored_state(); state.replace_v2_registration(ROOT, "0x01", Uuid::from_u128(1), NAMESPACE, &[0xff], 10, None);
     state.refresh_dirty_v2_names(9); let transition = state.refresh_dirty_v2_names(10).into_iter().next().expect("shadow retires");
@@ -67,8 +50,7 @@ fn v2_shadow_expiry_emits_a_registration_release_without_a_binding() {
     assert_eq!(interpreted.events[0].event_kind, "RegistrationReleased");
 }
 
-#[test]
-#[rustfmt::skip]
+#[test] #[rustfmt::skip]
 fn v2_same_token_renewal_requeues_expiry_and_revives_the_surface() {
     let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"alpha", 10);
     state.refresh_dirty_v2_names(9); state.refresh_dirty_v2_names(10);
@@ -79,8 +61,7 @@ fn v2_same_token_renewal_requeues_expiry_and_revives_the_surface() {
     assert!(!state.v2_expiries.contains(&(10, format!("{ROOT}:0x01"))));
 }
 
-#[test]
-#[rustfmt::skip]
+#[test] #[rustfmt::skip]
 fn v2_version_bumped_replacement_does_not_copy_latent_pointers() {
     let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"alpha", 10);
     state.set_v2_resolver(ROOT, "0x01", Some("0xresolver".to_owned())); state.set_v2_subregistry(ROOT, "0x01", Some(CHILD.to_owned())); state.refresh_dirty_v2_names(10);
@@ -88,8 +69,7 @@ fn v2_version_bumped_replacement_does_not_copy_latent_pointers() {
     assert!(replacement.resolver.is_none()); assert!(replacement.subregistry.is_none());
 }
 
-#[test]
-#[rustfmt::skip]
+#[test] #[rustfmt::skip]
 fn v2_restore_keeps_latent_pointers_for_projection_only_expiry_events() {
     let scope = Some(format!("{ROOT}:-:0x01:-:RegistryPathExpired")); let mut retained = retained_token_events(100);
     retained.extend([
@@ -102,8 +82,7 @@ fn v2_restore_keeps_latent_pointers_for_projection_only_expiry_events() {
     assert_eq!(token.resolver.as_deref(), Some("0xresolver")); assert_eq!(token.subregistry.as_deref(), Some(CHILD));
 }
 
-#[test]
-#[rustfmt::skip]
+#[test] #[rustfmt::skip]
 fn v2_restore_applies_raw_pointer_null_events_destructively() {
     let scope = Some(format!("{ROOT}:-:0x01:-:ResolverUpdated")); let mut retained = retained_token_events(100);
     retained.extend([

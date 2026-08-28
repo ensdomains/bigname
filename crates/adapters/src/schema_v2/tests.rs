@@ -8514,6 +8514,7 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
 }
 
 #[test]
+#[rustfmt::skip]
 fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Result<()> {
     const CHILD: &str = "0x0000000000000000000000000000000000000068";
     let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
@@ -8532,6 +8533,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
                 &["registry"],
                 &["RegistrationGranted"],
             ),
+            ("TokenResource", "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)", &["registry"], &["TokenResourceLinked"]),
             (
                 "SubregistryUpdated",
                 "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
@@ -8544,6 +8546,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
                 &["registry"],
                 &["ParentChanged"],
             ),
+            ("ExpiryUpdated", "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)", &["registry"], &["ExpiryChanged"]),
         ],
     );
     let mut child_admission = admission(68, "registry");
@@ -8598,6 +8601,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
                 CONTRACT,
             ),
             raw_at(hostile_registration, 2, 0, CHILD),
+            raw_at(v2_registry::TokenResource { tokenId: child_token, resource: U256::from(68) }.encode_log_data(), 2, 1, CHILD),
             raw_at(
                 v2_registry::SubregistryUpdated {
                     tokenId: parent_token,
@@ -8664,26 +8668,19 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
         shadow_release[0].after_state["terminal_reason"],
         "registry_name_binding_expired"
     );
-    super::state::reset_v2_refresh_visits();
-    interpret_test_batch_incremental(
+    let (revived, _) = interpret_test_batch_incremental(
         BatchInput {
             chain_id: CHAIN.to_owned(),
             manifests: vec![manifest],
             discovery_rules: rules(),
             admissions: admissions(),
             prior_events: Vec::new(),
-            blocks: vec![RawBlockInput {
-                chain_id: CHAIN.to_owned(),
-                block_hash: "after-shadow-expiry".to_owned(),
-                block_number: 8,
-                block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(8),
-                canonicality_state: "canonical".to_owned(),
-            }],
-            raw_logs: Vec::new(),
+            blocks: vec![test_block(8)],
+            raw_logs: vec![raw_at(v2_registry::ExpiryUpdated { tokenId: parent_token, newExpiry: 100, sender }.encode_log_data(), 8, 0, CONTRACT)],
         },
         Some(session),
     )?;
-    assert_eq!(super::state::v2_refresh_visits(), 0);
+    assert!(revived.normalized_events.iter().any(|event| event.event_kind == "RegistrationGranted" && event.logical_name_id.as_deref() == Some(shadow_id.as_str()) && event.resource_id.is_some()));
     Ok(())
 }
 

@@ -91,6 +91,11 @@ pub(super) fn append_v2_name_transitions(
                 namehash: current.namehash.clone(),
                 source_kind: format!("{source_event}_registry_suffix"),
             });
+            if !identity_reassertion && source_event != "LabelReserved" {
+                let id = &current.logical_name_id;
+                let resource = transition.resource_id;
+                emit(output, &transition, id, resource, source_event);
+            }
         }
         let Some(ref current) = transition.current else {
             continue;
@@ -170,10 +175,12 @@ pub(super) fn append_v2_name_transitions(
                 state_scope: transition_scope(&transition, source_event),
             });
             let resource_id = Some(resource_id);
-            emit(output, &transition, current, resource_id, source_event);
+            let id = &current.logical_name_id;
+            emit(output, &transition, id, resource_id, source_event);
         } else if !identity_reassertion && source_event != "LabelReserved" {
             let resource_id = transition.resource_id;
-            emit(output, &transition, current, resource_id, source_event);
+            let id = &current.logical_name_id;
+            emit(output, &transition, id, resource_id, source_event);
         }
     }
 }
@@ -224,37 +231,22 @@ pub(in crate::schema_v2) fn boundary_reassertion(
     Some(output)
 }
 
+#[rustfmt::skip]
 fn append_removed_name(
     output: &mut Interpreted,
     transition: &V2NameTransition,
     released_at: i64,
 ) -> anyhow::Result<()> {
-    let expiry = transition
-        .expiry
-        .context("block-boundary ENSv2 expiry transition has no retained expiry")?;
+    let expiry = transition.expiry.context("block-boundary ENSv2 expiry transition has no retained expiry")?;
     debug_assert!(transition.previous.is_none() || transition.previous_shadow.is_none());
-    let (logical_name_id, previous_namehash, normal_surface) =
-        if let Some(previous) = transition.previous.as_ref() {
-            (&previous.logical_name_id, &previous.namehash, true)
-        } else if let Some(previous) = transition.previous_shadow.as_ref() {
-            (&previous.logical_name_id, &previous.namehash, false)
-        } else {
-            return super::expiry::append_resource_expiration(output, transition, released_at);
-        };
+    let (logical_name_id, previous_namehash, normal_surface) = if let Some(previous) = transition.previous.as_ref() {
+        (&previous.logical_name_id, &previous.namehash, true)
+    } else if let Some(previous) = transition.previous_shadow.as_ref() {
+        (&previous.logical_name_id, &previous.namehash, false)
+    } else { return super::expiry::append_resource_expiration(output, transition, released_at); };
     let registry = transition.registry.to_ascii_lowercase();
-    let registry_contract_instance_id = transition
-        .registry_contract_instance_id
-        .map(|id| id.to_string());
-    let registrant = transition
-        .registration
-        .as_ref()
-        .and_then(|registration| {
-            registration
-                .get("registrant")
-                .or_else(|| registration.get("owner"))
-        })
-        .cloned()
-        .unwrap_or(Value::Null);
+    let registry_contract_instance_id = transition.registry_contract_instance_id.map(|id| id.to_string());
+    let registrant = transition.registration.as_ref().and_then(|registration| registration.get("registrant").or_else(|| registration.get("owner"))).cloned().unwrap_or(Value::Null);
     if normal_surface && transition.registration.is_some() && transition.resource_id.is_some() {
         output.binding_closures.push(BindingClosureDraft {
             logical_name_id: logical_name_id.clone(),
@@ -341,7 +333,7 @@ fn append_removed_name(
 fn emit(
     output: &mut Interpreted,
     transition: &V2NameTransition,
-    current: &crate::schema_v2::state::V2NameState,
+    logical_name_id: &str,
     resource_id: Option<uuid::Uuid>,
     source_event: &str,
 ) {
@@ -370,7 +362,7 @@ fn emit(
         );
         output.events.push(EventDraft {
             event_kind: "RegistrationGranted".to_owned(),
-            logical_name_id: Some(current.logical_name_id.clone()),
+            logical_name_id: Some(logical_name_id.to_owned()),
             resource_id,
             identity_suffix: format!(
                 "RegistrationGranted:topology:{}:{}",
@@ -394,7 +386,7 @@ fn emit(
         });
         output.events.push(EventDraft {
             event_kind: "AuthorityTransferred".to_owned(),
-            logical_name_id: Some(current.logical_name_id.clone()),
+            logical_name_id: Some(logical_name_id.to_owned()),
             resource_id,
             identity_suffix: format!(
                 "AuthorityTransferred:topology:{}:{}",
@@ -413,7 +405,7 @@ fn emit(
         if !expiry.is_null() {
             output.events.push(EventDraft {
                 event_kind: "ExpiryChanged".to_owned(),
-                logical_name_id: Some(current.logical_name_id.clone()),
+                logical_name_id: Some(logical_name_id.to_owned()),
                 resource_id,
                 identity_suffix: format!(
                     "ExpiryChanged:topology:{}:{}",
@@ -436,7 +428,7 @@ fn emit(
     {
         output.events.push(EventDraft {
             event_kind: "RegistrationReserved".to_owned(),
-            logical_name_id: Some(current.logical_name_id.clone()),
+            logical_name_id: Some(logical_name_id.to_owned()),
             resource_id,
             identity_suffix: format!(
                 "RegistrationReserved:topology:{}:{}",
@@ -457,7 +449,7 @@ fn emit(
         });
         output.events.push(EventDraft {
             event_kind: "ExpiryChanged".to_owned(),
-            logical_name_id: Some(current.logical_name_id.clone()),
+            logical_name_id: Some(logical_name_id.to_owned()),
             resource_id,
             identity_suffix: format!(
                 "ExpiryChanged:topology:{}:{}",
@@ -489,7 +481,7 @@ fn emit(
         let Some(target) = target else { continue };
         output.events.push(EventDraft {
             event_kind: event_kind.to_owned(),
-            logical_name_id: Some(current.logical_name_id.clone()),
+            logical_name_id: Some(logical_name_id.to_owned()),
             resource_id,
             identity_suffix: format!(
                 "{event_kind}:topology:{}:{}",
