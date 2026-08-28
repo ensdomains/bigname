@@ -234,24 +234,28 @@ pub(super) async fn build(
               AND (
                   (event.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
                       AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'))
-                  OR (event.event_kind = 'RegistrationReleased'
-                      AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
-                      AND event.after_state ->> 'derived_from' = 'interpreter_state'
-                      AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
-              )
-              AND (event.event_kind = 'RegistrationReleased' OR NOT EXISTS (
-                  SELECT 1 FROM project_events terminal
-                  WHERE terminal.logical_name_id = event.logical_name_id
-                    AND COALESCE(terminal.resource_id::text, CONCAT(COALESCE(terminal.after_state ->> 'registry_contract_instance_id', terminal.raw_fact_ref ->> 'emitting_address', terminal.after_state ->> 'registry'), ':', terminal.after_state ->> 'token_id')) = COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'))
-                    AND terminal.event_kind = 'RegistrationReleased'
-                    AND ROW(COALESCE(terminal.block_number, -1), COALESCE(terminal.transaction_index, -1), COALESCE(terminal.log_index, -1)) >= ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1))
+                  OR (event.event_kind = 'RegistrationReleased' AND event.source_family IN
+                      ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1') AND
+                      ((event.after_state ->> 'source_event' = 'RegistryPathExpired' AND
+                        event.after_state ->> 'derived_from' = 'interpreter_state' AND
+                        event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
+                        OR EXISTS (
+                          SELECT 1 FROM project_events active
+                          WHERE active.logical_name_id = event.logical_name_id AND COALESCE(active.resource_id::text, CONCAT(COALESCE(active.after_state ->> 'registry_contract_instance_id', active.raw_fact_ref ->> 'emitting_address', active.after_state ->> 'registry'), ':', active.after_state ->> 'token_id')) = COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'))
+                            AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND active.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1') AND ROW(COALESCE(active.block_number, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                            AND NOT EXISTS (
+                              SELECT 1 FROM project_events expiry
+                              WHERE expiry.logical_name_id = event.logical_name_id AND COALESCE(expiry.resource_id::text, CONCAT(COALESCE(expiry.after_state ->> 'registry_contract_instance_id', expiry.raw_fact_ref ->> 'emitting_address', expiry.after_state ->> 'registry'), ':', expiry.after_state ->> 'token_id')) = COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'))
+                                AND expiry.event_kind = 'RegistrationReleased' AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state' AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND ROW(COALESCE(expiry.block_number, -1), expiry.normalized_event_id) BETWEEN ROW(COALESCE(active.block_number, -1), active.normalized_event_id) AND ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                            )))
               ))
-            ORDER BY COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id')), event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST, (event.event_kind = 'RegistrationReleased') DESC,
-                     event.normalized_event_id DESC) event
-            ORDER BY (event.event_kind = 'RegistrationReleased'), event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_events later WHERE later.logical_name_id = event.logical_name_id AND COALESCE(later.resource_id::text, CONCAT(COALESCE(later.after_state ->> 'registry_contract_instance_id', later.raw_fact_ref ->> 'emitting_address', later.after_state ->> 'registry'), ':', later.after_state ->> 'token_id')) = COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'))
+                    AND ((event.event_kind = 'RegistrationReleased' AND later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')) OR (event.event_kind <> 'RegistrationReleased' AND later.event_kind = 'RegistrationReleased'))
+                    AND ROW(COALESCE(later.block_number, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+              )
+            ORDER BY COALESCE(event.resource_id::text, CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id')), event.block_number DESC NULLS LAST, event.normalized_event_id DESC) event
+            ORDER BY (event.event_kind = 'RegistrationReleased'), event.block_number DESC NULLS LAST, event.normalized_event_id DESC
             LIMIT 1
         ) registration_current ON TRUE
         LEFT JOIN LATERAL (
@@ -620,12 +624,8 @@ pub(super) async fn build(
         WHERE surface.visibility_state = 'active'
           AND surface.raw_name <> ''
           AND NOT COALESCE(
-              registration_current.event_kind = 'RegistrationReleased'
-              AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired'
-              AND registration_current.after_state ->> 'derived_from' = 'interpreter_state'
-              AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
-              AND COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id),
-              FALSE
+              registration_current.event_kind = 'RegistrationReleased' AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired' AND registration_current.after_state ->> 'derived_from' = 'interpreter_state' AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND
+              COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id), FALSE
           )
         ORDER BY surface.logical_name_id
         "#,

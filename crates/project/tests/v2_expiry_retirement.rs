@@ -36,29 +36,25 @@ fn hash(block: i64) -> &'static str {
         101 => "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
         102 => "0xb5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5",
         103 => "0xc3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        104 => "0xc4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
         _ => unreachable!(),
     }
 }
 
+#[rustfmt::skip]
 async fn database(prefix: &str) -> Result<(TestDatabase, PgPool)> {
     let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
     let pool = database.pool().clone();
-    let name: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(&pool)
-        .await?;
+    let name: String = sqlx::query_scalar("SELECT current_database()").fetch_one(&pool).await?;
     let mut tx = pool.begin().await?;
-    sqlx::query("CREATE SCHEMA bigname_phase")
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query("CREATE SCHEMA bigname_phase").execute(&mut *tx).await?;
     raw_sql(&format!(
         "ALTER DATABASE \"{}\" SET search_path TO bigname_phase, public",
         name.replace('"', r#""""#)
     ))
     .execute(&mut *tx)
     .await?;
-    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query("SET LOCAL search_path TO bigname_phase, public").execute(&mut *tx).await?;
     for script in [
         include_str!("../../../schema-v2/baseline/01_chain.sql"),
         include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
@@ -74,38 +70,20 @@ async fn database(prefix: &str) -> Result<(TestDatabase, PgPool)> {
         raw_sql(script).execute(&mut *tx).await?;
     }
     tx.commit().await?;
-    pool.set_connect_options(
-        pool.connect_options()
-            .as_ref()
-            .clone()
-            .options([("search_path", "bigname_phase,public")]),
-    );
+    pool.set_connect_options(pool.connect_options().as_ref().clone().options([("search_path", "bigname_phase,public")]));
     let mut connections = Vec::new();
     for _ in 0..pool.options().get_max_connections() {
         connections.push(pool.acquire().await?);
     }
     for connection in &mut connections {
-        sqlx::query("SET search_path TO bigname_phase, public")
-            .execute(&mut **connection)
-            .await?;
+        sqlx::query("SET search_path TO bigname_phase, public").execute(&mut **connection).await?;
     }
     Ok((database, pool))
 }
 
-async fn event(
-    pool: &PgPool,
-    logical: &str,
-    resource: Option<&str>,
-    block: i64,
-    log: Option<i64>,
-    kind: &str,
-    after: Value,
-) -> Result<()> {
-    let family = if logical == MIXED && kind == "AuthorityTransferred" {
-        "ens_v1_registry_l1"
-    } else {
-        "ens_v2_registry_l1"
-    };
+#[rustfmt::skip]
+async fn event(pool: &PgPool, logical: &str, resource: Option<&str>, block: i64, log: Option<i64>, kind: &str, after: Value) -> Result<()> {
+    let family = if logical == MIXED && kind == "AuthorityTransferred" { "ens_v1_registry_l1" } else { "ens_v2_registry_l1" };
     sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, logical_name_id, resource_id, event_kind,
@@ -117,19 +95,17 @@ async fn event(
                    CASE WHEN $9::bigint IS NULL THEN NULL ELSE 0 END, $9,
                    'ens_v2_registry_resource_surface', 'canonical', $11)",
     )
-    .bind(format!("{block}:{logical}:{kind}:{log:?}"))
-    .bind(logical)
-    .bind(resource)
-    .bind(kind)
-    .bind(family)
-    .bind(CHAIN)
-    .bind(block)
-    .bind(hash(block))
-    .bind(log)
-    .bind(format!("0x{:064x}", block))
-    .bind(after)
-    .execute(pool)
-    .await?;
+    .bind(format!("{block}:{logical}:{kind}:{log:?}")).bind(logical).bind(resource).bind(kind).bind(family)
+    .bind(CHAIN).bind(block).bind(hash(block)).bind(log).bind(format!("0x{:064x}", block)).bind(after).execute(pool).await?;
+    Ok(())
+}
+
+#[rustfmt::skip]
+async fn exact_events(pool: &PgPool, rows: &[Value], block: i64, kinds: &[&str]) -> Result<()> {
+    for row in rows.iter().filter(|row| row["block_number"] == block && kinds.contains(&row["event_kind"].as_str().unwrap_or_default())) {
+        sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, before_state, after_state) VALUES ($1, 'ens', $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'canonical', $14, $15)")
+            .bind(row["event_identity"].as_str()).bind(row["logical_name_id"].as_str()).bind(row["resource_id"].as_str()).bind(row["event_kind"].as_str()).bind(row["source_family"].as_str()).bind(row["manifest_version"].as_i64()).bind(row["chain_id"].as_str()).bind(row["block_number"].as_i64()).bind(row["block_hash"].as_str()).bind(row["transaction_hash"].as_str()).bind(row["transaction_index"].as_i64()).bind(row["log_index"].as_i64()).bind(row["derivation_kind"].as_str()).bind(&row["before_state"]).bind(&row["after_state"]).execute(pool).await?;
+    }
     Ok(())
 }
 
@@ -151,6 +127,7 @@ fn expired(token: &str, expiry: i64) -> Value {
 async fn seed(pool: &PgPool) -> Result<()> {
     let fixture: Value = serde_json::from_str(FIXTURE)?;
     let expected = fixture.get("expected_project").context("expiry fixture expected_project")?;
+    let exact = expected["interpret_events"].as_array().context("exact Interpret rows")?;
     assert_eq!(expected["logical_name_id"], MAIN); assert_eq!(expected["resource_id"], RESOURCE);
     assert_eq!(expected["token_lineage_id"], LINEAGE); assert_eq!(expected["token_id"], TOKEN);
     assert_eq!(expected["registry"], REGISTRY); assert_eq!(expected["expiry"], 1_800_000_000_i64);
@@ -159,7 +136,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     assert_eq!(stale["token_lineage_id"], STALE_LINEAGE); assert_eq!(stale["token_id"], STALE_TOKEN);
     assert_eq!(stale["expiry"], 1_700_000_100_i64);
     for (block, timestamp) in [
-        (100, 1_700_000_100_i64), (101, 1_800_000_000), (102, 1_800_000_001), (103, 1_900_000_000),
+        (100, 1_700_000_100_i64), (101, 1_800_000_000), (102, 1_800_000_001), (103, 1_900_000_000), (104, 1_900_000_001),
     ] {
         sqlx::query(
             "INSERT INTO chain_lineage (
@@ -214,24 +191,25 @@ async fn seed(pool: &PgPool) -> Result<()> {
     }; }
     add!(MAIN, Some(RESOURCE), 100, Some(0), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 100, Some(3), "ResolverChanged", json!({"source_event":"ResolverUpdated","resolver":OWNER}));
-    add!(MAIN, Some(RESOURCE), 100, Some(4), "PermissionChanged", permission.clone());
+    exact_events(pool, exact, 100, &["PermissionChanged"]).await?;
     add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64})); add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
     add!(RESERVATION, None, 100, Some(5), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
     add!(RESERVATION, None, 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_900_000_000_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
     add!(MIXED, Some(RESOURCE), 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
     event(pool, MIXED, None, 100, Some(7), "AuthorityTransferred", json!({"source_event":"NewOwner","owner":OWNER})).await?;
-    add!(STALE, Some(STALE_RESOURCE), 100, Some(8), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN}));
-    add!(STALE, Some(STALE_RESOURCE), 100, Some(8), "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
+    add!(STALE, Some(STALE_RESOURCE), 100, Some(8), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN})); exact_events(pool, exact, 100, &["RegistrationReleased"]).await?;
     add!(STALE, Some(STALE_RESOURCE), 100, Some(9), "PermissionChanged", permission);
-    add!(MAIN, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
+    exact_events(pool, exact, 101, &["SurfaceUnbound", "RegistrationReleased", "ResolverChanged", "SubregistryChanged"]).await?;
     add!(MAIN, Some(RESOURCE), 101, Some(9), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
     add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(9), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000)); add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(10), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"})); add!(MAIN, Some(RESOURCE), 101, Some(11), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"registered","expiry":1_800_000_000_i64,"token_id":TOKEN}));
     add!(RESERVATION, None, 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
     add!(MIXED, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
-    add!(MAIN, Some(RESOURCE), 102, Some(0), "RegistrationGranted", granted("ExpiryUpdated", TOKEN, 1_900_000_000));
     add!(MAIN, Some(RESOURCE), 102, Some(1), "ExpiryChanged", json!({"source_event":"ExpiryUpdated","expiry":1_900_000_000_i64,"token_id":TOKEN}));
+    exact_events(pool, exact, 102, &["RegistrationGranted"]).await?;
+    add!(STALE, Some(STALE_RESOURCE), 102, Some(2), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":STALE_TOKEN,"revived_from_expiry":true}));
     add!(RESERVATION, None, 102, Some(2), "RegistrationReserved", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
     add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
+    add!(MAIN, Some(VERSION_RESOURCE), 104, Some(0), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
     Ok(())
 }
 async fn run(pool: &PgPool, target: i64, resume: Option<Marker>) -> Result<Marker> {
@@ -356,17 +334,19 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     let revived = run(&incremental, 102, Some(retired)).await?;
     let (revived_db, revived_fresh) = fresh("v2_expiry_revived_fresh", 102).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&revived_fresh).await?);
-    let revival: (String, String, i64) = sqlx::query_as(
+    let revival: (String, String, i64, i64) = sqlx::query_as(
         "SELECT resource_id::text, token_lineage_id::text,
                 (SELECT count(*) FROM permissions_current
-                 WHERE resource_id = name_current.resource_id)
+                 WHERE resource_id = name_current.resource_id),
+                (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid)
          FROM name_current WHERE logical_name_id = $1",
     )
     .bind(MAIN)
+    .bind(STALE_RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(revival, (RESOURCE.into(), LINEAGE.into(), 1));
-    run(&incremental, 103, Some(revived)).await?;
+    assert_eq!(revival, (RESOURCE.into(), LINEAGE.into(), 1, 1));
+    let version_marker = run(&incremental, 103, Some(revived)).await?;
     let (version_db, version_fresh) = fresh("v2_expiry_version_fresh", 103).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&version_fresh).await?);
     let version: (String, i64, i64, i64, Option<String>) = sqlx::query_as(
@@ -384,6 +364,12 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .fetch_one(&incremental)
     .await?;
     assert_eq!(version, (VERSION_RESOURCE.into(), 0, 0, 1, Some("operator_approval_surfaces_not_ingested".into())));
+    run(&incremental, 104, Some(version_marker)).await?;
+    let (terminal_db, terminal_fresh) = fresh("v2_expiry_terminal_fresh", 104).await?;
+    assert_eq!(snapshot(&incremental).await?, snapshot(&terminal_fresh).await?);
+    let terminal: (String, Option<String>, Option<String>) = sqlx::query_as("SELECT resource_id::text, declared_summary -> 'registration' ->> 'status', declared_summary -> 'control' ->> 'status' FROM name_current WHERE logical_name_id = $1").bind(MAIN).fetch_one(&incremental).await?;
+    assert_eq!(terminal, (VERSION_RESOURCE.into(), Some("released".into()), Some("unregistered".into())));
+    terminal_db.cleanup().await?;
     version_db.cleanup().await?;
     revived_db.cleanup().await?;
     retired_db.cleanup().await?;
