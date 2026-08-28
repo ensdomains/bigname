@@ -95,16 +95,25 @@ pub(super) fn widening_start(
             ))
             && let Some(uncovered) = first_uncovered(intervals, *start)
         {
+            let recovery = if pending_all_emitter_removal {
+                "Let any pending required Ingest redo on this chain complete before retrying, or \
+                 split a combined manifest change so its widening redo completes before removing \
+                 the all-emitter watch"
+                    .to_owned()
+            } else {
+                format!(
+                    "Raise the declaration to the first continuously covered start, or rebuild \
+                     from a fresh database/from-zero ingest when coverage from {start} is required. \
+                     A retained database that still requires that coverage needs a separately \
+                     planned repair which fetches the uncovered range before making the wider \
+                     promise; ordinary address-scoped redo follows the persisted epochs and cannot \
+                     fill this gap. Manifest sync did not mark these blocks repaired"
+                )
+            };
             bail!(
                 "compiled-watch comparison refused promised coverage start {start}: persisted \
                  ingest coverage has an uncovered interval {uncovered} for chain {chain_id}, \
-                 source family {family}, address {address}, topic {}. Raise the declaration to \
-                 the first continuously covered start, or rebuild from a fresh database/from-zero \
-                 ingest when coverage from {start} is required. A retained database that still \
-                 requires that coverage needs a separately planned repair which fetches the \
-                 uncovered range before making the wider promise; ordinary address-scoped redo \
-                 follows the persisted epochs and cannot fill this gap. Manifest sync did not mark \
-                 these blocks repaired",
+                 source family {family}, address {address}, topic {}. {recovery}",
                 key.topic0,
             );
         }

@@ -651,10 +651,13 @@ The widening comparison first proves that persisted address epochs continuously
 honor the desired direct-address promise. It refuses an existing gap before the
 ordinary widening path can stamp a required Ingest redo; redo state is created
 only for a promise that the persisted interval union can represent. If a
-pending required redo belongs to an all-emitter watch, manifest synchronization
-also refuses to remove that watch when the desired address-scoped replacement
-would expose a persisted epoch gap. The transaction leaves the previous watch
-plan and redo marker unchanged.
+required Ingest redo is pending anywhere on the chain, manifest synchronization
+deliberately and conservatively refuses to remove a previous all-emitter watch
+when the desired address-scoped replacement would expose a persisted epoch gap.
+The redo need not belong to that watch; let it complete and retry, or split a combined
+[registry-announcement widening](glossary.md#discovery-rule-widening-and-narrowing) and
+all-emitter removal so its redo completes first. The transaction leaves the
+previous watch plan and redo state unchanged.
 
 ## Interpretation replay
 

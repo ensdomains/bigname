@@ -935,15 +935,20 @@ finite end, sorts the remaining intervals, and merges overlap and adjacency.
 The resulting union must continuously cover the promised start through an
 open-ended final interval. A desired all-emitter entry for the same topic keeps
 the existing shortcut and covers the direct-address watch without this check.
-While a required Ingest redo for an all-emitter watch is still pending,
-synchronization also refuses to remove that watch if doing so would expose a
-gap in a desired direct-address watch. The refusal preserves both the previous
-compiled watch plan and the pending redo.
+Whenever any required Ingest redo is pending on the chain, synchronization
+deliberately and conservatively refuses to remove a previous all-emitter watch
+if doing so would expose a gap in a desired direct-address watch. The redo need
+not have been stamped by that watch. Let it complete and retry; if one manifest
+change both widens registry-announcement coverage and removes the all-emitter
+watch, split the change so its redo completes first.
+The refusal preserves the previous compiled watch plan and redo state.
 
 The transaction fails before recording a promise when the union has a leading
-gap, an internal gap, or a finite tail. The error names the promised start and
-the first uncovered inclusive range; an uncovered tail is rendered
-`<N>..=unbounded`. The stored [compiled watch
+or internal gap. It also retains a finite-tail structural guard, although every
+desired direct-address declaration contributes an open epoch today, so that
+class cannot arise through manifest synchronization. The error names
+the promised start and the first uncovered inclusive range; an uncovered tail
+is rendered `<N>..=unbounded`. The stored [compiled watch
 plan](glossary.md#compiled-watch-plan) keeps its existing
 emitter/topic/start JSON shape and remains backward-decodable; the interval
 union exists only while synchronization validates the desired plan.

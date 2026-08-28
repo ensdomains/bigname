@@ -1209,92 +1209,125 @@ status = "supported"
 }
 
 #[tokio::test]
-async fn removing_pending_all_emitter_refuses_exposed_address_gap() -> Result<()> {
+async fn combined_announcement_widening_and_all_emitter_removal_is_refused() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_previous_all_removed").await?;
     let chain_id = "manifest-previous-all-removed";
     let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v2_registry_l1")?;
     fixture.write_with_start(false, false, 1)?;
     let path = fixture.root.join("test/ens_v2_registry_l1/v1.toml");
     let manifest = fs::read_to_string(&path)?.replace(
-        r#"[[abi.events]]
-name = "Transfer"
-fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
-emitter_roles = ["source_a"]
-normalized_events = []
-status = "supported"
-"#,
-        "",
+        "name = \"Transfer\"\nfragment = \"event Transfer(address indexed from, address indexed to, uint256 value)\"",
+        "name = \"TextChanged\"\nfragment = \"event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)\"",
     );
     fs::write(&path, manifest)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
     seed_completed_ingest_range_through(&scratch, chain_id, 10).await?;
 
-    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE chain_id = $1")
-        .bind(chain_id)
-        .execute(scratch.pool())
-        .await?;
     sqlx::query(
-        "UPDATE contract_instance_addresses
-         SET active_from_block_number = 5,
-             active_to_block_number = 5, active_to_block_hash = NULL, deactivated_at = now()
-         WHERE chain_id = $1 AND deactivated_at IS NULL",
+        "WITH closed AS (
+             UPDATE contract_instance_addresses SET active_from_block_number = 5, active_to_block_number = 5, active_to_block_hash = NULL, deactivated_at = now()
+             WHERE chain_id = $1 AND deactivated_at IS NULL RETURNING contract_instance_id, chain_id, address, source_manifest_id, provenance)
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id, provenance)
+         SELECT contract_instance_id, chain_id, address, 6, source_manifest_id, provenance FROM closed",
     )
     .bind(chain_id)
     .execute(scratch.pool())
     .await?;
-    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
-    assert_eq!(
-        required_ingest_redo(scratch.pool(), chain_id).await?,
-        Some((0, 10)),
-        "the all-emitter re-admission must back the address's persisted gap"
-    );
 
-    let without_all =
-        WatchManifestFixture::with_source_family(chain_id, "test_events_all_removed")?;
-    without_all.write_with_start(false, false, 1)?;
-    let path = without_all
-        .root
-        .join("test/test_events_all_removed/v1.toml");
-    let manifest = fs::read_to_string(&path)?.replace(
-        r#"name = "Transfer"
-fragment = "event Transfer(address indexed from, address indexed to, uint256 value)""#,
-        r#"name = "RegistryCreated"
-fragment = "event RegistryCreated()""#,
+    let text_changed = format!(
+        "{:#x}",
+        keccak256(b"TextChanged(bytes32,string,string,string)")
     );
-    fs::write(&path, manifest)?;
+    sqlx::query(
+        "UPDATE manifest_versions SET manifest_payload = jsonb_set(manifest_payload, '{_bigname_compiled_watch}',
+             (manifest_payload -> '_bigname_compiled_watch') || jsonb_build_array(jsonb_build_object('emitter', jsonb_build_object('kind', 'all'), 'topic0', $2, 'start', 0)))
+         WHERE chain_id = $1 AND rollout_status = 'active'",
+    )
+    .bind(chain_id)
+    .bind(&text_changed)
+    .execute(scratch.pool())
+    .await?;
+    fixture.add_discovery_rule("registry_announcement")?;
 
     let before_refusal = exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?;
-    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&without_all.root)?)
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
         .await
-        .expect_err("removing a pending all-emitter watch must not expose an address gap");
-    assert!(error.to_string().contains("uncovered interval 1..=4"));
+        .expect_err("same-sync widening must not license removal across an address gap");
+    let message = error.to_string();
+    assert!(message.contains("uncovered interval 1..=4"), "{message}");
+    assert!(
+        message.contains("Let any pending required Ingest redo on this chain complete")
+            && message.contains("split a combined manifest change"),
+        "{message}"
+    );
     assert_eq!(
         exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?,
         before_refusal,
-        "the refused removal must roll back the manifest, watch plan, epochs, and redo marker"
+        "the refusal must preserve the prior manifest, watch plan, address epochs, and redo state"
     );
-    let active_watch_shape: (i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (
-                    WHERE entry -> 'emitter' ->> 'kind' = 'all'
-                ),
-                count(*) FILTER (
-                    WHERE entry -> 'emitter' ->> 'kind' = 'address'
-                )
-         FROM manifest_versions manifest
-         CROSS JOIN LATERAL jsonb_array_elements(
-             manifest.manifest_payload -> '_bigname_compiled_watch'
-         ) entry
-         WHERE manifest.chain_id = $1
-           AND manifest.rollout_status = 'active'",
-    )
-    .bind(chain_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(active_watch_shape, (1, 1));
     assert_eq!(
         required_ingest_redo(scratch.pool(), chain_id).await?,
-        Some((0, 10)),
-        "the refusal must preserve the pending all-emitter redo"
+        None,
+        "the same-sync registry-announcement redo must roll back with the refusal"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn removing_all_emitter_while_chain_redo_is_pending_uses_wait_recovery() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_pending_all_removed").await?;
+    let chain_id = "manifest-pending-all-removed";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v1_resolver_l1")?;
+    fixture.write_with_start(false, false, 1)?;
+    let path = fixture.root.join("test/ens_v1_resolver_l1/v1.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replace(
+            "name = \"Transfer\"\nfragment = \"event Transfer(address indexed from, address indexed to, uint256 value)\"",
+            "name = \"TextChanged\"\nfragment = \"event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)\"",
+        ),
+    )?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 10).await?;
+    sqlx::query(
+        "WITH closed AS (
+             UPDATE contract_instance_addresses SET active_from_block_number = 5, active_to_block_number = 5, deactivated_at = now()
+             WHERE chain_id = $1 AND deactivated_at IS NULL RETURNING contract_instance_id, chain_id, address, source_manifest_id, provenance)
+         INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id, provenance) SELECT contract_instance_id, chain_id, address, 6, source_manifest_id, provenance FROM closed",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo', redo_previous_phase_status = 'completed', redo_from_block_number = 0, redo_to_block_number = 10,
+             redo_previous_started_at = started_at, redo_previous_finished_at = finished_at, last_error = 'required downstream redo: unrelated fixture', started_at = now(), finished_at = NULL WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    let replacement = fixture.root.join("test/test_events_pending_removed");
+    fs::rename(fixture.root.join("test/ens_v1_resolver_l1"), &replacement)?;
+    let path = replacement.join("v1.toml");
+    fs::write(
+        &path,
+        fs::read_to_string(&path)?.replace("ens_v1_resolver_l1", "test_events_pending_removed"),
+    )?;
+
+    let before_refusal = exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?;
+    let error = sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?)
+        .await
+        .expect_err("any pending chain redo must conservatively gate all-emitter removal");
+    let message = error.to_string();
+    assert!(message.contains("Let any pending required Ingest redo on this chain complete"));
+    assert!(message.contains("split a combined manifest change"));
+    assert_eq!(
+        exact_manifest_sync_snapshot(scratch.pool(), chain_id).await?,
+        before_refusal,
+        "the refusal must preserve the prior manifest, watch plan, address epochs, and redo state"
+    );
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 10))
     );
     scratch.cleanup().await
 }
