@@ -46,16 +46,9 @@ fn hash(block: i64) -> &'static str {
 #[rustfmt::skip]
 async fn database(prefix: &str) -> Result<(TestDatabase, PgPool)> {
     let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
-    let pool = database.pool().clone();
-    let name: String = sqlx::query_scalar("SELECT current_database()").fetch_one(&pool).await?;
-    let mut tx = pool.begin().await?;
+    let pool = database.pool().clone(); let name: String = sqlx::query_scalar("SELECT current_database()").fetch_one(&pool).await?; let mut tx = pool.begin().await?;
     sqlx::query("CREATE SCHEMA bigname_phase").execute(&mut *tx).await?;
-    raw_sql(&format!(
-        "ALTER DATABASE \"{}\" SET search_path TO bigname_phase, public",
-        name.replace('"', r#""""#)
-    ))
-    .execute(&mut *tx)
-    .await?;
+    raw_sql(&format!("ALTER DATABASE \"{}\" SET search_path TO bigname_phase, public", name.replace('"', r#""""#))).execute(&mut *tx).await?;
     sqlx::query("SET LOCAL search_path TO bigname_phase, public").execute(&mut *tx).await?;
     for script in [
         include_str!("../../../schema-v2/baseline/01_chain.sql"),
@@ -307,6 +300,8 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .fetch_one(&incremental)
     .await?;
     assert_eq!(retired_state, (0, 1, 1, 1, 0, 0, Some("operator_approval_surfaces_not_ingested".into())));
+    let reservation: (Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT declared_summary -> 'registration' ->> 'status', declared_summary -> 'control' ->> 'status', declared_summary -> 'registration' ->> 'latest_event_kind', declared_summary -> 'registration' ->> 'expiry' FROM name_current WHERE logical_name_id = $1").bind(RESERVATION).fetch_one(&incremental).await?;
+    assert_eq!(reservation, (Some("reserved".into()), Some("reserved".into()), Some("RegistrationReserved".into()), Some("1900000000".into())));
     let generic: (Option<String>, Option<String>, Option<String>) = sqlx::query_as("SELECT declared_summary -> 'registration' ->> 'status', declared_summary -> 'control' ->> 'status', declared_summary -> 'resolver' ->> 'address' FROM name_current WHERE logical_name_id = $1").bind(GENERIC).fetch_one(&incremental).await?;
     assert_eq!(generic, (Some("released".into()), Some("unregistered".into()), None));
     let mixed: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(

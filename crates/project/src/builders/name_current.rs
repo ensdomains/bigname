@@ -42,11 +42,11 @@ pub(super) async fn build(
                        'authority_kind', authority_context.authority_kind,
                        'authority_key', authority_context.authority_key,
                        'registrant', registrant.registrant,
-                       'expiry', to_jsonb(expiry.expiry_seconds),
+                       'expiry', COALESCE(to_jsonb(expiry.expiry_seconds), CASE WHEN COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' THEN registration_current.after_state -> 'expiry' END),
                        'registered_at', registration_grant.block_timestamp,
                        'created_at', created.block_timestamp,
                        'released_at', registration.after_state -> 'released_at',
-                       'latest_event_kind', registration_latest.event_kind
+                       'latest_event_kind', COALESCE(registration_latest.event_kind, CASE WHEN COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' THEN registration_current.event_kind END)
                    ) || CASE WHEN registration.event_kind = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2'
                        THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
                            'registrant', NULL, 'expiry', NULL) ELSE '{}'::jsonb END,
