@@ -1942,6 +1942,70 @@ fn incremental_v2_displacement_drops_the_replaced_active_resource() -> anyhow::R
 }
 
 #[test]
+fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyhow::Result<()> {
+    const DETACHED: &str = "0x0000000000000000000000000000000000000069";
+    let manifest = manifest_with_events(
+        86,
+        "ens",
+        "ens_v2_registry_l1",
+        &[(
+            "LabelReserved",
+            "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
+            &["registry"],
+            &["RegistrationReserved"],
+        )],
+    );
+    let mut detached = admission(86, "registry");
+    detached.address = DETACHED.to_owned();
+    detached.contract_instance_id = super::common::contract_id(CHAIN, DETACHED);
+    detached.role = None;
+    detached.discovery_edge_kind = Some("registry_announcement".to_owned());
+    detached.discovery_from_contract_instance_id =
+        Some(super::common::contract_id(CHAIN, DETACHED));
+    detached.discovery_observation_key = Some("registry-announcement:detached".to_owned());
+    let token = versioned_token("stale", 0);
+    let sender: Address = CONTRACT.parse()?;
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: vec![DiscoveryRuleInput {
+            manifest_id: 86,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }],
+        admissions: vec![detached],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v2_registry::LabelReserved {
+                tokenId: token,
+                labelHash: keccak256(b"stale"),
+                label: "stale".to_owned(),
+                expiry: 1,
+                sender,
+            }
+            .encode_log_data(),
+            1,
+            0,
+            DETACHED,
+        )],
+    })?;
+    let release = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationReleased"
+                && event.after_state["source_event"] == "RegistryPathExpired"
+        })
+        .unwrap_or_else(|| panic!("missing detached expiry release: {output:#?}"));
+    assert!(release.logical_name_id.is_none());
+    assert!(release.resource_id.is_some());
+    assert_eq!(release.before_state["status"], "reserved");
+    Ok(())
+}
+
+#[test]
 fn incremental_v2_delta_refreshes_only_the_affected_topology_component() {
     const OTHER_REGISTRY: &str = "0x0000000000000000000000000000000000000043";
     let retained_registration = |registry: &str, ordinal: usize, timestamp: i64| {
