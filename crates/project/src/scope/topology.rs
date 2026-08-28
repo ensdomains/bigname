@@ -49,13 +49,6 @@ pub(super) async fn close(
         if moved == 0 {
             break;
         }
-        sqlx::query("ANALYZE project_scope_topology_current")
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| {
-                ProjectError::database("failed to analyze topology frontier", error)
-            })?;
-
         sqlx::query(
             "INSERT INTO project_scope_topology_seen
              SELECT logical_name_id FROM project_scope_topology_current

@@ -154,7 +154,6 @@ async fn head_once(tx: &mut Transaction<'_, Postgres>, sqls: &[String]) -> Resul
         sqlx::query("TRUNCATE project_scope_topology_current, project_scope_topology_candidates").execute(&mut **tx).await?;
         let input = sqlx::query("WITH moved AS (DELETE FROM project_scope_topology_pending RETURNING logical_name_id) INSERT INTO project_scope_topology_current SELECT logical_name_id FROM moved").execute(&mut **tx).await?.rows_affected();
         if input == 0 { return Ok((iterations, trace)); }
-        sqlx::query("ANALYZE project_scope_topology_current").execute(&mut **tx).await?;
         sqlx::query("INSERT INTO project_scope_topology_seen SELECT * FROM project_scope_topology_current ON CONFLICT DO NOTHING").execute(&mut **tx).await?;
         for sql in sqls { sqlx::query(sql).bind("issue-435-measurement").bind(435_i64).execute(&mut **tx).await?; }
         let found = sqlx::query("INSERT INTO project_scope_children SELECT * FROM project_scope_topology_candidates ON CONFLICT DO NOTHING").execute(&mut **tx).await?.rows_affected();
@@ -191,7 +190,6 @@ async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, dept
     reset(&mut tx, head, frontier, depth).await?;
     if head {
         sqlx::query("WITH moved AS (DELETE FROM project_scope_topology_pending RETURNING logical_name_id) INSERT INTO project_scope_topology_current SELECT * FROM moved").execute(&mut *tx).await?;
-        sqlx::query("ANALYZE project_scope_topology_current").execute(&mut *tx).await?;
     }
     let mut plan: Vec<Value> = Vec::new();
     for sql in sqls { plan.push(sqlx::query_scalar(&format!("{EXPLAIN} {sql}")).bind("issue-435-measurement").bind(435_i64).fetch_one(&mut *tx).await?); }
