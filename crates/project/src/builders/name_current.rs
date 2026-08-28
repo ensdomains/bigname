@@ -228,7 +228,7 @@ pub(super) async fn build(
             LIMIT 1
         ) registration_latest ON TRUE
         LEFT JOIN LATERAL (
-            SELECT event.event_kind, event.after_state
+            SELECT event.event_kind, event.after_state, event.resource_id
             FROM project_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND (
@@ -622,7 +622,8 @@ pub(super) async fn build(
               AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired'
               AND registration_current.after_state ->> 'derived_from' = 'interpreter_state'
               AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
-              AND COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2',
+              AND COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2'
+              AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id),
               FALSE
           )
         ORDER BY surface.logical_name_id

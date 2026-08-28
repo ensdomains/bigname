@@ -156,7 +156,6 @@ async fn seed(pool: &PgPool) -> Result<()> {
     assert_eq!(stale["logical_name_id"], STALE); assert_eq!(stale["resource_id"], STALE_RESOURCE);
     assert_eq!(stale["token_lineage_id"], STALE_LINEAGE); assert_eq!(stale["token_id"], STALE_TOKEN);
     assert_eq!(stale["expiry"], 1_700_000_100_i64);
-
     for (block, timestamp) in [
         (100, 1_700_000_100_i64), (101, 1_800_000_000), (102, 1_800_000_001), (103, 1_900_000_000),
     ] {
@@ -214,6 +213,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     }; }
     add!(MAIN, Some(RESOURCE), 100, Some(0), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 100, Some(4), "PermissionChanged", permission.clone());
+    add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64})); add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
     add!(RESERVATION, Some(RESOURCE), 100, Some(5), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
     add!(MIXED, Some(RESOURCE), 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
     event(pool, MIXED, None, 100, Some(7), "AuthorityTransferred", json!({"source_event":"NewOwner","owner":OWNER})).await?;
