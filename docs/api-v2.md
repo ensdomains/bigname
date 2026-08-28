@@ -115,18 +115,36 @@ without the expansion.
 
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary. For a resource-bound
-`GET /v2/permissions` read, a missing or partial summary produces
-`meta.completeness=partial` with `permission_support_unknown`; an ENSv1 wrapper
-summary produces `meta.completeness=unsupported` with
-`wrapper_holder_permissions_not_supported`. An address-only permissions read
-is always at least `partial` with the wrapper reason because a wrapper resource
-with zero holder rows cannot be discovered from the permission-row collection.
+`GET /v2/permissions` read, a non-wrapper summary whose standard operator,
+token-approval, or resolver-delegation paths are not indexed produces
+`meta.completeness=partial` with
+`approval_and_delegation_permissions_not_supported`. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) An ENSv1 wrapper-only
+summary instead produces `meta.completeness=unsupported` with
+`wrapper_holder_permissions_not_supported`. A missing or unrecognized summary
+produces `meta.completeness=partial` with `permission_support_unknown`, which
+takes precedence over both known limitations. An address-only permissions read
+is always at least `partial` with
+`approval_and_delegation_permissions_not_supported`, including when it returns
+zero rows, because returned registrations cannot establish the request's full
+permission set.
 For `include=role_summary`, any non-full resource summary makes the overall
 address-name response `partial`, lists `role_summary` in
 `meta.unsupported_fields`, and uses the same product reason mapping. Projected
 permission rows remain visible, but an empty or populated expansion is not
-authoritative when that metadata is present. Missing summary metadata takes
-precedence over the known wrapper limitation when both occur on one page.
+authoritative when that metadata is present. A page containing both a wrapper
+summary and a non-wrapper approval/delegation limitation uses the latter partial
+reason; missing or unrecognized summary metadata still takes precedence. A
+synthetic or future resource summary that independently proves full coverage
+adds no completeness metadata on a resource-bound request.
+
+These classifications are request-relative. `/v2/permissions` continues to
+serve known permission rows that apply to each resource, but those rows and the
+derived role summaries are not authoritative enumerations while the coverage
+described above remains partial. Zero returned rows therefore
+do not prove that no account can mutate the selected name or registration.
+NameWrapper holder enumeration remains a separate known unsupported class, and
+ENSv2 registry operator approval remains separately narrowed until indexed.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
 
 `wrapper_fuses` has one stable shape on name detail, resolver `bound_names`,
 and permission rows:
@@ -159,10 +177,9 @@ their owner.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L856 @ ens_v1@91c966f)
 Each returned item either has both `wrapper_state` and `wrapper_fuses` or has
-neither. Collection completeness remains request-relative: wrapper metadata on
-returned permission rows does not make zero-row wrapper-holder enumeration
-complete, so the existing `meta.completeness` and wrapper unsupported-reason
-rules still apply.
+neither. Collection completeness remains request-relative: metadata on returned
+permission rows does not make zero-row permission enumeration complete, so the
+`meta.completeness` and unsupported-reason rules above still apply.
 
 During `.eth` registrar grace, bigname keeps the existing approve-only policy
 interpretation for projected wrapper-holder powers: it removes owner

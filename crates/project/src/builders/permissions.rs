@@ -514,14 +514,7 @@ pub(super) async fn build(
         SELECT resource.resource_id,
                resource.authority_kind,
                root_resource.resource_id,
-               CASE
-                   WHEN resource.authority_kind IN (
-                       'registrar', 'registry', 'registry_only',
-                       'registry_owner', 'registrant', 'resolver',
-                       'ens_v2_registry'
-                   ) THEN 'supported'
-                   ELSE 'unsupported'
-               END,
+               'unsupported',
                CASE
                    WHEN resource.authority_kind = 'wrapper'
                        THEN 'ensv1_wrapper_holder_permissions_not_projected'
@@ -529,7 +522,7 @@ pub(super) async fn build(
                        'registrar', 'registry', 'registry_only',
                        'registry_owner', 'registrant', 'resolver',
                        'ens_v2_registry'
-                   ) THEN NULL
+                   ) THEN 'operator_approval_surfaces_not_ingested'
                    ELSE 'resource_permission_authority_not_projected'
                END,
                COALESCE(resource.raw_fact_ref, resource.provenance) || jsonb_build_object(

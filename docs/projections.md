@@ -294,7 +294,18 @@ chains retain independent publication decisions.
 `permissions_current` is resource-anchored and preserves subject, scope,
 effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
-partial permission support.
+partial permission support. Current non-wrapper summaries are partial because
+standard registry operators, registrar token and account approvals, resolver
+operators and delegates, and ENSv2 registry operators are not indexed.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) Known
+owner-derived rows remain available, but neither those rows nor a zero-row
+summary is an authoritative permission enumeration. API contract tests inject
+an independently proven full summary to verify that resource-bound public
+requests are not globally forced to partial.
 
 For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
 holder grant. A separately observed compatible holder grant is masked by the
@@ -305,8 +316,9 @@ not change the companion resource summary's unsupported wrapper-holder
 enumeration status. For ENSv2, permissions remain keyed by the
 upstream resource linked to bigname `resource_id`, not by token ID.[^v2-iperm-l57][^v2-pr-l261][^v2-pr-l351]
 
-Unknown or inconsistent summary vocabulary is a storage error. Product routes
-fail closed rather than converting it into broader support.
+Unknown or inconsistent typed summary combinations are a storage error. A
+persisted unsupported reason that a reader does not recognize maps to partial
+unknown support rather than wrapper support or an internal server error.
 
 ## Resolver and records
 

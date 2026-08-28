@@ -606,7 +606,12 @@ async fn upsert_phase_permissions_current_rows(
     Ok(rows.to_vec())
 }
 
-/// Authority kinds the permission projection builder treats as projected authority.
+/// Authority kinds whose known owner-derived permission rows omit standard approval paths.
+/// ENSv1 registry operators, registrar approvals, and resolver operators/delegates can authorize
+/// mutation. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114-L129 @ ens_v1@91c966f)
 const PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS: &[&str] = &[
     "registrar",
     "registry",
@@ -626,7 +631,10 @@ fn phase_permission_summary_support(
 ) -> (&'static str, Option<&'static str>) {
     match authority_kind {
         Some(kind) if PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS.contains(&kind) => {
-            ("supported", None)
+            (
+                "unsupported",
+                Some("operator_approval_surfaces_not_ingested"),
+            )
         }
         Some("wrapper") => (
             "unsupported",
@@ -2778,7 +2786,7 @@ fn permission_current_resource_summary(
     let authority_kind = authority_kind.map(str::to_owned);
     let coverage = match authority_kind.as_deref() {
         Some(kind) if PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS.contains(&kind) => {
-            bigname_storage::ResourcePermissionCoverage::authoritative(["permissions_current"])
+            bigname_storage::ResourcePermissionCoverage::operator_approval_surfaces_not_ingested()
         }
         Some("wrapper") => bigname_storage::ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected(),
         _ => bigname_storage::ResourcePermissionCoverage::resource_authority_not_projected(),

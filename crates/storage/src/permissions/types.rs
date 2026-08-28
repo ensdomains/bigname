@@ -72,6 +72,7 @@ impl PermissionCoverageExhaustiveness {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionCoverageUnsupportedReason {
+    OperatorApprovalSurfacesNotIngested,
     Ensv1WrapperHolderPermissionsNotProjected,
     ResourcePermissionAuthorityNotProjected,
 }
@@ -79,6 +80,7 @@ pub enum PermissionCoverageUnsupportedReason {
 impl PermissionCoverageUnsupportedReason {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::OperatorApprovalSurfacesNotIngested => "operator_approval_surfaces_not_ingested",
             Self::Ensv1WrapperHolderPermissionsNotProjected => {
                 "ensv1_wrapper_holder_permissions_not_projected"
             }
@@ -131,6 +133,18 @@ impl ResourcePermissionCoverage {
         }
     }
 
+    pub fn operator_approval_surfaces_not_ingested() -> Self {
+        Self {
+            status: PermissionCoverageStatus::Partial,
+            exhaustiveness: PermissionCoverageExhaustiveness::BestEffort,
+            source_classes_considered: vec!["permissions_current".to_owned()],
+            enumeration_basis: "resource_permissions".to_owned(),
+            unsupported_reason: Some(
+                PermissionCoverageUnsupportedReason::OperatorApprovalSurfacesNotIngested,
+            ),
+        }
+    }
+
     pub fn ensv1_wrapper_holder_permissions_not_projected() -> Self {
         Self {
             status: PermissionCoverageStatus::Unsupported,
@@ -173,6 +187,10 @@ impl ResourcePermissionCoverage {
                 PermissionCoverageStatus::Full,
                 PermissionCoverageExhaustiveness::Authoritative,
                 None
+            ) | (
+                PermissionCoverageStatus::Partial,
+                PermissionCoverageExhaustiveness::BestEffort,
+                Some(PermissionCoverageUnsupportedReason::OperatorApprovalSurfacesNotIngested)
             ) | (
                 PermissionCoverageStatus::Partial,
                 PermissionCoverageExhaustiveness::BestEffort,
@@ -289,6 +307,49 @@ pub struct PermissionsCurrentAccountResourcePage {
     pub rows: Vec<PermissionsCurrentRow>,
     pub next_cursor: Option<PermissionsCurrentAccountResourceCursor>,
     pub summary: PermissionsCurrentFullFilterSummary,
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn permission_coverage_accepts_only_typed_status_reason_combinations() {
+        let partial = serde_json::from_value::<ResourcePermissionCoverage>(json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": ["permissions_current"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": "operator_approval_surfaces_not_ingested"
+        }))
+        .expect("the approval coverage marker must decode");
+        assert_eq!(
+            partial,
+            ResourcePermissionCoverage::operator_approval_surfaces_not_ingested()
+        );
+
+        for invalid in [
+            json!({
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "source_classes_considered": ["permissions_current"],
+                "enumeration_basis": "resource_permissions",
+                "unsupported_reason": "operator_approval_surfaces_not_ingested"
+            }),
+            json!({
+                "status": "partial",
+                "exhaustiveness": "best_effort",
+                "source_classes_considered": ["permissions_current"],
+                "enumeration_basis": "resource_permissions",
+                "unsupported_reason": "a_reason_this_build_has_never_seen"
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<ResourcePermissionCoverage>(invalid).is_err(),
+                "invalid permission coverage must fail typed decoding"
+            );
+        }
+    }
 }
 
 /// Stable storage representation for permission scope keys.

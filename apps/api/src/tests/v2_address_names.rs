@@ -778,6 +778,41 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
 }
 
 #[tokio::test]
+async fn v2_address_role_summary_marks_uningested_approvals_non_authoritative() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let resource_id = Uuid::from_u128(0xa100);
+    upsert_phase_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("registrar")),
+    )
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+    )
+    .await?;
+
+    assert!(
+        payload["data"][0]["role_summary"]
+            .as_array()
+            .is_some_and(|summary| !summary.is_empty())
+    );
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_fields"],
+        json!(["role_summary"])
+    );
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("approval_and_delegation_permissions_not_supported")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_address_names_include_role_summary_groups_permissions_by_address() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
@@ -886,7 +921,15 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
             .get("effective_powers")
             .is_none()
     );
-    assert!(payload["meta"].get("completeness").is_none());
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_fields"],
+        json!(["role_summary"])
+    );
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("approval_and_delegation_permissions_not_supported")
+    );
 
     database.cleanup().await?;
     Ok(())

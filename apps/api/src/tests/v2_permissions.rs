@@ -184,7 +184,7 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(
         payload["meta"]["unsupported_reason"],
-        json!("wrapper_holder_permissions_not_supported")
+        json!("approval_and_delegation_permissions_not_supported")
     );
     assert!(payload["meta"].get("unsupported_fields").is_none());
 
@@ -349,7 +349,11 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
             .iter()
             .all(|row| row["registration_id"] == json!(current_resource_id.to_string()))
     );
-    assert!(by_name["meta"].get("completeness").is_none());
+    assert_eq!(by_name["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        by_name["meta"]["unsupported_reason"],
+        json!("approval_and_delegation_permissions_not_supported")
+    );
 
     let by_registration = v2_permissions_payload_for_database(
         &database,
@@ -365,7 +369,11 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
             .iter()
             .all(|row| row["registration_id"] == json!(current_resource_id.to_string()))
     );
-    assert!(by_registration["meta"].get("completeness").is_none());
+    assert_eq!(by_registration["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        by_registration["meta"]["unsupported_reason"],
+        json!("approval_and_delegation_permissions_not_supported")
+    );
 
     let by_address_and_registration = v2_permissions_payload_for_database(
         &database,
@@ -385,10 +393,13 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
             .len(),
         1
     );
-    assert!(
-        by_address_and_registration["meta"]
-            .get("completeness")
-            .is_none()
+    assert_eq!(
+        by_address_and_registration["meta"]["completeness"],
+        json!("partial")
+    );
+    assert_eq!(
+        by_address_and_registration["meta"]["unsupported_reason"],
+        json!("approval_and_delegation_permissions_not_supported")
     );
 
     database.cleanup().await?;
@@ -547,7 +558,7 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     assert_eq!(by_address["meta"]["completeness"], json!("partial"));
     assert_eq!(
         by_address["meta"]["unsupported_reason"],
-        json!("wrapper_holder_permissions_not_supported")
+        json!("approval_and_delegation_permissions_not_supported")
     );
 
     let by_missing_name =
@@ -583,10 +594,26 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
         &permission_current_resource_summary(resource_id, Some("registrar")),
     )
     .await?;
-    let full = v2_permissions_payload_for_database(&database, &uri).await?;
-    assert_eq!(full["data"], json!([]));
-    assert!(full["meta"].get("completeness").is_none());
-    assert!(full["meta"].get("unsupported_reason").is_none());
+    let partial = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(partial["data"], json!([]));
+    assert_eq!(partial["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        partial["meta"]["unsupported_reason"],
+        json!("approval_and_delegation_permissions_not_supported")
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.permissions_current_resource_summary
+         SET support_status = 'supported', unsupported_reason = NULL
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .execute(&database.pool)
+    .await?;
+    let synthetic_full = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(synthetic_full["data"], json!([]));
+    assert!(synthetic_full["meta"].get("completeness").is_none());
+    assert!(synthetic_full["meta"].get("unsupported_reason").is_none());
 
     upsert_phase_permissions_current_resource_summary(
         &database.pool,
@@ -637,6 +664,23 @@ async fn v2_permissions_serve_unprojected_authority_resources_as_partial() -> Re
         );
     }
 
+    sqlx::query(
+        "UPDATE bigname_phase.permissions_current_resource_summary
+         SET support_status = 'unsupported', unsupported_reason = 'future_permission_reason'
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .execute(&database.pool)
+    .await?;
+    let response = v2_permissions_response_for_database(&database, &uri).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
+
     database.cleanup().await
 }
 
@@ -650,7 +694,11 @@ async fn v2_permissions_admit_project_vocabulary_and_exclude_orphaned_projection
 
     let readable = v2_permissions_payload_for_database(&database, &uri).await?;
     assert!(!readable["data"].as_array().is_none_or(Vec::is_empty));
-    assert!(readable["meta"].get("completeness").is_none());
+    assert_eq!(readable["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        readable["meta"]["unsupported_reason"],
+        json!("approval_and_delegation_permissions_not_supported")
+    );
 
     sqlx::query(
         r#"
