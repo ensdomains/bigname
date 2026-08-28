@@ -489,14 +489,9 @@ mod tests {
     #[sqlx::test]
     #[rustfmt::skip]
     async fn jit_restoration_preserves_session_and_local_values(pool: sqlx::PgPool) -> anyhow::Result<()> {
-        let mut transaction = pool.begin().await?;
-        sqlx::query("SET SESSION jit = off").execute(&mut *transaction).await?;
+        let mut transaction = pool.begin().await?; sqlx::query("SET SESSION jit = off").execute(&mut *transaction).await?;
         for expected in ["off", "on"] {
-            if expected == "on" { sqlx::query("SET LOCAL jit = on").execute(&mut *transaction).await?; }
-            let previous = sqlx::query_scalar::<_, String>("SHOW jit").fetch_one(&mut *transaction).await?;
-            sqlx::query("SET LOCAL jit = off").execute(&mut *transaction).await?;
-            restore_jit(&mut transaction, &previous).await?;
-            assert_eq!(sqlx::query_scalar::<_, String>("SHOW jit").fetch_one(&mut *transaction).await?, expected);
+            if expected == "on" { sqlx::query("SET LOCAL jit = on").execute(&mut *transaction).await?; } let previous = sqlx::query_scalar::<_, String>("SHOW jit").fetch_one(&mut *transaction).await?; sqlx::query("SET LOCAL jit = off").execute(&mut *transaction).await?; restore_jit(&mut transaction, &previous).await?; assert_eq!(sqlx::query_scalar::<_, String>("SHOW jit").fetch_one(&mut *transaction).await?, expected);
         }
         Ok(())
     }

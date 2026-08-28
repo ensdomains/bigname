@@ -16,13 +16,14 @@ WITH parameters AS (
     FROM generated
 )
 INSERT INTO normalized_events (
-    event_identity, namespace, event_kind, source_family, manifest_version,
+    event_identity, namespace, logical_name_id, event_kind, source_family, manifest_version,
     chain_id, block_number, block_hash, derivation_kind, canonicality_state,
     consumer_visibility, migration_correlation_ids, before_state, after_state
 )
 SELECT
     'issue-435:' || ordinal,
     'ens',
+    'ens:0x' || lpad(to_hex(parent_number), 64, '0'),
     CASE WHEN local <= qualifying OR local % 4 <> 0
          THEN 'SubregistryChanged' ELSE 'ResolverChanged' END,
     CASE WHEN local <= qualifying

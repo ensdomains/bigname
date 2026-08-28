@@ -15,12 +15,15 @@ const BASELINE: &[&str] = &[
 ];
 #[rustfmt::skip]
 const INDEXES: &[(&str, &str)] = &[
-    ("after-node", "normalized_events_v1_subregistry_after_node_scope_idx"), ("after-child", "normalized_events_v1_subregistry_after_child_scope_idx"), ("before-node", "normalized_events_v1_subregistry_before_node_scope_idx"), ("before-child", "normalized_events_v1_subregistry_before_child_scope_idx"),
+    ("after-node", "normalized_events_v1_subregistry_after_node_scope_idx"), ("after-child", "normalized_events_v1_subregistry_after_child_scope_idx"), ("before-node", "normalized_events_v1_subregistry_before_node_scope_idx"), ("before-child", "normalized_events_v1_subregistry_before_child_scope_idx"), ("v2-pointer", "normalized_events_v2_subregistry_pointer_scope_idx"),
 ];
 #[rustfmt::skip]
 const MIGRATIONS: &[&str] = &[
-    include_str!("../../../../migrations/20260827130000_normalized_events_v1_after_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130100_normalized_events_v1_after_child_scope_idx.sql"), include_str!("../../../../migrations/20260827130200_normalized_events_v1_before_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130300_normalized_events_v1_before_child_scope_idx.sql"),
+    include_str!("../../../../migrations/20260827130000_normalized_events_v1_after_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130100_normalized_events_v1_after_child_scope_idx.sql"), include_str!("../../../../migrations/20260827130200_normalized_events_v1_before_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130300_normalized_events_v1_before_child_scope_idx.sql"), include_str!("../../../../migrations/20260827130400_normalized_events_v2_subregistry_pointer_scope_idx.sql"),
 ];
+
+#[rustfmt::skip]
+fn normalized_events_seq_scan(value: &Value) -> bool { value.as_object().is_some_and(|object| (object.get("Node Type").and_then(Value::as_str) == Some("Seq Scan") && object.get("Relation Name").and_then(Value::as_str) == Some("normalized_events")) || object.values().any(normalized_events_seq_scan)) || value.as_array().is_some_and(|array| array.iter().any(normalized_events_seq_scan)) }
 
 fn extract(source: &str, prefix: &str, suffix: &str) -> Result<String> {
     let start = source.find(prefix).context("SQL prefix")? + prefix.len();
@@ -83,7 +86,7 @@ async fn prepare() -> Result<(TestDatabase, PgPool)> {
 #[rustfmt::skip]
 async fn load(pool: &PgPool, start: i64, rows: i64) -> Result<f64> {
     let started = Instant::now();
-    raw_sql(&CORPUS.replace("__START__", &start.to_string()).replace("__V1_ROWS__", &rows.to_string()).replace("__FRONTIER__", "1000").replace("__DEPTH__", "8")).execute(pool).await?;
+    let mut transaction = pool.begin().await?; sqlx::query("SET LOCAL session_replication_role = replica").execute(&mut *transaction).await?; raw_sql(&CORPUS.replace("__START__", &start.to_string()).replace("__V1_ROWS__", &rows.to_string()).replace("__FRONTIER__", "1000").replace("__DEPTH__", "8")).execute(&mut *transaction).await?; transaction.commit().await?;
     sqlx::query("VACUUM (ANALYZE) normalized_events").execute(pool).await?;
     Ok(started.elapsed().as_secs_f64())
 }
@@ -241,7 +244,7 @@ async fn issue_435_measurement() -> Result<()> {
         head_cells.push(measure(&pool, &head, true, frontier, depth, 20).await?);
     }
     let head_v2_cell = measure(&pool, &head_v2, true, 1, 1, 20).await?;
-    if scale >= 5_000_000 { let plan = serde_json::to_string(&head_v2_cell["plan"])?; ensure!(plan.contains("normalized_events_name_history_idx") && plan.contains("normalized_events_subregistry_registration_history_idx"), "v2 plan did not use existing history indexes"); }
+    if scale >= 5_000_000 { let plan = serde_json::to_string(&head_v2_cell["plan"])?; ensure!(plan.contains(INDEXES[4].1) && plan.contains("normalized_events_name_history_idx") && plan.contains("normalized_events_subregistry_registration_history_idx") && !normalized_events_seq_scan(&head_v2_cell["plan"]), "v2 plan was not frontier-indexed"); }
     let exact_plan = serde_json::to_string(&head_cells[2]["plan"])?;
     if scale >= 5_000_000 {
         for (_, index) in &INDEXES[..4] { ensure!(exact_plan.contains(index), "plan did not use {index}"); }
