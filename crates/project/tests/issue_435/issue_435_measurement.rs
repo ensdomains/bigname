@@ -178,7 +178,11 @@ fn stats(mut times: Vec<f64>) -> Value {
 }
 
 #[rustfmt::skip]
+async fn await_quiet(pool: &PgPool) -> Result<()> { let mut quiet = 0; while quiet < 4 { let active: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND state <> 'idle' AND datname NOT LIKE 'issue_435_measurement_%'").fetch_one(pool).await?; quiet = if active == 0 { quiet + 1 } else { 0 }; if quiet < 4 { tokio::time::sleep(std::time::Duration::from_secs(5)).await; } } Ok(()) }
+
+#[rustfmt::skip]
 async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, depth: i64, samples: usize) -> Result<Value> {
+    await_quiet(pool).await?;
     configure_graph(pool, frontier, depth).await?;
     let mut tx = pool.begin().await?;
     if head { head_tables(&mut tx).await? } else { base_tables(&mut tx).await? }
@@ -207,6 +211,7 @@ async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, dept
 
 #[rustfmt::skip]
 async fn build_indexes(pool: &PgPool) -> Result<Vec<Value>> {
+    await_quiet(pool).await?;
     let mut evidence = Vec::new();
     for (((label, index), migration), ordinal) in INDEXES.iter().zip(MIGRATIONS).zip(0..) {
         let mut tx = pool.begin().await?;
