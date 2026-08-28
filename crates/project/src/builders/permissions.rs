@@ -85,31 +85,30 @@ pub(super) async fn build(
             SELECT * FROM ranked WHERE latest_rank = 1
         ),
         v2_registration_current AS (
-            SELECT DISTINCT ON (event.resource_id)
-                   event.resource_id, event.event_kind, event.after_state
+            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.event_kind, event.after_state
             FROM project_events event
             WHERE event.resource_id IS NOT NULL AND (
                   (
-                      event.event_kind IN (
-                          'RegistrationGranted', 'RegistrationReserved', 'RegistrationRenewed'
-                      )
-                      AND event.source_family IN (
-                          'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
-                      )
+                      event.event_kind IN ('RegistrationGranted', 'RegistrationReserved', 'RegistrationRenewed')
+                      AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
                       AND (event.event_kind <> 'RegistrationRenewed'
-                           OR (event.after_state ->> 'revived_from_expiry' = 'true' AND
-                               event.after_state ->> 'status' = 'reserved' AND event.after_state ->> 'reservation_resource' = 'true'))
+                           OR (event.after_state ->> 'revived_from_expiry' = 'true' AND (
+                               (event.after_state ->> 'status' = 'reserved' AND event.after_state ->> 'reservation_resource' = 'true')
+                               OR COALESCE((SELECT expiry.logical_name_id IS NULL FROM project_events expiry
+                                   WHERE expiry.resource_id = event.resource_id AND expiry.event_kind = 'RegistrationReleased'
+                                     AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired'
+                                     AND expiry.after_state ->> 'derived_from' = 'interpreter_state'
+                                     AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
+                                     AND (expiry.block_number, expiry.normalized_event_id) < (event.block_number, event.normalized_event_id)
+                                   ORDER BY expiry.block_number DESC, expiry.normalized_event_id DESC LIMIT 1), FALSE))))
                   )
-                  OR (
-                      event.event_kind = 'RegistrationReleased'
+                  OR (event.event_kind = 'RegistrationReleased'
                       AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
                       AND event.after_state ->> 'derived_from' = 'interpreter_state'
-                      AND event.after_state ->> 'terminal_reason' =
-                          'registry_name_binding_expired'
+                      AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
                   )
               )
-            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
-                     event.normalized_event_id DESC
+            ORDER BY event.resource_id, event.block_number DESC NULLS LAST, event.normalized_event_id DESC
         ),
         modifiers AS (
             SELECT DISTINCT ON (event.resource_id)
