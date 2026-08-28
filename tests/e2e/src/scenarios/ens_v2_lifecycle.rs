@@ -358,8 +358,8 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     Ok(())
 }
 
-/// Row 5: registry expiry passes with no transaction (event-silent flip), the
-/// registrar grace period then passes, and the name re-registers, advancing
+/// Row 5: registry expiry passes with no transaction (a state-derived flip),
+/// the registrar grace period then passes, and the name re-registers, advancing
 /// lineage on two LabelRegistered derivations with no unregister and no token
 /// regeneration
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L531 @ ens_v2@a971bd64)
@@ -415,38 +415,23 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
     let first =
         support::ingest_ens_v2_sepolia_and_serve(&anvil, &deployment, Some(phase_one_ready))
             .await?;
-    // The flip is event-silent: no release-like event exists, and the last
-    // derived registration state stays granted with a past expiry.
-    let fleeting_kinds: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT event_kind FROM normalized_events \
-         WHERE after_state->>'label' = 'fleeting' \
-           AND canonicality_state = 'canonical'",
-    )
-    .fetch_all(&first.db.pool)
-    .await?;
-    assert!(
-        !fleeting_kinds
-            .iter()
-            .any(|kind| kind == "RegistrationReleased" || kind == "RegistrationUnregistered"),
-        "v2 expiry passage must stay event-silent: {fleeting_kinds:?}"
-    );
-    let summary: Value = sqlx::query_scalar(
-        "SELECT declared_summary FROM name_current \
-         WHERE logical_name_id = 'ens:0xebeb30c0ed8d518212f883517e086e19588c459e1b5d50e613df0fceca59a3fb'",
+    // The first post-expiry block derives one history-retained release before its raw log.
+    let retirement: (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE
+             after_state->>'source_event' = 'RegistryPathExpired'
+             AND after_state->>'derived_from' = 'interpreter_state'
+             AND after_state->>'terminal_reason' = 'registry_name_binding_expired'
+             AND transaction_hash IS NULL AND transaction_index IS NULL AND log_index IS NULL)
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:0xebeb30c0ed8d518212f883517e086e19588c459e1b5d50e613df0fceca59a3fb'
+           AND event_kind = 'RegistrationReleased' AND canonicality_state = 'canonical'",
     )
     .fetch_one(&first.db.pool)
     .await?;
-    let projected_expiry = summary["registration"]["expiry"]
-        .as_i64()
-        .context("fleeting expiry missing")?;
-    let head_timestamp = i64::try_from(rpc.block_timestamp().await?)?;
-    assert!(
-        projected_expiry < head_timestamp,
-        "fleeting must serve last-known state with a past expiry: {summary}"
-    );
     assert_eq!(
-        summary["registration"]["status"], "active",
-        "no event means no status flip: {summary}"
+        retirement,
+        (1, 1),
+        "expiry must derive exactly one state-attributed release without raw-log provenance"
     );
     first.db.cleanup().await?;
 
