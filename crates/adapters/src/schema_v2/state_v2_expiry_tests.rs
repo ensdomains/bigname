@@ -48,6 +48,11 @@ fn v2_detached_resource_expiry_emits_a_bindingless_release() {
     assert_eq!(interpreted.events[0].explicit_before.as_ref().expect("before")["status"], "reserved");
     let retained = state.v2_token(ROOT, "0x01").expect("latent reservation");
     assert_eq!(retained.resolver.as_deref(), Some("0xresolver")); assert_eq!(retained.subregistry.as_deref(), Some(CHILD));
+    let mut formerly_named = nested_state(100); formerly_named.link_v2_resource(CHILD, "0x02", "resource".to_owned(), Uuid::from_u128(10), None); formerly_named.set_v2_expiry(CHILD, "0x02", 10);
+    formerly_named.refresh_dirty_v2_names(9); formerly_named.set_v2_parent_claim(CHILD, None, b"sub"); formerly_named.refresh_dirty_v2_names(9);
+    let detached = formerly_named.refresh_dirty_v2_names(10).into_iter().next().expect("detached named resource retires at own expiry");
+    assert!(detached.previous.is_none()); assert_eq!(detached.resource_id, Some(Uuid::from_u128(10))); assert!(formerly_named.v2_token(CHILD, "0x02").is_some_and(|token| token.expiry_retirement_emitted)); let emitted = crate::schema_v2::protocol::v2_boundary_expiration(detached, 10).expect("expiry event"); assert_eq!(emitted.events[0].after_state["source_event"], "RegistryPathExpired");
+    let mut ancestor = nested_state(10); ancestor.link_v2_resource(CHILD, "0x02", "resource".to_owned(), Uuid::from_u128(11), None); ancestor.set_v2_expiry(CHILD, "0x02", 20); ancestor.refresh_dirty_v2_names(9); assert!(ancestor.refresh_dirty_v2_names(10).iter().any(|transition| transition.registry == CHILD)); assert!(ancestor.refresh_dirty_v2_names(20).iter().all(|transition| transition.registry != CHILD));
 }
 
 #[test]

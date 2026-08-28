@@ -120,6 +120,11 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             state.transfer_v2_registrant(emitter, token, registrant.to_owned());
         }
         "RegistrationReleased" => {
+            if expiry_retirement_is_projection_only(event)
+                && let Some(token) = token
+            {
+                state.mark_v2_expiry_retirement(emitter, token, true);
+            }
             if !matches!(
                 event
                     .after_state
@@ -176,21 +181,13 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
     }
 }
 fn expiry_retirement_is_projection_only(event: &PriorEventInput) -> bool {
-    event
-        .after_state
-        .get("source_event")
-        .and_then(Value::as_str)
-        == Some("RegistryPathExpired")
-        && event
-            .after_state
-            .get("derived_from")
-            .and_then(Value::as_str)
-            == Some("interpreter_state")
-        && event
-            .after_state
-            .get("terminal_reason")
-            .and_then(Value::as_str)
-            == Some("registry_name_binding_expired")
+    [
+        ("source_event", "RegistryPathExpired"),
+        ("derived_from", "interpreter_state"),
+        ("terminal_reason", "registry_name_binding_expired"),
+    ]
+    .into_iter()
+    .all(|(key, value)| event.after_state.get(key).and_then(Value::as_str) == Some(value))
 }
 fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
     after_state

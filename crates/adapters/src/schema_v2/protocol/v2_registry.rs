@@ -541,9 +541,9 @@ fn label_event(
         };
         let mut retirement =
             topology::boundary_expiration(transition, raw.block_timestamp.unix_timestamp())?;
-        debug_assert!(retirement.binding_closures.is_empty());
         retirement.boundary_events.append(&mut retirement.events);
         output.append(&mut retirement);
+        state.mark_v2_expiry_retirement(&raw.emitting_address, &token_id, true);
     }
     let mut candidates = linked.resolver_discovery_aliases.clone();
     candidates.insert(token_id.clone());

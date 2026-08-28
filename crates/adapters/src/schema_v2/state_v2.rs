@@ -28,6 +28,7 @@ pub(in crate::schema_v2) struct V2TokenState {
     pub name: Option<V2NameState>,
     pub shadow_name: Option<V2RawNameState>,
     pub last_logical_name_id: Option<String>,
+    pub expiry_retirement_emitted: bool,
     pub registration: Option<Value>,
     pub upstream_resource: Option<String>,
     pub resource_id: Option<Uuid>,
@@ -288,6 +289,7 @@ impl State {
         if let Some(entry) = self.v2_tokens.get_mut(&key) {
             previous_expiry = entry.expiry;
             entry.expiry = Some(expiry);
+            entry.expiry_retirement_emitted &= entry.last_logical_name_id.is_some();
             if let Some(registration) = entry.registration.as_mut()
                 && let Some(registration) = registration.as_object_mut()
             {
