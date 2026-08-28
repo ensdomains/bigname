@@ -1998,7 +1998,7 @@ fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyho
                 1,
                 0,
                 DETACHED,
-            )],
+            ), raw_at(v2_registry::LabelReserved { tokenId: token, labelHash: keccak256(b"stale"), label: "stale".to_owned(), expiry: 1, sender }.encode_log_data(), 1, 1, DETACHED)],
         }, None)?;
     let release = output
         .normalized_events
@@ -2008,6 +2008,7 @@ fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyho
                 && event.after_state["source_event"] == "RegistryPathExpired"
         })
         .unwrap_or_else(|| panic!("missing detached expiry release: {output:#?}"));
+    let release_ids = output.normalized_events.iter().filter(|event| event.event_kind == "RegistrationReleased" && event.after_state["source_event"] == "RegistryPathExpired").map(|event| &event.event_identity).collect::<std::collections::BTreeSet<_>>(); assert_eq!(release_ids.len(), 2);
     assert!(release.logical_name_id.is_none());
     assert!(release.resource_id.is_some());
     assert_eq!(release.before_state["status"], "reserved");
@@ -2020,7 +2021,7 @@ fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyho
         .filter(|event| matches!(event.event_kind.as_str(), "RegistrationReserved" | "RegistrationReleased"))
         .map(|event| event.event_kind.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(lifecycle, ["RegistrationReserved", "RegistrationReleased"]);
+    assert_eq!(lifecycle, ["RegistrationReserved", "RegistrationReleased", "RegistrationReserved", "RegistrationReleased"]);
     let prior = seam::fold_prior_events(
         Vec::new(),
         &output.normalized_events,

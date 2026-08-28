@@ -112,6 +112,7 @@ pub(super) fn raw_log_event_identity(
     )
 }
 
+#[rustfmt::skip]
 pub(super) fn materialize_boundary(
     source: &ManifestSource,
     block: &RawBlockInput,
@@ -121,6 +122,8 @@ pub(super) fn materialize_boundary(
 ) {
     for (ordinal, draft) in events.into_iter().enumerate() {
         let derivation = derivation_kind(&source.source_family, &draft.event_kind);
+        let identity_prefix = format!("{derivation}:{}:{}:{}:{}:", source.manifest_id, block.chain_id, block.block_hash, draft.identity_suffix);
+        let ordinal = ordinal + output.normalized_events.iter().filter(|event| event.event_identity.starts_with(&identity_prefix)).count();
         let before_state_explicit = draft.explicit_before.is_some();
         let state_key = interpreter_state_key(
             &source.namespace,
