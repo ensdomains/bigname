@@ -3522,18 +3522,12 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
         !producers.is_empty(),
         "protocol source must expose at least one manifest-rule lookup producer"
     );
-    // This documents a known unadmitted [discovery edge](../../../../docs/glossary.md#discovery-graph--discovery-edge)
-    // whose missing [admission](../../../../docs/glossary.md#admission) is pending
-    // https://github.com/ensdomains/bigname/issues/374. It is not an accepted manifest shape.
-    let known_unadmitted_edges = known_unadmitted_rule_lookup_cases();
-
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("manifests");
     let mut manifest_id = 700;
     let mut covered_producers = std::collections::BTreeSet::new();
     let mut covered_cases = std::collections::BTreeSet::new();
-    let mut encountered_known_gaps = std::collections::BTreeSet::new();
     for environment in ["mainnet", "sepolia"] {
         let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
         for loaded in repository
@@ -3570,28 +3564,16 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
                         continue;
                     }
 
-                    let gap_key = rule_lookup_case_key(
-                        environment,
-                        &source.namespace,
-                        &source.chain,
-                        &source.deployment_epoch,
-                        source.manifest_version,
-                        &source.source_family,
-                        &event.name,
-                        edge_kind,
-                    );
                     let checked_in_rule = source
                         .discovery_rules
                         .iter()
-                        .find(|rule| rule.edge_kind == *edge_kind);
-                    let is_known_gap = validate_rule_lookup_case(
-                        &gap_key,
-                        checked_in_rule.is_some(),
-                        &known_unadmitted_edges,
-                    )?;
-                    if is_known_gap {
-                        encountered_known_gaps.insert(gap_key.clone());
-                    }
+                        .find(|rule| rule.edge_kind == *edge_kind)
+                        .with_context(|| {
+                            format!(
+                                "{} {} has no checked-in {edge_kind} discovery rule",
+                                source.source_family, event.name
+                            )
+                        })?;
                     let normalized_events = event
                         .normalized_events
                         .iter()
@@ -3612,56 +3594,35 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
                     );
                     let mut unrelated = admission(manifest_id, "unrelated_role");
                     unrelated.contract_instance_id = Uuid::from_u128(700);
-                    let mut other = admission(
-                        manifest_id,
-                        checked_in_rule.map_or_else(
-                            || emitter_roles.first().copied().unwrap_or("other_role"),
-                            |rule| rule.from_role.as_str(),
-                        ),
-                    );
+                    let mut other = admission(manifest_id, &checked_in_rule.from_role);
                     other.contract_instance_id = unrelated.contract_instance_id;
                     let catalog = super::catalog::Catalog::new(
                         vec![source_input],
-                        checked_in_rule
-                            .map(|rule| DiscoveryRuleInput {
-                                manifest_id,
-                                edge_kind: rule.edge_kind.clone(),
-                                from_role: Some(rule.from_role.clone()),
-                                admission: rule.admission.clone(),
-                            })
-                            .into_iter()
-                            .collect(),
+                        vec![DiscoveryRuleInput {
+                            manifest_id,
+                            edge_kind: checked_in_rule.edge_kind.clone(),
+                            from_role: Some(checked_in_rule.from_role.clone()),
+                            admission: checked_in_rule.admission.clone(),
+                        }],
                         vec![unrelated, other],
                     )?;
                     let topic0 = event
                         .topic0()?
                         .with_context(|| format!("{} must have topic0", event.name))?;
                     let raw = raw_with_topic0(topic0);
-                    if !is_known_gap {
-                        let rule = checked_in_rule.expect("non-gap rule checked above");
-                        let selected = catalog.select(&raw)?.with_context(|| {
-                            format!(
-                                "{} {} must select an admitted role",
-                                source.source_family, event.name
-                            )
-                        })?;
-                        assert_eq!(
-                            selected.emitter_role.as_deref(),
-                            Some(rule.from_role.as_str()),
-                            "required_discovery_rule must cover {} {} -> {edge_kind}",
-                            source.source_family,
-                            event.name,
-                        );
-                    } else {
-                        let selected = catalog
-                            .select(&raw)?
-                            .context("the #374 event must remain selectable before rule lookup")?;
-                        assert_eq!(
-                            selected.emitter_role.as_deref(),
-                            emitter_roles.first().copied(),
-                            "the #374 case must preserve its manifest-declared emitter role",
-                        );
-                    }
+                    let selected = catalog.select(&raw)?.with_context(|| {
+                        format!(
+                            "{} {} must select an admitted role",
+                            source.source_family, event.name
+                        )
+                    })?;
+                    assert_eq!(
+                        selected.emitter_role.as_deref(),
+                        Some(checked_in_rule.from_role.as_str()),
+                        "required_discovery_rule must cover {} {} -> {edge_kind}",
+                        source.source_family,
+                        event.name,
+                    );
                     manifest_id += 1;
                 }
             }
@@ -3671,10 +3632,6 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
     assert_eq!(
         covered_producers, producers,
         "every rule-lookup producer in protocol source must have a checked-in manifest event"
-    );
-    assert_eq!(
-        encountered_known_gaps, known_unadmitted_edges,
-        "every known-gap entry must still identify a protocol producer with no discovery rule"
     );
     Ok(())
 }
@@ -4107,52 +4064,10 @@ fn producer_guard_rejects_a_discovery_module_constructor() {
 }
 
 #[test]
-fn gap_374_does_not_waive_a_synthetic_active_mainnet_case() {
-    let key = rule_lookup_case_key(
-        "mainnet",
-        "ens",
-        "ethereum-mainnet",
-        "synthetic-mainnet",
-        1,
-        "ens_v2_root_l1",
-        "ResolverUpdated",
-        "resolver",
-    );
-    let error = validate_rule_lookup_case(&key, false, &known_unadmitted_rule_lookup_cases())
-        .expect_err("a mainnet occurrence without a rule must fail the producer guard");
-    assert!(
-        error
-            .to_string()
-            .contains("has no checked-in discovery rule or explicit known-gap entry")
-    );
-}
-
-#[test]
-fn gap_374_does_not_waive_another_namespace() {
-    let namespace = "future-namespace";
-    let key = rule_lookup_case_key(
-        "sepolia",
-        namespace,
-        "ethereum-sepolia",
-        "ens_v2_sepolia_post_audit",
-        2,
-        "ens_v2_root_l1",
-        "ResolverUpdated",
-        "resolver",
-    );
-    let error = validate_rule_lookup_case(&key, false, &known_unadmitted_rule_lookup_cases())
-        .expect_err("the ENS #374 gap must not waive another namespace");
-    assert!(
-        error
-            .to_string()
-            .contains("has no checked-in discovery rule or explicit known-gap entry"),
-        "namespace {namespace} must have an independently checked rule-lookup case"
-    );
-}
-
-#[test]
-fn root_resolver_updated_gap_374_is_terminal_in_active_sepolia_manifest() -> anyhow::Result<()> {
+fn root_resolver_updated_is_admitted_in_active_sepolia_manifest() -> anyhow::Result<()> {
     const MANIFEST_ID: i64 = 374;
+    const RESOLVER_MANIFEST_ID: i64 = 375;
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000043";
 
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -4177,14 +4092,22 @@ fn root_resolver_updated_gap_374_is_terminal_in_active_sepolia_manifest() -> any
         .iter()
         .find(|root| root.address.eq_ignore_ascii_case(&contract.address))
         .context("RootRegistry root and contract declarations must share an address")?;
+    let resolver_rule = source
+        .discovery_rules
+        .iter()
+        .find(|rule| rule.edge_kind == "resolver")
+        .context("active RootRegistry resolver rule is missing")?;
+    assert_eq!(resolver_rule.from_role, "root_registry");
+    assert_eq!(resolver_rule.admission, "reachable_from_root");
     let mut root_admission = admission(MANIFEST_ID, &root.name);
     root_admission.address = root.address.clone();
     let mut contract_admission = admission(MANIFEST_ID, &contract.role);
     contract_admission.address = contract.address.clone();
+    let root_instance_id = contract_admission.contract_instance_id;
     let mut resolver_updated = raw_at(
         v2_registry::ResolverUpdated {
             tokenId: U256::from(1),
-            resolver: "0x0000000000000000000000000000000000000043".parse()?,
+            resolver: RESOLVER.parse()?,
             sender: CONTRACT.parse()?,
         }
         .encode_log_data(),
@@ -4193,18 +4116,30 @@ fn root_resolver_updated_gap_374_is_terminal_in_active_sepolia_manifest() -> any
         &contract.address,
     );
     resolver_updated.chain_id = source.chain.clone();
-    let error = interpret_test_batch(BatchInput {
+    let root_manifest = ManifestInput {
+        manifest_id: MANIFEST_ID,
+        manifest_version: i64::try_from(source.manifest_version)?,
+        namespace: source.namespace.clone(),
+        source_family: source.source_family.clone(),
         chain_id: source.chain.clone(),
-        manifests: vec![ManifestInput {
-            manifest_id: MANIFEST_ID,
-            manifest_version: i64::try_from(source.manifest_version)?,
-            namespace: source.namespace.clone(),
-            source_family: source.source_family.clone(),
-            chain_id: source.chain.clone(),
-            deployment_label: source.deployment_epoch.clone(),
-            normalizer_version: source.normalizer_version.clone(),
-            payload_json: serde_json::to_string(source)?,
-        }],
+        deployment_label: source.deployment_epoch.clone(),
+        normalizer_version: source.normalizer_version.clone(),
+        payload_json: serde_json::to_string(source)?,
+    };
+    let mut resolver_manifest = manifest(
+        RESOLVER_MANIFEST_ID,
+        "ens_v2_resolver_l1",
+        "TextChanged",
+        "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+        &[],
+        &["RecordChanged"],
+    );
+    resolver_manifest.namespace = source.namespace.clone();
+    resolver_manifest.chain_id = source.chain.clone();
+    resolver_manifest.deployment_label = source.deployment_epoch.clone();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: source.chain.clone(),
+        manifests: vec![root_manifest.clone(), resolver_manifest.clone()],
         discovery_rules: source
             .discovery_rules
             .iter()
@@ -4219,13 +4154,66 @@ fn root_resolver_updated_gap_374_is_terminal_in_active_sepolia_manifest() -> any
         prior_events: Vec::new(),
         blocks: Vec::new(),
         raw_logs: vec![resolver_updated],
-    })
-    .expect_err("the #374 active-manifest gap must remain an explicit terminal error");
+    })?;
 
-    assert_eq!(
-        error.to_string(),
-        "ResolverUpdated is not admitted by a resolver manifest rule"
-    );
+    let changed = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "ResolverChanged")
+        .context("RootRegistry ResolverUpdated did not emit ResolverChanged")?;
+    assert_eq!(changed.source_family, "ens_v2_root_l1");
+    assert_eq!(changed.after_state["resolver"], RESOLVER);
+    let edge = output
+        .discovery_edges
+        .iter()
+        .find(|edge| edge.edge_kind == "resolver")
+        .context("RootRegistry ResolverUpdated did not emit a resolver discovery edge")?;
+    assert_eq!(edge.from_contract_instance_id, root_instance_id);
+    assert_eq!(edge.source_manifest_id, MANIFEST_ID);
+    assert_eq!(edge.admission_basis, "reachable_from_root");
+    let address = output
+        .contract_addresses
+        .iter()
+        .find(|address| address.address == RESOLVER)
+        .context("resolver discovery did not emit its address interval")?;
+    let selected = super::catalog::Catalog::new(
+        vec![root_manifest, resolver_manifest],
+        source
+            .discovery_rules
+            .iter()
+            .map(|rule| DiscoveryRuleInput {
+                manifest_id: MANIFEST_ID,
+                edge_kind: rule.edge_kind.clone(),
+                from_role: Some(rule.from_role.clone()),
+                admission: rule.admission.clone(),
+            })
+            .collect(),
+        vec![AddressAdmissionInput {
+            address: address.address.clone(),
+            contract_instance_id: address.contract_instance_id,
+            source_manifest_id: Some(MANIFEST_ID),
+            role: None,
+            discovery_edge_kind: Some("resolver".to_owned()),
+            discovery_from_contract_instance_id: Some(root_instance_id),
+            discovery_observation_key: Some(edge.observation_key.clone()),
+            active_from_block: Some(address.active_from_block_number),
+            active_to_block: None,
+        }],
+    )?
+    .select(&raw_at(
+        resolver_strings::TextChanged {
+            node: B256::ZERO,
+            indexedKey: keccak256(b"url"),
+            key: "url".to_owned(),
+            value: "https://example.test".to_owned(),
+        }
+        .encode_log_data(),
+        2,
+        0,
+        RESOLVER,
+    ))?
+    .context("root-discovered resolver did not select a target adapter")?;
+    assert_eq!(selected.source.source_family, "ens_v2_resolver_l1");
     Ok(())
 }
 
@@ -15673,64 +15661,6 @@ fn role_insensitivity_discovery_overlap(
                 })
         })
         .collect()
-}
-
-type RuleLookupCaseKey = (String, String, String, String, u64, String, String, String);
-
-#[allow(clippy::too_many_arguments)]
-fn rule_lookup_case_key(
-    environment: &str,
-    namespace: &str,
-    chain: &str,
-    deployment_label: &str,
-    manifest_version: u64,
-    source_family: &str,
-    event: &str,
-    edge_kind: &str,
-) -> RuleLookupCaseKey {
-    (
-        environment.to_owned(),
-        namespace.to_owned(),
-        chain.to_owned(),
-        deployment_label.to_owned(),
-        manifest_version,
-        source_family.to_owned(),
-        event.to_owned(),
-        edge_kind.to_owned(),
-    )
-}
-
-fn known_unadmitted_rule_lookup_cases() -> std::collections::BTreeSet<RuleLookupCaseKey> {
-    std::collections::BTreeSet::from([rule_lookup_case_key(
-        "sepolia",
-        "ens",
-        "ethereum-sepolia",
-        "ens_v2_sepolia_post_audit",
-        2,
-        "ens_v2_root_l1",
-        "ResolverUpdated",
-        "resolver",
-    )])
-}
-
-fn validate_rule_lookup_case(
-    key: &RuleLookupCaseKey,
-    has_rule: bool,
-    known_unadmitted: &std::collections::BTreeSet<RuleLookupCaseKey>,
-) -> anyhow::Result<bool> {
-    let is_known_gap = known_unadmitted.contains(key);
-    if is_known_gap {
-        anyhow::ensure!(
-            !has_rule,
-            "known gap {key:?} now has a discovery rule; remove its #374 entry"
-        );
-    } else {
-        anyhow::ensure!(
-            has_rule,
-            "protocol producer {key:?} has no checked-in discovery rule or explicit known-gap entry"
-        );
-    }
-    Ok(is_known_gap)
 }
 
 fn collect_rust_sources(

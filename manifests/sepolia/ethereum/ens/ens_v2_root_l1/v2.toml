@@ -31,6 +31,11 @@ edge_kind = "subregistry"
 from_role = "root_registry"
 admission = "reachable_from_root"
 
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "root_registry"
+admission = "reachable_from_root"
+
 # RootRegistry follows the address-scoped registry event ABI consumed by ENSv2
 # registry adapters. RegistryCreated belongs to the ens_v2_registry_l1
 # match-all scope rather than being duplicated here; URIUpdated remains
