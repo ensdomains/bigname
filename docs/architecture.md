@@ -401,6 +401,23 @@ families retained the historical `mixed_exact_name_corpus` product reason. The
 current per-name rule and its two reasons are the contracted replacement for that
 blanket refusal, not behavior claimed by ENSv1→ENSv2 migration-family intake alone.
 
+Resolver-bearing ENSv2 reservations, their expiry maintenance, and their
+release are retained facts, but they do not establish ENSv2 authority.
+Premigration can create an
+owner-zero reservation or extend an existing reservation's expiry, and the
+registry can return that reservation's resolver while it remains unexpired.
+(upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L48-L71 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+The registry permits unregistering either a registered or reserved entry; only
+a release whose resource had a matching [surface binding](glossary.md#surface-name-surface)
+remains ENSv2 era evidence.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+A real ENSv2 registration or binding still establishes ENSv2 authority.
+Therefore a live ENSv1 name plus only a premigration reservation selects ENSv1;
+a live ENSv1 name plus an actual ENSv2 registration remains unsupported without
+a proven boundary. This does not introduce a recency bridge between independent
+deployments: genuine overlap remains unsupported regardless of event age.
+
 ## Source families
 
 ENS:
