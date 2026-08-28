@@ -57,6 +57,7 @@ mod v2_pointers;
 #[path = "state_v2_tests.rs"]
 mod v2_tests;
 
+pub(in crate::schema_v2) use self::topology::v2_expiry_is_live;
 pub(super) use self::v2::{V2NameState, V2NameTransition, V2RawNameState, V2TokenState};
 #[cfg(test)]
 pub(super) use self::v2_index::{reset_v2_lookup_visits, v2_lookup_visits};

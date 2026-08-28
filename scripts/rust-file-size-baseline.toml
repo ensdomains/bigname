@@ -16,6 +16,11 @@ loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
 
 [[files]]
+path = "crates/adapters/src/schema_v2/protocol/v2_registry.rs"
+loc = 645
+justification = "ENSv2 registry dispatch keeps raw registration and reservation admission adjacent to its immediate already-expired reservation retirement, so raw-log ordering and the retained topology refresh cannot diverge."
+
+[[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry/topology.rs"
 loc = 711
 justification = "ENSv2 topology removal, expiry retirement, and rebound event groups remain adjacent so their fixed ordering, binding closure, and retained-pointer symmetry can be reviewed as one lifecycle boundary."

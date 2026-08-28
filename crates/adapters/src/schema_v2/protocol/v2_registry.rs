@@ -17,7 +17,7 @@ use crate::{
             ens_v2_registry_token_lineage_id,
         },
         model::RawLogInput,
-        state::{State, V2NameTransition, V2TokenState},
+        state::{State, V2NameTransition, V2RawNameState, V2TokenState, v2_expiry_is_live},
     },
 };
 
@@ -286,7 +286,7 @@ fn label_event(
     state: &mut State,
     registered: bool,
 ) -> anyhow::Result<Interpreted> {
-    let (token_id, label_hash, label, after) = if registered {
+    let (token_id, label_hash, label, expiry, after) = if registered {
         let e = decode_event_log_data_as::<RawLabelRegistered>(
             &raw.topics,
             &raw.data,
@@ -297,6 +297,7 @@ fn label_event(
             e.tokenId,
             e.labelHash,
             e.label.to_vec(),
+            e.expiry,
             json!({"source_event":"LabelRegistered","registrant":address_hex(e.owner),"expiry":e.expiry,"sender":address_hex(e.sender)}),
         )
     } else {
@@ -310,6 +311,7 @@ fn label_event(
             e.tokenId,
             e.labelHash,
             e.label.to_vec(),
+            e.expiry,
             json!({"source_event":"LabelReserved","expiry":e.expiry,"sender":address_hex(e.sender)}),
         )
     };
@@ -332,6 +334,23 @@ fn label_event(
             raw.block_timestamp.unix_timestamp(),
         )
     });
+    let immediate_expiry =
+        !registered && !v2_expiry_is_live(Some(expiry), raw.block_timestamp.unix_timestamp());
+    let prospective_shadow = (immediate_expiry && name.is_none())
+        .then(|| {
+            state.v2_shadow_name_for_parent_claim(
+                &raw.emitting_address,
+                &selected.source.namespace,
+                &label,
+                raw.block_timestamp.unix_timestamp(),
+            )
+        })
+        .flatten()
+        .map(|(raw_labels, namehash)| V2RawNameState {
+            logical_name_id: format!("{}:{namehash}", selected.source.namespace),
+            raw_labels,
+            namehash,
+        });
     let direct_name = name.is_some();
     let logical_name_id = name.as_ref().map(|name| name.logical_name_id.clone());
     let token_id = u256_word_hex(token_id);
@@ -378,10 +397,7 @@ fn label_event(
         selected.contract_instance_id,
         &selected.source.namespace,
         &label,
-        event_state
-            .get("expiry")
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
+        expiry,
         registered.then(|| event_state.clone()),
     );
     if let Some((upstream_resource, resource_id, token_lineage_id)) = reservation_resource {
@@ -418,10 +434,10 @@ fn label_event(
         raw_label: label,
         source_kind: format!("{}_label", selected.event.name),
     });
-    if let Some(name) = name {
+    if let Some(name) = name.as_ref() {
         output.names.push(NameDraft {
-            labels: name.labels,
-            namehash: name.namehash,
+            labels: name.labels.clone(),
+            namehash: name.namehash.clone(),
             resource_id: linked.resource_id,
             token_lineage_id: linked.token_lineage_id,
             surface_binding_id: None,
@@ -435,7 +451,7 @@ fn label_event(
         // name's stale bindings; a reservation would close another holder's live binding.
         if registered {
             output.binding_closures.push(BindingClosureDraft {
-                logical_name_id: name.logical_name_id,
+                logical_name_id: name.logical_name_id.clone(),
                 authority_arm: "ens_v2".to_owned(),
             });
         }
@@ -475,6 +491,36 @@ fn label_event(
         &selected.event.name,
         direct_name.then_some((&raw.emitting_address, token_id.as_str())),
     );
+    if immediate_expiry {
+        if let Some(shadow) = prospective_shadow.as_ref() {
+            output.shadow_names.push(ShadowNameDraft {
+                raw_labels: shadow.raw_labels.clone(),
+                namehash: shadow.namehash.clone(),
+                source_kind: format!("{}_registry_suffix", selected.event.name),
+            });
+        }
+        let mut retirement = topology::boundary_expiration(
+            V2NameTransition {
+                registry: raw.emitting_address.to_ascii_lowercase(),
+                registry_contract_instance_id: linked.registry_contract_instance_id,
+                token_id: token_id.clone(),
+                expiry: linked.expiry,
+                previous: name.clone(),
+                previous_shadow: prospective_shadow,
+                current: None,
+                current_shadow: None,
+                resource_id: linked.resource_id,
+                token_lineage_id: linked.token_lineage_id,
+                upstream_resource: linked.upstream_resource.clone(),
+                registration: None,
+                resolver: linked.resolver.clone(),
+                subregistry: linked.subregistry.clone(),
+            },
+            raw.block_timestamp.unix_timestamp(),
+        )?;
+        debug_assert!(retirement.binding_closures.is_empty());
+        output.append(&mut retirement);
+    }
     let mut candidates = linked.resolver_discovery_aliases.clone();
     candidates.insert(token_id.clone());
     let protected_tokens =

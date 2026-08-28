@@ -447,6 +447,58 @@ fn v2_expiry_retirement_is_an_empty_block_restore_and_redo_stable_delta() -> Res
         permission.resource_id.map(|id| id.to_string()).as_deref(),
         expected["resource_id"].as_str()
     );
+    let stale = &expected["already_expired_reservation"];
+    let stale_events = outputs[0]
+        .normalized_events
+        .iter()
+        .filter(|event| event.after_state["token_id"] == stale["token_id"])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stale_events
+            .iter()
+            .map(|event| event.event_kind.as_str())
+            .collect::<Vec<_>>(),
+        ["RegistrationReserved", "RegistrationReleased"]
+    );
+    let stale_release = stale_events[1];
+    assert_eq!(
+        stale_release.logical_name_id.as_deref(),
+        stale["logical_name_id"].as_str()
+    );
+    assert_eq!(
+        stale_release
+            .resource_id
+            .map(|id| id.to_string())
+            .as_deref(),
+        stale["resource_id"].as_str()
+    );
+    assert_eq!(stale_release.transaction_index, Some(1));
+    assert_eq!(stale_release.log_index, Some(0));
+    assert_eq!(
+        stale_release.after_state["source_event"],
+        "RegistryPathExpired"
+    );
+    assert_eq!(
+        stale_release.after_state["derived_from"],
+        "interpreter_state"
+    );
+    assert_eq!(
+        stale_release.after_state["terminal_reason"],
+        "registry_name_binding_expired"
+    );
+    assert_eq!(stale_release.before_state["status"], "reserved");
+    assert!(outputs[0].name_surfaces.iter().any(|surface| {
+        Some(surface.logical_name_id.as_str()) == stale["logical_name_id"].as_str()
+    }));
+    assert!(outputs[0].resources.iter().any(|resource| {
+        Some(resource.resource_id.to_string().as_str()) == stale["resource_id"].as_str()
+    }));
+    assert!(outputs[0].token_lineages.iter().any(|lineage| {
+        Some(lineage.token_lineage_id.to_string().as_str()) == stale["token_lineage_id"].as_str()
+    }));
+    assert!(outputs[0].binding_closures.iter().all(|closure| {
+        Some(closure.logical_name_id.as_str()) != stale["logical_name_id"].as_str()
+    }));
     assert_eq!(
         events
             .iter()

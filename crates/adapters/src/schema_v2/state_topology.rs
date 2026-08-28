@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use super::State;
 use crate::schema_v2::common::surface_labels;
 
-pub(super) fn v2_expiry_is_live(expiry: Option<u64>, at_unix_timestamp: i64) -> bool {
+pub(in crate::schema_v2) fn v2_expiry_is_live(expiry: Option<u64>, at_unix_timestamp: i64) -> bool {
     expiry.is_some_and(|expiry| u64::try_from(at_unix_timestamp).is_ok_and(|now| now < expiry))
 }
 

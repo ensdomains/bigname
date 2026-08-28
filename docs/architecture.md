@@ -655,14 +655,20 @@ ENSv2: the ENSv2 registry returns no subregistry, resolver, or owner for an
 expired entry. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L258 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L343-L354 @ ens_v2@a971bd64)
 
-Retirement runs before the first raw log of the first interpreted block whose
-timestamp reaches the expiry. An ordered retained-expiry index selects only
+For retained entries, retirement runs before the first raw log of the first
+interpreted block whose timestamp reaches the expiry. An ordered retained-expiry index selects only
 tokens that crossed the expiry boundary, and Interpret materializes the
 affected descendants as ordinary normalized lifecycle and pointer-clearing
 deltas. Wall-clock time, physical batch boundaries, read-time expiry filters,
 and per-read ancestor walks do not participate. Premigration reservations use
 the same rule: expiry removes the reservation and its mirror resolver from
 current surfaces without creating an ENSv2 authority binding.
+
+An ownerless reservation may also be observed with a nonzero expiry that is
+already at or before its event block timestamp. Interpret retains that raw
+reservation as history, then emits its state-derived release at the same raw-log
+position so the reservation and any later effective grants never enter current
+state. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L465 @ ens_v2@a971bd64)
 
 Interpret and Project may land as separate deployment slices, but this
 combined [interpreter content hash](glossary.md#interpreter-content-hash)
