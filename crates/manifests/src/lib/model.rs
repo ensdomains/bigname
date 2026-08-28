@@ -6,6 +6,8 @@ use std::{
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
+pub use bigname_domain::resolver_read::ResolverReadFeature;
+
 use crate::REACHABLE_FROM_ROOT_ADMISSION;
 
 #[path = "model/abi.rs"]
@@ -225,6 +227,8 @@ pub struct ManifestContract {
     pub address: String,
     pub proxy_kind: String,
     pub implementation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_features: Vec<ResolverReadFeature>,
     #[serde(default, deserialize_with = "deserialize_optional_start_block")]
     pub start_block: Option<u64>,
 }
@@ -233,6 +237,8 @@ pub struct ManifestContract {
 pub struct ResolverImplementation {
     pub role: String,
     pub address: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_features: Vec<ResolverReadFeature>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

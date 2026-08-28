@@ -389,7 +389,8 @@ detail, it belongs on a diagnostics route instead.
 schema-v2 lookup engine on every request. Response fields and per-record status
 meaning stay unchanged, but there is no reusable outcome, durable execution
 trace, or execution-cache readback. A direct live answer that disagrees
-with the exact indexed record used for comparison writes the guarded
+with the indexed exact entry or manifest-authorized derived read used for
+comparison writes the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
 Agreement creates no divergence but may clear a matching active row, wildcard
 lookup without an exact comparison row writes nothing, and an answer that used
@@ -413,8 +414,10 @@ partial blend after such a failure.
 Explicit record `keys` and the inventory-derived default verified selector set
 are each limited to 200 keys. An oversized server-derived set returns `422
 unsupported` before provider execution; the compact records caller can narrow
-the request with `keys`, while the verified flat name-profile has no selector
-parameter and returns the same error.
+the request with `keys`. For the verified flat name-profile, the limit applies
+before its synthetic `addr:60` request is added, so a 200-selector inventory
+may issue 201 provider keys when the primary-address selector was absent; more
+than 200 inventory-derived selectors still returns the same error.
 
 `GET /v2/addresses/{address}/primary-name` keeps its documented `answers` and
 typed `verification` shapes. Every indexed answer reads

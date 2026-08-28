@@ -4,6 +4,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use bigname_domain::resolver_read::ResolverReadFeature;
 use bigname_storage::{
     BASENAMES_NAMESPACE, NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot,
     SnapshotSelectionErrorKind,
@@ -136,6 +137,15 @@ pub(crate) struct RecordAnswer {
     pub(crate) unsupported_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) meta: Option<RecordAnswerMeta>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct RecordAnswerMeta {
+    pub(crate) basis: String,
+    pub(crate) rule: ResolverReadFeature,
+    pub(crate) source_record_key: String,
 }
 
 pub(crate) enum VerifiedRecordLookup {

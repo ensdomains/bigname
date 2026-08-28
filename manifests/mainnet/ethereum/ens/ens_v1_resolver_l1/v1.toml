@@ -46,6 +46,12 @@ discovery_rules = []
 role = "public_resolver"
 address = "0xF29100983E058B709F3D539b0c765937B804AC15"
 proxy_kind = "none"
+# This generation composes AddrResolver and first-party app metadata marks its
+# default coin-type support.
+# (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+# (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32-L40 @ ens_app_v3@7175858)
+read_features = ["ensip19_default_address"]
 # Start block follows the mainnet deployment transaction.
 # (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L1104 @ ens_v1@91c966f).
 start_block = 22764828

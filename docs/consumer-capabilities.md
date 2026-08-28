@@ -39,6 +39,50 @@ it does not preserve the deleted v1 DTOs.
 | Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
+## Resolver address read modes
+
+The records route, exact-name detail, and name results in batch lookup share
+one indexed ENSIP-19 behavior. Projected exact entries remain event-derived.
+When the selected resolver has the manifest-authorized
+[resolver read feature](glossary.md#resolver-read-feature), an eligible EVM
+coin-type request whose exact entry is empty or missing reads the projected
+default entry instead. The records route identifies per-key derived results in
+`records[key].meta`; values-only address maps contain the value without adding
+provenance fields. Derived values use the requested getter's verified decode:
+coin type `60` treats a 20-byte zero default as `not_found`, while EVM-range
+multicoin selectors retain that non-empty byte value. Exact stored records are
+not normalized by this rule. Completeness remains request-relative. ENSIP-19 defines the
+coin-type-to-chain eligibility rule, and the admitted resolver getter performs
+the default-entry fallback only when that rule returns a positive chain ID
+`(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)`.
+The admitted archived-Sepolia implementation exposes the same two getter shapes
+`(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)`.
+
+| Address read | Indexed | Auto | Verified |
+| --- | --- | --- | --- |
+| Exact entry | Exact value | Exact value | Chain value |
+| Eligible EVM coin type, flagged resolver, default entry present | Derived value with per-key metadata | Derived value; no provider call | Chain value |
+| Coin type 60, flagged resolver, default entry is 20 zero bytes | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain `not_found` |
+| Eligible EVM coin type, flagged resolver, default source authoritatively absent | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain result |
+| Default source unavailable or inventory non-authoritative | Explicit `unsupported` | Request-scoped verified fallback | Chain result |
+| Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |
+
+The flagged deployments are the current ENS PublicResolver on mainnet and the
+admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation. The
+admitted Basenames address is the legacy resolver and remains unflagged; its
+vendored coin-type getter reads exact storage, while the fallback-bearing
+upgradeable resolver proxy is not admitted in this change.
+`(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)`
+`(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2398 @ ens_v2@a971bd64)`
+`(upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)`
+`(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)`
+
+Verified answers never claim whether the on-chain resolver used exact storage,
+default storage, or another execution path, so they omit derived metadata.
+
 ## ENSv1→ENSv2 mixed-history ownership
 
 The replacement contract for exact-name and direct-subname current reads is

@@ -434,7 +434,13 @@ Field ownership:
   record-key allowlist using the existing app key grammar: `addr:<coin_type>`,
   `text:<key>`, `avatar`, and `contenthash`. Requested-key outcomes are also
   returned in route-local `records`, keyed by the requested key; each value is
-  `{status, value?, unsupported_reason?, failure_reason?}`. `source=verified`
+  `{status, value?, unsupported_reason?, failure_reason?, meta?}`. Exact indexed
+  and verified answers omit `meta`. An indexed ENSIP-19 answer derived from the
+  projected default-address rule includes
+  `meta={basis:"derived", rule:"ensip19_default_address",
+  source_record_key:"addr:2147483648"}` for both `ok` and authoritative
+  `not_found`. Values-only convenience maps continue to contain only values.
+  `source=verified`
   and verified fallback from `source=auto` execute a fresh schema-v2 lookup on
   every request. They do not read or write the legacy execution cache. A direct
   live/indexed disagreement may update the guarded resolution divergence
@@ -457,9 +463,34 @@ Field ownership:
   `record_family_not_supported`.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
-  lookup. An indexed answer — including an indexed `not_found` — is admitted
-  only from a record inventory whose coverage carries no unsupported reason and
-  whose coverage `status` is `full` or `projected`. `projected` is admitted
+  lookup. Exact indexed `ok` answers and authoritative ENSIP-19 derived answers
+  satisfy auto without a provider request. For `addr:<coin_type>`, exact `ok`
+  wins. An exact entry normalized to `not_found`, including empty address
+  bytes, or a missing exact entry may read projected
+  `addr:2147483648` only when the selected resolver's manifest-authorized
+  [resolver read feature](glossary.md#resolver-read-feature) is present and
+  `chainFromCoinType(coin_type) > 0`; coin type `2147483648` itself never
+  recurses. A derived answer is normalized through the requested getter's
+  verified decode: for coin type `60`, a 20-byte zero default becomes derived
+  `not_found`; for EVM-range multicoin selectors, the same non-empty bytes remain
+  an `ok` value. Exact stored records keep their existing behavior. Other
+  default-source `ok` values yield the requested-key value, while authoritative
+  absence yields derived `not_found`. An unsupported or
+  non-authoritative source leaves auto unsatisfied and triggers ordinary
+  verified lookup. Explicit `source=indexed` reports that case as
+  `unsupported`.
+  (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
+  The admitted legacy Basenames resolver is unflagged because its exact-storage
+  getter does not implement that fallback. The fallback-bearing upgradeable
+  Basenames resolver proxy is not yet admitted.
+  (upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)
+  (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)
+  A non-derived indexed `not_found` is admitted only from a record inventory
+  whose coverage carries no unsupported reason and whose coverage `status` is
+  `full` or `projected`. `projected` is admitted
   because a supported schema-v2 inventory is complete for its current resolver
   over retained supported facts: the project phase includes both record events
   already linked to the name and ENSv1 resolver events whose `logical_name_id`
@@ -501,9 +532,11 @@ Field ownership:
   Explicit `keys` and the inventory-derived default verified selector set are
   both limited to 200 record keys. When omitted `keys` would derive more than
   200 keys, `source=verified` returns `422 unsupported` before any provider call;
-  callers can supply `keys` to select a smaller set. The verified flat
-  name-profile has the same 200-key server-derived limit and returns `422
-  unsupported` because that route has no key selector.
+  callers can supply `keys` to select a smaller set. For the verified flat
+  name-profile, the limit applies to inventory-derived selectors before the
+  route adds its synthetic primary-address request. A 200-selector inventory
+  may therefore produce 201 provider keys when `addr:60` was absent; an
+  inventory with more than 200 selectors still returns `422 unsupported`.
   `include=inventory` adds route-local
   `inventory: {known_keys, unset_keys, unsupported_keys}`. Deep inventory
   internals stay on diagnostics.
@@ -535,6 +568,10 @@ Field ownership:
   `status=unsupported` with `inventory_not_available`. `source=auto` follows
   its ordinary verified-lookup fallback rules when that execution path is
   available.
+  Direct verified lookup compares against the same exact-or-derived indexed
+  evaluator before the guarded resolution-divergence-ledger write. Agreement
+  can therefore clear an older exact-key false miss; provider output remains
+  request-scoped and is never copied into inventory or another projection.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 

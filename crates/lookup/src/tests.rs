@@ -161,6 +161,10 @@ fn avatar_comparison_uses_the_text_avatar_inventory_entry() -> crate::Result<()>
 async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<()> {
     let oversized_text_key = "k".repeat(4_096);
     let oversized_record_key = format!("text:{oversized_text_key}");
+    let read_rule = json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]});
     let cases = vec![
         (
             "nested value",
@@ -172,6 +176,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": { "value": "https://value.example" },
             }]),
+            json!({}),
         ),
         (
             "nested bytes",
@@ -183,6 +188,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": { "bytes": "0xe3010170" },
             }]),
+            json!({}),
         ),
         (
             "avatar exact entry preferred over text fallback",
@@ -203,6 +209,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                     "value": { "value": "ipfs://preferred" },
                 },
             ]),
+            json!({}),
         ),
         (
             "address value lowercasing",
@@ -214,8 +221,14 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": { "bytes": "0xAbCdEf0123" },
             }]),
+            json!({}),
         ),
-        ("absent entry", "text:missing".to_owned(), json!([])),
+        (
+            "absent entry",
+            "text:missing".to_owned(),
+            json!([]),
+            json!({}),
+        ),
         (
             "null value",
             "text:null".to_owned(),
@@ -226,6 +239,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": null,
             }]),
+            json!({}),
         ),
         (
             "oversized text key",
@@ -237,17 +251,131 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": { "value": "oversized-key-value" },
             }]),
+            json!({}),
         ),
-    ];
+        (
+            "legacy failed status alias",
+            "text:failed".to_owned(),
+            json!([{
+                "record_key":"text:failed",
+                "record_family":"text",
+                "selector_key":"failed",
+                "status":"failed",
+                "failure_reason":"record_read_failed"
+            }]),
+            json!({}),
+        ),
+        (
+            "empty exact address derives from default",
+            "addr:60".to_owned(),
+            json!([
+                {
+                    "record_key":"addr:60",
+                    "record_family":"addr",
+                    "selector_key":"60",
+                    "status":"not_found"
+                },
+                {
+                    "record_key":"addr:2147483648",
+                    "record_family":"addr",
+                    "selector_key":"2147483648",
+                    "status":"success",
+                    "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000def"}
+                }
+            ]),
+            read_rule.clone(),
+        ),
+        (
+            "empty default address derives not found",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key":"addr:2147483648",
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"not_found"
+            }]),
+            read_rule.clone(),
+        ),
+        (
+            "zero20 default for legacy address derives not found",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key":"addr:2147483648",
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"success",
+                "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+            }]),
+            read_rule.clone(),
+        ),
+        (
+            "zero20 default for EVM multicoin remains success",
+            "addr:2147483649".to_owned(),
+            json!([{
+                "record_key":"addr:2147483648",
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"success",
+                "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+            }]),
+            read_rule,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, record_key, entries, provenance)| {
+        (
+            name,
+            record_key,
+            entries,
+            provenance,
+            json!({"status":"projected"}),
+            "supported",
+        )
+    })
+    .chain([(
+        "exact not found with non-authoritative coverage",
+        "text:empty".to_owned(),
+        json!([{
+            "record_key":"text:empty",
+            "record_family":"text",
+            "selector_key":"empty",
+            "status":"not_found"
+        }]),
+        json!({}),
+        json!({
+            "status":"unsupported",
+            "unsupported_reason":"coverage_incomplete"
+        }),
+        "unsupported",
+    )]);
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
 
-    for (case_name, record_key, entries) in cases {
+    for (case_name, record_key, entries, provenance, coverage, support_status) in cases {
         let selector = RecordSelector::parse(&record_key)?;
-        let rust_answer = crate::store::indexed_answer(&entries, &selector);
-        sqlx::query("UPDATE record_inventory_current SET entries = $1")
-            .bind(&entries)
-            .execute(fixture.pool())
-            .await?;
+        let rust_answer = bigname_domain::resolver_read::evaluate_indexed_record(
+            &entries,
+            &provenance,
+            &coverage,
+            &selector.record_key,
+            &selector.record_family,
+            selector.selector_key.as_deref(),
+        )
+        .comparison_value();
+        sqlx::query(
+            "UPDATE record_inventory_current
+             SET entries = $1,
+                 provenance = $2,
+                 support_status = $3,
+                 unsupported_reason = CASE WHEN $3 = 'unsupported'
+                     THEN 'coverage_incomplete'
+                     ELSE NULL
+                 END",
+        )
+        .bind(&entries)
+        .bind(&provenance)
+        .bind(support_status)
+        .execute(fixture.pool())
+        .await?;
         let snapshot = crate::store::load_snapshot(
             fixture.pool(),
             &LookupRequest::new(&fixture.logical_name_id, [&record_key])?,
@@ -303,6 +431,97 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
 }
 
 #[tokio::test]
+async fn empty_ensip19_default_agrees_with_live_miss_without_divergence() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_address_result(
+        "0x0000000000000000000000000000000000000000",
+    )?)])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET selectors = $1, entries = $2, provenance = $3",
+    )
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648"
+    }]))
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648",
+        "status":"not_found"
+    }]))
+    .bind(json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]}))
+    .execute(fixture.pool())
+    .await?;
+
+    let outcome = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(&fixture.logical_name_id, ["addr:60"])?)
+        .await?;
+    assert_eq!(outcome.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(
+        outcome.records[0].status,
+        crate::LookupRecordStatus::NotFound
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zero20_ensip19_default_agrees_with_legacy_live_miss_without_divergence() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_address_result(
+        "0x0000000000000000000000000000000000000000",
+    )?)])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET selectors = $1, entries = $2, provenance = $3",
+    )
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648"
+    }]))
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648",
+        "status":"success",
+        "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+    }]))
+    .bind(json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]}))
+    .execute(fixture.pool())
+    .await?;
+
+    let outcome = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(&fixture.logical_name_id, ["addr:60"])?)
+        .await?;
+    assert_eq!(outcome.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(
+        outcome.records[0].status,
+        crate::LookupRecordStatus::NotFound
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn agreeing_resolution_without_active_divergence_writes_nothing() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
         INDEXED_VALUE,
@@ -348,6 +567,61 @@ async fn restored_agreement_clears_the_matching_active_divergence() -> AnyResult
     let requests = join_rpc(rpc_handle).await?;
     assert_eq!(requests.len(), 2);
     assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ensip19_derived_indexed_agreement_clears_a_prior_divergence() -> AnyResult<()> {
+    let default_address = "0x0000000000000000000000000000000000000def";
+    let different_address = "0x0000000000000000000000000000000000000abc";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_address_result(different_address)?),
+        RpcResponse::Result(encoded_address_result(default_address)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET selectors = $1, entries = $2, provenance = $3",
+    )
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648"
+    }]))
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648",
+        "status":"success",
+        "value":default_address
+    }]))
+    .bind(json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]}))
+    .execute(fixture.pool())
+    .await?;
+    let request = || LookupRequest::new(&fixture.logical_name_id, ["addr:60"]);
+
+    let disagreement = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request()?)
+        .await?;
+    assert_eq!(disagreement.records[0].ledger_action, LedgerAction::Written);
+
+    let agreement = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request()?)
+        .await?;
+    assert_eq!(agreement.records[0].ledger_action, LedgerAction::Cleared);
+    let active: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL")
+            .fetch_one(fixture.pool())
+            .await?;
+    assert_eq!(active, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 2);
     Ok(())
 }
 

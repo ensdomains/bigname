@@ -1025,6 +1025,13 @@ refresh, or clear one active divergence observation. The API role receives
 `EXECUTE` on those functions but no direct write access to
 `resolution_divergences`. Ledger rows are durable operational observations;
 they are not projection input or a response cache.
+The guard derives the same exact-or-ENSIP-19 indexed comparison from the locked
+inventory `entries` and `provenance.read_rules` before mutation. This baseline
+comparison normalizes the legacy indexed status alias `failed` to
+`execution_failed`, matching the Rust evaluator. This baseline function change
+adds no table, column, or reusable provider state; the release
+uses the documented empty-namespace replacement and full Project walk rather
+than an in-place schema-migration.
 
 ## Inspection
 

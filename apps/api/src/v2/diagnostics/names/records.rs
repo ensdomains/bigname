@@ -363,12 +363,14 @@ mod tests {
                     value: Some(json!("0x0000000000000000000000000000000000000abc")),
                     unsupported_reason: None,
                     failure_reason: None,
+                    meta: None,
                 },
                 verified: RecordAnswer {
                     status: Status::Stale,
                     value: None,
                     unsupported_reason: None,
                     failure_reason: Some("rpc_not_configured".to_owned()),
+                    meta: None,
                 },
             },
         );

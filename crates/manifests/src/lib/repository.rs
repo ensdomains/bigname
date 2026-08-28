@@ -15,6 +15,11 @@ use crate::model::RawSourceManifest;
 use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
+#[path = "repository/read_features.rs"]
+mod read_features;
+
+use read_features::validate_read_features;
+
 pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
     let root = root.as_ref();
     let display_root = canonicalize_for_logging(root);
@@ -385,6 +390,8 @@ fn validate_manifest_metadata(
             );
         }
     }
+
+    validate_read_features(manifest, path)?;
 
     let mut contract_roles = BTreeSet::new();
     for contract in &manifest.contracts {

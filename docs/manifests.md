@@ -36,8 +36,8 @@ Each manifest contains:
 - `deployment_epoch`
 - `rollout_status` — `draft` | `shadow` | `active` | `deprecated`
 - `normalizer_version`
-- `resolver_implementations` — optional declared implementation artifacts for
-  upgradeable resolver families
+- `resolver_implementations` — optional declared implementation artifacts and
+  implementation-sensitive `read_features` for upgradeable resolver families
 - `correlation_addresses` — optional named, validated EVM addresses used only
   to correlate decoded observations across declared emitters; these entries do
   not declare contracts, add discovery edges, or widen the watch plan
@@ -83,9 +83,64 @@ manifest-drift observation job. Baseline
 materialization and handling of upgrade observations are the schema-v2
 consumers that keep `proxy_kind` in the manifest schema.
 
-`resolver_implementations` is a list of `{ role, address }` entries with unique
-addresses; several implementation generations may share one role. It
-does not admit an implementation as a watched emitter. The project phase uses
+`resolver_implementations` is a list of `{ role, address, read_features? }`
+entries with unique addresses; several implementation generations may share
+one role. `[[contracts]]` also accepts `read_features`. Each feature list is
+deduplicated and uses the closed `ensip19_default_address` vocabulary in this
+release. Unknown or duplicate values fail loading. Contract-level features are
+valid only for resolver roles with `proxy_kind = "none"`; proxy-sensitive
+features belong on the implementation declaration. A family with any
+`resolver_implementations` entries rejects contract-level read features rather
+than choosing between two authority forms. All direct contract declarations
+for the same case-normalized address must also declare the same feature set;
+role ordering never resolves conflicting getter authority. An empty list is
+the default.
+
+A [resolver read feature](glossary.md#resolver-read-feature) authorizes getter
+behavior, not an event family or watch-plan expansion. Direct resolvers use the
+features on their exact active contract declaration. A resolver proxy uses only
+the features on the implementation selected by latest canonical `Upgraded`
+history; features from older implementations are never unioned.
+`ensip19_default_address` authorizes reading `addr:2147483648` when an eligible
+requested EVM coin-type entry is empty. Eligibility follows
+`chainFromCoinType(coinType) > 0`: coin type `60` and
+`2147483649..=4294967295` are targets, while `2147483648` is the source key and
+does not recurse. The read feature authorizes the fallback source; serving then
+uses the requested getter's verified decode. A derived coin-type-60 zero address
+is `not_found`, while an EVM-range multicoin request preserves the same non-empty
+20 zero bytes. This target-specific normalization does not alter exact stored
+records.
+(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
+
+The current ENS PublicResolver and the admitted archived-Sepolia ENSv2
+`PermissionedResolver` implementation declare this feature. Legacy ENS resolver
+generations remain unflagged: bigname makes no derived-read claim for them even
+if retained events exist. The current ENS contract composes `AddrResolver`, and
+first-party app metadata identifies that generation as supporting the default
+coin type.
+(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)
+(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32-L40 @ ens_app_v3@7175858)
+The archived ENSv2 deployment identifies the admitted implementation, whose
+embedded compiled-source metadata applies the same empty-address fallback.
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2398 @ ens_v2@a971bd64)
+
+The admitted Basenames address is the legacy L2 resolver. It imports the
+vendored exact-storage address resolver, so it deliberately carries no
+`ensip19_default_address` feature. The fallback-bearing implementation is used
+by the separate upgradeable resolver proxy, which is not admitted in this
+manifest and is deferred to a follow-up admission decision.
+(upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/L2Resolver.sol:L4-L32 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/UpgradeableL2Resolver.sol:L11-L40 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L84-L99 @ basenames@1809bbc)
+
+`resolver_implementations` does not admit an implementation as a watched
+emitter. The project phase uses
 the list only to classify a discovered ENSv2 resolver proxy after canonical
 ERC-1967 `Upgraded` history identifies its current implementation. ENSv1 and
 Basenames resolver classification instead requires the resolver address itself

@@ -5,6 +5,9 @@
 # (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)
 # (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L22 @ ens_v2_sepolia_20260629@ccaeb58)
 # (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L89 @ ens_v2_sepolia_20260629@ccaeb58).
+# The archived artifact's embedded compiled-source metadata proves its
+# empty-address default fallback:
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2398 @ ens_v2@a971bd64).
 manifest_version = 2
 namespace = "ens"
 source_family = "ens_v2_resolver_l1"
@@ -13,7 +16,7 @@ deployment_epoch = "ens_v2_sepolia_post_audit"
 rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 resolver_implementations = [
-  { role = "permissioned_resolver", address = "0x7e4b2d59938930168024201752ee5503df402303" },
+  { role = "permissioned_resolver", address = "0x7e4b2d59938930168024201752ee5503df402303", read_features = ["ensip19_default_address"] },
 ]
 roots = []
 contracts = []

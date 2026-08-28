@@ -352,6 +352,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                 "declared_summary": {
                     "classification": {
                         "basis": "manifest_declared_address",
+                        "read_features": [],
                         "role": "public_resolver",
                         "source_family": "ens_v1_resolver_l1"
                     },
@@ -7125,6 +7126,212 @@ async fn record_inventory_restores_same_resolver_records_across_resources() -> R
 }
 
 #[tokio::test]
+async fn record_inventory_normalizes_empty_address_shapes_and_coin60_siblings() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_empty_address_shapes").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    for (source_family, after_state) in [
+        (
+            "ens_v1_resolver_l1",
+            json!({
+                "resolver":RESOLVER,
+                "source_event":"AddressChanged",
+                "record_key":"addr:2147483649",
+                "record_family":"addr",
+                "selector_key":"2147483649",
+                "value":{"encoding":"hex","bytes":"0x"}
+            }),
+        ),
+        (
+            "ens_v2_resolver_l1",
+            json!({
+                "resolver":RESOLVER,
+                "source_event":"AddressChanged",
+                "record_key":"addr:2147483650",
+                "record_family":"addr",
+                "selector_key":"2147483650",
+                "address_bytes_hex":"0x"
+            }),
+        ),
+        (
+            "ens_v1_resolver_l1",
+            json!({
+                "resolver":RESOLVER,
+                "source_event":"AddressChanged",
+                "record_key":"addr:2147483651",
+                "record_family":"addr",
+                "selector_key":"2147483651",
+                "value":{"encoding":"hex","bytes":"0x1234"}
+            }),
+        ),
+        (
+            "ens_v1_resolver_l1",
+            json!({
+                "resolver":RESOLVER,
+                "source_event":"AddressChanged",
+                "record_key":"addr:60",
+                "record_family":"addr",
+                "selector_key":"60",
+                "value":{"encoding":"hex","bytes":"0x"}
+            }),
+        ),
+        (
+            "ens_v1_resolver_l1",
+            json!({
+                "resolver":RESOLVER,
+                "source_event":"AddrChanged",
+                "record_key":"addr:60",
+                "record_family":"addr",
+                "selector_key":"60",
+                "value":"0x0000000000000000000000000000000000000000"
+            }),
+        ),
+    ] {
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            3,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "RecordChanged",
+            source_family,
+            after_state,
+            json!({"emitting_address":RESOLVER}),
+        )
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE normalized_events
+         SET transaction_index = 0,
+             transaction_hash = '0xcoin60pair',
+             log_index = CASE after_state ->> 'source_event'
+                 WHEN 'AddressChanged' THEN 10
+                 ELSE 11
+             END
+         WHERE chain_id = $1
+           AND block_number = 3
+           AND after_state ->> 'record_key' = 'addr:60'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let entries: Value =
+        sqlx::query_scalar("SELECT entries FROM record_inventory_current WHERE resource_id = $1")
+            .bind(Uuid::parse_str(RESOURCE)?)
+            .fetch_one(scratch.pool())
+            .await?;
+    for key in ["addr:60", "addr:2147483649", "addr:2147483650"] {
+        let entry = entries
+            .as_array()
+            .expect("entries array")
+            .iter()
+            .find(|entry| entry["record_key"] == key)
+            .unwrap_or_else(|| panic!("missing {key}"));
+        assert_eq!(
+            entry["status"],
+            json!("not_found"),
+            "wrong status for {key}"
+        );
+        assert!(entry.get("value").is_none(), "empty {key} retained a value");
+    }
+    let nonempty = entries
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .find(|entry| entry["record_key"] == "addr:2147483651")
+        .expect("missing nonempty v1-shape address");
+    assert_eq!(nonempty["status"], json!("success"));
+    assert_eq!(
+        nonempty["value"],
+        json!({"encoding":"hex","bytes":"0x1234"})
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn record_inventory_coin60_pair_does_not_override_a_later_same_transaction_write()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_coin60_pair_scope").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    for after_state in [
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"AddressChanged",
+            "record_key":"addr:60",
+            "record_family":"addr",
+            "selector_key":"60",
+            "value":{"encoding":"hex","bytes":"0x"}
+        }),
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"AddrChanged",
+            "record_key":"addr:60",
+            "record_family":"addr",
+            "selector_key":"60",
+            "value":"0x0000000000000000000000000000000000000000"
+        }),
+        json!({
+            "resolver":RESOLVER,
+            "source_event":"AddrChanged",
+            "record_key":"addr:60",
+            "record_family":"addr",
+            "selector_key":"60",
+            "value":"0x0000000000000000000000000000000000000def"
+        }),
+    ] {
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            3,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            after_state,
+            json!({"emitting_address":RESOLVER}),
+        )
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE normalized_events
+         SET transaction_index = 0,
+             transaction_hash = '0xcoin60scope',
+             log_index = CASE
+                 WHEN after_state ->> 'source_event' = 'AddressChanged' THEN 10
+                 WHEN after_state ->> 'value' =
+                      '0x0000000000000000000000000000000000000000' THEN 11
+                 ELSE 12
+             END
+         WHERE chain_id = $1
+           AND block_number = 3
+           AND after_state ->> 'record_key' = 'addr:60'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let entries: Value =
+        sqlx::query_scalar("SELECT entries FROM record_inventory_current WHERE resource_id = $1")
+            .bind(Uuid::parse_str(RESOURCE)?)
+            .fetch_one(scratch.pool())
+            .await?;
+    let addr60 = entries
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .find(|entry| entry["record_key"] == "addr:60")
+        .expect("missing addr:60");
+    assert_eq!(addr60["status"], json!("success"));
+    assert_eq!(
+        addr60["value"],
+        json!("0x0000000000000000000000000000000000000def")
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn record_inventory_chain_position_keeps_block_number_and_hash_paired() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_record_position_pair").await?;
     seed_project_fixture(scratch.pool()).await?;
@@ -8973,7 +9180,7 @@ async fn manifest_admission_reclassifies_v2_resolver_inline_without_a_queue() ->
          SET manifest_payload = jsonb_set(
              manifest_payload,
              '{resolver_implementations}',
-             '[{"role":"permissioned_resolver","address":"0x00000000000000000000000000000000000000c1"}]'::jsonb
+             '[{"role":"permissioned_resolver","address":"0x00000000000000000000000000000000000000c1","read_features":["ensip19_default_address"]}]'::jsonb
          )
          WHERE chain_id = $1 AND source_family = 'ens_v2_resolver_l1'"#,
     )
@@ -9013,16 +9220,21 @@ async fn manifest_admission_reclassifies_v2_resolver_inline_without_a_queue() ->
         0,
     )
     .await?;
-    let after: (String, String) = sqlx::query_as(
+    let after: (String, String, Value) = sqlx::query_as(
         "SELECT support_status,
-                declared_summary -> 'classification' ->> 'basis'
+                declared_summary -> 'classification' ->> 'basis',
+                declared_summary -> 'classification' -> 'read_features'
          FROM resolver_current",
     )
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(
         after,
-        ("supported".into(), "erc1967_upgraded_history".into())
+        (
+            "supported".into(),
+            "erc1967_upgraded_history".into(),
+            json!(["ensip19_default_address"]),
+        )
     );
     scratch.cleanup().await
 }

@@ -1308,7 +1308,8 @@ Default verified entrypoints:
 
 The v2 lookup engine executes afresh at the schema-v2 current readable position.
 It has no trace or cache identity. It may compare a direct record answer with
-the exact projected record row and perform the guarded divergence-ledger write;
+the projected exact entry or a manifest-authorized derived read from that same
+record inventory and perform the guarded divergence-ledger write;
 v2 primary-name verification performs no write.
 
 ## Reorg, redo, and historical ranges

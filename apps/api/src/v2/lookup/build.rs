@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
-use serde_json::Value;
+use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
+use serde_json::{Value, json};
 
 use super::{cursor::reverse_identity_is_primary, dto::LookupRecord};
 use crate::v2::support::{
@@ -160,7 +161,7 @@ fn build_detail_record(
         .record_inventory_current
         .as_ref()
         .filter(|_| !released_tombstone);
-    let addresses = identity_addresses(record_inventory);
+    let addresses = identity_addresses(record_inventory, primary_coin_type);
     let text_records = identity_text_records(record_inventory);
     let content_hash = identity_content_hash(record_inventory);
     let unsupported_fields = identity_unsupported_fields(record_inventory);
@@ -264,11 +265,43 @@ fn authority_unsupported_record(
 
 fn identity_addresses(
     inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
+    primary_coin_type: &str,
 ) -> std::collections::BTreeMap<String, String> {
-    record_addresses_from_entries(
+    let mut addresses = record_addresses_from_entries(
         inventory.map(|inventory| &inventory.entries),
         direct_json_field,
-    )
+    );
+    if addresses.contains_key(primary_coin_type) {
+        return addresses;
+    }
+    let Some(inventory) = inventory else {
+        return addresses;
+    };
+    let coverage = if inventory.support_status == "supported" {
+        json!({"status": "projected", "exhaustiveness": "not_asserted"})
+    } else {
+        json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_asserted",
+            "unsupported_reason": inventory.unsupported_reason
+        })
+    };
+    let answer = evaluate_indexed_record(
+        &inventory.entries,
+        &inventory.provenance,
+        &coverage,
+        &format!("addr:{primary_coin_type}"),
+        "addr",
+        Some(primary_coin_type),
+    );
+    if answer.status == IndexedRecordStatus::Success
+        && let Some(value) = answer
+            .value
+            .and_then(|value| value.as_str().map(str::to_owned))
+    {
+        addresses.insert(primary_coin_type.to_owned(), value);
+    }
+    addresses
 }
 
 fn identity_text_records(
