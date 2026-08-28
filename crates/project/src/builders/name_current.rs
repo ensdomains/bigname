@@ -7,6 +7,17 @@ pub(super) async fn build(
 ) -> Result<()> {
     sqlx::query(
         r#"
+        WITH v2_registration_events AS (
+            SELECT event.*, COALESCE(event.resource_id::text, (
+                SELECT linked.resource_id::text FROM project_events linked
+                WHERE linked.logical_name_id = event.logical_name_id AND linked.resource_id IS NOT NULL
+                  AND linked.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND linked.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
+                  AND COALESCE(linked.after_state ->> 'registry_contract_instance_id', linked.raw_fact_ref ->> 'emitting_address', linked.after_state ->> 'registry') = COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry') AND linked.after_state ->> 'token_id' = event.after_state ->> 'token_id'
+                ORDER BY linked.block_number DESC NULLS LAST, linked.normalized_event_id DESC LIMIT 1
+            ), NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':')) AS lifecycle_key
+            FROM project_events event
+            WHERE event.event_kind IN ('RegistrationGranted', 'RegistrationReserved', 'RegistrationReleased') AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
+        )
         INSERT INTO project_stage_name_current (
             logical_name_id, namespace, raw_name, namehash,
             surface_binding_id, resource_id, token_lineage_id, binding_kind,
@@ -229,32 +240,21 @@ pub(super) async fn build(
         ) registration_latest ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.event_kind, event.after_state, event.resource_id
-            FROM (SELECT DISTINCT ON (COALESCE(NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':'), event.resource_id::text)) event.* FROM project_events event
-            WHERE event.logical_name_id = surface.logical_name_id
-              AND (
-                  (event.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
-                      AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'))
-                  OR (event.event_kind = 'RegistrationReleased' AND event.source_family IN
-                      ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1') AND
-                      ((event.after_state ->> 'source_event' = 'RegistryPathExpired' AND
-                        event.after_state ->> 'derived_from' = 'interpreter_state' AND
-                        event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
-                        OR EXISTS (
-                          SELECT 1 FROM project_events active
-                          WHERE active.logical_name_id = event.logical_name_id AND COALESCE(NULLIF(CONCAT(COALESCE(active.after_state ->> 'registry_contract_instance_id', active.raw_fact_ref ->> 'emitting_address', active.after_state ->> 'registry'), ':', active.after_state ->> 'token_id'), ':'), active.resource_id::text) = COALESCE(NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':'), event.resource_id::text)
-                            AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND active.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1') AND ROW(COALESCE(active.block_number, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
-                            AND NOT EXISTS (
-                              SELECT 1 FROM project_events expiry
-                              WHERE expiry.logical_name_id = event.logical_name_id AND COALESCE(NULLIF(CONCAT(COALESCE(expiry.after_state ->> 'registry_contract_instance_id', expiry.raw_fact_ref ->> 'emitting_address', expiry.after_state ->> 'registry'), ':', expiry.after_state ->> 'token_id'), ':'), expiry.resource_id::text) = COALESCE(NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':'), event.resource_id::text)
+            FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM v2_registration_events event
+            WHERE event.logical_name_id = surface.logical_name_id AND (
+                  event.event_kind IN ('RegistrationGranted', 'RegistrationReserved') OR
+                  (event.event_kind = 'RegistrationReleased' AND ((event.after_state ->> 'source_event' = 'RegistryPathExpired' AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
+                        OR EXISTS (SELECT 1 FROM v2_registration_events active WHERE active.logical_name_id = event.logical_name_id AND active.lifecycle_key = event.lifecycle_key
+                            AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND ROW(COALESCE(active.block_number, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                            AND NOT EXISTS (SELECT 1 FROM v2_registration_events expiry WHERE expiry.logical_name_id = event.logical_name_id AND expiry.lifecycle_key = event.lifecycle_key
                                 AND expiry.event_kind = 'RegistrationReleased' AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state' AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND ROW(COALESCE(expiry.block_number, -1), expiry.normalized_event_id) BETWEEN ROW(COALESCE(active.block_number, -1), active.normalized_event_id) AND ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
                             )))
               ))
-              AND NOT EXISTS (
-                  SELECT 1 FROM project_events later WHERE later.logical_name_id = event.logical_name_id AND COALESCE(NULLIF(CONCAT(COALESCE(later.after_state ->> 'registry_contract_instance_id', later.raw_fact_ref ->> 'emitting_address', later.after_state ->> 'registry'), ':', later.after_state ->> 'token_id'), ':'), later.resource_id::text) = COALESCE(NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':'), event.resource_id::text)
+              AND NOT EXISTS (SELECT 1 FROM v2_registration_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key
                     AND ((event.event_kind = 'RegistrationReleased' AND later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')) OR (event.event_kind <> 'RegistrationReleased' AND later.event_kind = 'RegistrationReleased'))
                     AND ROW(COALESCE(later.block_number, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
               )
-            ORDER BY COALESCE(NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':'), event.resource_id::text), event.block_number DESC NULLS LAST, event.normalized_event_id DESC) event
+            ORDER BY event.lifecycle_key, event.block_number DESC NULLS LAST, event.normalized_event_id DESC) event
             ORDER BY (event.event_kind = 'RegistrationReleased'), event.block_number DESC NULLS LAST, event.normalized_event_id DESC
             LIMIT 1
         ) registration_current ON TRUE

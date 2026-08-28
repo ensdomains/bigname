@@ -378,3 +378,15 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     incremental_db.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn regenerated_token_expiry_retires_the_predecessor_grant() -> Result<()> {
+    let (database, pool) = database("v2_expiry_regenerated").await?; seed(&pool).await?;
+    let regenerated = "0x0000000000000000000000000000000000000000000000000000000000000066";
+    event(&pool, MAIN, Some(RESOURCE), 100, Some(12), "TokenRegenerated", json!({"source_event":"TokenRegenerated","old_token_id":TOKEN,"new_token_id":regenerated})).await?;
+    sqlx::query("UPDATE normalized_events SET after_state = jsonb_set(after_state, '{token_id}', to_jsonb($1::text)) WHERE logical_name_id = $2 AND block_number = 101 AND event_kind = 'RegistrationReleased' AND after_state ->> 'source_event' = 'RegistryPathExpired'").bind(regenerated).bind(MAIN).execute(&pool).await?;
+    run(&pool, 101, None).await?;
+    let current: i64 = sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1").bind(MAIN).fetch_one(&pool).await?;
+    assert_eq!(current, 0); database.cleanup().await?; Ok(())
+}
