@@ -4,7 +4,6 @@ use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction, raw_sql};
-
 const BASE_SHA: &str = "eabbd4c4485e7983251a33492c1d5952ea4fe4cd";
 const PROJECT_SOURCE: &str = include_str!("../../src/scope/topology.rs");
 const CORPUS: &str = include_str!("corpus.sql");
@@ -58,14 +57,12 @@ fn v2_sql(source: &str, base: bool) -> Result<String> {
 }
 #[rustfmt::skip]
 fn project_sql(function: &str) -> Result<String> { let source = PROJECT_SOURCE.split(function).nth(1).context("Project function")?; extract(source, "sqlx::query(\n        \"", "\",\n    )") }
-
 async fn seed_v2(pool: &PgPool) -> Result<()> {
     raw_sql("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ('00000000-0000-0000-0000-000000000435','issue-435-measurement','contract'); INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,active_from_block_number) VALUES ('00000000-0000-0000-0000-000000000435','issue-435-measurement','0x0000000000000000000000000000000000000435',0); INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ('ens:0x0000000000000000000000000000000000000000000000000000000000000002','ens','p.eth',ARRAY['p','eth'],decode('00','hex'),'0x0000000000000000000000000000000000000000000000000000000000000002',ARRAY['0xp','0xeth'],'fixture','active','issue-435-measurement','0x435',435,'canonical'), ('ens:0x0000000000000000000000000000000000000000000000000000000000000001','ens','c.p.eth',ARRAY['c','p','eth'],decode('00','hex'),'0x0000000000000000000000000000000000000000000000000000000000000001',ARRAY['0xc','0xp','0xeth'],'fixture','active','issue-435-measurement','0x435',435,'canonical'); INSERT INTO normalized_events (event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,derivation_kind,canonicality_state,after_state) VALUES ('issue-435-v2-parent','ens','ens:0x0000000000000000000000000000000000000000000000000000000000000002','SubregistryChanged','ens_v2_registry_l1',1,'issue-435-measurement',435,'0x435','ens_v1_unwrapped_authority','canonical','{\"subregistry\":\"0x0000000000000000000000000000000000000435\"}'), ('issue-435-v2-child','ens','ens:0x0000000000000000000000000000000000000000000000000000000000000001','RegistrationGranted','ens_v2_registry_l1',1,'issue-435-measurement',435,'0x435','ens_v1_unwrapped_authority','canonical','{\"registry_contract_instance_id\":\"00000000-0000-0000-0000-000000000435\"}')").execute(pool).await?;
     Ok(())
 }
 #[rustfmt::skip]
 async fn seed_same_label_hotspot(pool: &PgPool) -> Result<()> { raw_sql("WITH ids AS (SELECT ordinal, '0x' || lpad(to_hex(2000000000000 + ordinal * 2), 64, '0') parent_hash, '0x' || lpad(to_hex(2000000000001 + ordinal * 2), 64, '0') child_hash FROM generate_series(1, 10000) ordinal), names AS (INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) SELECT 'ens:' || parent_hash,'ens','hotspot.eth',ARRAY['hotspot','eth'],decode('00','hex'),parent_hash,ARRAY['0x435','0xeth'],'fixture','active','issue-435-measurement','0x435',435,'canonical' FROM ids) INSERT INTO children_current (parent_logical_name_id,child_logical_name_id,namespace,namehash,labelhash,provenance,manifest_version) SELECT 'ens:' || parent_hash,'ens:' || child_hash,'ens',child_hash,'0x435',jsonb_build_object('chain_id','issue-435-measurement'),1 FROM ids").execute(pool).await?; Ok(()) }
-
 #[rustfmt::skip]
 async fn prepare() -> Result<(TestDatabase, PgPool)> {
     let database = TestDatabase::create(TestDatabaseConfig::new("issue_435_measurement")).await?;
@@ -84,7 +81,6 @@ async fn prepare() -> Result<(TestDatabase, PgPool)> {
     }
     Ok((database, pool))
 }
-
 #[rustfmt::skip]
 async fn load(pool: &PgPool, start: i64, rows: i64) -> Result<f64> {
     let started = Instant::now();
@@ -92,7 +88,6 @@ async fn load(pool: &PgPool, start: i64, rows: i64) -> Result<f64> {
     sqlx::query("VACUUM (ANALYZE) normalized_events").execute(pool).await?;
     Ok(started.elapsed().as_secs_f64())
 }
-
 #[rustfmt::skip]
 async fn configure_graph(pool: &PgPool, frontier: i64, depth: i64) -> Result<()> {
     sqlx::query(
@@ -113,12 +108,10 @@ async fn configure_graph(pool: &PgPool, frontier: i64, depth: i64) -> Result<()>
     ).bind(frontier).bind(depth).execute(pool).await?;
     sqlx::query("ANALYZE normalized_events").execute(pool).await?; Ok(())
 }
-
 #[rustfmt::skip]
 async fn base_tables(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     raw_sql("CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP").execute(&mut **tx).await?; Ok(())
 }
-
 #[rustfmt::skip]
 async fn head_tables(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     raw_sql("CREATE TEMP TABLE project_scope_topology_pending (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_current (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_seen (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_candidates (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP").execute(&mut **tx).await?;
@@ -126,7 +119,6 @@ async fn head_tables(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
 }
 #[rustfmt::skip]
 async fn measure_current_hotspot(pool: &PgPool) -> Result<Value> { let changed = project_sql("async fn include_changed_current_edges")?; let current = project_sql("async fn include_current_edges")?; let mut tx = pool.begin().await?; head_tables(&mut tx).await?; raw_sql("CREATE TEMP TABLE project_changed_events (namespace text, after_state jsonb) ON COMMIT DROP; INSERT INTO project_changed_events VALUES ('ens', jsonb_build_object('node','0x' || lpad(to_hex(2000000000002),64,'0'),'labelhash','0x435')); INSERT INTO project_scope_topology_current VALUES ('ens:0x' || lpad(to_hex(2000000000002),64,'0'))").execute(&mut *tx).await?; let changed_plan: Value = sqlx::query_scalar(&format!("{EXPLAIN} {changed}")).bind("issue-435-measurement").fetch_one(&mut *tx).await?; let selected: Vec<String> = sqlx::query_scalar("SELECT logical_name_id FROM project_scope_children ORDER BY logical_name_id").fetch_all(&mut *tx).await?; let current_plan: Value = sqlx::query_scalar(&format!("{EXPLAIN} {current}")).bind("issue-435-measurement").fetch_one(&mut *tx).await?; ensure!(selected.len() == 2 && selected.iter().all(|id| id.ends_with("000000000000000000000000000000000000000000000000000001d1a94a2002") || id.ends_with("000000000000000000000000000000000000000000000000000001d1a94a2003")), "same-label hotspot admitted an unrelated parent"); ensure!(scan_with_condition(&changed_plan, "children_current", Some("children_current_parent_idx"), &["parent_logical_name_id"]) && scan_with_condition(&current_plan, "children_current", Some("children_current_parent_idx"), &["parent_logical_name_id"]) && scan_with_condition(&current_plan, "children_current", Some("children_current_namehash_idx"), &["namespace", "namehash"]), "current topology plans were not endpoint-indexed: changed={changed_plan} current={current_plan}"); tx.rollback().await?; Ok(json!({"unrelated_parents":10000,"selected_endpoints":selected,"changed_current_plan":changed_plan,"frontier_current_plan":current_plan})) }
-
 #[rustfmt::skip]
 async fn reset(tx: &mut Transaction<'_, Postgres>, head: bool, frontier: i64, depth: i64) -> Result<()> {
     let tables = if head {
@@ -140,7 +132,6 @@ async fn reset(tx: &mut Transaction<'_, Postgres>, head: bool, frontier: i64, de
         .bind(frontier).bind(depth).execute(&mut **tx).await?;
     Ok(())
 }
-
 #[rustfmt::skip]
 async fn base_once(tx: &mut Transaction<'_, Postgres>, sqls: &[String]) -> Result<(u64, Vec<Value>)> {
     let mut iterations = 0;
@@ -152,7 +143,6 @@ async fn base_once(tx: &mut Transaction<'_, Postgres>, sqls: &[String]) -> Resul
         if rows == 0 { return Ok((iterations, trace)); }
     }
 }
-
 #[rustfmt::skip]
 async fn head_once(tx: &mut Transaction<'_, Postgres>, sqls: &[String]) -> Result<(u64, Vec<Value>)> {
     let mut iterations = 0;
@@ -168,7 +158,6 @@ async fn head_once(tx: &mut Transaction<'_, Postgres>, sqls: &[String]) -> Resul
         iterations += 1; trace.push(json!({"iteration":iterations,"input_frontier_rows":input,"edges_matched":found,"new_logical_ids":queued}));
     }
 }
-
 fn stats(mut times: Vec<f64>) -> Value {
     times.sort_by(f64::total_cmp);
     let mean = times.iter().sum::<f64>() / times.len() as f64;
@@ -176,10 +165,8 @@ fn stats(mut times: Vec<f64>) -> Value {
         (times.iter().map(|time| (time - mean).powi(2)).sum::<f64>() / times.len() as f64).sqrt();
     json!({"minimum_ms":times[0],"median_ms":times[10],"p95_ms":times[18],"maximum_ms":times[19],"stddev_ms":stddev})
 }
-
 #[rustfmt::skip]
 async fn await_quiet(pool: &PgPool) -> Result<()> { let mut quiet = 0; while quiet < 4 { let active: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND state <> 'idle' AND datname NOT LIKE 'issue_435_measurement_%'").fetch_one(pool).await?; quiet = if active == 0 { quiet + 1 } else { 0 }; if quiet < 4 { tokio::time::sleep(std::time::Duration::from_secs(5)).await; } } Ok(()) }
-
 #[rustfmt::skip]
 async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, depth: i64, samples: usize) -> Result<Value> {
     await_quiet(pool).await?;
@@ -209,7 +196,6 @@ async fn measure(pool: &PgPool, sqls: &[String], head: bool, frontier: i64, dept
     let warm = if times.is_empty() { Value::Null } else { stats(times) };
     Ok(json!({"frontier":frontier,"depth":depth,"fresh_restored_ms":fresh_ms,"iterations":iterations,"iteration_trace":trace,"warm":warm,"plan":plan}))
 }
-
 #[rustfmt::skip]
 async fn build_indexes(pool: &PgPool) -> Result<Vec<Value>> {
     await_quiet(pool).await?;
@@ -227,7 +213,6 @@ async fn build_indexes(pool: &PgPool) -> Result<Vec<Value>> {
     }
     Ok(evidence)
 }
-
 #[tokio::test]
 #[ignore = "loads the production-scale issue #435 corpus"]
 #[rustfmt::skip]
