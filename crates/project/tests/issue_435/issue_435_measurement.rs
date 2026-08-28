@@ -21,40 +21,34 @@ const INDEXES: &[(&str, &str)] = &[
 const MIGRATIONS: &[&str] = &[
     include_str!("../../../../migrations/20260827130000_normalized_events_v1_after_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130100_normalized_events_v1_after_child_scope_idx.sql"), include_str!("../../../../migrations/20260827130200_normalized_events_v1_before_node_scope_idx.sql"), include_str!("../../../../migrations/20260827130300_normalized_events_v1_before_child_scope_idx.sql"), include_str!("../../../../migrations/20260827130400_normalized_events_v2_subregistry_pointer_scope_idx.sql"),
 ];
-
 #[rustfmt::skip]
 fn scan_with_condition(value: &Value, relation: &str, index: Option<&str>, terms: &[&str]) -> bool { value.as_object().is_some_and(|object| (object.get("Relation Name").and_then(Value::as_str) == Some(relation) && index.is_none_or(|expected| object.get("Index Name").and_then(Value::as_str) == Some(expected)) && object.get("Index Cond").and_then(Value::as_str).is_some_and(|condition| terms.iter().all(|term| condition.contains(term)))) || object.values().any(|child| scan_with_condition(child, relation, index, terms))) || value.as_array().is_some_and(|array| array.iter().any(|child| scan_with_condition(child, relation, index, terms))) }
 #[rustfmt::skip]
 fn unexpected_v1_scan(value: &Value) -> bool { value.as_object().is_some_and(|object| (object.get("Relation Name").and_then(Value::as_str) == Some("normalized_events") && !INDEXES[..4].iter().any(|(_, index)| object.get("Index Name").and_then(Value::as_str) == Some(*index) && object.get("Index Cond").and_then(Value::as_str).is_some_and(|condition| ["chain_id", "scope.logical_name_id", "block_number"].iter().all(|term| condition.contains(term))))) || object.values().any(unexpected_v1_scan)) || value.as_array().is_some_and(|array| array.iter().any(unexpected_v1_scan)) }
 #[rustfmt::skip]
 fn unbounded_scope_scan(value: &Value) -> bool { value.as_object().is_some_and(|object| ((object.get("Relation Name").and_then(Value::as_str) == Some("normalized_events") && !((object.get("Index Name").and_then(Value::as_str) == Some("normalized_events_name_history_idx") && object.get("Index Cond").and_then(Value::as_str).is_some_and(|condition| condition.contains("logical_name_id"))) || (object.get("Index Name").and_then(Value::as_str) == Some("normalized_events_subregistry_registration_history_idx") && object.get("Index Cond").and_then(Value::as_str).is_some_and(|condition| condition.contains("registry_contract_instance_id"))) || (object.get("Node Type").and_then(Value::as_str) == Some("Bitmap Heap Scan") && serde_json::to_string(object).is_ok_and(|plan| plan.contains(INDEXES[4].1))))) || (object.get("Relation Name").and_then(Value::as_str) == Some("contract_instance_addresses") && !(object.get("Node Type").and_then(Value::as_str) == Some("Index Scan") && object.get("Index Cond").and_then(Value::as_str).is_some_and(|condition| (condition.contains("chain_id") && condition.contains("lower(")) || condition.contains("contract_instance_id"))))) || object.values().any(unbounded_scope_scan)) || value.as_array().is_some_and(|array| array.iter().any(unbounded_scope_scan)) }
-
 fn extract(source: &str, prefix: &str, suffix: &str) -> Result<String> {
     let start = source.find(prefix).context("SQL prefix")? + prefix.len();
     let end = source[start..].find(suffix).context("SQL suffix")? + start;
     Ok(source[start..end].to_owned())
 }
-
 #[rustfmt::skip]
 fn head_sql() -> Result<Vec<String>> {
     ["V1_AFTER_NODE_SQL", "V1_AFTER_CHILD_SQL", "V1_BEFORE_NODE_SQL", "V1_BEFORE_CHILD_SQL"]
         .map(|name| extract(PROJECT_SOURCE, &format!("pub(crate) const {name}: &str = r#\""), "\"#;")).into_iter().collect()
 }
-
 #[rustfmt::skip]
 fn base_source() -> Result<String> {
     let output = Command::new("git").args(["show", &format!("{BASE_SHA}:crates/project/src/scope/topology.rs")]).output()?;
     ensure!(output.status.success(), "cannot read base topology source");
     Ok(String::from_utf8(output.stdout)?)
 }
-
 #[rustfmt::skip]
 fn base_sql() -> Result<String> {
     let source = base_source()?;
     let function = source.split("pub(super) async fn include_event_edges").nth(1).context("base function")?;
     extract(function, "let v1 = sqlx::query(\n        \"", "\",\n    )")
 }
-
 #[rustfmt::skip]
 fn v2_sql(source: &str, base: bool) -> Result<String> {
     let marker = if base { "async fn include_event_edges" } else { "async fn include_v2_event_edges" };
@@ -62,11 +56,15 @@ fn v2_sql(source: &str, base: bool) -> Result<String> {
     let function = source.split(marker).nth(1).context("v2 function")?;
     extract(function, prefix, "\",\n    )")
 }
+#[rustfmt::skip]
+fn project_sql(function: &str) -> Result<String> { let source = PROJECT_SOURCE.split(function).nth(1).context("Project function")?; extract(source, "sqlx::query(\n        \"", "\",\n    )") }
 
 async fn seed_v2(pool: &PgPool) -> Result<()> {
     raw_sql("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ('00000000-0000-0000-0000-000000000435','issue-435-measurement','contract'); INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,active_from_block_number) VALUES ('00000000-0000-0000-0000-000000000435','issue-435-measurement','0x0000000000000000000000000000000000000435',0); INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ('ens:0x0000000000000000000000000000000000000000000000000000000000000002','ens','p.eth',ARRAY['p','eth'],decode('00','hex'),'0x0000000000000000000000000000000000000000000000000000000000000002',ARRAY['0xp','0xeth'],'fixture','active','issue-435-measurement','0x435',435,'canonical'), ('ens:0x0000000000000000000000000000000000000000000000000000000000000001','ens','c.p.eth',ARRAY['c','p','eth'],decode('00','hex'),'0x0000000000000000000000000000000000000000000000000000000000000001',ARRAY['0xc','0xp','0xeth'],'fixture','active','issue-435-measurement','0x435',435,'canonical'); INSERT INTO normalized_events (event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,derivation_kind,canonicality_state,after_state) VALUES ('issue-435-v2-parent','ens','ens:0x0000000000000000000000000000000000000000000000000000000000000002','SubregistryChanged','ens_v2_registry_l1',1,'issue-435-measurement',435,'0x435','ens_v1_unwrapped_authority','canonical','{\"subregistry\":\"0x0000000000000000000000000000000000000435\"}'), ('issue-435-v2-child','ens','ens:0x0000000000000000000000000000000000000000000000000000000000000001','RegistrationGranted','ens_v2_registry_l1',1,'issue-435-measurement',435,'0x435','ens_v1_unwrapped_authority','canonical','{\"registry_contract_instance_id\":\"00000000-0000-0000-0000-000000000435\"}')").execute(pool).await?;
     Ok(())
 }
+#[rustfmt::skip]
+async fn seed_same_label_hotspot(pool: &PgPool) -> Result<()> { raw_sql("WITH ids AS (SELECT ordinal, '0x' || lpad(to_hex(2000000000000 + ordinal * 2), 64, '0') parent_hash, '0x' || lpad(to_hex(2000000000001 + ordinal * 2), 64, '0') child_hash FROM generate_series(1, 10000) ordinal), names AS (INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) SELECT 'ens:' || parent_hash,'ens','hotspot.eth',ARRAY['hotspot','eth'],decode('00','hex'),parent_hash,ARRAY['0x435','0xeth'],'fixture','active','issue-435-measurement','0x435',435,'canonical' FROM ids) INSERT INTO children_current (parent_logical_name_id,child_logical_name_id,namespace,namehash,labelhash,provenance,manifest_version) SELECT 'ens:' || parent_hash,'ens:' || child_hash,'ens',child_hash,'0x435',jsonb_build_object('chain_id','issue-435-measurement'),1 FROM ids").execute(pool).await?; Ok(()) }
 
 #[rustfmt::skip]
 async fn prepare() -> Result<(TestDatabase, PgPool)> {
@@ -126,6 +124,8 @@ async fn head_tables(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     raw_sql("CREATE TEMP TABLE project_scope_topology_pending (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_current (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_seen (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_topology_candidates (logical_name_id text PRIMARY KEY) ON COMMIT DROP; CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP").execute(&mut **tx).await?;
     sqlx::query("SET LOCAL jit = off").execute(&mut **tx).await?; Ok(())
 }
+#[rustfmt::skip]
+async fn measure_current_hotspot(pool: &PgPool) -> Result<Value> { let changed = project_sql("async fn include_changed_current_edges")?; let current = project_sql("async fn include_current_edges")?; let mut tx = pool.begin().await?; head_tables(&mut tx).await?; raw_sql("CREATE TEMP TABLE project_changed_events (namespace text, after_state jsonb) ON COMMIT DROP; INSERT INTO project_changed_events VALUES ('ens', jsonb_build_object('node','0x' || lpad(to_hex(2000000000002),64,'0'),'labelhash','0x435')); INSERT INTO project_scope_topology_current VALUES ('ens:0x' || lpad(to_hex(2000000000002),64,'0'))").execute(&mut *tx).await?; let changed_plan: Value = sqlx::query_scalar(&format!("{EXPLAIN} {changed}")).bind("issue-435-measurement").fetch_one(&mut *tx).await?; let selected: Vec<String> = sqlx::query_scalar("SELECT logical_name_id FROM project_scope_children ORDER BY logical_name_id").fetch_all(&mut *tx).await?; let current_plan: Value = sqlx::query_scalar(&format!("{EXPLAIN} {current}")).bind("issue-435-measurement").fetch_one(&mut *tx).await?; ensure!(selected.len() == 2 && selected.iter().all(|id| id.ends_with("000000000000000000000000000000000000000000000000000001d1a94a2002") || id.ends_with("000000000000000000000000000000000000000000000000000001d1a94a2003")), "same-label hotspot admitted an unrelated parent"); ensure!(scan_with_condition(&changed_plan, "children_current", Some("children_current_parent_idx"), &["parent_logical_name_id"]) && scan_with_condition(&current_plan, "children_current", Some("children_current_parent_idx"), &["parent_logical_name_id"]) && scan_with_condition(&current_plan, "children_current", Some("children_current_namehash_idx"), &["namespace", "namehash"]), "current topology plans were not endpoint-indexed: changed={changed_plan} current={current_plan}"); tx.rollback().await?; Ok(json!({"unrelated_parents":10000,"selected_endpoints":selected,"changed_current_plan":changed_plan,"frontier_current_plan":current_plan})) }
 
 #[rustfmt::skip]
 async fn reset(tx: &mut Transaction<'_, Postgres>, head: bool, frontier: i64, depth: i64) -> Result<()> {
@@ -243,6 +243,7 @@ async fn issue_435_measurement() -> Result<()> {
     let head_v2 = vec![v2_sql(PROJECT_SOURCE, false)?];
     let load_5m_seconds = load(&pool, 0, scale).await?;
     seed_v2(&pool).await?;
+    seed_same_label_hotspot(&pool).await?;
     let mut base_cells = Vec::new();
     for &(frontier, depth) in if head_only { &[][..] } else { &[(1, 1), (100, 3), (1000, 8)] } {
         base_cells.push(match measure(&pool, &base, false, frontier, depth, 20).await { Ok(cell) => cell, Err(error) if error.to_string().contains("canceling statement due to statement timeout") => json!({"frontier":frontier,"depth":depth,"timed_out_ms":60_000,"result":"one base closure statement exceeded the timeout; no latency substituted"}), Err(error) => return Err(error) });
@@ -254,6 +255,7 @@ async fn issue_435_measurement() -> Result<()> {
         head_cells.push(measure(&pool, &head, true, frontier, depth, 20).await?);
     }
     let head_v2_cell = measure(&pool, &head_v2, true, 1, 1, 20).await?;
+    let same_label_hotspot = measure_current_hotspot(&pool).await?;
     let plan = &head_v2_cell["plan"]; ensure!(scan_with_condition(plan, "normalized_events", Some("normalized_events_name_history_idx"), &["logical_name_id"]) && scan_with_condition(plan, "normalized_events", Some("normalized_events_subregistry_registration_history_idx"), &["registry_contract_instance_id"]) && scan_with_condition(plan, "contract_instance_addresses", Some("contract_instance_addresses_active_idx"), &["chain_id", "lower("]) && scan_with_condition(plan, "contract_instance_addresses", None, &["contract_instance_id"]) && serde_json::to_string(plan)?.contains(INDEXES[4].1) && !unbounded_scope_scan(plan), "v2 plan was not frontier-indexed");
     let exact_plan = serde_json::to_string(&head_cells[2]["plan"])?;
     for (_, index) in &INDEXES[..4] { ensure!(exact_plan.contains(index) && scan_with_condition(&head_cells[2]["plan"], "normalized_events", Some(index), &["chain_id", "scope.logical_name_id", "block_number"]), "plan did not use bounded {index}"); } ensure!(!unexpected_v1_scan(&head_cells[2]["plan"]), "v1 plan included an unexpected normalized-events scan");
@@ -268,7 +270,7 @@ async fn issue_435_measurement() -> Result<()> {
     let revision = String::from_utf8(Command::new("git").args(["rev-parse", "HEAD"]).output()?.stdout)?;
     let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/issue-435-evidence").join(revision.trim());
     fs::create_dir_all(&output)?;
-    fs::write(output.join("topology-matrix.json"), serde_json::to_vec_pretty(&json!({"seed":435,"base_sha":BASE_SHA,"first_corpus_rows":scale,"second_corpus_rows":scale,"load_5m_seconds":load_5m_seconds,"load_10m_seconds":load_10m_seconds,"base_5m":base_cells,"head_5m":head_cells,"base_v2":base_v2_cell,"head_v2":head_v2_cell,"base_10m":base_10m,"head_10m":head_10m,"migrations":migrations,"predicate_mutation":mutation,"nonblank_mutation":nonblank}))?)?;
+    fs::write(output.join("topology-matrix.json"), serde_json::to_vec_pretty(&json!({"seed":435,"base_sha":BASE_SHA,"first_corpus_rows":scale,"second_corpus_rows":scale,"load_5m_seconds":load_5m_seconds,"load_10m_seconds":load_10m_seconds,"base_5m":base_cells,"head_5m":head_cells,"base_v2":base_v2_cell,"head_v2":head_v2_cell,"same_label_hotspot":same_label_hotspot,"base_10m":base_10m,"head_10m":head_10m,"migrations":migrations,"predicate_mutation":mutation,"nonblank_mutation":nonblank}))?)?;
     database.cleanup().await?;
     Ok(())
 }

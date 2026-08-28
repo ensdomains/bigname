@@ -120,24 +120,25 @@ async fn include_changed_current_edges(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_children
-         SELECT child.parent_logical_name_id
-         FROM children_current child
-         JOIN project_changed_events changed
-          ON changed.namespace = child.namespace
-          AND lower(changed.after_state ->> 'labelhash') = lower(child.labelhash)
-          AND child.parent_logical_name_id =
-              changed.namespace || ':' || lower(changed.after_state ->> 'node')
-         WHERE child.provenance ->> 'chain_id' = $1
+        "WITH edges AS (
+             SELECT child.parent_logical_name_id, child.child_logical_name_id
+             FROM project_changed_events changed
+             CROSS JOIN LATERAL (
+                 SELECT child.parent_logical_name_id, child.child_logical_name_id
+                 FROM children_current child
+                 WHERE child.namespace = changed.namespace
+                   AND lower(child.labelhash) =
+                       lower(changed.after_state ->> 'labelhash')
+                   AND child.parent_logical_name_id = changed.namespace || ':' ||
+                       lower(changed.after_state ->> 'node')
+                   AND child.provenance ->> 'chain_id' = $1
+                 OFFSET 0
+             ) child
+         )
+         INSERT INTO project_scope_children
+         SELECT parent_logical_name_id FROM edges
          UNION
-         SELECT child.child_logical_name_id
-         FROM children_current child
-         JOIN project_changed_events changed
-          ON changed.namespace = child.namespace
-          AND lower(changed.after_state ->> 'labelhash') = lower(child.labelhash)
-          AND child.parent_logical_name_id =
-              changed.namespace || ':' || lower(changed.after_state ->> 'node')
-         WHERE child.provenance ->> 'chain_id' = $1
+         SELECT child_logical_name_id FROM edges
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
@@ -152,36 +153,34 @@ async fn include_current_edges(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_topology_candidates
-         SELECT child.parent_logical_name_id
-         FROM project_scope_topology_current scope
-         JOIN children_current child
-           ON child.parent_logical_name_id = scope.logical_name_id
-         WHERE child.provenance ->> 'chain_id' = $1
+        "WITH edges AS (
+             SELECT child.parent_logical_name_id, child.child_logical_name_id
+             FROM project_scope_topology_current scope
+             CROSS JOIN LATERAL (
+                 SELECT child.parent_logical_name_id, child.child_logical_name_id
+                 FROM children_current child
+                 WHERE child.parent_logical_name_id = scope.logical_name_id
+                   AND child.provenance ->> 'chain_id' = $1
+                 OFFSET 0
+             ) child
+             UNION ALL
+             SELECT child.parent_logical_name_id, child.child_logical_name_id
+             FROM project_scope_topology_current scope
+             CROSS JOIN LATERAL (
+                 SELECT child.parent_logical_name_id, child.child_logical_name_id
+                 FROM children_current child
+                 WHERE child.namespace = split_part(scope.logical_name_id, ':', 1)
+                   AND child.namehash = substring(
+                       scope.logical_name_id FROM position(':' IN scope.logical_name_id) + 1
+                   )
+                   AND child.provenance ->> 'chain_id' = $1
+                 OFFSET 0
+             ) child
+         )
+         INSERT INTO project_scope_topology_candidates
+         SELECT parent_logical_name_id FROM edges
          UNION
-         SELECT child.child_logical_name_id
-         FROM project_scope_topology_current scope
-         JOIN children_current child
-           ON child.parent_logical_name_id = scope.logical_name_id
-         WHERE child.provenance ->> 'chain_id' = $1
-         UNION
-         SELECT child.parent_logical_name_id
-         FROM project_scope_topology_current scope
-         JOIN children_current child
-           ON child.namespace = split_part(scope.logical_name_id, ':', 1)
-          AND child.namehash = substring(
-              scope.logical_name_id FROM position(':' IN scope.logical_name_id) + 1
-          )
-         WHERE child.provenance ->> 'chain_id' = $1
-         UNION
-         SELECT child.child_logical_name_id
-         FROM project_scope_topology_current scope
-         JOIN children_current child
-           ON child.namespace = split_part(scope.logical_name_id, ':', 1)
-          AND child.namehash = substring(
-              scope.logical_name_id FROM position(':' IN scope.logical_name_id) + 1
-          )
-         WHERE child.provenance ->> 'chain_id' = $1
+         SELECT child_logical_name_id FROM edges
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
