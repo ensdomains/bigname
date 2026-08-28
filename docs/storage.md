@@ -206,6 +206,19 @@ restored interval. The repair is
 one-shot because the stored row is then zero and its positive-floor predicate
 cannot fire again; a current finite declaration keeps its finite watch bound.
 
+Manifest synchronization does not reduce these address epochs to a minimum
+when it validates a newly widened direct-address watch. It constructs the
+continuous union of [persisted Ingest
+coverage](glossary.md#persisted-ingest-coverage) for each chain, source family,
+address, and event topic after applying the declaration start to every usable
+epoch. A gap or finite tail refuses the synchronization transaction, preserving
+the preceding manifest rows, address epochs, derived-phase markers, and Ingest
+redo state. The refusal never stamps the missing range as repaired. Operators
+must instead choose the first continuously covered start or rebuild from zero.
+A retained database that still requires the earlier start needs a separately
+planned repair which explicitly fetches the gap before the wider promise;
+ordinary address-scoped redo follows the persisted epochs and cannot fill it.
+
 Before re-deriving a range, Interpret preserves a finitely retired
 manifest-declared contract-address row as coordination state. An event-derived
 observation at or before that row's close block may reproduce its discovery
@@ -633,6 +646,15 @@ manifest-required redo also requires its loaded range-end hash to equal the
 readable hash at that height. Ordinary repair redos retain their existing
 ability to reconcile a source cursor to another retained fork before normal
 head publication.
+
+The widening comparison first proves that persisted address epochs continuously
+honor the desired direct-address promise. It refuses an existing gap before the
+ordinary widening path can stamp a required Ingest redo; redo state is created
+only for a promise that the persisted interval union can represent. If a
+pending required redo belongs to an all-emitter watch, manifest synchronization
+also refuses to remove that watch when the desired address-scoped replacement
+would expose a persisted epoch gap. The transaction leaves the previous watch
+plan and redo marker unchanged.
 
 ## Interpretation replay
 

@@ -6,7 +6,9 @@ use serde_json::Value;
 
 use crate::{SourceManifest, all_emitter_topic0s, normalize_address};
 
-pub(super) use super::watch_widening::{PersistedWatchFloors, widening_start};
+pub(super) use super::watch_widening::{
+    CoverageInterval, PersistedWatchCoverage, normalize_coverage, widening_start,
+};
 
 const COMPILED_WATCH_FIELD: &str = "_bigname_compiled_watch";
 pub(super) type AdmissionFloors = BTreeMap<(String, String, String, String), u64>;

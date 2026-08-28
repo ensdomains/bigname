@@ -1309,11 +1309,13 @@ not superseded normalized events, are the permanent audit trail for chain
 events. The current event stream is what projections consume. See the [reorg
 and redo boundary](storage.md#reorg-and-redo-boundary).
 
-**Persisted Ingest floor** — the earliest block that the stored address
-intervals can honor for one compiled-watch address and event topic. Manifest
-synchronization compares a newly promised direct-address start with this bound
-and refuses to record an earlier promise unless the desired all-emitter watch
-already covers the same topic.
+**Persisted Ingest coverage** — the normalized, continuous union of usable
+address epochs for one compiled-watch chain, source family, address, and event
+topic after applying the declaration start to each epoch. Manifest
+synchronization accepts a newly widened direct-address promise only when this
+union covers every block from the promised start through an open-ended final
+interval. It refuses the first leading gap, internal gap, or finite tail unless
+the desired all-emitter watch already covers the same topic.
 
 **Persisted address floor** — the earliest block stored on the shared active
 interval for one chain address. Refreshing a declaration keeps the lower bound
