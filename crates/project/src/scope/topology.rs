@@ -385,14 +385,14 @@ async fn include_v2_event_edges(
                  VALUES (topology.after_state ->> 'subregistry'),
                         (topology.before_state ->> 'subregistry')
              ) pointer(address)
-             JOIN contract_instance_addresses address
-               ON address.chain_id = topology.chain_id
+             CROSS JOIN LATERAL (SELECT * FROM contract_instance_addresses address
+               WHERE address.chain_id = topology.chain_id
               AND lower(address.address) = lower(pointer.address)
               AND (address.active_from_block_number IS NULL
                    OR address.active_from_block_number <= $2)
               AND (address.active_to_block_number IS NULL
                    OR address.active_to_block_number > $2)
-              AND address.deactivated_at IS NULL
+              AND address.deactivated_at IS NULL OFFSET 0) address
              CROSS JOIN LATERAL (SELECT * FROM normalized_events registration
                WHERE registration.chain_id = $1
               AND registration.after_state ->> 'registry_contract_instance_id' =
@@ -444,15 +444,19 @@ async fn include_v2_event_edges(
               AND registration_lineage.canonicality_state IN (
                   'canonical', 'safe', 'finalized'
               )
-             JOIN contract_instance_addresses address
-               ON address.contract_instance_id::text =
-                  registration.after_state ->> 'registry_contract_instance_id'
-              AND address.chain_id = registration.chain_id
-              AND (address.active_from_block_number IS NULL
-                   OR address.active_from_block_number <= $2)
-              AND (address.active_to_block_number IS NULL
-                   OR address.active_to_block_number > $2)
-              AND address.deactivated_at IS NULL
+             CROSS JOIN LATERAL (
+                 SELECT * FROM (
+                     SELECT * FROM contract_instance_addresses
+                     WHERE contract_instance_id = CASE WHEN pg_input_is_valid(registration.after_state ->> 'registry_contract_instance_id', 'uuid') THEN (registration.after_state ->> 'registry_contract_instance_id')::uuid END
+                       AND deactivated_at IS NULL
+                     OFFSET 0
+                 ) address_frontier
+                 WHERE address_frontier.chain_id = registration.chain_id
+                   AND (address_frontier.active_from_block_number IS NULL
+                        OR address_frontier.active_from_block_number <= $2)
+                   AND (address_frontier.active_to_block_number IS NULL
+                        OR address_frontier.active_to_block_number > $2)
+             ) address
              CROSS JOIN LATERAL (
                  SELECT logical_name_id, chain_id, block_number, block_hash
                  FROM normalized_events

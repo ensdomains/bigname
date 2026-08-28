@@ -17,27 +17,15 @@ SELECT
     'ens',
     'ens:0x' || lpad(to_hex(parent_number), 64, '0'),
     CASE WHEN local <= qualifying OR local % 4 <> 0 THEN 'SubregistryChanged' ELSE 'ResolverChanged' END,
-    CASE WHEN local <= qualifying
-         THEN CASE WHEN local % 20 = 0
-                   THEN 'basenames_base_registry' ELSE 'ens_v1_registry_l1' END
-         WHEN local % 4 = 1 THEN 'decoy_family'
-         ELSE 'ens_v1_registry_l1' END,
+    CASE WHEN local <= qualifying THEN CASE WHEN local % 20 = 0 THEN 'basenames_base_registry' ELSE 'ens_v1_registry_l1' END WHEN local % 4 = 1 THEN 'decoy_family' ELSE 'ens_v1_registry_l1' END,
     1,
     'issue-435-measurement',
     435,
     '0x435',
     'ens_v1_unwrapped_authority',
     CASE WHEN local > qualifying AND local % 4 = 3 THEN 'orphaned'::canonicality_state ELSE 'canonical'::canonicality_state END,
-    CASE WHEN local > qualifying AND local % 4 = 2
-         THEN 'candidate' ELSE 'activated' END,
-    CASE WHEN local > qualifying AND local % 4 = 2
-         THEN ARRAY['issue-435-candidate']::text[] ELSE ARRAY[]::text[] END,
-    CASE WHEN local <= frontier * depth OR local % 2 = 0 THEN jsonb_build_object(
-        'node', '0x' || lpad(to_hex(parent_number), 64, '0'),
-        'child_node', '0x' || lpad(to_hex(parent_number + 1), 64, '0')
-    ) ELSE '{}'::jsonb END,
-    jsonb_build_object(
-        'node', '0x' || lpad(to_hex(parent_number), 64, '0'),
-        'child_node', '0x' || lpad(to_hex(parent_number + 1), 64, '0')
-    )
+    CASE WHEN local > qualifying AND local % 4 = 2 THEN 'candidate' ELSE 'activated' END,
+    CASE WHEN local > qualifying AND local % 4 = 2 THEN ARRAY['issue-435-candidate']::text[] ELSE ARRAY[]::text[] END,
+    CASE WHEN local <= frontier * depth OR local % 2 = 0 THEN jsonb_build_object('node', '0x' || lpad(to_hex(parent_number), 64, '0'), 'child_node', '0x' || lpad(to_hex(parent_number + 1), 64, '0')) ELSE '{}'::jsonb END,
+    jsonb_build_object('node', '0x' || lpad(to_hex(parent_number), 64, '0'), 'child_node', '0x' || lpad(to_hex(parent_number + 1), 64, '0'))
 FROM endpoints;
