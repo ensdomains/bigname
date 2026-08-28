@@ -8650,6 +8650,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
         None,
     )?;
     let shadow_id = format!("ens:{shadow_namehash}");
+    assert_eq!(first.normalized_events.iter().filter(|event| event.event_kind == "RegistrationGranted" && event.logical_name_id.as_deref() == Some(shadow_id.as_str())).count(), 1);
     assert!(
         boundary
             .binding_closures

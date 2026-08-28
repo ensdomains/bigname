@@ -14,8 +14,7 @@ fn v2_direct_leaf_expiry_does_not_expire_its_suffix_anchor() {
 
 #[test] #[rustfmt::skip]
 fn v2_expiry_crossing_ignores_many_unrelated_future_entries() {
-    let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"crossing", 10);
-    for ordinal in 2..=512 { install_token(&mut state, ROOT, &format!("0x{ordinal:064x}"), format!("future-{ordinal}").as_bytes(), 10_000); }
+    let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"crossing", 10); for ordinal in 2..=512 { install_token(&mut state, ROOT, &format!("0x{ordinal:064x}"), format!("future-{ordinal}").as_bytes(), 10_000); }
     state.refresh_dirty_v2_names(9); super::super::reset_v2_refresh_visits();
     let transitions = state.refresh_dirty_v2_names(10); assert_eq!(super::super::v2_refresh_visits(), 1); assert_eq!(transitions.len(), 1); assert_eq!(transitions[0].token_id, "0x01");
 }
@@ -42,8 +41,7 @@ fn v2_detached_resource_expiry_emits_a_bindingless_release() {
 
 #[test] #[rustfmt::skip]
 fn v2_shadow_expiry_emits_a_registration_release_without_a_binding() {
-    let mut state = anchored_state(); state.replace_v2_registration(ROOT, "0x01", Uuid::from_u128(1), NAMESPACE, &[0xff], 10, None);
-    state.refresh_dirty_v2_names(9); let transition = state.refresh_dirty_v2_names(10).into_iter().next().expect("shadow retires");
+    let mut state = anchored_state(); state.replace_v2_registration(ROOT, "0x01", Uuid::from_u128(1), NAMESPACE, &[0xff], 10, None); state.refresh_dirty_v2_names(9); let transition = state.refresh_dirty_v2_names(10).into_iter().next().expect("shadow retires");
     assert!(transition.previous.is_none()); assert!(transition.previous_shadow.is_some());
     let interpreted = crate::schema_v2::protocol::v2_boundary_expiration(transition, 10).expect("retirement materializes");
     assert!(interpreted.binding_closures.is_empty()); assert_eq!(interpreted.events.len(), 1);
@@ -52,8 +50,7 @@ fn v2_shadow_expiry_emits_a_registration_release_without_a_binding() {
 
 #[test] #[rustfmt::skip]
 fn v2_same_token_renewal_requeues_expiry_and_revives_the_surface() {
-    let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"alpha", 10);
-    state.refresh_dirty_v2_names(9); state.refresh_dirty_v2_names(10);
+    let mut state = anchored_state(); install_token(&mut state, ROOT, "0x01", b"alpha", 10); state.refresh_dirty_v2_names(9); state.refresh_dirty_v2_names(10);
     assert!(state.v2_token(ROOT, "0x01").is_some_and(|token| token.name.is_none()));
     state.set_v2_expiry(ROOT, "0x01", 20); let revived = state.refresh_dirty_v2_names(11);
     assert_eq!(revived.len(), 1); assert!(revived[0].current.is_some());

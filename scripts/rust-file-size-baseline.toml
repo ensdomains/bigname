@@ -22,7 +22,7 @@ justification = "ENSv2 registry dispatch keeps raw registration and reservation 
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry/topology.rs"
-loc = 685
+loc = 686
 justification = "ENSv2 topology removal and rebound groups remain adjacent while the fixed expiry event group and pointer clears live in the bounded sibling module."
 
 [[files]]
