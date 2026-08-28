@@ -213,9 +213,9 @@ async fn seed(pool: &PgPool) -> Result<()> {
     exact_events(pool, exact, 102, &["RegistrationGranted"]).await?;
     add!(STALE, Some(STALE_RESOURCE), 102, Some(2), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":STALE_TOKEN,"revived_from_expiry":true,"reservation_resource":true})); add!(DETACHED, Some(DETACHED_RESOURCE), 102, Some(3), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","expiry":1_900_000_000_i64,"token_id":TOKEN,"revived_from_expiry":true}));
     add!(RESERVATION, None, 102, Some(2), "RegistrationReserved", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
-    sqlx::query("UPDATE normalized_events SET logical_name_id = NULL WHERE resource_id = $1::uuid AND event_kind IN ('RegistrationReleased', 'RegistrationRenewed')").bind(DETACHED_RESOURCE).execute(pool).await?;
-    add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
+    add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(DETACHED, Some(DETACHED_RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
     add!(MAIN, Some(VERSION_RESOURCE), 104, Some(0), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
+    sqlx::query("UPDATE normalized_events SET logical_name_id = NULL WHERE resource_id = $1::uuid AND event_kind IN ('RegistrationReleased', 'RegistrationRenewed')").bind(DETACHED_RESOURCE).execute(pool).await?;
     Ok(())
 }
 async fn run(pool: &PgPool, target: i64, resume: Option<Marker>) -> Result<Marker> {
@@ -361,7 +361,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     assert_eq!(snapshot(&incremental).await?, snapshot(&version_fresh).await?);
     let version: (String, i64, i64, i64, Option<String>) = sqlx::query_as(
         "SELECT (SELECT resource_id::text FROM name_current WHERE logical_name_id = $1),
-                (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
+                (SELECT count(*) FROM permissions_current WHERE resource_id IN ($2::uuid, $4::uuid)),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $3::uuid),
                 (SELECT count(*) FROM permissions_current_resource_summary
                  WHERE resource_id = $3::uuid),
@@ -370,7 +370,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     )
     .bind(MAIN)
     .bind(RESOURCE)
-    .bind(VERSION_RESOURCE)
+    .bind(VERSION_RESOURCE).bind(DETACHED_RESOURCE)
     .fetch_one(&incremental)
     .await?;
     assert_eq!(version, (VERSION_RESOURCE.into(), 0, 0, 1, Some("operator_approval_surfaces_not_ingested".into())));
