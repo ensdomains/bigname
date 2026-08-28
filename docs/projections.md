@@ -373,7 +373,16 @@ The resolver classification also carries effective manifest-declared
 `ensip19_default_address` into `provenance.read_rules` with source key
 `addr:2147483648`. `selectors` and `entries` remain exact `RecordChanged`
 observations: Project does not fabricate target coin types or rewrite the
-default entry. Removing the feature, changing to an unflagged resolver, or
+default entry. Empty address bytes in either the ENSv1 `value` shape or ENSv2
+`address_bytes_hex` shape are normalized to an exact `not_found` entry. For
+coin type 60, the multicoin `AddressChanged` payload takes precedence over its
+immediately adjacent compatibility `AddrChanged` sibling in the same
+transaction, so an empty multicoin clear remains empty instead of becoming a
+retained zero-address value. The paired logs share one effective ordering
+position; any later independent write in that transaction still wins.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+Removing the feature, changing to an unflagged resolver, or
 rotating a proxy to an unflagged implementation removes the rule on the same
 scoped rebuild. Full and incremental rebuilds select the feature from the same
 current resolver classification.

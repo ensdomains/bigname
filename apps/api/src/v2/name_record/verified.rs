@@ -173,6 +173,8 @@ fn profile_verified_requested_records(
         .into_iter()
         .map(|record| (record.record_key.clone(), record))
         .collect::<BTreeMap<_, _>>();
+    let requested_records = records.values().cloned().collect::<Vec<_>>();
+    ensure_verified_record_limit(&requested_records)?;
     if should_use_profile_fallback_records(record_inventory) {
         let fallbacks = if records.is_empty() {
             profile_fallback_requested_records()
@@ -187,7 +189,6 @@ fn profile_verified_requested_records(
         }
     }
     let records = records.into_values().collect::<Vec<_>>();
-    ensure_verified_record_limit(&records)?;
     Ok(records)
 }
 
@@ -359,4 +360,52 @@ fn is_text_record(record: &ResolutionRecordKey) -> bool {
 
 fn is_content_hash_record(record: &ResolutionRecordKey) -> bool {
     record.record_key == "contenthash"
+}
+
+#[cfg(test)]
+mod tests {
+    use bigname_storage::RecordInventoryCurrentRow;
+    use serde_json::json;
+    use sqlx::types::time::OffsetDateTime;
+
+    use super::*;
+    use crate::v2::name_records::MAX_RECORD_KEYS;
+
+    #[test]
+    fn synthetic_primary_address_does_not_reject_maximum_inventory() {
+        let selectors = (0..MAX_RECORD_KEYS)
+            .map(|index| {
+                json!({
+                    "record_key": format!("text:key{index}"),
+                    "record_family": "text",
+                    "selector_key": format!("key{index}"),
+                    "cacheable": true
+                })
+            })
+            .collect::<Vec<_>>();
+        let inventory = RecordInventoryCurrentRow {
+            resource_id: "00000000-0000-0000-0000-000000000606"
+                .parse()
+                .expect("test resource id"),
+            record_version_boundary: json!({}),
+            enumeration_basis: json!({}),
+            selectors: serde_json::Value::Array(selectors),
+            explicit_gaps: json!([]),
+            unsupported_families: json!([]),
+            last_change: None,
+            entries: json!([]),
+            provenance: json!({}),
+            coverage: json!({"status":"projected"}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({}),
+            manifest_version: 1,
+            last_recomputed_at: OffsetDateTime::from_unix_timestamp(1_717_171_719)
+                .expect("test timestamp"),
+        };
+
+        let records = profile_verified_requested_records(Some(&inventory))
+            .expect("the synthetic primary selector is exempt from the client record limit");
+        assert_eq!(records.len(), MAX_RECORD_KEYS + 1);
+        assert!(records.iter().any(|record| record.record_key == "addr:60"));
+    }
 }

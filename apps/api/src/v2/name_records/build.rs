@@ -296,6 +296,10 @@ fn indexed_satisfying_record_answer(
         return Ok(Some(not_found_answer(None)?));
     }
     let answer = indexed_record_answer(record_inventory, record)?;
+    let exact_success = answer.status == Status::Ok && answer.meta.is_none();
+    if !exact_success && !indexed_inventory_is_authoritative(record_inventory) {
+        return Ok(None);
+    }
     Ok(matches!(answer.status, Status::Ok | Status::NotFound).then_some(answer))
 }
 
@@ -448,6 +452,19 @@ fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
         && string_field(resolver.get("address")).is_none()
 }
 
+fn indexed_inventory_is_authoritative(
+    record_inventory: Option<&RecordInventoryCurrentRow>,
+) -> bool {
+    let Some(record_inventory) = record_inventory else {
+        return false;
+    };
+    string_field(record_inventory.coverage.get("unsupported_reason")).is_none()
+        && matches!(
+            string_field(record_inventory.coverage.get("status")).as_deref(),
+            Some("full" | "projected")
+        )
+}
+
 fn not_found_answer(failure_reason: Option<String>) -> V2Result<RecordAnswer> {
     Ok(RecordAnswer {
         status: Status::NotFound,
@@ -509,35 +526,4 @@ fn product_record_reason(reason: &str) -> V2Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::v2::ErrorCode;
-
-    #[test]
-    fn product_record_reason_maps_storage_projection_reasons() {
-        assert_eq!(
-            product_record_reason("value_not_retained_in_normalized_events")
-                .expect("known reason must map"),
-            "value_not_retained"
-        );
-        assert_eq!(
-            product_record_reason("record_family_not_supported_in_phase6_projection")
-                .expect("known reason must map"),
-            "record_family_not_supported"
-        );
-        assert_eq!(
-            product_record_reason("resolver_family_pending").expect("product reason must pass"),
-            "resolver_family_pending"
-        );
-    }
-
-    #[test]
-    fn product_record_reason_rejects_unmapped_pipeline_vocabulary() {
-        for reason in ["raw_log_missing_record_cache", "record_sidecar_missing"] {
-            let error =
-                product_record_reason(reason).expect_err("pipeline vocabulary must fail loudly");
-
-            assert_eq!(error.code(), ErrorCode::InternalError);
-        }
-    }
-}
+mod tests;

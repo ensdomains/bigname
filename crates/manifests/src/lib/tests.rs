@@ -677,8 +677,26 @@ fn checked_in_resolver_read_features_are_generation_scoped() -> Result<()> {
         .iter()
         .find(|loaded| loaded.manifest.source_family == "basenames_base_resolver")
         .expect("Basenames resolver manifest");
+    assert!(
+        basenames.manifest.contracts[0].read_features.is_empty(),
+        "the admitted legacy Basenames resolver must not authorize ENSIP-19 fallback"
+    );
+    Ok(())
+}
+
+#[test]
+fn checked_in_archived_sepolia_permissioned_resolver_has_ensip19_fallback() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let resolver = repository
+        .manifests()
+        .iter()
+        .find(|loaded| {
+            loaded.manifest.source_family == "ens_v2_resolver_l1"
+                && loaded.manifest.deployment_epoch == "ens_v2_sepolia_post_audit"
+        })
+        .expect("active archived-Sepolia ENSv2 resolver manifest");
     assert_eq!(
-        basenames.manifest.contracts[0].read_features,
+        resolver.manifest.resolver_implementations[0].read_features,
         vec![ResolverReadFeature::Ensip19DefaultAddress]
     );
     Ok(())
@@ -711,6 +729,34 @@ fn repository_rejects_invalid_resolver_read_feature_declarations() -> Result<()>
     );
     let error = load_one(&unknown).expect_err("unknown read features must fail");
     assert!(format!("{error:#}").contains("unknown variant"));
+
+    let mixed_implementation_family = direct_resolver.replace(
+        "[\"ensip19_default_address\", \"ensip19_default_address\"]",
+        "[\"ensip19_default_address\"]",
+    );
+    let error = load_one(&mixed_implementation_family)
+        .expect_err("implementation families must reject contract-level read features");
+    assert!(format!("{error:#}").contains("implementation family"));
+
+    let conflicting_same_address = manifest_contents()
+        .replace(
+            "resolver_implementations = [\n  { role = \"permissioned_resolver\", address = \"0x00000000000000000000000000000000000000CC\" },\n]\n",
+            "",
+        )
+        .replace("role = \"registry\"", "role = \"resolver\"")
+        .replace("emitter_roles = [\"registry\"]", "emitter_roles = [\"resolver\"]")
+        .replace("from_role = \"registry\"", "from_role = \"resolver\"")
+        .replace("proxy_kind = \"erc1967\"", "proxy_kind = \"none\"")
+        .replace(
+            "start_block = 23456",
+            "read_features = [\"ensip19_default_address\"]\nstart_block = 23456\n\n[[contracts]]\nrole = \"a_registry\"\naddress = \"0x00000000000000000000000000000000000000aa\"\nproxy_kind = \"none\"\nstart_block = 23456",
+        );
+    let error = load_one(&conflicting_same_address)
+        .expect_err("same-address direct resolver declarations must agree on read features");
+    assert!(
+        format!("{error:#}").contains("same address"),
+        "unexpected error: {error:#}"
+    );
     Ok(())
 }
 

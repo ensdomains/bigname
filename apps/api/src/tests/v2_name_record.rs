@@ -1441,19 +1441,35 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
 async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-        inventory.selectors = json!([{
-            "record_key": "addr:2147483648",
-            "record_family": "addr",
-            "selector_key": "2147483648",
-            "cacheable": true
-        }]);
-        inventory.entries = json!([{
-            "record_key": "addr:2147483648",
-            "record_family": "addr",
-            "selector_key": "2147483648",
-            "status": "success",
-            "value": "0x0000000000000000000000000000000000000DeF"
-        }]);
+        inventory.selectors = json!([
+            {
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "cacheable": true
+            },
+            {
+                "record_key": "addr:2147483649",
+                "record_family": "addr",
+                "selector_key": "2147483649",
+                "cacheable": true
+            }
+        ]);
+        inventory.entries = json!([
+            {
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "status": "success",
+                "value": "0x0000000000000000000000000000000000000DeF"
+            },
+            {
+                "record_key": "addr:2147483649",
+                "record_family": "addr",
+                "selector_key": "2147483649",
+                "status": "not_found"
+            }
+        ]);
         inventory.provenance["read_rules"] = json!([{
             "kind": "ensip19_default_address",
             "source_record_key": "addr:2147483648"

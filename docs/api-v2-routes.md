@@ -465,7 +465,8 @@ Field ownership:
   requested key, and only the remaining supported keys fall back to verified
   lookup. Exact indexed `ok` answers and authoritative ENSIP-19 derived answers
   satisfy auto without a provider request. For `addr:<coin_type>`, exact `ok`
-  wins. Exact `not_found` or a missing exact entry may read projected
+  wins. An exact entry normalized to `not_found`, including empty address
+  bytes, or a missing exact entry may read projected
   `addr:2147483648` only when the selected resolver's manifest-authorized
   [resolver read feature](glossary.md#resolver-read-feature) is present and
   `chainFromCoinType(coin_type) > 0`; coin type `2147483648` itself never
@@ -476,6 +477,11 @@ Field ownership:
   `unsupported`.
   (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+  The admitted legacy Basenames resolver is unflagged because its exact-storage
+  getter does not implement that fallback. The fallback-bearing upgradeable
+  Basenames resolver proxy is not yet admitted.
+  (upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)
+  (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)
   A non-derived indexed `not_found` is admitted only from a record inventory
   whose coverage carries no unsupported reason and whose coverage `status` is
   `full` or `projected`. `projected` is admitted
@@ -520,9 +526,11 @@ Field ownership:
   Explicit `keys` and the inventory-derived default verified selector set are
   both limited to 200 record keys. When omitted `keys` would derive more than
   200 keys, `source=verified` returns `422 unsupported` before any provider call;
-  callers can supply `keys` to select a smaller set. The verified flat
-  name-profile has the same 200-key server-derived limit and returns `422
-  unsupported` because that route has no key selector.
+  callers can supply `keys` to select a smaller set. For the verified flat
+  name-profile, the limit applies to inventory-derived selectors before the
+  route adds its synthetic primary-address request. A 200-selector inventory
+  may therefore produce 201 provider keys when `addr:60` was absent; an
+  inventory with more than 200 selectors still returns `422 unsupported`.
   `include=inventory` adds route-local
   `inventory: {known_keys, unset_keys, unsupported_keys}`. Deep inventory
   internals stay on diagnostics.

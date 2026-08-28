@@ -421,40 +421,45 @@ BEGIN
              AND rule ->> 'source_record_key' = 'addr:2147483648'
        )
     THEN
-        SELECT candidate.entry
-        INTO default_entry
-        FROM jsonb_array_elements(compared_entries)
-            WITH ORDINALITY AS candidate(entry, ordinal)
-        WHERE candidate.entry ->> 'record_key' = 'addr:2147483648'
-           OR (
-                candidate.entry ->> 'record_family' = 'addr'
-                AND candidate.entry ->> 'selector_key' = '2147483648'
-           )
-        ORDER BY candidate.ordinal
-        LIMIT 1;
+        IF compared_support_status <> 'supported' THEN
+            indexed_entry := jsonb_build_object('status', 'unsupported');
+        ELSE
+            SELECT candidate.entry
+            INTO default_entry
+            FROM jsonb_array_elements(compared_entries)
+                WITH ORDINALITY AS candidate(entry, ordinal)
+            WHERE candidate.entry ->> 'record_key' = 'addr:2147483648'
+               OR (
+                    candidate.entry ->> 'record_family' = 'addr'
+                    AND candidate.entry ->> 'selector_key' = '2147483648'
+               )
+            ORDER BY candidate.ordinal
+            LIMIT 1;
 
-        IF default_entry IS NULL THEN
-            IF compared_support_status = 'supported' THEN
+            IF default_entry IS NULL THEN
                 indexed_entry := jsonb_build_object('status', 'not_found');
+            ELSIF default_entry ->> 'status' IN ('success', 'not_found') THEN
+                indexed_entry := default_entry;
             ELSE
                 indexed_entry := jsonb_build_object('status', 'unsupported');
             END IF;
-        ELSIF default_entry ->> 'status' IN ('success', 'not_found') THEN
-            indexed_entry := default_entry;
-        ELSE
-            indexed_entry := jsonb_build_object('status', 'unsupported');
         END IF;
-    ELSIF indexed_entry IS NULL AND compared_support_status <> 'supported' THEN
+    ELSIF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+          AND compared_support_status <> 'supported'
+    THEN
         indexed_entry := jsonb_build_object('status', 'unsupported');
     END IF;
 
     IF indexed_entry IS NULL THEN
         indexed_answer := jsonb_build_object('status', 'not_found');
     ELSE
-        indexed_status := COALESCE(
+        indexed_status := CASE COALESCE(
             indexed_entry ->> 'status',
             'unsupported'
-        );
+        )
+            WHEN 'failed' THEN 'execution_failed'
+            ELSE COALESCE(indexed_entry ->> 'status', 'unsupported')
+        END;
         indexed_answer := jsonb_build_object('status', indexed_status);
         IF indexed_status = 'success' THEN
             indexed_value := COALESCE(

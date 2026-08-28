@@ -90,16 +90,25 @@ pub(super) async fn build(
         versions AS (
             SELECT * FROM ranked_versions WHERE version_rank = 1
         ),
-        ranked_records AS (
+        eligible_records AS (
             SELECT event.*,
-                   row_number() OVER (
-                       PARTITION BY event.attributed_resource_id,
-                                    event.after_state ->> 'record_key'
-                       ORDER BY event.block_number DESC NULLS LAST,
-                                event.transaction_index DESC NULLS LAST,
-                                event.log_index DESC NULLS LAST,
-                                event.normalized_event_id DESC
-                   ) AS record_rank
+                   event.after_state ->> 'record_family' = 'addr'
+                   AND event.after_state ->> 'selector_key' = '60'
+                   AND event.after_state ->> 'source_event' = 'AddressChanged'
+                   AND event.log_index IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1
+                       FROM attributed_events sibling
+                       WHERE sibling.attributed_resource_id = event.attributed_resource_id
+                         AND sibling.chain_id = event.chain_id
+                         AND sibling.block_number = event.block_number
+                         AND sibling.transaction_hash IS NOT DISTINCT FROM event.transaction_hash
+                         AND sibling.transaction_index IS NOT DISTINCT FROM event.transaction_index
+                         AND sibling.log_index = event.log_index + 1
+                         AND sibling.event_kind = 'RecordChanged'
+                         AND sibling.after_state ->> 'record_key' = 'addr:60'
+                         AND sibling.after_state ->> 'source_event' = 'AddrChanged'
+                   ) AS coin60_compatibility_source
             FROM attributed_events event
             LEFT JOIN versions version USING (attributed_resource_id)
             WHERE event.event_kind = 'RecordChanged'
@@ -117,6 +126,26 @@ pub(super) async fn build(
                       version.normalized_event_id
                   )
               )
+        ),
+        ranked_records AS (
+            SELECT event.*,
+                   row_number() OVER (
+                       PARTITION BY event.attributed_resource_id,
+                                    event.after_state ->> 'record_key'
+                       ORDER BY event.block_number DESC NULLS LAST,
+                                event.transaction_index DESC NULLS LAST,
+                                -- setAddr(node, 60, bytes) emits AddressChanged before its
+                                -- compatibility AddrChanged sibling. Prefer the storage-faithful
+                                -- bytes payload only for that adjacent log pair, including empty
+                                -- clears, without outranking a later write in the transaction.
+                                -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1@91c966f)
+                                CASE WHEN event.coin60_compatibility_source
+                                    THEN event.log_index + 1
+                                    ELSE event.log_index END DESC NULLS LAST,
+                                event.coin60_compatibility_source DESC,
+                                event.normalized_event_id DESC
+                   ) AS record_rank
+            FROM eligible_records event
         ),
         current_records AS (
             SELECT * FROM ranked_records WHERE record_rank = 1
@@ -158,6 +187,14 @@ pub(super) async fn build(
                                WHEN event.after_state ->> 'record_family' = 'contenthash'
                                 AND event.after_state ->> 'value' IN ('', '0x')
                                    THEN 'not_found'
+                               WHEN event.after_state ->> 'record_family' = 'addr'
+                                AND (
+                                    event.after_state ->> 'value' IN ('', '0x')
+                                    OR COALESCE(
+                                        event.after_state #>> '{value,bytes}' IN ('', '0x'),
+                                        false
+                                    )
+                                ) THEN 'not_found'
                                ELSE 'success'
                            END
                            WHEN event.after_state ? 'contenthash_hex' THEN CASE
@@ -175,8 +212,19 @@ pub(super) async fn build(
                        'value', CASE
                            WHEN event.after_state ? 'value'
                             AND NOT (
-                                event.after_state ->> 'record_family' = 'contenthash'
-                                AND event.after_state ->> 'value' IN ('', '0x')
+                                (
+                                    event.after_state ->> 'record_family' = 'contenthash'
+                                    AND event.after_state ->> 'value' IN ('', '0x')
+                                ) OR (
+                                    event.after_state ->> 'record_family' = 'addr'
+                                    AND (
+                                        event.after_state ->> 'value' IN ('', '0x')
+                                        OR COALESCE(
+                                            event.after_state #>> '{value,bytes}' IN ('', '0x'),
+                                            false
+                                        )
+                                    )
+                                )
                             ) THEN event.after_state -> 'value'
                            WHEN event.after_state ? 'contenthash_hex'
                             AND event.after_state ->> 'contenthash_hex' NOT IN ('', '0x')

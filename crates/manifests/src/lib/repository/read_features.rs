@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use anyhow::{Result, bail};
 
@@ -27,6 +30,38 @@ pub(super) fn validate_read_features(manifest: &SourceManifest, path: &Path) -> 
             bail!(
                 "manifest proxy contract {} in {} must declare implementation-sensitive read features on resolver_implementations",
                 contract.role,
+                path.display()
+            );
+        }
+    }
+    if !manifest.resolver_implementations.is_empty()
+        && manifest
+            .contracts
+            .iter()
+            .any(|contract| !contract.read_features.is_empty())
+    {
+        bail!(
+            "manifest implementation family in {} must declare implementation-sensitive read features only on resolver_implementations",
+            path.display()
+        );
+    }
+    let mut direct_features_by_address = BTreeMap::new();
+    for contract in manifest
+        .contracts
+        .iter()
+        .filter(|contract| contract.proxy_kind == "none")
+    {
+        let address = contract.address.to_ascii_lowercase();
+        let features = contract
+            .read_features
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if let Some(previous) = direct_features_by_address.insert(address.clone(), features.clone())
+            && previous != features
+        {
+            bail!(
+                "manifest direct resolver declarations for the same address {address} in {} disagree on read features",
                 path.display()
             );
         }

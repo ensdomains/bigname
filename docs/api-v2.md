@@ -414,8 +414,10 @@ partial blend after such a failure.
 Explicit record `keys` and the inventory-derived default verified selector set
 are each limited to 200 keys. An oversized server-derived set returns `422
 unsupported` before provider execution; the compact records caller can narrow
-the request with `keys`, while the verified flat name-profile has no selector
-parameter and returns the same error.
+the request with `keys`. For the verified flat name-profile, the limit applies
+before its synthetic `addr:60` request is added, so a 200-selector inventory
+may issue 201 provider keys when the primary-address selector was absent; more
+than 200 inventory-derived selectors still returns the same error.
 
 `GET /v2/addresses/{address}/primary-name` keeps its documented `answers` and
 typed `verification` shapes. Every indexed answer reads

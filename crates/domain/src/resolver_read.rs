@@ -76,6 +76,9 @@ pub fn evaluate_indexed_record(
         .flatten()
         .is_some_and(ensip19_default_fallback_target);
     if eligible_coin_type && has_ensip19_rule(provenance) {
+        if !coverage_is_authoritative(coverage) {
+            return unsupported("ensip19_default_address_source_unavailable");
+        }
         let derivation = Some(IndexedRecordDerivation {
             rule: ResolverReadFeature::Ensip19DefaultAddress,
             source_record_key: ENSIP19_DEFAULT_RECORD_KEY.to_owned(),

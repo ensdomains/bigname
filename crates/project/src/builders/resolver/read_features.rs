@@ -7,6 +7,7 @@ COALESCE((
     WHERE lower(declaration ->> 'address') = candidate.resolver_address
       AND (declaration ->> 'start_block' IS NULL
            OR (declaration ->> 'start_block')::bigint <= $2)
+    ORDER BY declaration ->> 'role', declaration::text
     LIMIT 1
 ), '[]'::jsonb)
 "#;
@@ -19,6 +20,7 @@ COALESCE((
     )) admitted
     WHERE lower(admitted ->> 'address') =
           lower(upgrade.after_state ->> 'implementation')
+    ORDER BY admitted ->> 'role', admitted::text
     LIMIT 1
 ), '[]'::jsonb)
 "#;

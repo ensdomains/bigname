@@ -89,8 +89,12 @@ one role. `[[contracts]]` also accepts `read_features`. Each feature list is
 deduplicated and uses the closed `ensip19_default_address` vocabulary in this
 release. Unknown or duplicate values fail loading. Contract-level features are
 valid only for resolver roles with `proxy_kind = "none"`; proxy-sensitive
-features belong on the implementation declaration. An empty list is the
-default.
+features belong on the implementation declaration. A family with any
+`resolver_implementations` entries rejects contract-level read features rather
+than choosing between two authority forms. All direct contract declarations
+for the same case-normalized address must also declare the same feature set;
+role ordering never resolves conflicting getter authority. An empty list is
+the default.
 
 A [resolver read feature](glossary.md#resolver-read-feature) authorizes getter
 behavior, not an event family or watch-plan expansion. Direct resolvers use the
@@ -105,15 +109,28 @@ does not recurse.
 (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
 
-The current ENS PublicResolver and admitted Basenames resolver declare this
-feature. Legacy ENS resolver generations remain unflagged: bigname makes no
-derived-read claim for them even if retained events exist. The current ENS
-contract composes `AddrResolver`, and first-party app metadata identifies that
-generation as supporting the default coin type.
+The current ENS PublicResolver and the admitted archived-Sepolia ENSv2
+`PermissionedResolver` implementation declare this feature. Legacy ENS resolver
+generations remain unflagged: bigname makes no derived-read claim for them even
+if retained events exist. The current ENS contract composes `AddrResolver`, and
+first-party app metadata identifies that generation as supporting the default
+coin type.
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)
 (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32-L40 @ ens_app_v3@7175858)
-Basenames' admitted resolver composes the same fallback-bearing resolver profile.
-(upstream: .refs/basenames/src/L2/L2Resolver.sol:L4-L29 @ basenames@1809bbc)
+The archived ENSv2 deployment identifies the admitted implementation, whose
+embedded compiled-source metadata applies the same empty-address fallback.
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2398 @ ens_v2@a971bd64)
+
+The admitted Basenames address is the legacy L2 resolver. It imports the
+vendored exact-storage address resolver, so it deliberately carries no
+`ensip19_default_address` feature. The fallback-bearing implementation is used
+by the separate upgradeable resolver proxy, which is not admitted in this
+manifest and is deferred to a follow-up admission decision.
+(upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/L2Resolver.sol:L4-L32 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/UpgradeableL2Resolver.sol:L11-L40 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L84-L99 @ basenames@1809bbc)
 
 `resolver_implementations` does not admit an implementation as a watched
