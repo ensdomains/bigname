@@ -11145,6 +11145,321 @@ async fn sepolia_live_v1_plus_released_v2_reservation_selects_v1() -> Result<()>
 }
 
 #[tokio::test]
+async fn reservation_release_cannot_borrow_a_later_same_resource_registration() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_authority_reservation_release_reuse").await?;
+    let chain = "ethereum-sepolia";
+    let logical_name_id =
+        seed_raw_reservation_release_then_registration_before_v1(scratch.pool(), chain).await?;
+
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 3,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+
+    let causal_shape: (Uuid, Uuid, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT release.resource_id, registration.resource_id,
+                release.block_number, release.transaction_index, release.log_index,
+                binding.block_number,
+                (binding.provenance ->> 'transaction_index')::bigint,
+                (binding.provenance ->> 'log_index')::bigint
+         FROM normalized_events release
+         JOIN normalized_events registration
+           ON registration.chain_id = release.chain_id
+          AND registration.logical_name_id = release.logical_name_id
+          AND registration.event_kind = 'RegistrationGranted'
+         JOIN surface_bindings binding
+           ON binding.chain_id = registration.chain_id
+          AND binding.logical_name_id = registration.logical_name_id
+          AND binding.authority_arm = 'ens_v2'
+          AND binding.resource_id = registration.resource_id
+         WHERE release.chain_id = $1
+           AND release.logical_name_id = $2
+           AND release.event_kind = 'RegistrationReleased'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        causal_shape.0, causal_shape.1,
+        "the registration must reuse the released reservation resource"
+    );
+    assert_eq!(causal_shape.2, 2, "the reservation release is in block 2");
+    assert_eq!(
+        causal_shape.3, 1,
+        "the reservation release transaction index is 1"
+    );
+    assert_eq!(causal_shape.4, 1, "the reservation release log index is 1");
+    assert_eq!(
+        causal_shape.5, 2,
+        "the first matching binding shares the block"
+    );
+    assert_eq!(
+        causal_shape.6, 2,
+        "the matching binding transaction index is later in block 2"
+    );
+    assert_eq!(
+        causal_shape.7, 3,
+        "the matching binding starts at the later resource-link log"
+    );
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 3).await?;
+    let selected: (Option<String>, String, Option<String>) = sqlx::query_as(
+        "SELECT provenance #>> '{authority_selection,authority_arm}',
+                support_status, unsupported_reason
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        selected,
+        (
+            None,
+            "unsupported".into(),
+            Some("independent_ens_deployments_overlap".into()),
+        ),
+        "a later same-resource registration cannot retroactively qualify a reservation release",
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn reservation_release_same_resource_incremental_matches_fresh() -> Result<()> {
+    let incremental =
+        ScratchDatabase::create("project_authority_release_reuse_incremental").await?;
+    let fresh = ScratchDatabase::create("project_authority_release_reuse_fresh").await?;
+    let chain = "ethereum-sepolia";
+    let incremental_name =
+        seed_raw_reservation_release_then_registration_before_v1(incremental.pool(), chain).await?;
+    let fresh_name =
+        seed_raw_reservation_release_then_registration_before_v1(fresh.pool(), chain).await?;
+    assert_eq!(incremental_name, fresh_name);
+
+    InterpretEngine::new(incremental.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 1,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 1).await?;
+    InterpretEngine::new(incremental.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 2,
+            to_block: 2,
+            resume_current: Some(InterpretMarker {
+                number: 1,
+                hash: block_hash(chain, 1),
+            }),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 1,
+            hash: block_hash(chain, 1),
+        }),
+        RunMode::Normal,
+        2,
+        2,
+    )
+    .await?;
+    InterpretEngine::new(incremental.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 3,
+            to_block: 3,
+            resume_current: Some(InterpretMarker {
+                number: 2,
+                hash: block_hash(chain, 2),
+            }),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(chain, 2),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await?;
+
+    InterpretEngine::new(fresh.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 3,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    run_project(fresh.pool(), chain, None, RunMode::Normal, 0, 3).await?;
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "incremental reservation release reuse diverged from a fresh rebuild",
+    );
+    let incremental_authority: Value = sqlx::query_scalar(
+        "SELECT provenance -> 'authority_selection'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&incremental_name)
+    .fetch_one(incremental.pool())
+    .await?;
+    let fresh_authority: Value = sqlx::query_scalar(
+        "SELECT provenance -> 'authority_selection'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&fresh_name)
+    .fetch_one(fresh.pool())
+    .await?;
+    assert_eq!(incremental_authority, fresh_authority);
+    assert!(incremental_authority["authority_arm"].is_null());
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn reservation_release_event_vote_requires_a_preexisting_binding() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_authority_release_event_causality").await?;
+    let chain = "project-authority-release-event-causality";
+    seed_lineage(scratch.pool(), chain, 4).await?;
+    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
+    insert_namespaced_manifest(
+        scratch.pool(),
+        "ens",
+        chain,
+        "ens_v2_registry_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        "tests/project-authority-release-event-causality.toml",
+        json!({}),
+    )
+    .await?;
+    insert_namespaced_manifest(
+        scratch.pool(),
+        "ens",
+        chain,
+        "ens_v2_registrar_l1",
+        1,
+        "ens_v2_sepolia_post_audit",
+        "tests/project-authority-release-event-causality-registrar.toml",
+        json!({"capability_flags":{"exact_name_profile":{"status":"supported"}}}),
+    )
+    .await?;
+    let logical_name_id = format!(
+        "ens:{:#x}",
+        raw_namehash(&[b"release-event-causality", b"classifier", b"eth"])
+    );
+    seed_authority_classifier_case(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        EnsArmSet::Empty,
+        EnsArmSet::Empty,
+    )
+    .await?;
+
+    let future_resource = Uuid::new_v4();
+    let future_binding = Uuid::new_v4();
+    insert_classifier_resource_and_binding(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "ens_v2",
+        future_resource,
+        future_binding,
+        2,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(3)
+         WHERE surface_binding_id = $1",
+    )
+    .bind(future_binding)
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        2,
+        Some(&logical_name_id),
+        Some(&future_resource.to_string()),
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({"status":"released"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        3,
+        Some(&logical_name_id),
+        Some(&future_resource.to_string()),
+        "RegistrationReserved",
+        "ens_v2_registry_l1",
+        json!({"status":"reserved"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        4,
+        Some(&logical_name_id),
+        None,
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"expiry":4_000}),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 4).await?;
+    let selected: (Option<String>, String, Option<String>) = sqlx::query_as(
+        "SELECT provenance #>> '{authority_selection,authority_arm}',
+                support_status, unsupported_reason
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        selected,
+        (
+            Some("ens_v1".into()),
+            "unsupported".into(),
+            Some("current_authority_not_projected".into()),
+        ),
+        "a release cannot borrow a later closed binding to create an ENSv2 event vote",
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn reservation_era_selection_incremental_matches_fresh() -> Result<()> {
     let incremental = ScratchDatabase::create("project_reservation_incremental").await?;
     let fresh = ScratchDatabase::create("project_reservation_fresh").await?;
@@ -17599,6 +17914,186 @@ async fn insert_raw_v2_reservation_release(
         released.data.as_ref(),
     )
     .await
+}
+
+async fn seed_raw_reservation_release_then_registration_before_v1(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<String> {
+    seed_lineage(pool, chain, 3).await?;
+    insert_declared_source_manifest_events(
+        pool,
+        "ens",
+        chain,
+        "ens_v2_root_l1",
+        "root_registry",
+        V2_REGISTRY,
+        &[
+            (
+                "LabelReserved",
+                "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
+                &["root_registry"],
+                &["RegistrationReserved"],
+            ),
+            (
+                "LabelUnregistered",
+                "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)",
+                &["root_registry"],
+                &["RegistrationReleased"],
+            ),
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["root_registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["root_registry"],
+                &["TokenResourceLinked"],
+            ),
+        ],
+    )
+    .await?;
+    let v2_manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = $1 AND source_family = 'ens_v2_root_l1'",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET deployment_label = 'ens_v2_sepolia_post_audit',
+             manifest_payload = jsonb_set(
+                 manifest_payload, '{deployment_epoch}',
+                 '\"ens_v2_sepolia_post_audit\"'::jsonb
+             )
+         WHERE manifest_id = $1",
+    )
+    .bind(v2_manifest_id)
+    .execute(pool)
+    .await?;
+    insert_declared_source_manifest(
+        pool,
+        chain,
+        "ens_v1_wrapper_l1",
+        "name_wrapper",
+        WRAPPER,
+        "NameWrapped",
+        "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+        &["name_wrapper"],
+        &[
+            "TokenControlTransferred",
+            "ExpiryChanged",
+            "PermissionScopeChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+            "PreimageObserved",
+        ],
+    )
+    .await?;
+
+    let label = "eth";
+    let mut token_bytes = *keccak256(label.as_bytes());
+    token_bytes[28..].copy_from_slice(&0_u32.to_be_bytes());
+    let token_id = U256::from_be_bytes(token_bytes);
+    let label_hash = keccak256(label.as_bytes());
+    let reserved = LabelReserved {
+        tokenId: token_id,
+        labelHash: label_hash,
+        label: label.into(),
+        expiry: 4_000_000_000,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        pool,
+        chain,
+        1,
+        1,
+        1,
+        V2_REGISTRY,
+        reserved.topics(),
+        reserved.data.as_ref(),
+    )
+    .await?;
+    let released = LabelUnregistered {
+        tokenId: token_id,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        pool,
+        chain,
+        2,
+        1,
+        1,
+        V2_REGISTRY,
+        released.topics(),
+        released.data.as_ref(),
+    )
+    .await?;
+    let registered = LabelRegistered {
+        tokenId: token_id,
+        labelHash: label_hash,
+        label: label.into(),
+        owner: OWNER.parse()?,
+        expiry: 4_000_000_000,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        pool,
+        chain,
+        2,
+        2,
+        2,
+        V2_REGISTRY,
+        registered.topics(),
+        registered.data.as_ref(),
+    )
+    .await?;
+    let linked = TokenResource {
+        tokenId: token_id,
+        resource: token_id,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        pool,
+        chain,
+        2,
+        2,
+        3,
+        V2_REGISTRY,
+        linked.topics(),
+        linked.data.as_ref(),
+    )
+    .await?;
+    let wrapped = NameWrapped {
+        node: raw_namehash(&[b"eth"]),
+        name: b"\x03eth\0".to_vec().into(),
+        owner: OWNER.parse()?,
+        fuses: 0,
+        expiry: 4_000_000_000,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        pool,
+        chain,
+        3,
+        1,
+        1,
+        WRAPPER,
+        wrapped.topics(),
+        wrapped.data.as_ref(),
+    )
+    .await?;
+
+    Ok(format!("ens:{:#x}", raw_namehash(&[b"eth"])))
 }
 
 async fn assert_reservation_selects_v1(
