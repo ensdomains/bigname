@@ -647,6 +647,168 @@ fn loopback_runner(scratch: &ScratchDatabase, instance_id: &str) -> Result<Phase
 }
 
 #[tokio::test]
+async fn checked_in_sepolia_resolvers_sync_fresh_with_exact_addresses_and_family_watches()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_sepolia_v1_resolver_fresh").await?;
+    let root = checked_in_sepolia_root();
+    let repository = load_repository(&root)?;
+    sync_schema_v2_repository(scratch.pool(), &repository).await?;
+
+    let contracts: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT declaration.role, lower(address.address), address.active_from_block_number
+         FROM manifest_versions manifest
+         JOIN manifest_contract_instances declaration ON declaration.manifest_id = manifest.manifest_id
+         JOIN contract_instances instance ON instance.contract_instance_id = declaration.contract_instance_id
+         JOIN contract_instance_addresses address
+           ON address.contract_instance_id = instance.contract_instance_id
+          AND address.deactivated_at IS NULL
+         WHERE manifest.chain_id = 'ethereum-sepolia'
+           AND manifest.namespace = 'ens'
+           AND manifest.source_family = 'ens_v1_resolver_l1'
+           AND manifest.rollout_status = 'active'
+         ORDER BY declaration.role",
+    )
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        contracts,
+        vec![
+            (
+                "public_resolver".into(),
+                "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5".into(),
+                Some(8_580_001)
+            ),
+            (
+                "public_resolver_0ceec52".into(),
+                "0x0ceec524b2807841739d3b5e161f5bf1430ffa48".into(),
+                Some(3_790_166)
+            ),
+            (
+                "public_resolver_8948458".into(),
+                "0x8948458626811dd0c23eb25cc74291247077cc51".into(),
+                Some(0)
+            ),
+            (
+                "public_resolver_8fade66".into(),
+                "0x8fade66b79cc9f707ab26799354482eb93a5b7dd".into(),
+                Some(0)
+            ),
+        ]
+    );
+
+    let resolver = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
+        .expect("checked-in Sepolia resolver family");
+    let filter = load_persisted_watch_filter(scratch.pool(), "ethereum-sepolia", 0, 0).await?;
+    for event in &resolver.manifest.abi.events {
+        let topic = format!(
+            "{:#x}",
+            keccak256(event.parsed_event_view()?.canonical_signature().as_bytes())
+        );
+        assert!(filter.includes("0x1111111111111111111111111111111111111111", &topic, 0));
+    }
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), "ethereum-sepolia").await?,
+        None
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn checked_in_sepolia_resolver_admission_clamps_retained_redo_to_cursor_floor() -> Result<()>
+{
+    let scratch =
+        ScratchDatabase::create("production_manifest_sepolia_v1_resolver_retained").await?;
+    let desired_root = checked_in_sepolia_root();
+    let baseline_root = copy_profile_without_resolver(&desired_root)?;
+    let baseline = load_repository(&baseline_root)?;
+    sync_schema_v2_repository(scratch.pool(), &baseline).await?;
+    seed_completed_ingest_range_through(&scratch, "ethereum-sepolia", 9_000_000).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors SET start_block_number = 1_000_000
+         WHERE chain_id = 'ethereum-sepolia'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $1
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+    let marker_before = interpret_input_hash(scratch.pool(), "ethereum-sepolia").await?;
+
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&desired_root)?).await?;
+    let marker_after = interpret_input_hash(scratch.pool(), "ethereum-sepolia").await?;
+    assert_ne!(marker_after, marker_before);
+    assert!(marker_after.starts_with("manifest-authority:"));
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), "ethereum-sepolia").await?,
+        Some((1_000_000, 9_000_000))
+    );
+    let reason: String = sqlx::query_scalar(
+        "SELECT last_error FROM chain_phase_state
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'ingest'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        reason,
+        "required downstream redo: manifest watch plan widened over an already-ingested range"
+    );
+    let text_topic = format!(
+        "{:#x}",
+        keccak256(b"TextChanged(bytes32,string,string,string)")
+    );
+    let filter =
+        load_persisted_watch_filter(scratch.pool(), "ethereum-sepolia", 1_000_000, 9_000_000)
+            .await?;
+    let zero_filter = load_persisted_watch_filter(scratch.pool(), "ethereum-sepolia", 0, 0).await?;
+    assert!(zero_filter.includes("0x8948458626811dd0c23eb25cc74291247077cc51", &text_topic, 0));
+    assert!(zero_filter.includes("0x8fade66b79cc9f707ab26799354482eb93a5b7dd", &text_topic, 0));
+    for address in [
+        "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5",
+        "0x8948458626811dd0c23eb25cc74291247077cc51",
+        "0x8fade66b79cc9f707ab26799354482eb93a5b7dd",
+        "0x0ceec524b2807841739d3b5e161f5bf1430ffa48",
+    ] {
+        let block = match address {
+            "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5" => 8_580_001,
+            "0x0ceec524b2807841739d3b5e161f5bf1430ffa48" => 3_790_166,
+            _ => 1_000_000,
+        };
+        assert!(filter.includes(address, &text_topic, block));
+    }
+    let chain = ChainConfig::new(
+        "ethereum-sepolia",
+        vec![SourceConfig::new(
+            "ethereum-sepolia",
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            1_000_000,
+            "http://127.0.0.1:1",
+        )?],
+        false,
+    )?;
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        loopback_runner(&scratch, "sepolia-v1-resolver-retained-runner")?
+            .run_chain(&chain, CancellationToken::new()),
+    )
+    .await
+    .context("outstanding resolver admission redo did not fence derivation")?
+    .expect_err("derivation must wait for the required Ingest redo");
+    assert!(error.to_string().contains("redo --chain ethereum-sepolia"));
+
+    fs::remove_dir_all(&baseline_root)?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn widening_an_ingested_manifest_event_blocks_initial_derivation_until_reingest() -> Result<()>
 {
     let scratch = ScratchDatabase::create("production_manifest_sync_ingest_widening_gap").await?;
@@ -4641,6 +4803,37 @@ async fn required_ingest_redo(pool: &sqlx::PgPool, chain_id: &str) -> Result<Opt
     .bind(chain_id)
     .fetch_optional(pool)
     .await?)
+}
+
+fn checked_in_sepolia_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia")
+}
+
+fn copy_profile_without_resolver(source: &std::path::Path) -> Result<std::path::PathBuf> {
+    fn copy_dir(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
+        fs::create_dir_all(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+            if source_path.is_dir() {
+                copy_dir(&source_path, &target_path)?;
+            } else {
+                fs::copy(source_path, target_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    let target = std::env::temp_dir().join(format!(
+        "bigname-sepolia-without-v1-resolver-{}",
+        Uuid::new_v4()
+    ));
+    copy_dir(source, &target)?;
+    fs::remove_dir_all(target.join("ethereum/ens/ens_v1_resolver_l1"))?;
+    Ok(target)
 }
 
 async fn seed_chain_head(pool: &sqlx::PgPool, chain_id: &str, number: i64) -> Result<()> {

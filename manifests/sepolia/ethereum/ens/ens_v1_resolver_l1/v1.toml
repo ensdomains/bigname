@@ -1,0 +1,137 @@
+# ENSv1 Sepolia PublicResolver source-family admission. The four contracts are
+# the complete first-party app known-resolver list for Sepolia:
+# (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L149-L221 @ ens_app_v3@7175858).
+# Reverse resolvers, ExtendedDNSResolver / OffchainDNSResolver, UniversalResolver,
+# and the TLD-level OwnedResolver are outside this family.
+#
+# Resolver compatibility claims remain intentionally narrower than latest PublicResolver
+# compatibility: unsupported interfaces and features are not inferred from
+# newer generations unless a role-specific resolver profile admits them.
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_resolver_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+# Latest ENS Labs resolver; wrapper-aware. The app metadata also records
+# supportsDefaultCoinType, retained here as provenance only.
+# (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L151-L166 @ ens_app_v3@7175858).
+role = "public_resolver"
+address = "0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5"
+proxy_kind = "none"
+# Receipt-backed deployment start.
+# (upstream: .refs/ens_v1/deployments/sepolia/PublicResolver.json:L1091-L1107 @ ens_v1@91c966f).
+start_block = 8580001
+
+[[contracts]]
+# Outdated ENS Labs resolver generation; wrapper-aware.
+# (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L169-L184 @ ens_app_v3@7175858).
+role = "public_resolver_8948458"
+address = "0x8948458626811dd0c23EB25Cc74291247077cC51"
+proxy_kind = "none"
+# No pinned receipt is available. Zero is a conservative watch lower bound,
+# not a claimed deployment block; see docs/upstream.md § Known divergences,
+# “Retired automatic-bootstrap start-block narrowing.”
+start_block = 0
+
+[[contracts]]
+# Outdated ENS Labs resolver generation; wrapper-aware.
+# (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L187-L202 @ ens_app_v3@7175858).
+role = "public_resolver_8fade66"
+address = "0x8FADE66B79cC9f707aB26799354482EB93a5B7dD"
+proxy_kind = "none"
+# No pinned receipt is available. Zero is a conservative watch lower bound,
+# not a claimed deployment block; see docs/upstream.md § Known divergences,
+# “Retired automatic-bootstrap start-block narrowing.”
+start_block = 0
+
+[[contracts]]
+# Legacy ENS Labs resolver generation; not wrapper-aware.
+# (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L205-L220 @ ens_app_v3@7175858).
+role = "public_resolver_0ceec52"
+address = "0x0CeEC524b2807841739D3B5E161F5bf1430FFA48"
+proxy_kind = "none"
+# Receipt-backed deployment start.
+# (upstream: .refs/ens_v1/deployments/sepolia/LegacyPublicResolver.json:L868-L880 @ ens_v1@91c966f).
+start_block = 3790166
+
+# Match the mainnet family-wide resolver signature surface. These events have
+# no emitter_roles: direct contract declarations provide the watched address
+# set, while every admitted resolver uses the complete signature set.
+[[abi.events]]
+name = "ABIChanged"
+fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "AddrChanged"
+fragment = "event AddrChanged(bytes32 indexed node, address a)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "AddressChanged"
+fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "ContentChanged"
+fragment = "event ContentChanged(bytes32 indexed node, bytes32 hash)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "ContenthashChanged"
+fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "DNSRecordChanged"
+fragment = "event DNSRecordChanged(bytes32 indexed node, bytes name, uint16 resource, bytes record)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "DNSRecordDeleted"
+fragment = "event DNSRecordDeleted(bytes32 indexed node, bytes name, uint16 resource)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "DNSZonehashChanged"
+fragment = "event DNSZonehashChanged(bytes32 indexed node, bytes lastzonehash, bytes zonehash)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "DataChanged"
+fragment = "event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "InterfaceChanged"
+fragment = "event InterfaceChanged(bytes32 indexed node, bytes4 indexed interfaceID, address implementer)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "NameChanged"
+fragment = "event NameChanged(bytes32 indexed node, string name)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "TextChanged"
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "TextChanged"
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+name = "VersionChanged"
+fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
+normalized_events = ["RecordVersionChanged"]

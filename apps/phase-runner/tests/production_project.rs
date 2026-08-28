@@ -18,7 +18,7 @@ use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, Marker as InterpretMarker,
     RunMode as InterpretRunMode,
 };
-use bigname_manifests::load_repository;
+use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_project::{
     BatchRequest, DUAL_CURRENT_CHILD_AUTHORITY, DUAL_CURRENT_EXACT_NAME_AUTHORITY, Engine, Marker,
     RunMode,
@@ -11902,6 +11902,189 @@ async fn raw_ingest_fixture_flows_through_interpret_then_project() -> Result<()>
         .into_iter()
         .all(|count| count > 0),
         "every projection table must be populated from interpreted raw facts: {outputs:?}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project() -> Result<()> {
+    const CHAIN: &str = "ethereum-sepolia";
+    const REGISTRY: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e";
+    const REGISTRAR: &str = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85";
+    const WRAPPER: &str = "0x0635513f179D50A207757E05759CbD106d7dFcE8";
+    const RESOLVER: &str = "0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5";
+    const FIRST_BLOCK: i64 = 8_580_001;
+
+    let scratch = ScratchDatabase::create("production_project_sepolia_v1_resolver").await?;
+    let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(scratch.pool(), &load_repository(profile)?).await?;
+    for block in FIRST_BLOCK..=FIRST_BLOCK + 3 {
+        insert_lineage_block(scratch.pool(), CHAIN, block).await?;
+    }
+
+    let eth_node = raw_namehash(&[b"eth"]);
+    let alice_node = raw_namehash(&[b"alice", b"eth"]);
+    let wrapped = NameWrapped {
+        node: alice_node,
+        name: b"\x05alice\x03eth\0".to_vec().into(),
+        owner: OWNER.parse::<Address>()?,
+        fuses: 0,
+        expiry: 4_000_000_000,
+    }
+    .encode_log_data();
+    insert_raw_event(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK,
+        WRAPPER,
+        wrapped.topics(),
+        wrapped.data.as_ref(),
+    )
+    .await?;
+    let registration = NameRegistered {
+        name: "alice".into(),
+        label: B256::from(keccak256(b"alice")),
+        owner: OWNER.parse::<Address>()?,
+        expires: U256::from(4_000_000_000_u64),
+    }
+    .encode_log_data();
+    insert_raw_event(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 1,
+        REGISTRAR,
+        registration.topics(),
+        registration.data.as_ref(),
+    )
+    .await?;
+    let child = NewOwner {
+        node: eth_node,
+        label: B256::from(keccak256(b"alice")),
+        owner: OWNER.parse::<Address>()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 1,
+        1,
+        1,
+        REGISTRY,
+        child.topics(),
+        child.data.as_ref(),
+    )
+    .await?;
+    let resolver = NewResolver {
+        node: alice_node,
+        resolver: RESOLVER.parse::<Address>()?,
+    }
+    .encode_log_data();
+    insert_raw_event(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 2,
+        REGISTRY,
+        resolver.topics(),
+        resolver.data.as_ref(),
+    )
+    .await?;
+    let record = TextChanged {
+        node: alice_node,
+        indexedKey: keccak256(b"url"),
+        key: "url".into(),
+        value: "https://sepolia-v1.example.test".into(),
+    }
+    .encode_log_data();
+    insert_raw_event(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 3,
+        RESOLVER,
+        record.topics(),
+        record.data.as_ref(),
+    )
+    .await?;
+
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: CHAIN.into(),
+            from_block: FIRST_BLOCK,
+            to_block: FIRST_BLOCK + 3,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let interpreted: (String, String, String, String) = sqlx::query_as(
+        "SELECT source_family, lower(raw_fact_ref ->> 'emitting_address'),
+                after_state ->> 'record_key', after_state ->> 'value'
+         FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+           AND block_number = $2",
+    )
+    .bind(CHAIN)
+    .bind(FIRST_BLOCK + 3)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        interpreted,
+        (
+            "ens_v1_resolver_l1".into(),
+            RESOLVER.to_ascii_lowercase(),
+            "text:url".into(),
+            "https://sepolia-v1.example.test".into(),
+        )
+    );
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        None,
+        RunMode::Normal,
+        FIRST_BLOCK,
+        FIRST_BLOCK + 3,
+    )
+    .await?;
+    let resolver_row: (String, String, String) = sqlx::query_as(
+        "SELECT support_status,
+                declared_summary #>> '{classification,source_family}',
+                declared_summary #>> '{classification,role}'
+         FROM resolver_current current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        resolver_row,
+        (
+            "supported".into(),
+            "ens_v1_resolver_l1".into(),
+            "public_resolver".into()
+        )
+    );
+    let binding: (String, Uuid) = sqlx::query_as(
+        "SELECT lower(declared_summary -> 'resolver' ->> 'address'), resource_id
+         FROM name_current WHERE lower(raw_name) = 'alice.eth'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(binding.0, RESOLVER.to_ascii_lowercase());
+    let records: Vec<(String, String)> = sqlx::query_as(
+        "SELECT entry ->> 'record_key', entry ->> 'value'
+         FROM record_inventory_current inventory
+         CROSS JOIN LATERAL jsonb_array_elements(inventory.entries) entry
+         WHERE inventory.resource_id = $1
+         ORDER BY entry ->> 'record_key'",
+    )
+    .bind(binding.1)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        records,
+        vec![("text:url".into(), "https://sepolia-v1.example.test".into())]
     );
     scratch.cleanup().await
 }

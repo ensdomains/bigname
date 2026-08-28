@@ -271,6 +271,8 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V1Wrapper::NameUnwrapped,
             V1Wrapper::ExpiryExtended,
             V1Wrapper::TransferSingle,
+            V1Resolver::TextChanged,
+            V1Resolver::VersionChanged,
         ]
     );
     v1.into_iter().chain(v1_sepolia).chain(v2).collect()

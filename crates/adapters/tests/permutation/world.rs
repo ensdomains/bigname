@@ -125,6 +125,10 @@ pub const ENS_V1_SEPOLIA: World = World {
             family: "ens_v1_wrapper_l1",
             version_file: "v1.toml",
         },
+        SourceSlot {
+            family: "ens_v1_resolver_l1",
+            version_file: "v1.toml",
+        },
     ],
     roles: &[
         RoleSlot {
@@ -138,6 +142,10 @@ pub const ENS_V1_SEPOLIA: World = World {
         RoleSlot {
             family: "ens_v1_wrapper_l1",
             role: "name_wrapper",
+        },
+        RoleSlot {
+            family: "ens_v1_resolver_l1",
+            role: "public_resolver",
         },
     ],
 };
