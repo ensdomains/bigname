@@ -7808,6 +7808,10 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
     let new_token = versioned_token(label, 2);
     let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
     let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let old_resolver: Address = "0x0000000000000000000000000000000000000051".parse()?;
+    let old_subregistry: Address = "0x0000000000000000000000000000000000000052".parse()?;
+    let new_resolver: Address = "0x0000000000000000000000000000000000000053".parse()?;
+    let new_subregistry: Address = "0x0000000000000000000000000000000000000054".parse()?;
     let manifest = manifest_with_events(
         57,
         "ens",
@@ -7825,16 +7829,39 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
                 &["registry"],
                 &["TokenResourceLinked"],
             ),
+            (
+                "ResolverUpdated",
+                "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
+                &["registry"],
+                &["ResolverChanged"],
+            ),
+            (
+                "SubregistryUpdated",
+                "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+                &["registry"],
+                &["SubregistryChanged"],
+            ),
         ],
     );
-    let registration = |token_id: U256, block_number: i64| {
+    let rules = || {
+        ["resolver", "subregistry"]
+            .into_iter()
+            .map(|edge_kind| DiscoveryRuleInput {
+                manifest_id: 57,
+                edge_kind: edge_kind.to_owned(),
+                from_role: Some("registry".to_owned()),
+                admission: "protocol_event".to_owned(),
+            })
+            .collect()
+    };
+    let registration = |token_id: U256, expiry: u64, block_number: i64| {
         raw_at(
             v2_registry::LabelRegistered {
                 tokenId: token_id,
                 labelHash: keccak256(label.as_bytes()),
                 label: label.to_owned(),
                 owner,
-                expiry: 100,
+                expiry,
                 sender,
             }
             .encode_log_data(),
@@ -7858,11 +7885,36 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
     let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
-        discovery_rules: Vec::new(),
+        discovery_rules: rules(),
         admissions: vec![admission(57, "registry")],
         prior_events: Vec::new(),
         blocks: Vec::new(),
-        raw_logs: vec![registration(old_token, 1), link(old_token, 99, 1)],
+        raw_logs: vec![
+            registration(old_token, 7, 1),
+            link(old_token, 99, 1),
+            raw_at(
+                v2_registry::ResolverUpdated {
+                    tokenId: old_token,
+                    resolver: old_resolver,
+                    sender,
+                }
+                .encode_log_data(),
+                1,
+                2,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::SubregistryUpdated {
+                    tokenId: old_token,
+                    subregistry: old_subregistry,
+                    sender,
+                }
+                .encode_log_data(),
+                1,
+                3,
+                CONTRACT,
+            ),
+        ],
     })?;
     let old_resource = first
         .normalized_events
@@ -7870,14 +7922,34 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
         .find(|event| event.event_kind == "TokenResourceLinked")
         .and_then(|event| event.resource_id)
         .expect("old resource");
+    let expiry = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: rules(),
+        admissions: vec![admission(57, "registry")],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: vec![RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "version-bump-expiry".to_owned(),
+            block_number: 7,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(7),
+            canonicality_state: "canonical".to_owned(),
+        }],
+        raw_logs: Vec::new(),
+    })?;
     let second = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
-        discovery_rules: Vec::new(),
+        discovery_rules: rules(),
         admissions: vec![admission(57, "registry")],
-        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        prior_events: first
+            .normalized_events
+            .iter()
+            .chain(&expiry.normalized_events)
+            .map(prior_event)
+            .collect(),
         blocks: Vec::new(),
-        raw_logs: vec![registration(new_token, 2), link(new_token, 100, 2)],
+        raw_logs: vec![registration(new_token, 100, 8), link(new_token, 100, 8)],
     })?;
     let new_resource = second
         .normalized_events
@@ -7886,20 +7958,50 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
         .and_then(|event| event.resource_id)
         .expect("new resource");
     assert_ne!(old_resource, new_resource);
+    assert!(second.normalized_events.iter().all(|event| {
+        !matches!(
+            event.event_kind.as_str(),
+            "ResolverChanged" | "SubregistryChanged"
+        ) || event.resource_id != Some(new_resource)
+    }));
 
     let third = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
-        discovery_rules: Vec::new(),
+        discovery_rules: rules(),
         admissions: vec![admission(57, "registry")],
         prior_events: first
             .normalized_events
             .iter()
+            .chain(&expiry.normalized_events)
             .chain(&second.normalized_events)
             .map(prior_event)
             .collect(),
         blocks: Vec::new(),
-        raw_logs: vec![link(new_token, 100, 3)],
+        raw_logs: vec![
+            raw_at(
+                v2_registry::ResolverUpdated {
+                    tokenId: new_token,
+                    resolver: new_resolver,
+                    sender,
+                }
+                .encode_log_data(),
+                9,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::SubregistryUpdated {
+                    tokenId: new_token,
+                    subregistry: new_subregistry,
+                    sender,
+                }
+                .encode_log_data(),
+                9,
+                1,
+                CONTRACT,
+            ),
+        ],
     })?;
     assert!(
         third
@@ -7913,6 +8015,16 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
             .iter()
             .all(|resource| resource.resource_id != old_resource)
     );
+    assert!(third.normalized_events.iter().any(|event| {
+        event.event_kind == "ResolverChanged"
+            && event.resource_id == Some(new_resource)
+            && event.after_state["resolver"] == format!("{new_resolver:#x}")
+    }));
+    assert!(third.normalized_events.iter().any(|event| {
+        event.event_kind == "SubregistryChanged"
+            && event.resource_id == Some(new_resource)
+            && event.after_state["subregistry"] == format!("{new_subregistry:#x}")
+    }));
     Ok(())
 }
 
@@ -8123,6 +8235,12 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
                 &["registry"],
                 &["ExpiryChanged", "RegistrationRenewed"],
             ),
+            (
+                "LabelUnregistered",
+                "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)",
+                &["registry"],
+                &["RegistrationReleased"],
+            ),
         ],
     );
     let mut child_admission = admission(59, "registry");
@@ -8255,6 +8373,41 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
                 && event.transaction_index.is_none()
         }));
     }
+    let prior_events = first
+        .normalized_events
+        .iter()
+        .chain(&boundary.normalized_events)
+        .map(prior_event)
+        .collect::<Vec<_>>();
+    let late_unregister = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: vec![DiscoveryRuleInput {
+            manifest_id: 59,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }],
+        admissions: vec![admission(59, "registry"), child_admission.clone()],
+        prior_events: prior_events.clone(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v2_registry::LabelUnregistered {
+                tokenId: child_token,
+                sender,
+            }
+            .encode_log_data(),
+            8,
+            0,
+            CHILD,
+        )],
+    })?;
+    assert!(late_unregister.normalized_events.iter().any(|event| {
+        event.event_kind == "RegistrationReleased"
+            && event.logical_name_id.as_deref() == Some(&leaf.logical_name_id)
+            && event.transaction_hash.is_some()
+            && event.log_index == Some(0)
+    }));
     let restored = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
@@ -8265,12 +8418,7 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
             admission: "linked_subregistry_event".to_owned(),
         }],
         admissions: vec![admission(59, "registry"), child_admission],
-        prior_events: first
-            .normalized_events
-            .iter()
-            .chain(&boundary.normalized_events)
-            .map(prior_event)
-            .collect(),
+        prior_events,
         blocks: Vec::new(),
         raw_logs: vec![raw_at(
             v2_registry::ExpiryUpdated {
@@ -8430,11 +8578,17 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
             .iter()
             .all(|closure| closure.logical_name_id != shadow_id)
     );
-    assert!(
-        boundary
-            .normalized_events
-            .iter()
-            .all(|event| { event.logical_name_id.as_deref() != Some(shadow_id.as_str()) })
+    let shadow_release = boundary
+        .normalized_events
+        .iter()
+        .filter(|event| event.logical_name_id.as_deref() == Some(shadow_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(shadow_release.len(), 1);
+    assert_eq!(shadow_release[0].event_kind, "RegistrationReleased");
+    assert_eq!(shadow_release[0].before_state["status"], "registered");
+    assert_eq!(
+        shadow_release[0].after_state["terminal_reason"],
+        "registry_name_binding_expired"
     );
     super::state::reset_v2_refresh_visits();
     interpret_test_batch_incremental(
@@ -8880,10 +9034,21 @@ fn reserved_child_on_a_claim_path_keeps_reservation_scope_through_topology_legs(
     };
     assert_eq!(
         lifecycle(&kid),
-        [(9, "RegistrationReleased")],
+        [
+            (7, "RegistrationReleased"),
+            (9, "RegistrationReleased"),
+            (1_001, "RegistrationReleased"),
+        ],
         "reservation lifecycle drift: {:#?}",
         output.normalized_events
     );
+    assert!(output.normalized_events.iter().any(|event| {
+        event.block_number == Some(7)
+            && event.event_kind == "RegistrationReleased"
+            && event.logical_name_id.as_deref() == Some(kid.as_str())
+            && event.before_state["status"] == "reserved"
+            && event.after_state["terminal_reason"] == "registry_name_binding_changed"
+    }));
     assert_eq!(
         lifecycle(&ctrl),
         [

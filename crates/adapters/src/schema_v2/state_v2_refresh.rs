@@ -1,4 +1,4 @@
-use super::{State, V2NameState, V2NameTransition, V2RawNameState};
+use super::{State, V2NameState, V2NameTransition, V2RawNameState, v2::v2_key};
 use crate::schema_v2::common::surface_labels;
 
 #[cfg(test)]
@@ -17,6 +17,17 @@ pub(in crate::schema_v2) fn v2_refresh_visits() -> usize {
 }
 
 impl State {
+    pub(in crate::schema_v2) fn remember_v2_logical_name(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        logical_name_id: &str,
+    ) {
+        if let Some(token) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) {
+            token.last_logical_name_id = Some(logical_name_id.to_owned());
+        }
+    }
+
     pub(in crate::schema_v2) fn refresh_dirty_v2_names(
         &mut self,
         at_unix_timestamp: i64,
@@ -167,12 +178,15 @@ impl State {
             else {
                 continue;
             };
-            let raw_name = self
-                .v2_registry_raw_suffix(emitter, namespace, at_unix_timestamp)
-                .map(|mut suffix| {
-                    suffix.insert(0, raw_label.clone());
-                    suffix
-                });
+            let raw_name = super::topology::v2_expiry_is_live(token.expiry, at_unix_timestamp)
+                .then(|| {
+                    self.v2_registry_raw_suffix(emitter, namespace, at_unix_timestamp)
+                        .map(|mut suffix| {
+                            suffix.insert(0, raw_label.clone());
+                            suffix
+                        })
+                })
+                .flatten();
             let name = raw_name
                 .as_ref()
                 .and_then(|raw_labels| surface_labels(raw_labels))
@@ -193,6 +207,14 @@ impl State {
                     namehash,
                 }
             });
+            let current_logical_name_id = name
+                .as_ref()
+                .map(|name| name.logical_name_id.clone())
+                .or_else(|| {
+                    shadow_name
+                        .as_ref()
+                        .map(|name| name.logical_name_id.clone())
+                });
             let previous = token.name.clone();
             let previous_shadow = token.shadow_name.clone();
             let current_resource = token
@@ -224,6 +246,7 @@ impl State {
                     registry: emitter.to_owned(),
                     registry_contract_instance_id: token.registry_contract_instance_id,
                     token_id: token_id.to_owned(),
+                    expiry: token.expiry,
                     previous: previous.clone(),
                     previous_shadow: previous_shadow.clone(),
                     current: name.clone(),
@@ -244,6 +267,9 @@ impl State {
                 let mut current = token.clone();
                 current.name = name.clone();
                 current.shadow_name = shadow_name.clone();
+                if let Some(logical_name_id) = current_logical_name_id.as_ref() {
+                    current.last_logical_name_id = Some(logical_name_id.clone());
+                }
                 self.replace_v2_token_indexes(&key, Some(&token), Some(&current));
             }
             if changed
@@ -263,6 +289,9 @@ impl State {
             if let Some(current) = self.v2_tokens.get_mut(&key) {
                 current.name = name;
                 current.shadow_name = shadow_name;
+                if let Some(logical_name_id) = current_logical_name_id {
+                    current.last_logical_name_id = Some(logical_name_id);
+                }
             }
         }
         terminal_closure_hits.extend(std::mem::take(&mut self.v2_terminal_closure_hits));
@@ -289,6 +318,7 @@ impl State {
             registry: registry.to_owned(),
             registry_contract_instance_id: token.registry_contract_instance_id,
             token_id: token_id.to_owned(),
+            expiry: token.expiry,
             previous: Some(current.clone()),
             previous_shadow: token.shadow_name.clone(),
             current: Some(current),

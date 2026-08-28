@@ -100,8 +100,9 @@ pub(super) struct MigrationObservation {
 
 pub(super) fn v2_boundary_expiration(
     transition: super::state::V2NameTransition,
+    released_at: i64,
 ) -> anyhow::Result<Interpreted> {
-    v2_registry::boundary_expiration(transition)
+    v2_registry::boundary_expiration(transition, released_at)
 }
 
 #[derive(Clone, Debug)]

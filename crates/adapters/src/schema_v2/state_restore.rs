@@ -132,6 +132,9 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             }
         }
         "ResolverChanged" => {
+            if expiry_retirement_is_projection_only(event) {
+                return;
+            }
             let Some(token) = token else { return };
             let resolver = event
                 .after_state
@@ -141,6 +144,9 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             state.set_v2_resolver(emitter, token, resolver);
         }
         "SubregistryChanged" => {
+            if expiry_retirement_is_projection_only(event) {
+                return;
+            }
             let Some(token) = token else { return };
             state.restore_v2_subregistry_change(emitter, token, &event.after_state);
         }
@@ -165,6 +171,26 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
         }
         _ => {}
     }
+    if let (Some(token), Some(logical_name_id)) = (token, event.logical_name_id.as_deref()) {
+        state.remember_v2_logical_name(emitter, token, logical_name_id);
+    }
+}
+fn expiry_retirement_is_projection_only(event: &PriorEventInput) -> bool {
+    event
+        .after_state
+        .get("source_event")
+        .and_then(Value::as_str)
+        == Some("RegistryPathExpired")
+        && event
+            .after_state
+            .get("derived_from")
+            .and_then(Value::as_str)
+            == Some("interpreter_state")
+        && event
+            .after_state
+            .get("terminal_reason")
+            .and_then(Value::as_str)
+            == Some("registry_name_binding_expired")
 }
 fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
     after_state
@@ -186,7 +212,6 @@ fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
                 .map(|label| label.as_bytes().to_vec())
         })
 }
-
 pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     let source_event = event
         .after_state

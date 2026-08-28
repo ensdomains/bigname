@@ -16,6 +16,16 @@ loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
 
 [[files]]
+path = "crates/adapters/src/schema_v2/protocol/v2_registry/topology.rs"
+loc = 711
+justification = "ENSv2 topology removal, expiry retirement, and rebound event groups remain adjacent so their fixed ordering, binding closure, and retained-pointer symmetry can be reviewed as one lifecycle boundary."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/state_restore.rs"
+loc = 619
+justification = "Normalized-event restore keeps destructive lifecycle mutations and projection-only ENSv2 expiry deltas in one event-kind fold so cold restore cannot silently diverge from live interpretation."
+
+[[files]]
 path = "crates/project/src/builders/name_authority.rs"
 loc = 683
 justification = "The exact-name authority selector keeps proof, released tombstone, and released-regime arm rules in one auditable query; the released-regime clause belongs next to the tombstone rules whose positions it shares, and the file stays under the review threshold."

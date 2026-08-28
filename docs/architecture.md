@@ -642,6 +642,54 @@ recorded in the [resolution divergence ledger](glossary.md#resolution-divergence
 
 Every projected row carries provenance pointers, manifest version, canonicality state, and chain-position context.
 
+### ENSv2 expiry retirement
+
+An ENSv2 registry token stops contributing to every current surface when an
+interpreted block timestamp reaches its retained expiry. At `now >= expiry`,
+Interpret closes the token's current name and registration or reservation,
+current ownership, resolver, subregistry, and every descendant connection that
+depends on that registry path. Expired-but-unreleased entries remain available
+only through normalized events and historical identity, resource, and token
+lineage surfaces. ENSv1's expired-but-still-owned presentation does not apply to
+ENSv2: the ENSv2 registry returns no subregistry, resolver, or owner for an
+expired entry. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L258 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L343-L354 @ ens_v2@a971bd64)
+
+Retirement runs before the first raw log of the first interpreted block whose
+timestamp reaches the expiry. An ordered retained-expiry index selects only
+tokens that crossed the expiry boundary, and Interpret materializes the
+affected descendants as ordinary normalized lifecycle and pointer-clearing
+deltas. Wall-clock time, physical batch boundaries, read-time expiry filters,
+and per-read ancestor walks do not participate. Premigration reservations use
+the same rule: expiry removes the reservation and its mirror resolver from
+current surfaces without creating an ENSv2 authority binding.
+
+Interpret and Project may land as separate deployment slices, but this
+combined [interpreter content hash](glossary.md#interpreter-content-hash)
+rollout is not serving-eligible until both are present and the retained range
+has been interpreted and projected coherently. Deployments must not serve the
+newly interpreted range between those slices.
+
+Expiry retirement is computed and non-destructive. Interpret retains the token,
+registration or reservation payload, resource and token lineage, resolver,
+subregistry, and descendant topology. Any later observed renewal of the same
+token ID can therefore revive the same registration and reconnect its retained
+subtree; bigname assumes no grace duration. Registry revival is role-gated but
+has no time-bound check, while the grace period belongs to registrar policy.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L600-L611 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L78 @ ens_v2@a971bd64)
+
+A version-bumped token ID instead defines a new registration. ENSv2 keeps
+independent permission-resource and token version bits, increments both when a
+previously owned entry is re-registered, and writes the new resolver and
+subregistry from that registration call. Interpret does not copy pointers from
+the expired registration. A new registration may explicitly reuse the previous
+child registry and thereby reconnect that registry's retained subtree.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29-L32 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455-L460 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L463 @ ens_v2@a971bd64)
+
 ## Internal domain model
 
 Core objects: `NameSurface`, `SurfaceBinding`, `BackingResource`, `NameClass`, `RegistrationSnapshot`, `AuthoritySnapshot`, `ControlVector`, `PermissionSnapshot`, `ResolutionTopology`, `RecordInventory`, `RecordCache`, `PrimaryNameSnapshot`, `SourceProvenance`, `CoverageSnapshot`, `TokenLineage`, `ExecutionResult`.

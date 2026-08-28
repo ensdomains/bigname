@@ -1,0 +1,158 @@
+{
+  "case": {
+    "id": "v2_expiry_retirement_empty_block",
+    "runner": "ens_v2_registry",
+    "manifests": [
+      {
+        "namespace": "ens",
+        "source_family": "ens_v2_registry_l1",
+        "chain": "ethereum-sepolia",
+        "deployment_epoch": "ens_v2_sepolia_post_audit",
+        "file_path": "manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v2.toml",
+        "role": "registry",
+        "address": "0x00000000000000000000000000000000000020aa",
+        "contract_instance_id": "00000000-0000-0000-0000-000000000001"
+      }
+    ],
+    "blocks": [
+      {
+        "hash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "number": 100,
+        "timestamp": 1700000100
+      },
+      {
+        "hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+        "number": 101,
+        "timestamp": 1800000000
+      },
+      {
+        "hash": "0xb5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5",
+        "number": 102,
+        "timestamp": 1800000001
+      }
+    ],
+    "logs": [
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "block_number": 100,
+        "transaction_hash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "transaction_index": 0,
+        "log_index": 0,
+        "emitting_address": "0x00000000000000000000000000000000000020aa",
+        "topics": [
+          "0x2fe093918572373e9f1f0368f414dffd0043a74ae8c9fd7b0e390b26a0d20b6e",
+          "0x0000000000000000000000000000000000000000000000000000000000000065",
+          "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+          "0x0000000000000000000000000000000000000000000000000000000000002022"
+        ],
+        "data": "0x00000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000002011000000000000000000000000000000000000000000000000000000006b49d2000000000000000000000000000000000000000000000000000000000000000005616c696365000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "block_number": 100,
+        "transaction_hash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "transaction_index": 0,
+        "log_index": 1,
+        "emitting_address": "0x00000000000000000000000000000000000020aa",
+        "topics": [
+          "0x35190fb7cb1f442974e3c68fa2be9cf56828d0043b1cfcfbd17b4efa85669296",
+          "0x0000000000000000000000000000000000000000000000000000000000000065",
+          "0x0000000000000000000000000000000000000000000000000000000000001389"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "block_number": 100,
+        "transaction_hash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "transaction_index": 0,
+        "log_index": 2,
+        "emitting_address": "0x00000000000000000000000000000000000020aa",
+        "topics": [
+          "0x9b6b420ff87c91604d447e507cbeedda5df2fa669a6b6534375e41fd3905a8d5",
+          "0x0000000000000000000000000000000000000000000000000000000000000065",
+          "0x00000000000000000000000000000000000000000000000000000000000020cc",
+          "0x0000000000000000000000000000000000000000000000000000000000002022"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "block_number": 100,
+        "transaction_hash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "transaction_index": 0,
+        "log_index": 3,
+        "emitting_address": "0x00000000000000000000000000000000000020aa",
+        "topics": [
+          "0xca9c8d517128edd416adf5719242ca6ff93ce234442d95234da53c0ae8a10540",
+          "0x0000000000000000000000000000000000000000000000000000000000000065",
+          "0x00000000000000000000000000000000000000000000000000000000000020bb",
+          "0x0000000000000000000000000000000000000000000000000000000000002022"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "block_number": 100,
+        "transaction_hash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "transaction_index": 0,
+        "log_index": 4,
+        "emitting_address": "0x00000000000000000000000000000000000020aa",
+        "topics": [
+          "0x0d35bf721a39b614de00ca5038e1deb0cb0c69a278645e83405a7226cf80ba3c",
+          "0x0000000000000000000000000000000000000000000000000000000000001389",
+          "0x0000000000000000000000000000000000000000000000000000000000002033"
+        ],
+        "data": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+      },
+      {
+        "chain": "ethereum-sepolia",
+        "block_hash": "0xb5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5",
+        "block_number": 102,
+        "transaction_hash": "0xb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6",
+        "transaction_index": 0,
+        "log_index": 0,
+        "emitting_address": "0x00000000000000000000000000000000000020aa",
+        "topics": [
+          "0x3260962d42d8f7ae0af25cbfdb2983c214a859cfa2ac6df8ea29b534c267d429",
+          "0x0000000000000000000000000000000000000000000000000000000000000065",
+          "0x00000000000000000000000000000000000000000000000000000000713fb300",
+          "0x0000000000000000000000000000000000000000000000000000000000002022"
+        ],
+        "data": "0x"
+      }
+    ]
+  },
+  "batches": [
+    {
+      "from_block": 100,
+      "to_block": 100
+    },
+    {
+      "from_block": 101,
+      "to_block": 101
+    },
+    {
+      "from_block": 102,
+      "to_block": 102
+    }
+  ],
+  "expected_project": {
+    "logical_name_id": "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+    "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+    "resource_id": "b64d3841-80ce-5f90-bb3c-575c05361e16",
+    "token_lineage_id": "27c01db8-d04a-5c85-af28-dfed7797bc79",
+    "surface_binding_id": "6347b94d-744e-5e3c-a8a9-38cefbcf0e25",
+    "token_id": "0x0000000000000000000000000000000000000000000000000000000000000065",
+    "registry": "0x00000000000000000000000000000000000020aa",
+    "registrant": "0x0000000000000000000000000000000000002011",
+    "resolver": "0x00000000000000000000000000000000000020cc",
+    "subregistry": "0x00000000000000000000000000000000000020bb",
+    "expiry": 1800000000
+  }
+}

@@ -25,6 +25,28 @@ position and must remain distinct from the added registry log's real `(block,
 0, 0)` position. The fixture's `case.synthetic_logs` says which logs are not
 production and which ones a real registration would also emit.
 
+`v2-expiry-retirement.json` registers and links `alice.eth`, sets its resolver,
+subregistry, and one effective permission grant, ends the first physical batch,
+and then supplies an empty block whose timestamp equals the retained expiry. A
+later `ExpiryUpdated` log revives the same token and retained resource. The
+corpus pins the block-derived
+`SurfaceUnbound`, `RegistrationReleased`, `ResolverChanged`, and
+`SubregistryChanged` order and attribution, with no invented transaction or log
+position. The harness compares fresh, live incremental, tiny-cache, and
+compacted cold-restore execution; repeats the retirement from the same retained
+predecessor; and substitutes a same-height, same-timestamp block hash to prove
+stable semantic payloads with block-specific identities. The Project fixture
+anchors reserve the same identity and event provenance for downstream
+incremental-versus-fresh Project convergence coverage; this adapter harness
+does not itself run Project. ENSv2 returns no subregistry, resolver, or owner
+once the entry expires. (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L258 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L343-L354 @
+ens_v2@a971bd64) The registry accepts a later expiry update for the same token.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @
+ens_v2@a971bd64)
+
 The original four cases were copied from these now-deleted legacy adapter
 tests:
 

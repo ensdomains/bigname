@@ -23,6 +23,7 @@ const EXPECTED_OUTPUTS: &str = include_str!("fixtures/interpreters/expected-outp
 const DENSE_SAME_TRANSACTION: &str =
     include_str!("fixtures/interpreters/dense-same-transaction.json");
 const BINDING_FK_RELEASE: &str = include_str!("fixtures/interpreters/binding-fk-release.json");
+const V2_EXPIRY_RETIREMENT: &str = include_str!("fixtures/interpreters/v2-expiry-retirement.json");
 
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
@@ -120,6 +121,13 @@ struct BindingFkFixture {
     case: Case,
     batches: Vec<BlockRange>,
     expected: BindingFkExpected,
+}
+
+#[derive(Deserialize)]
+struct V2ExpiryFixture {
+    case: Case,
+    batches: Vec<BlockRange>,
+    expected_project: Value,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -401,6 +409,149 @@ fn production_lease_release_corpus_materializes_its_registry_fallback() -> Resul
             .iter()
             .all(|row| row.resource_id != expected.resource_id)
     }));
+    Ok(())
+}
+
+#[test]
+fn v2_expiry_retirement_is_an_empty_block_restore_and_redo_stable_delta() -> Result<()> {
+    let fixture: V2ExpiryFixture = serde_json::from_str(V2_EXPIRY_RETIREMENT)?;
+    let expected_gate = ExpectedCase {
+        id: fixture.case.id.clone(),
+        normalized_events: fixture
+            .case
+            .blocks
+            .iter()
+            .map(|block| serde_json::json!({"block_hash":block.hash}))
+            .collect(),
+        name_surfaces: Vec::new(),
+        surface_bindings: Vec::new(),
+        resources: Vec::new(),
+        token_lineages: Vec::new(),
+    };
+    let input = batch_input(&fixture.case, &expected_gate, &checked_in_manifests()?)?;
+    let outputs = interpret_physical_batches(&fixture.case.id, input.clone(), &fixture.batches)?;
+    assert_eq!(outputs.len(), 3, "expiry fixture must include revival");
+    let expiry = &outputs[1];
+    let events = &expiry.normalized_events;
+    let expected = &fixture.expected_project;
+    let permission = outputs[0]
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "PermissionChanged")
+        .context("expiry fixture must grant a permission before retirement")?;
+    assert_eq!(
+        permission.after_state["role_bitmap"],
+        "0x0000000000000000000000000000000000000000000000000000000000000001"
+    );
+    assert_eq!(
+        permission.resource_id.map(|id| id.to_string()).as_deref(),
+        expected["resource_id"].as_str()
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "SurfaceUnbound",
+            "RegistrationReleased",
+            "ResolverChanged",
+            "SubregistryChanged",
+        ]
+    );
+    assert_eq!(expiry.binding_closures.len(), 1);
+    assert!(events.iter().all(|event| {
+        event.logical_name_id.as_deref() == expected["logical_name_id"].as_str()
+            && event.resource_id.map(|id| id.to_string()).as_deref()
+                == expected["resource_id"].as_str()
+    }));
+    assert_eq!(
+        expiry.binding_closures[0].active_to.unix_timestamp(),
+        1_800_000_000
+    );
+    let token_id = "0x0000000000000000000000000000000000000000000000000000000000000065";
+    for event in events {
+        assert_eq!(event.block_number, Some(101));
+        assert_eq!(event.transaction_hash, None);
+        assert_eq!(event.transaction_index, None);
+        assert_eq!(event.log_index, None);
+        assert_eq!(event.after_state["source_event"], "RegistryPathExpired");
+        assert_eq!(event.after_state["derived_from"], "interpreter_state");
+        assert_eq!(
+            event.after_state["terminal_reason"],
+            "registry_name_binding_expired"
+        );
+        assert_eq!(event.after_state["expiry"], 1_800_000_000_u64);
+        assert_eq!(event.after_state["token_id"], token_id);
+        assert_eq!(
+            event.raw_fact_ref["state_scope"],
+            format!(
+                "0x00000000000000000000000000000000000020aa:-:{token_id}:-:RegistryPathExpired"
+            )
+        );
+    }
+    assert_eq!(
+        events[1].before_state,
+        serde_json::json!({
+            "status":"registered",
+            "expiry":1_800_000_000_u64,
+            "registrant":"0x0000000000000000000000000000000000002011",
+        })
+    );
+    assert_eq!(events[1].after_state["released_at"], 1_800_000_000_i64);
+    assert_eq!(
+        events[2].before_state["resolver"],
+        "0x00000000000000000000000000000000000020cc"
+    );
+    assert_eq!(events[2].after_state["resolver"], Value::Null);
+    assert_eq!(
+        events[3].before_state["subregistry"],
+        "0x00000000000000000000000000000000000020bb"
+    );
+    assert_eq!(events[3].after_state["subregistry"], Value::Null);
+    let revival = &outputs[2].normalized_events;
+    assert!(revival.iter().any(|event| {
+        event.event_kind == "RegistrationGranted"
+            && event.resource_id.map(|id| id.to_string()).as_deref()
+                == expected["resource_id"].as_str()
+            && event.after_state["source_event"] == "ExpiryUpdated"
+    }));
+    assert!(revival.iter().any(|event| {
+        event.event_kind == "ExpiryChanged" && event.after_state["expiry"] == 1_900_000_000_u64
+    }));
+
+    let repeated = interpret_physical_batches(&fixture.case.id, input.clone(), &fixture.batches)?;
+    assert_eq!(outputs, repeated, "redo from the same predecessor drifted");
+
+    let mut replacement_input = input;
+    replacement_input.blocks[1].block_hash =
+        "0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4".to_owned();
+    let replacement = interpret_physical_batches(
+        "v2_expiry_retirement_replacement",
+        replacement_input,
+        &fixture.batches,
+    )?;
+    let replacement_events = &replacement[1].normalized_events;
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| (&event.event_kind, &event.after_state))
+            .collect::<Vec<_>>(),
+        replacement_events
+            .iter()
+            .map(|event| (&event.event_kind, &event.after_state))
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(
+        events
+            .iter()
+            .map(|event| &event.event_identity)
+            .collect::<Vec<_>>(),
+        replacement_events
+            .iter()
+            .map(|event| &event.event_identity)
+            .collect::<Vec<_>>()
+    );
     Ok(())
 }
 

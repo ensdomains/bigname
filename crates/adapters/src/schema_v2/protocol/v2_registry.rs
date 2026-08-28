@@ -31,8 +31,11 @@ use topology::{
     append_token_discovery_closures, append_v2_name_transitions, discovery_observation_key,
 };
 
-pub(super) fn boundary_expiration(transition: V2NameTransition) -> anyhow::Result<Interpreted> {
-    topology::boundary_expiration(transition)
+pub(super) fn boundary_expiration(
+    transition: V2NameTransition,
+    released_at: i64,
+) -> anyhow::Result<Interpreted> {
+    topology::boundary_expiration(transition, released_at)
 }
 
 sol! {
@@ -512,8 +515,15 @@ fn token_state_event(
 ) -> anyhow::Result<Interpreted> {
     ensure_declared(selected, &[kind])?;
     let logical_name_id = linked
-        .and_then(|state| state.name.as_ref())
-        .map(|name| name.logical_name_id.clone());
+        .and_then(|state| {
+            state
+                .name
+                .as_ref()
+                .map(|name| &name.logical_name_id)
+                .or_else(|| state.shadow_name.as_ref().map(|name| &name.logical_name_id))
+                .or(state.last_logical_name_id.as_ref())
+        })
+        .cloned();
     let resource_id = linked.and_then(|state| state.resource_id);
     let mut output = single_event(
         kind,
