@@ -1,4 +1,1 @@
-# Issue 435 measurement
-The ignored release-mode test loads a deterministic PostgreSQL 16 corpus, extracts the [Project phase](../../../../docs/glossary.md#project-phase) SQL, and keeps competing scan types enabled.
-Run `DATABASE_URL='postgresql://...' ISSUE_435_SEED=435 cargo test -p bigname-project --test issue_435_measurement --release -- --ignored --nocapture`.
-Artifacts go to `target/issue-435-evidence/<commit-sha>/`; the test appends 5M rows to the indexed 5M corpus and refuses a seed other than 435.
+# Issue 435 measurement — run `DATABASE_URL='postgresql://...' ISSUE_435_SEED=435 cargo test -p bigname-project --test issue_435_measurement --release -- --ignored --nocapture`; this ignored release-mode test extracts production SQL, keeps competing scans enabled, appends 5M indexed rows to 5M, and writes seed-435 evidence under `target/issue-435-evidence/<commit-sha>/`.

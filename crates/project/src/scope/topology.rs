@@ -366,14 +366,14 @@ async fn include_v2_event_edges(
              SELECT DISTINCT topology.logical_name_id AS parent_id,
                     registration.logical_name_id AS child_id
              FROM project_scope_topology_current scope
-             JOIN normalized_events topology
-               ON topology.logical_name_id = scope.logical_name_id
+             CROSS JOIN LATERAL (SELECT * FROM normalized_events topology
+               WHERE topology.logical_name_id = scope.logical_name_id
               AND topology.chain_id = $1
               AND topology.block_number <= $2
               AND topology.event_kind = 'SubregistryChanged'
               AND topology.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
               AND topology.consumer_visibility = 'activated'
-              AND topology.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND topology.canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0) topology
              JOIN chain_lineage topology_lineage
                ON topology_lineage.chain_id = topology.chain_id
               AND topology_lineage.block_number = topology.block_number
@@ -393,8 +393,8 @@ async fn include_v2_event_edges(
               AND (address.active_to_block_number IS NULL
                    OR address.active_to_block_number > $2)
               AND address.deactivated_at IS NULL
-             JOIN normalized_events registration
-               ON registration.chain_id = $1
+             CROSS JOIN LATERAL (SELECT * FROM normalized_events registration
+               WHERE registration.chain_id = $1
               AND registration.after_state ->> 'registry_contract_instance_id' =
                   address.contract_instance_id::text
               AND registration.block_number <= $2
@@ -404,7 +404,7 @@ async fn include_v2_event_edges(
               AND registration.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
               AND registration.consumer_visibility = 'activated'
               AND registration.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND registration.logical_name_id IS NOT NULL
+              AND registration.logical_name_id IS NOT NULL OFFSET 0) registration
              JOIN chain_lineage registration_lineage
                ON registration_lineage.chain_id = registration.chain_id
               AND registration_lineage.block_number = registration.block_number
@@ -417,17 +417,26 @@ async fn include_v2_event_edges(
              SELECT DISTINCT topology.logical_name_id,
                     registration.logical_name_id
              FROM project_scope_topology_current scope
-             JOIN normalized_events registration
-               ON registration.logical_name_id = scope.logical_name_id
-              AND registration.chain_id = $1
-              AND registration.block_number <= $2
-              AND registration.event_kind IN (
+             CROSS JOIN LATERAL (
+                 SELECT *
+                 FROM (
+                     SELECT * FROM normalized_events
+                     WHERE logical_name_id = scope.logical_name_id
+                       AND chain_id = $1
+                       AND block_number <= $2
+                       AND canonicality_state IN ('canonical', 'safe', 'finalized')
+                     OFFSET 0
+                 ) registration_frontier
+                 WHERE registration_frontier.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased'
-              )
-              AND registration.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-              AND registration.consumer_visibility = 'activated'
-              AND registration.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND registration.after_state ->> 'registry_contract_instance_id' IS NOT NULL
+                 )
+                   AND registration_frontier.source_family IN (
+                       'ens_v2_root_l1', 'ens_v2_registry_l1'
+                   )
+                   AND registration_frontier.consumer_visibility = 'activated'
+                   AND registration_frontier.after_state ->>
+                       'registry_contract_instance_id' IS NOT NULL
+             ) registration
              JOIN chain_lineage registration_lineage
                ON registration_lineage.chain_id = registration.chain_id
               AND registration_lineage.block_number = registration.block_number
