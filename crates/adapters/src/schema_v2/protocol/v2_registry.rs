@@ -499,27 +499,51 @@ fn label_event(
                 source_kind: format!("{}_registry_suffix", selected.event.name),
             });
         }
-        let mut retirement = topology::boundary_expiration(
-            V2NameTransition {
-                registry: raw.emitting_address.to_ascii_lowercase(),
-                registry_contract_instance_id: linked.registry_contract_instance_id,
-                token_id: token_id.clone(),
-                expiry: linked.expiry,
-                previous: name.clone(),
-                previous_shadow: prospective_shadow,
-                current: None,
-                current_shadow: None,
+        let registry = raw.emitting_address.to_ascii_lowercase();
+        let transition = V2NameTransition {
+            registry: registry.clone(),
+            registry_contract_instance_id: linked.registry_contract_instance_id,
+            token_id: token_id.clone(),
+            expiry: linked.expiry,
+            previous: name.clone(),
+            previous_shadow: prospective_shadow,
+            current: None,
+            current_shadow: None,
+            resource_id: linked.resource_id,
+            token_lineage_id: linked.token_lineage_id,
+            upstream_resource: linked.upstream_resource.clone(),
+            registration: None,
+            resolver: linked.resolver.clone(),
+            subregistry: linked.subregistry.clone(),
+        };
+        if transition.previous.is_some() || transition.previous_shadow.is_some() {
+            let mut retirement =
+                topology::boundary_expiration(transition, raw.block_timestamp.unix_timestamp())?;
+            debug_assert!(retirement.binding_closures.is_empty());
+            output.append(&mut retirement);
+        } else {
+            output.events.push(EventDraft {
+                event_kind: "RegistrationReleased".to_owned(),
+                logical_name_id: None,
                 resource_id: linked.resource_id,
-                token_lineage_id: linked.token_lineage_id,
-                upstream_resource: linked.upstream_resource.clone(),
-                registration: None,
-                resolver: linked.resolver.clone(),
-                subregistry: linked.subregistry.clone(),
-            },
-            raw.block_timestamp.unix_timestamp(),
-        )?;
-        debug_assert!(retirement.binding_closures.is_empty());
-        output.append(&mut retirement);
+                identity_suffix: format!("RegistrationReleased:expiry:{registry}:{token_id}"),
+                explicit_before: Some(json!({
+                    "status":"reserved", "expiry":expiry, "registrant":Value::Null,
+                })),
+                after_state: json!({
+                    "source_event":"RegistryPathExpired",
+                    "derived_from":"interpreter_state",
+                    "terminal_reason":"registry_name_binding_expired",
+                    "registry":registry,
+                    "token_id":token_id,
+                    "registry_contract_instance_id":linked.registry_contract_instance_id.map(|id| id.to_string()),
+                    "expiry":expiry,
+                    "status":"released",
+                    "released_at":raw.block_timestamp.unix_timestamp(),
+                }),
+                state_scope: format!("{registry}:-:{token_id}:-:RegistryPathExpired"),
+            });
+        }
     }
     let mut candidates = linked.resolver_discovery_aliases.clone();
     candidates.insert(token_id.clone());
