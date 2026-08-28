@@ -594,24 +594,28 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
         |_, _, inventory| {
             inventory.selectors = json!([
                 {
-                    "record_key": "addr:60",
+                    "record_key": "addr:2147483648",
                     "record_family": "addr",
-                    "selector_key": "60",
+                    "selector_key": "2147483648",
                     "cacheable": true
                 }
             ]);
             inventory.entries = json!([
                 {
-                    "record_key": "addr:60",
+                    "record_key": "addr:2147483648",
                     "record_family": "addr",
-                    "selector_key": "60",
+                    "selector_key": "2147483648",
                     "status": "success",
                     "value": {
-                        "coin_type": "60",
+                        "coin_type": "2147483648",
                         "value": "0x0000000000000000000000000000000000000def"
                     }
                 }
             ]);
+            inventory.provenance["read_rules"] = json!([{
+                "kind": "ensip19_default_address",
+                "source_record_key": "addr:2147483648"
+            }]);
             inventory.record_version_boundary["chain_position"]["block_hash"] =
                 json!(execution_block_hash);
             inventory.chain_positions = json!({
@@ -627,7 +631,9 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     .await?;
     let executed_address = "0x0000000000000000000000000000000000000e0e";
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_universal_resolver_multicoin_response(executed_address),
         resolution_universal_resolver_addr60_response(executed_address),
+        resolution_universal_resolver_multicoin_response(executed_address),
         resolution_universal_resolver_addr60_response(executed_address),
     ])
     .await?;
@@ -655,6 +661,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     assert_eq!(
         payload["data"]["addresses"],
         json!({
+            "2147483648": executed_address,
             "60": executed_address
         })
     );
@@ -710,7 +717,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     );
 
     let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
-    assert_eq!(rpc_requests.len(), 2, "v2 must not reuse a verified cache outcome");
+    assert_eq!(rpc_requests.len(), 4, "v2 must not reuse a verified cache outcome");
     for request in &rpc_requests {
         assert_eq!(request["method"], json!("eth_call"));
         assert_eq!(
@@ -730,7 +737,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     )
     .fetch_one(&lookup_pool)
     .await?;
-    assert_eq!(ledger_count, 1);
+    assert_eq!(ledger_count, 2);
 
     lookup_pool.close().await;
     database.cleanup().await?;
@@ -1427,6 +1434,136 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
         })
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
+        inventory.selectors = json!([{
+            "record_key": "addr:2147483648",
+            "record_family": "addr",
+            "selector_key": "2147483648",
+            "cacheable": true
+        }]);
+        inventory.entries = json!([{
+            "record_key": "addr:2147483648",
+            "record_family": "addr",
+            "selector_key": "2147483648",
+            "status": "success",
+            "value": "0x0000000000000000000000000000000000000DeF"
+        }]);
+        inventory.provenance["read_rules"] = json!([{
+            "kind": "ensip19_default_address",
+            "source_record_key": "addr:2147483648"
+        }]);
+        inventory.explicit_gaps = json!([]);
+        inventory.unsupported_families = json!([]);
+    })
+    .await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={unavailable_rpc_url}"),
+        ])?)
+        .await?;
+
+    for uri in [
+        "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
+        "/v2/names/Alice.eth/records?source=auto&keys=addr:2147483649",
+    ] {
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["meta"]["source"], "indexed");
+        assert_eq!(
+            payload["data"]["records"]["addr:2147483649"],
+            json!({
+                "status": "ok",
+                "value": "0x0000000000000000000000000000000000000def",
+                "meta": {
+                    "basis": "derived",
+                    "rule": "ensip19_default_address",
+                    "source_record_key": "addr:2147483648"
+                }
+            })
+        );
+    }
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=indexed")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"]["addresses"]["60"],
+        "0x0000000000000000000000000000000000000def"
+    );
+    assert_eq!(
+        payload["data"]["primary_address"],
+        "0x0000000000000000000000000000000000000def"
+    );
+
+    let lookup = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"id": "alice", "name": "Alice.eth"}]}),
+    )
+    .await?;
+    assert_eq!(
+        lookup["data"][0]["record"]["addresses"]["60"],
+        "0x0000000000000000000000000000000000000def"
+    );
+    assert_eq!(
+        lookup["data"][0]["record"]["primary_address"],
+        "0x0000000000000000000000000000000000000def"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_indexed_records_do_not_derive_for_unflagged_resolvers() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
+        |_, _, inventory| {
+            inventory.selectors = json!([{
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "cacheable": true
+            }]);
+            inventory.entries = json!([{
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "status": "success",
+                "value": "0x0000000000000000000000000000000000000def"
+            }]);
+            inventory.provenance["read_rules"] = json!([]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]["records"]["addr:2147483649"],
+        json!({"status":"not_found"})
+    );
     Ok(())
 }
 
@@ -4824,6 +4961,22 @@ fn resolution_universal_resolver_addr60_response(address: &str) -> Value {
         resolution_padded_address_hex("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"),
         resolution_left_pad_hex("20", 64),
         resolution_padded_address_hex(address),
+    ))
+}
+
+fn resolution_universal_resolver_multicoin_response(address: &str) -> Value {
+    let stripped = address
+        .strip_prefix("0x")
+        .expect("test address must be 0x-prefixed");
+    assert_eq!(stripped.len(), 40, "test address must be 20 bytes");
+    json!(format!(
+        "0x{}{}{}{}{}{}",
+        resolution_left_pad_hex("40", 64),
+        resolution_padded_address_hex("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"),
+        resolution_left_pad_hex("60", 64),
+        resolution_left_pad_hex("20", 64),
+        resolution_left_pad_hex("14", 64),
+        format!("{stripped:0<64}"),
     ))
 }
 

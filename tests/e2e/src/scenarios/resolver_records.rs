@@ -8,6 +8,7 @@ use crate::harness::{anvil::Anvil, db::HarnessDb, ens_v1, manifests, pipeline, r
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const MULTICOIN_TYPE: u64 = 0;
+const ENSIP19_DEFAULT_COIN_TYPE: u64 = 1 << 31;
 const MULTICOIN_BYTES: &[u8] = &[0xde, 0xad, 0xbe, 0xef];
 const CONTENTHASH_BYTES: &[u8] = &[0xe3, 0x01, 0x01, 0x70, 0x12, 0x20];
 const MULTICOIN_HEX: &str = "0xdeadbeef";
@@ -592,6 +593,15 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
         MULTICOIN_BYTES,
     )
     .await?;
+    ens_v1::set_multicoin_addr_record(
+        &rpc,
+        resolver_a,
+        alice,
+        "records.eth",
+        ENSIP19_DEFAULT_COIN_TYPE,
+        alice.as_slice(),
+    )
+    .await?;
     ens_v1::set_contenthash_record(&rpc, resolver_a, alice, "records.eth", CONTENTHASH_BYTES)
         .await?;
 
@@ -611,10 +621,10 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
         &deployment,
         Some(
             "SELECT \
-               (SELECT count(DISTINCT after_state->>'record_key') >= 2 FROM normalized_events \
+               (SELECT count(DISTINCT after_state->>'record_key') >= 3 FROM normalized_events \
                 WHERE logical_name_id = 'ens:0x9407a4f27b24ccf343caeb964a24d93fe04d7851e8fa0813a35c1c3b9eda8574' AND event_kind = 'RecordChanged' \
                 AND canonicality_state = 'canonical' \
-                AND after_state->>'record_key' IN ('addr:0', 'contenthash')) \
+                AND after_state->>'record_key' IN ('addr:0', 'addr:2147483648', 'contenthash')) \
              AND \
                EXISTS (SELECT 1 FROM normalized_events \
                 WHERE logical_name_id = 'ens:0x129efdee8c82c635f3d70c6f1b7b36923b7419ade3f0c5eb4c1223435cc277dd' AND event_kind = 'RecordChanged' \
@@ -626,13 +636,37 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
 
     let records_exact = exact_name(&initial.api, "ens", "records.eth").await?;
     let selectors = selector_keys(&records_exact);
-    for expected in ["addr:0", "contenthash"] {
+    for expected in ["addr:0", "addr:2147483648", "contenthash"] {
         assert!(
             selectors.contains(expected),
             "expected selector {expected} in records.eth inventory; body: {records_exact}"
         );
     }
     let initial_records_boundary = boundary(&records_exact)?;
+    let (classification, provenance): (Value, Value) = sqlx::query_as(
+        "SELECT resolver.declared_summary->'classification', inventory.provenance
+         FROM resolver_current resolver
+         JOIN record_inventory_current inventory
+           ON inventory.provenance->>'resolver_address' = resolver.resolver_address
+         WHERE resolver.chain_id = 'ethereum-mainnet'
+           AND resolver.resolver_address = $1
+         ORDER BY inventory.resource_id
+         LIMIT 1",
+    )
+    .bind(format!("{resolver_a:#x}"))
+    .fetch_one(&initial.db.pool)
+    .await?;
+    assert_eq!(
+        classification["read_features"],
+        json!(["ensip19_default_address"])
+    );
+    assert_eq!(
+        provenance["read_rules"],
+        json!([{
+            "kind": "ensip19_default_address",
+            "source_record_key": "addr:2147483648"
+        }])
+    );
 
     // `include` replaces the default section set (which is just
     // resolver_address), so it must be named explicitly alongside the

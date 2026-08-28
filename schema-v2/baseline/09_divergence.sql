@@ -291,9 +291,12 @@ DECLARE
     guard_status text;
     resolver_path jsonb;
     compared_entries jsonb;
+    compared_provenance jsonb;
+    compared_support_status text;
     selector_family text;
     selector_key text;
     indexed_entry jsonb;
+    default_entry jsonb;
     indexed_status text;
     indexed_value jsonb;
     indexed_answer jsonb;
@@ -351,8 +354,10 @@ BEGIN
     END CASE;
 
     SELECT inventory.entries,
+           inventory.provenance,
+           inventory.support_status,
            name.declared_summary #> '{topology,resolver_path}'
-    INTO compared_entries, resolver_path
+    INTO compared_entries, compared_provenance, compared_support_status, resolver_path
     FROM record_inventory_current AS inventory
     JOIN name_current AS name
       ON name.logical_name_id = requested_logical_name_id
@@ -401,6 +406,48 @@ BEGIN
     candidate.ordinal
     LIMIT 1;
 
+    IF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+       AND selector_family = 'addr'
+       AND (
+           selector_key = '60'
+           OR selector_key::numeric BETWEEN 2147483649::numeric AND 4294967295::numeric
+       )
+       AND EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(COALESCE(
+               compared_provenance -> 'read_rules', '[]'::jsonb
+           )) rule
+           WHERE rule ->> 'kind' = 'ensip19_default_address'
+             AND rule ->> 'source_record_key' = 'addr:2147483648'
+       )
+    THEN
+        SELECT candidate.entry
+        INTO default_entry
+        FROM jsonb_array_elements(compared_entries)
+            WITH ORDINALITY AS candidate(entry, ordinal)
+        WHERE candidate.entry ->> 'record_key' = 'addr:2147483648'
+           OR (
+                candidate.entry ->> 'record_family' = 'addr'
+                AND candidate.entry ->> 'selector_key' = '2147483648'
+           )
+        ORDER BY candidate.ordinal
+        LIMIT 1;
+
+        IF default_entry IS NULL THEN
+            IF compared_support_status = 'supported' THEN
+                indexed_entry := jsonb_build_object('status', 'not_found');
+            ELSE
+                indexed_entry := jsonb_build_object('status', 'unsupported');
+            END IF;
+        ELSIF default_entry ->> 'status' IN ('success', 'not_found') THEN
+            indexed_entry := default_entry;
+        ELSE
+            indexed_entry := jsonb_build_object('status', 'unsupported');
+        END IF;
+    ELSIF indexed_entry IS NULL AND compared_support_status <> 'supported' THEN
+        indexed_entry := jsonb_build_object('status', 'unsupported');
+    END IF;
+
     IF indexed_entry IS NULL THEN
         indexed_answer := jsonb_build_object('status', 'not_found');
     ELSE
@@ -424,6 +471,8 @@ BEGIN
                         ELSE indexed_value #>> '{}'
                     END
                 );
+            ELSE
+                indexed_answer := jsonb_build_object('status', 'unsupported');
             END IF;
         END IF;
     END IF;

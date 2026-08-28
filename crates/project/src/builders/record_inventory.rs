@@ -333,6 +333,15 @@ pub(super) async fn build(
                    'resolver_address', pointer.resolver_address,
                    'resolver_pointer_event_id', pointer.pointer_event_id,
                    'record_event_ids', COALESCE(records.event_ids, '[]'::jsonb),
+                   'read_rules', CASE WHEN COALESCE(
+                       resolver.declared_summary -> 'classification' -> 'read_features',
+                       '[]'::jsonb
+                   ) ? 'ensip19_default_address' THEN jsonb_build_array(
+                       jsonb_build_object(
+                           'kind', 'ensip19_default_address',
+                           'source_record_key', 'addr:2147483648'
+                       )
+                   ) ELSE '[]'::jsonb END,
                    'coverage', jsonb_build_object(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'

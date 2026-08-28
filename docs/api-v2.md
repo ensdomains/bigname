@@ -389,7 +389,8 @@ detail, it belongs on a diagnostics route instead.
 schema-v2 lookup engine on every request. Response fields and per-record status
 meaning stay unchanged, but there is no reusable outcome, durable execution
 trace, or execution-cache readback. A direct live answer that disagrees
-with the exact indexed record used for comparison writes the guarded
+with the indexed exact entry or manifest-authorized derived read used for
+comparison writes the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
 Agreement creates no divergence but may clear a matching active row, wildcard
 lookup without an exact comparison row writes nothing, and an answer that used

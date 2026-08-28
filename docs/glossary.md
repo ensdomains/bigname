@@ -1442,9 +1442,15 @@ canonical normalized observations, but does not assert exhaustive history or
 event-to-call parity. Unknown or mismatched resolvers are explicitly
 unsupported. See [source manifests](manifests.md#required-fields).
 
+**Resolver read feature** — a manifest-authorized, implementation-sensitive
+resolver getter behavior that Project copies into the current resolver
+classification and then into record-inventory read rules. It authorizes a
+deterministic indexed read from projected records; it does not create record
+events, synthetic selectors, or reusable provider results.
+
 **Resolution divergence ledger** — the schema-v2 audit table whose active rows
 record only when a direct, hash-pinned resolution answer disagrees with the
-exact indexed record entry used for comparison. It is not a result cache:
+indexed exact-or-derived record answer used for comparison. It is not a result cache:
 agreement creates no divergence but may clear a matching active row, wildcard
 resolution without an exact comparison row writes nothing, and any answer that
 used CCIP-read never writes or clears a row. A mutation succeeds only while

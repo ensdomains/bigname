@@ -169,12 +169,24 @@ async fn build_verified_name_record(
 fn profile_verified_requested_records(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> V2Result<Vec<ResolutionRecordKey>> {
-    let records = default_requested_records(record_inventory);
-    let records = if !records.is_empty() || !should_use_profile_fallback_records(record_inventory) {
-        records
-    } else {
-        profile_fallback_requested_records()
-    };
+    let mut records = default_requested_records(record_inventory)
+        .into_iter()
+        .map(|record| (record.record_key.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    if should_use_profile_fallback_records(record_inventory) {
+        let fallbacks = if records.is_empty() {
+            profile_fallback_requested_records()
+        } else {
+            vec![
+                parse_resolution_record_key("addr:60")
+                    .expect("primary profile address selector must be valid"),
+            ]
+        };
+        for record in fallbacks {
+            records.entry(record.record_key.clone()).or_insert(record);
+        }
+    }
+    let records = records.into_values().collect::<Vec<_>>();
     ensure_verified_record_limit(&records)?;
     Ok(records)
 }

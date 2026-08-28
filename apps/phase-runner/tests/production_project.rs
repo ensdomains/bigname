@@ -352,6 +352,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                 "declared_summary": {
                     "classification": {
                         "basis": "manifest_declared_address",
+                        "read_features": [],
                         "role": "public_resolver",
                         "source_family": "ens_v1_resolver_l1"
                     },
@@ -8973,7 +8974,7 @@ async fn manifest_admission_reclassifies_v2_resolver_inline_without_a_queue() ->
          SET manifest_payload = jsonb_set(
              manifest_payload,
              '{resolver_implementations}',
-             '[{"role":"permissioned_resolver","address":"0x00000000000000000000000000000000000000c1"}]'::jsonb
+             '[{"role":"permissioned_resolver","address":"0x00000000000000000000000000000000000000c1","read_features":["ensip19_default_address"]}]'::jsonb
          )
          WHERE chain_id = $1 AND source_family = 'ens_v2_resolver_l1'"#,
     )
@@ -9013,16 +9014,21 @@ async fn manifest_admission_reclassifies_v2_resolver_inline_without_a_queue() ->
         0,
     )
     .await?;
-    let after: (String, String) = sqlx::query_as(
+    let after: (String, String, Value) = sqlx::query_as(
         "SELECT support_status,
-                declared_summary -> 'classification' ->> 'basis'
+                declared_summary -> 'classification' ->> 'basis',
+                declared_summary -> 'classification' -> 'read_features'
          FROM resolver_current",
     )
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(
         after,
-        ("supported".into(), "erc1967_upgraded_history".into())
+        (
+            "supported".into(),
+            "erc1967_upgraded_history".into(),
+            json!(["ensip19_default_address"]),
+        )
     );
     scratch.cleanup().await
 }

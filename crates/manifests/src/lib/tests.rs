@@ -652,6 +652,69 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
 }
 
 #[test]
+fn checked_in_resolver_read_features_are_generation_scoped() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let ens = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
+        .expect("ENSv1 resolver manifest");
+    let flagged = ens
+        .manifest
+        .contracts
+        .iter()
+        .filter(|contract| !contract.read_features.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0].role, "public_resolver");
+    assert_eq!(
+        flagged[0].read_features,
+        vec![ResolverReadFeature::Ensip19DefaultAddress]
+    );
+
+    let basenames = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "basenames_base_resolver")
+        .expect("Basenames resolver manifest");
+    assert_eq!(
+        basenames.manifest.contracts[0].read_features,
+        vec![ResolverReadFeature::Ensip19DefaultAddress]
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_rejects_invalid_resolver_read_feature_declarations() -> Result<()> {
+    let direct_resolver = manifest_contents()
+        .replace("role = \"registry\"", "role = \"resolver\"")
+        .replace("proxy_kind = \"erc1967\"", "proxy_kind = \"none\"")
+        .replace(
+            "start_block = 23456",
+            "read_features = [\"ensip19_default_address\", \"ensip19_default_address\"]\nstart_block = 23456",
+        );
+    let error = load_one(&direct_resolver).expect_err("duplicate read features must fail");
+    assert!(format!("{error:#}").contains("duplicates read feature"));
+
+    let proxy = direct_resolver
+        .replace("proxy_kind = \"none\"", "proxy_kind = \"erc1967\"")
+        .replace(
+            "[\"ensip19_default_address\", \"ensip19_default_address\"]",
+            "[\"ensip19_default_address\"]",
+        );
+    let error = load_one(&proxy).expect_err("proxy-level read features must fail");
+    assert!(format!("{error:#}").contains("resolver_implementations"));
+
+    let unknown = direct_resolver.replace(
+        "[\"ensip19_default_address\", \"ensip19_default_address\"]",
+        "[\"unknown_read_feature\"]",
+    );
+    let error = load_one(&unknown).expect_err("unknown read features must fail");
+    assert!(format!("{error:#}").contains("unknown variant"));
+    Ok(())
+}
+
+#[test]
 fn sepolia_ensv1_to_ensv2_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
     let migration = repository

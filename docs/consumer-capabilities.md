@@ -39,6 +39,32 @@ it does not preserve the deleted v1 DTOs.
 | Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
+## Resolver address read modes
+
+The records route, exact-name detail, and name results in batch lookup share
+one indexed ENSIP-19 behavior. Projected exact entries remain event-derived.
+When the selected resolver has the manifest-authorized
+[resolver read feature](glossary.md#resolver-read-feature), an eligible EVM
+coin-type request whose exact entry is empty or missing reads the projected
+default entry instead. The records route identifies per-key derived results in
+`records[key].meta`; values-only address maps contain the value without adding
+provenance fields. Completeness remains request-relative. ENSIP-19 defines the
+coin-type-to-chain eligibility rule, and the admitted resolver getter performs
+the default-entry fallback only when that rule returns a positive chain ID
+`(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)`.
+
+| Address read | Indexed | Auto | Verified |
+| --- | --- | --- | --- |
+| Exact entry | Exact value | Exact value | Chain value |
+| Eligible EVM coin type, flagged resolver, default entry present | Derived value with per-key metadata | Derived value; no provider call | Chain value |
+| Eligible EVM coin type, flagged resolver, default source authoritatively absent | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain result |
+| Default source unavailable or inventory non-authoritative | Explicit `unsupported` | Request-scoped verified fallback | Chain result |
+| Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |
+
+Verified answers never claim whether the on-chain resolver used exact storage,
+default storage, or another execution path, so they omit derived metadata.
+
 ## ENSv1→ENSv2 mixed-history ownership
 
 The replacement contract for exact-name and direct-subname current reads is

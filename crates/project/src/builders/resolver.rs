@@ -1,12 +1,14 @@
 mod alias_summary;
 mod binding_summary;
 mod permission_summary;
+mod read_features;
 
 use sqlx::{Postgres, Transaction};
 
 use crate::{
     Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
 };
+use read_features::{DECLARED_READ_FEATURES, IMPLEMENTATION_READ_FEATURES};
 
 const SUMMARY_SAMPLE_LIMIT: i32 = 100;
 
@@ -362,6 +364,8 @@ pub(super) async fn build(
                    upgrade.block_number AS upgrade_block_number,
                    upgrade.block_hash AS upgrade_block_hash,
                    upgrade.after_state ->> 'implementation' AS implementation,
+                   {DECLARED_READ_FEATURES} AS declared_read_features,
+                   {IMPLEMENTATION_READ_FEATURES} AS implementation_read_features,
                    COALESCE(
                        candidate.classification_role,
                        (
@@ -478,7 +482,13 @@ pub(super) async fn build(
                        'basis', CASE WHEN source_family = 'ens_v2_resolver_l1'
                            THEN 'erc1967_upgraded_history'
                            ELSE 'manifest_declared_address' END,
-                       'implementation', implementation
+                       'implementation', implementation,
+                       'read_features', CASE
+                           WHEN NOT supported THEN '[]'::jsonb
+                           WHEN source_family = 'ens_v2_resolver_l1'
+                               THEN implementation_read_features
+                           ELSE declared_read_features
+                       END
                    )),
                    'bindings', CASE WHEN enumeration_supported THEN jsonb_build_object(
                        'status', 'supported', 'count', binding_count,

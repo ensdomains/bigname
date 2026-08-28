@@ -368,6 +368,16 @@ it. Resolver-local events are accepted only under the manifest and
 current-resolver rules documented in
 [`manifests.md`](manifests.md).
 
+The resolver classification also carries effective manifest-declared
+[`read_features`](manifests.md#required-fields). A supported inventory copies
+`ensip19_default_address` into `provenance.read_rules` with source key
+`addr:2147483648`. `selectors` and `entries` remain exact `RecordChanged`
+observations: Project does not fabricate target coin types or rewrite the
+default entry. Removing the feature, changing to an unflagged resolver, or
+rotating a proxy to an unflagged implementation removes the rule on the same
+scoped rebuild. Full and incremental rebuilds select the feature from the same
+current resolver classification.
+
 For ENSv1, an admitted current resolver may contribute supported address, text,
 and contenthash inventory. An unlisted or unsupported resolver family stays
 explicitly unsupported. For ENSv2, current-emitter version evidence may define a

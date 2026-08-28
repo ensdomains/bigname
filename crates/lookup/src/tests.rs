@@ -352,6 +352,61 @@ async fn restored_agreement_clears_the_matching_active_divergence() -> AnyResult
 }
 
 #[tokio::test]
+async fn ensip19_derived_indexed_agreement_clears_a_prior_divergence() -> AnyResult<()> {
+    let default_address = "0x0000000000000000000000000000000000000def";
+    let different_address = "0x0000000000000000000000000000000000000abc";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_address_result(different_address)?),
+        RpcResponse::Result(encoded_address_result(default_address)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET selectors = $1, entries = $2, provenance = $3",
+    )
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648"
+    }]))
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648",
+        "status":"success",
+        "value":default_address
+    }]))
+    .bind(json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]}))
+    .execute(fixture.pool())
+    .await?;
+    let request = || LookupRequest::new(&fixture.logical_name_id, ["addr:60"]);
+
+    let disagreement = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request()?)
+        .await?;
+    assert_eq!(disagreement.records[0].ledger_action, LedgerAction::Written);
+
+    let agreement = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request()?)
+        .await?;
+    assert_eq!(agreement.records[0].ledger_action, LedgerAction::Cleared);
+    let active: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL")
+            .fetch_one(fixture.pool())
+            .await?;
+    assert_eq!(active, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn unadmitted_serving_position_fails_before_rpc_or_ledger_write() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?

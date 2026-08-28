@@ -19,7 +19,14 @@ mod manifests;
 mod persistence;
 mod positions;
 #[cfg(test)]
-pub(crate) use indexed::answer as indexed_answer;
+pub(crate) fn indexed_answer(entries: &Value, selector: &RecordSelector) -> Value {
+    indexed::answer(
+        entries,
+        &serde_json::json!({}),
+        &serde_json::json!({"status":"projected"}),
+        selector,
+    )
+}
 #[cfg(test)]
 pub(crate) use persistence::divergence_write_error;
 pub(crate) use persistence::{persist_comparisons, revalidate_primary_name_position};
@@ -51,6 +58,8 @@ pub(super) struct IndexedComparison {
     pub boundary_key: String,
     pub row_xmin: String,
     pub entries: Value,
+    pub provenance: Value,
+    pub coverage: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -63,9 +72,14 @@ pub(crate) struct EnsPrimaryNameAuthority {
 
 impl LookupSnapshot {
     pub fn indexed_answer(&self, selector: &RecordSelector) -> Option<Value> {
-        self.comparison
-            .as_ref()
-            .map(|comparison| indexed::answer(&comparison.entries, selector))
+        self.comparison.as_ref().map(|comparison| {
+            indexed::answer(
+                &comparison.entries,
+                &comparison.provenance,
+                &comparison.coverage,
+                selector,
+            )
+        })
     }
 }
 
@@ -87,6 +101,8 @@ struct InventoryRow {
     resource_id: String,
     record_version_boundary_key: String,
     entries: Value,
+    provenance: Value,
+    coverage: Value,
     chain_positions: Value,
     row_xmin: String,
 }
@@ -263,6 +279,8 @@ pub(crate) async fn load_snapshot(
             boundary_key: inventory.record_version_boundary_key,
             row_xmin: inventory.row_xmin,
             entries: inventory.entries,
+            provenance: inventory.provenance,
+            coverage: inventory.coverage,
         }),
     })
 }
@@ -416,6 +434,14 @@ async fn load_inventory(
         r#"
         SELECT inventory.resource_id::text AS resource_id,
                inventory.record_version_boundary_key, inventory.entries,
+               inventory.provenance,
+               CASE WHEN inventory.support_status = 'supported'
+                   THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
+                   ELSE jsonb_build_object(
+                       'status', 'unsupported', 'exhaustiveness', 'not_asserted',
+                       'unsupported_reason', inventory.unsupported_reason
+                   )
+               END AS coverage,
                inventory.chain_positions, inventory.xmin::text AS row_xmin
         FROM record_inventory_current inventory
         JOIN resources resource

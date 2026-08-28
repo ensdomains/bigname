@@ -158,8 +158,9 @@ decoding round-trips to them. A later preimage upgrades the same child row.
 ## Live/indexed resolution differences
 
 `resolution_divergences` stores a row only when a live resolver answer differs
-from the exact indexed `record_inventory_current.entries` answer selected by
-the projected record boundary's `resource_id`. It keeps at most one unresolved
+from the indexed exact entry or manifest-authorized derived read evaluated from
+the `record_inventory_current` row selected by the projected record boundary's
+`resource_id`. It keeps at most one unresolved
 row for each exact name, resolver, and record key. A wildcard lookup with no
 exact inventory comparison executes without ledger persistence and never
 compares the request with its wildcard ancestor's inventory. Lookup execution
@@ -170,8 +171,9 @@ therefore identifies an ingested block. Every active row must identify that
 block in `chain_lineage` with the same chain, hash, height, and timestamp and
 with readable canonicality; the strict position trigger remains required. The
 guarded writer locks the compared inventory row and accepts a mutation only
-while its `xmin` is unchanged from the read. It derives the indexed answer from
-that row and verifies the current requested name, selected resolver, record
+while its `xmin` is unchanged from the read. It evaluates the indexed answer
+from that row's exact entries and projected read rules, then verifies the
+current requested name, selected resolver, record
 selector, and record boundary before targeting a ledger row. Callers supply
 only the live answer. When indexed comparison and live execution use different
 blocks on one chain, `observed_positions` retains separate `indexed` and `live`
