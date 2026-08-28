@@ -34,12 +34,12 @@ impl State {
     ) -> Vec<V2NameTransition> {
         let previous_timestamp = self.latest_v2_timestamp;
         let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
-        self.capture_crossed_v2_expiries(previous_timestamp, at_unix_timestamp);
+        let crossed = self.capture_crossed_v2_expiries(previous_timestamp, at_unix_timestamp);
         self.expand_dirty_v2_registries();
         let keys = std::mem::take(&mut self.v2_dirty_tokens)
             .into_iter()
             .collect();
-        self.refresh_v2_name_keys(keys, at_unix_timestamp)
+        self.refresh_v2_name_keys(keys, at_unix_timestamp, &crossed)
     }
 
     pub(super) fn refresh_all_v2_names(&mut self, at_unix_timestamp: i64) -> Vec<V2NameTransition> {
@@ -47,7 +47,7 @@ impl State {
         self.v2_dirty_tokens.clear();
         self.v2_dirty_registries.clear();
         let keys = self.v2_tokens.keys().cloned().collect::<Vec<_>>();
-        self.refresh_v2_name_keys(keys, at_unix_timestamp)
+        self.refresh_v2_name_keys(keys, at_unix_timestamp, &imbl::ordset::OrdSet::new())
     }
 
     pub(super) fn mark_v2_token_dirty(&mut self, token_key: impl Into<String>) {
@@ -96,10 +96,10 @@ impl State {
         &mut self,
         previous_timestamp: Option<i64>,
         current_timestamp: i64,
-    ) {
+    ) -> imbl::ordset::OrdSet<String> {
         let previous_timestamp = previous_timestamp.unwrap_or(-1);
         if current_timestamp <= previous_timestamp || current_timestamp < 0 {
-            return;
+            return imbl::ordset::OrdSet::new();
         }
         let first_expiry = u64::try_from(previous_timestamp.saturating_add(1)).unwrap_or_default();
         let last_expiry = u64::try_from(current_timestamp).expect("non-negative timestamp");
@@ -108,10 +108,11 @@ impl State {
             .range((first_expiry, String::new())..)
             .take_while(|(expiry, _)| *expiry <= last_expiry)
             .map(|(_, token_key)| token_key.clone())
-            .collect::<Vec<_>>();
-        for token_key in crossed {
-            self.mark_v2_token_component_dirty(&token_key);
+            .collect::<imbl::ordset::OrdSet<String>>();
+        for token_key in &crossed {
+            self.mark_v2_token_component_dirty(token_key);
         }
+        crossed
     }
 
     fn expand_dirty_v2_registries(&mut self) {
@@ -153,6 +154,7 @@ impl State {
         &mut self,
         keys: Vec<String>,
         at_unix_timestamp: i64,
+        resource_retirements: &imbl::ordset::OrdSet<String>,
     ) -> Vec<V2NameTransition> {
         let mut transitions = Vec::new();
         let mut terminal_closure_hits = std::mem::take(&mut self.v2_terminal_closure_hits);
@@ -223,7 +225,12 @@ impl State {
                 .then_some(token.resource_id)
                 .flatten();
             let changed = previous != name || previous_shadow != shadow_name;
-            if changed {
+            let resource_retirement = resource_retirements.contains(&key)
+                && token.resource_id.is_some()
+                && token.last_logical_name_id.is_none()
+                && previous.is_none()
+                && previous_shadow.is_none();
+            if changed || resource_retirement {
                 if token.registration.is_some()
                     && let Some(previous) = previous.as_ref()
                     && name

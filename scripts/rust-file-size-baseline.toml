@@ -17,13 +17,13 @@ justification = "Manifest state, address-epoch persistence, and derived-phase in
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry.rs"
-loc = 669
-justification = "ENSv2 registry dispatch keeps raw registration and reservation admission adjacent to its immediate already-expired reservation retirement, so raw-log ordering and the retained topology refresh cannot diverge."
+loc = 665
+justification = "ENSv2 registry dispatch keeps raw registration and reservation admission adjacent to retained topology refresh while expiry lifecycle helpers live in the bounded sibling module."
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry/topology.rs"
-loc = 711
-justification = "ENSv2 topology removal, expiry retirement, and rebound event groups remain adjacent so their fixed ordering, binding closure, and retained-pointer symmetry can be reviewed as one lifecycle boundary."
+loc = 693
+justification = "ENSv2 topology removal and rebound groups remain adjacent while the fixed expiry event group and pointer clears live in the bounded sibling module."
 
 [[files]]
 path = "crates/adapters/src/schema_v2/state_restore.rs"

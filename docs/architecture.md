@@ -666,8 +666,8 @@ current surfaces without creating an ENSv2 authority binding.
 
 An ownerless reservation may also be observed with a nonzero expiry that is
 already at or before its event block timestamp. Interpret retains that raw
-reservation as history, then emits its state-derived release at the same raw-log
-position so the reservation and any later effective grants never enter current
+reservation as history, then emits its state-derived release in the same block,
+immediately after interpreting that reservation, so it has block-only provenance and never enters current
 state. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L465 @ ens_v2@a971bd64)
 
 Interpret and Project may land as separate deployment slices, but this

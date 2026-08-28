@@ -30,7 +30,7 @@ subregistry, and one effective permission grant, ends the first physical batch,
 and then supplies an empty block whose timestamp equals the retained expiry. A
 later `ExpiryUpdated` log revives the same token and retained resource. The
 first block also observes an ownerless reservation whose nonzero expiry equals
-that block timestamp; the corpus pins its raw history row followed immediately
+that block timestamp; the corpus pins its raw history row followed in the same block immediately
 by a state-derived, bindingless release. (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L465 @
 ens_v2@a971bd64) The

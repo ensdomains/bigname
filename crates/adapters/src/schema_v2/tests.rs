@@ -1949,11 +1949,18 @@ fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyho
         86,
         "ens",
         "ens_v2_registry_l1",
-        &[(
+        &[
+        (
             "LabelReserved",
             "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
             &["registry"],
             &["RegistrationReserved"],
+        ),
+        (
+            "ExpiryUpdated",
+            "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)",
+            &["registry"],
+            &["ExpiryChanged", "RegistrationRenewed"],
         )],
     );
     let mut detached = admission(86, "registry");
@@ -2006,8 +2013,9 @@ fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyho
     assert_eq!(release.before_state["status"], "reserved");
     assert_eq!(release.after_state["derived_from"], "interpreter_state");
     assert_eq!(release.after_state["terminal_reason"], "registry_name_binding_expired");
-    assert_eq!((release.block_number, release.transaction_index, release.log_index), (Some(1), Some(0), Some(0)));
-    assert_eq!(release.transaction_hash.as_deref(), Some("transaction-1"));
+    let resource_id = release.resource_id;
+    assert_eq!((release.block_number, release.transaction_index, release.log_index), (Some(1), None, None));
+    assert!(release.transaction_hash.is_none());
     let lifecycle = output.normalized_events.iter()
         .filter(|event| matches!(event.event_kind.as_str(), "RegistrationReserved" | "RegistrationReleased"))
         .map(|event| event.event_kind.as_str())
@@ -2026,14 +2034,19 @@ fn already_expired_detached_reservation_emits_resource_scoped_release() -> anyho
     )?;
     let (_, restored) = interpret_test_batch_incremental(BatchInput {
             chain_id: CHAIN.to_owned(),
-            manifests: vec![manifest],
-            discovery_rules,
-            admissions: vec![detached],
+            manifests: vec![manifest.clone()],
+            discovery_rules: discovery_rules.clone(),
+            admissions: vec![detached.clone()],
             prior_events: prior,
             blocks: Vec::new(),
             raw_logs: Vec::new(),
-        }, None)?;
+    }, None)?;
     assert_eq!(live, restored);
+    let (revival, _) = interpret_test_batch_incremental(BatchInput {
+        chain_id: CHAIN.to_owned(), manifests: vec![manifest], discovery_rules, admissions: vec![detached], prior_events: Vec::new(), blocks: Vec::new(),
+        raw_logs: vec![raw_at(v2_registry::ExpiryUpdated { tokenId: token, newExpiry: 100, sender }.encode_log_data(), 2, 0, DETACHED)],
+    }, Some(live))?;
+    assert!(revival.normalized_events.iter().any(|event| event.event_kind == "RegistrationRenewed" && event.logical_name_id.is_none() && event.resource_id == resource_id && event.after_state["revived_from_expiry"] == true));
     Ok(())
 }
 
