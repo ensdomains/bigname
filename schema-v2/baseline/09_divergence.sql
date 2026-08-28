@@ -439,7 +439,23 @@ BEGIN
             IF default_entry IS NULL THEN
                 indexed_entry := jsonb_build_object('status', 'not_found');
             ELSIF default_entry ->> 'status' IN ('success', 'not_found') THEN
-                indexed_entry := default_entry;
+                -- Match the requested getter's verified decode. addr(bytes32) converts
+                -- the coin-60 bytes to address(0); multicoin addr(bytes32,uint256)
+                -- preserves non-empty bytes, including 20 zero bytes.
+                -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+                -- (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
+                IF selector_key = '60'
+                   AND default_entry ->> 'status' = 'success'
+                   AND lower(COALESCE(
+                       default_entry #>> '{value,value}',
+                       default_entry #>> '{value,bytes}',
+                       default_entry ->> 'value'
+                   )) = '0x0000000000000000000000000000000000000000'
+                THEN
+                    indexed_entry := jsonb_build_object('status', 'not_found');
+                ELSE
+                    indexed_entry := default_entry;
+                END IF;
             ELSE
                 indexed_entry := jsonb_build_object('status', 'unsupported');
             END IF;

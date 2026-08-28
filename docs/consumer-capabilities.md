@@ -48,16 +48,23 @@ When the selected resolver has the manifest-authorized
 coin-type request whose exact entry is empty or missing reads the projected
 default entry instead. The records route identifies per-key derived results in
 `records[key].meta`; values-only address maps contain the value without adding
-provenance fields. Completeness remains request-relative. ENSIP-19 defines the
+provenance fields. Derived values use the requested getter's verified decode:
+coin type `60` treats a 20-byte zero default as `not_found`, while EVM-range
+multicoin selectors retain that non-empty byte value. Exact stored records are
+not normalized by this rule. Completeness remains request-relative. ENSIP-19 defines the
 coin-type-to-chain eligibility rule, and the admitted resolver getter performs
 the default-entry fallback only when that rule returns a positive chain ID
 `(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)`
 `(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)`.
+The admitted archived-Sepolia implementation exposes the same two getter shapes
+`(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)`.
 
 | Address read | Indexed | Auto | Verified |
 | --- | --- | --- | --- |
 | Exact entry | Exact value | Exact value | Chain value |
 | Eligible EVM coin type, flagged resolver, default entry present | Derived value with per-key metadata | Derived value; no provider call | Chain value |
+| Coin type 60, flagged resolver, default entry is 20 zero bytes | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain `not_found` |
 | Eligible EVM coin type, flagged resolver, default source authoritatively absent | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain result |
 | Default source unavailable or inventory non-authoritative | Explicit `unsupported` | Request-scoped verified fallback | Chain result |
 | Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |

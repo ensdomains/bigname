@@ -1553,6 +1553,109 @@ async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result
 }
 
 #[tokio::test]
+async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
+        inventory.selectors = json!([{
+            "record_key": "addr:2147483648",
+            "record_family": "addr",
+            "selector_key": "2147483648",
+            "cacheable": true
+        }]);
+        inventory.entries = json!([{
+            "record_key": "addr:2147483648",
+            "record_family": "addr",
+            "selector_key": "2147483648",
+            "status": "success",
+            "value": "0x0000000000000000000000000000000000000000"
+        }]);
+        inventory.provenance["read_rules"] = json!([{
+            "kind": "ensip19_default_address",
+            "source_record_key": "addr:2147483648"
+        }]);
+        inventory.explicit_gaps = json!([]);
+        inventory.unsupported_families = json!([]);
+    })
+    .await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={unavailable_rpc_url}"),
+        ])?)
+        .await?;
+
+    let expected_records = json!({
+        "addr:60": {
+            "status": "not_found",
+            "meta": {
+                "basis": "derived",
+                "rule": "ensip19_default_address",
+                "source_record_key": "addr:2147483648"
+            }
+        },
+        "addr:2147483649": {
+            "status": "ok",
+            "value": "0x0000000000000000000000000000000000000000",
+            "meta": {
+                "basis": "derived",
+                "rule": "ensip19_default_address",
+                "source_record_key": "addr:2147483648"
+            }
+        }
+    });
+    for source in ["indexed", "auto"] {
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v2/names/Alice.eth/records?source={source}&keys=addr:60,addr:2147483649"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["meta"]["source"], "indexed");
+        assert_eq!(payload["data"]["records"], expected_records);
+        assert!(payload["data"]["addresses"].get("60").is_none());
+        assert_eq!(
+            payload["data"]["addresses"]["2147483649"],
+            "0x0000000000000000000000000000000000000000"
+        );
+    }
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=indexed")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    let payload: Value = read_json(response).await?;
+    assert!(payload["data"]["addresses"].get("60").is_none());
+    assert!(payload["data"].get("primary_address").is_none());
+
+    let lookup = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"id": "alice", "name": "Alice.eth"}]}),
+    )
+    .await?;
+    assert!(lookup["data"][0]["record"]["addresses"]
+        .get("60")
+        .is_none());
+    assert!(lookup["data"][0]["record"]
+        .get("primary_address")
+        .is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_indexed_records_do_not_derive_for_unflagged_resolvers() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
         "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",

@@ -105,9 +105,15 @@ history; features from older implementations are never unioned.
 requested EVM coin-type entry is empty. Eligibility follows
 `chainFromCoinType(coinType) > 0`: coin type `60` and
 `2147483649..=4294967295` are targets, while `2147483648` is the source key and
-does not recurse.
+does not recurse. The read feature authorizes the fallback source; serving then
+uses the requested getter's verified decode. A derived coin-type-60 zero address
+is `not_found`, while an EVM-range multicoin request preserves the same non-empty
+20 zero bytes. This target-specific normalization does not alter exact stored
+records.
 (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
 
 The current ENS PublicResolver and the admitted archived-Sepolia ENSv2
 `PermissionedResolver` implementation declare this feature. Legacy ENS resolver

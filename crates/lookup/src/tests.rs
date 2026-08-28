@@ -294,6 +294,30 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "selector_key":"2147483648",
                 "status":"not_found"
             }]),
+            read_rule.clone(),
+        ),
+        (
+            "zero20 default for legacy address derives not found",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key":"addr:2147483648",
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"success",
+                "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+            }]),
+            read_rule.clone(),
+        ),
+        (
+            "zero20 default for EVM multicoin remains success",
+            "addr:2147483649".to_owned(),
+            json!([{
+                "record_key":"addr:2147483648",
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"success",
+                "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+            }]),
             read_rule,
         ),
     ]
@@ -427,6 +451,52 @@ async fn empty_ensip19_default_agrees_with_live_miss_without_divergence() -> Any
         "record_family":"addr",
         "selector_key":"2147483648",
         "status":"not_found"
+    }]))
+    .bind(json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]}))
+    .execute(fixture.pool())
+    .await?;
+
+    let outcome = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(&fixture.logical_name_id, ["addr:60"])?)
+        .await?;
+    assert_eq!(outcome.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(
+        outcome.records[0].status,
+        crate::LookupRecordStatus::NotFound
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zero20_ensip19_default_agrees_with_legacy_live_miss_without_divergence() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_address_result(
+        "0x0000000000000000000000000000000000000000",
+    )?)])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET selectors = $1, entries = $2, provenance = $3",
+    )
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648"
+    }]))
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648",
+        "status":"success",
+        "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
     }]))
     .bind(json!({"read_rules":[{
         "kind":"ensip19_default_address",

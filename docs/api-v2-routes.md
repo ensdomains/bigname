@@ -470,13 +470,19 @@ Field ownership:
   `addr:2147483648` only when the selected resolver's manifest-authorized
   [resolver read feature](glossary.md#resolver-read-feature) is present and
   `chainFromCoinType(coin_type) > 0`; coin type `2147483648` itself never
-  recurses. A default-source `ok` yields the requested-key value, while its
-  authoritative absence yields derived `not_found`. An unsupported or
+  recurses. A derived answer is normalized through the requested getter's
+  verified decode: for coin type `60`, a 20-byte zero default becomes derived
+  `not_found`; for EVM-range multicoin selectors, the same non-empty bytes remain
+  an `ok` value. Exact stored records keep their existing behavior. Other
+  default-source `ok` values yield the requested-key value, while authoritative
+  absence yields derived `not_found`. An unsupported or
   non-authoritative source leaves auto unsatisfied and triggers ordinary
   verified lookup. Explicit `source=indexed` reports that case as
   `unsupported`.
   (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
   The admitted legacy Basenames resolver is unflagged because its exact-storage
   getter does not implement that fallback. The fallback-bearing upgradeable
   Basenames resolver proxy is not yet admitted.

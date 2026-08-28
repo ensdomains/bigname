@@ -4,6 +4,7 @@ use serde_json::Value;
 pub const ENSIP19_DEFAULT_COIN_TYPE: u64 = 1 << 31;
 pub const ETH_COIN_TYPE: u64 = 60;
 pub const ENSIP19_DEFAULT_RECORD_KEY: &str = "addr:2147483648";
+const ZERO20_HEX: &str = "0x0000000000000000000000000000000000000000";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -89,7 +90,18 @@ pub fn evaluate_indexed_record(
             "addr",
             Some("2147483648"),
         ) {
-            let answer = answer_from_entry(source, record_family);
+            let mut answer = answer_from_entry(source, record_family);
+            // A derived answer must use the requested getter's verified decode. The legacy
+            // addr(bytes32) path converts the coin-60 bytes to address(0), while the multicoin
+            // path returns the non-empty bytes unchanged. Exact stored entries keep their shape.
+            // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+            // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
+            if selector_key == Some("60")
+                && answer.status == IndexedRecordStatus::Success
+                && answer.value.as_ref().and_then(Value::as_str) == Some(ZERO20_HEX)
+            {
+                answer = not_found();
+            }
             return match answer.status {
                 IndexedRecordStatus::Success | IndexedRecordStatus::NotFound => {
                     IndexedRecordAnswer {
@@ -343,6 +355,69 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn derived_zero20_matches_the_requested_verified_decode() {
+        let zero20 = json!([{
+            "record_key":ENSIP19_DEFAULT_RECORD_KEY,
+            "record_family":"addr",
+            "selector_key":"2147483648",
+            "status":"success",
+            "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+        }]);
+        let expected_derivation = Some(IndexedRecordDerivation {
+            rule: ResolverReadFeature::Ensip19DefaultAddress,
+            source_record_key: ENSIP19_DEFAULT_RECORD_KEY.to_owned(),
+        });
+
+        let legacy = evaluate_indexed_record(
+            &zero20,
+            &rule(),
+            &projected(),
+            "addr:60",
+            "addr",
+            Some("60"),
+        );
+        assert_eq!(legacy.status, IndexedRecordStatus::NotFound);
+        assert_eq!(legacy.value, None);
+        assert_eq!(legacy.derivation, expected_derivation);
+
+        let multicoin = evaluate_indexed_record(
+            &zero20,
+            &rule(),
+            &projected(),
+            "addr:2147483649",
+            "addr",
+            Some("2147483649"),
+        );
+        assert_eq!(multicoin.status, IndexedRecordStatus::Success);
+        assert_eq!(
+            multicoin.value,
+            Some(json!("0x0000000000000000000000000000000000000000"))
+        );
+        assert_eq!(multicoin.derivation, expected_derivation);
+
+        let nonzero = evaluate_indexed_record(
+            &json!([{
+                "record_key":ENSIP19_DEFAULT_RECORD_KEY,
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"success",
+                "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000def"}
+            }]),
+            &rule(),
+            &projected(),
+            "addr:60",
+            "addr",
+            Some("60"),
+        );
+        assert_eq!(nonzero.status, IndexedRecordStatus::Success);
+        assert_eq!(
+            nonzero.value,
+            Some(json!("0x0000000000000000000000000000000000000def"))
+        );
+        assert_eq!(nonzero.derivation, expected_derivation);
     }
 
     #[test]
