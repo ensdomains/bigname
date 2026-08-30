@@ -681,6 +681,38 @@ fn checked_in_resolver_read_features_are_generation_scoped() -> Result<()> {
         basenames.manifest.contracts[0].read_features.is_empty(),
         "the admitted legacy Basenames resolver must not authorize ENSIP-19 fallback"
     );
+
+    let sepolia = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let resolver = sepolia
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
+        .expect("Sepolia ENSv1 resolver manifest");
+    let flagged = resolver
+        .manifest
+        .contracts
+        .iter()
+        .filter(|contract| !contract.read_features.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0].role, "public_resolver");
+    assert_eq!(
+        normalize_address(&flagged[0].address),
+        "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5"
+    );
+    assert_eq!(
+        flagged[0].read_features,
+        vec![ResolverReadFeature::Ensip19DefaultAddress]
+    );
+    assert!(
+        resolver
+            .manifest
+            .contracts
+            .iter()
+            .filter(|contract| contract.role != "public_resolver")
+            .all(|contract| contract.read_features.is_empty()),
+        "only the latest Sepolia resolver generation supports ENSIP-19 fallback"
+    );
     Ok(())
 }
 

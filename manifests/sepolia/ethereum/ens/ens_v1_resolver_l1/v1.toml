@@ -21,12 +21,15 @@ discovery_rules = []
 [capability_flags]
 
 [[contracts]]
-# Latest ENS Labs resolver; wrapper-aware. The app metadata also records
-# supportsDefaultCoinType, retained here as provenance only.
+# Latest ENS Labs resolver; wrapper-aware. This generation composes AddrResolver,
+# and the app metadata records its default coin-type support.
+# (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f).
 # (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L151-L166 @ ens_app_v3@7175858).
 role = "public_resolver"
 address = "0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5"
 proxy_kind = "none"
+read_features = ["ensip19_default_address"]
 # Receipt-backed deployment start.
 # (upstream: .refs/ens_v1/deployments/sepolia/PublicResolver.json:L1091-L1107 @ ens_v1@91c966f).
 start_block = 8580001

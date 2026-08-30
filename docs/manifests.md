@@ -115,14 +115,16 @@ records.
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
 
-The current ENS PublicResolver and the admitted archived-Sepolia ENSv2
-`PermissionedResolver` implementation declare this feature. Legacy ENS resolver
-generations remain unflagged: bigname makes no derived-read claim for them even
-if retained events exist. The current ENS contract composes `AddrResolver`, and
-first-party app metadata identifies that generation as supporting the default
-coin type.
+The current Mainnet ENS PublicResolver, the Sepolia PublicResolver at
+`0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`, and the admitted archived-Sepolia
+ENSv2 `PermissionedResolver` implementation declare this feature. Legacy ENS
+resolver generations remain unflagged: bigname makes no derived-read claim for
+them even if retained events exist. The current ENS contract composes
+`AddrResolver`, and first-party app metadata identifies both admitted current
+PublicResolver declarations as supporting the default coin type.
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)
 (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32-L40 @ ens_app_v3@7175858)
+(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L151-L166 @ ens_app_v3@7175858)
 The archived ENSv2 deployment identifies the admitted implementation, whose
 embedded compiled-source metadata applies the same empty-address fallback.
 (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)
@@ -326,7 +328,7 @@ The two zero values are conservative watch lower bounds, not asserted deployment
 
 The normalized ENSv1 resolver address set is disjoint from every address-bearing field in the active Sepolia `ens_v2_resolver_l1` manifest; its complete resolver-side set is the `permissioned_resolver` implementation metadata address `0x7e4b2d59938930168024201752ee5503df402303`. That implementation is v2 classification metadata, not an ENSv1 direct-address admission. The connected deployment's premigration registrar assigns the separate `ENSV1Resolver` mirror at `0x5339161a7896ca9841ecc034a49edca40f7b9491`; that mirror finds the selected resolver through the ENSv1 registry and forwards resolution there. The serving-side mirror stays in the connected ENSv2 deployment, while v1 record ingestion and exact resolver classification stay in `ens_v1_resolver_l1`.[^v2-sepolia-v1-mirror]
 
-The latest resolver's app metadata records `supportsDefaultCoinType`, but `read_features` / ENSIP-19 capability modeling is deferred to #627 and will follow after that capability model settles.[^v1-sepolia-app-resolvers]
+The latest resolver declares `read_features = ["ensip19_default_address"]`, matching its app metadata and inherited `AddrResolver` fallback behavior. Project therefore publishes the ENSIP-19 default-address read rule for `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`; the other three generations remain unflagged.[^v1-sepolia-app-resolvers]
 
 Admission is necessary but not sufficient for a migrated child's cleanup to be
 observable. Both cleanup shapes — the wrapper token parked in the Graveyard, and
@@ -1465,7 +1467,7 @@ above does not change that provenance rule.
 [^v1-sepolia-baseregistrar-stale-receipt]: The pinned artifact records a receipt for a different address and two deployments, so its receipt block is not evidence for the admitted address: (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L733-L768 @ ens_v1@91c966f)
 [^v1-sepolia-receipt-backed-controllers]: The Legacy controller artifact records its address and a successful deployment receipt at block `3790197`: (upstream: .refs/ens_v1/deployments/sepolia/LegacyETHRegistrarController.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/sepolia/LegacyETHRegistrarController.json:L562-L599 @ ens_v1@91c966f). The later controller artifact records its address and retained receipt at block `8579988`: (upstream: .refs/ens_v1/deployments/sepolia/ETHRegistrarController.json:L2 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deployments/sepolia/ETHRegistrarController.json:L680-L720 @ ens_v1@91c966f).
 [^v1-sepolia-wrapped-controller-gap]: The v1-reference override is tracked for Sepolia chain `11155111`, and its complete controller artifact records the address and ABI but no deployment receipt or start metadata: (upstream: .refs/ens_v2/contracts/deployments/README.md:L60-L66 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/README.md:L141-L142 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/v1/sepolia/.chainId:L1 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/v1/sepolia/WrappedETHRegistrarController.json:L1-L21 @ ens_v2@a971bd64) `ETHRenewerV1` declares the constructor input and encodes the same address, while both reference indexers assign it block `3790244`: (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L37-L45 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L894 @ ens_v2@a971bd64) (upstream: .refs/ens_subgraph/networks.json:L55-L57 @ ens_subgraph@723f1b6) (upstream: .refs/ensnode/packages/datasources/src/sepolia.ts:L76-L80 @ ensnode@2017ae6)
-[^v1-sepolia-app-resolvers]: The four ordered entries record addresses, latest tagging, wrapper compatibility, supported interfaces, and the latest resolver's `supportsDefaultCoinType` flag. The table's older-generation classifications follow the maintainer-approved ordering rather than an upstream tag: (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L149-L221 @ ens_app_v3@7175858)
+[^v1-sepolia-app-resolvers]: The four ordered entries record addresses, latest tagging, wrapper compatibility, supported interfaces, and the latest resolver's `supportsDefaultCoinType` flag. The table's older-generation classifications follow the maintainer-approved ordering rather than an upstream tag: (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L149-L221 @ ens_app_v3@7175858). The latest `PublicResolver` composes `AddrResolver`, whose multicoin getter applies the default coin-type fallback: (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
 [^v1-sepolia-public-resolver-receipt]: The retained deployment receipt records block `8580001`: (upstream: .refs/ens_v1/deployments/sepolia/PublicResolver.json:L1091-L1107 @ ens_v1@91c966f)
 [^v1-sepolia-legacy-resolver-receipt]: The retained deployment receipt records block `3790166`: (upstream: .refs/ens_v1/deployments/sepolia/LegacyPublicResolver.json:L868-L880 @ ens_v1@91c966f)
 [^v1-mainnet-owned-resolver]: The pinned Mainnet deployment set records the `EthOwnedResolver` deployment marker, and its deploy script sets that resolver on `.eth`; the checked-in Mainnet `ens_v1_resolver_l1` manifest instead admits only its declared PublicResolver generations: (upstream: .refs/ens_v1/deployments/mainnet/.migrations.json:L15-L22 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deploy/resolvers/00_deploy_eth_owned_resolver.ts:L7-L38 @ ens_v1@91c966f)

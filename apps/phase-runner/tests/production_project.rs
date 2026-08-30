@@ -14,6 +14,9 @@ use bigname_adapters::schema_v2::{
     RawBlockInput as AdapterRawBlockInput, RawLogInput as AdapterRawLogInput,
     interpret_schema_v2_batch, seam::REDO_RESOLVER_EVIDENCE_SELECT_SQL,
 };
+use bigname_domain::resolver_read::{
+    ENSIP19_DEFAULT_RECORD_KEY, IndexedRecordStatus, ResolverReadFeature, evaluate_indexed_record,
+};
 use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, Marker as InterpretMarker,
     RunMode as InterpretRunMode,
@@ -165,6 +168,7 @@ sol! {
     );
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event NewResolver(bytes32 indexed node, address resolver);
+    event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
     event TextChanged(
         bytes32 indexed node,
         string indexed indexedKey,
@@ -11943,6 +11947,23 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
         wrapped.data.as_ref(),
     )
     .await?;
+    let default_address = AddressChanged {
+        node: alice_node,
+        coinType: U256::from(1_u64 << 31),
+        newAddress: vec![0_u8; 20].into(),
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 3,
+        1,
+        1,
+        RESOLVER,
+        default_address.topics(),
+        default_address.data.as_ref(),
+    )
+    .await?;
     let registration = NameRegistered {
         name: "alice".into(),
         label: B256::from(keccak256(b"alice")),
@@ -12021,7 +12042,7 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
                 after_state ->> 'record_key', after_state ->> 'value'
          FROM normalized_events
          WHERE chain_id = $1 AND event_kind = 'RecordChanged'
-           AND block_number = $2",
+           AND block_number = $2 AND after_state ->> 'record_key' = 'text:url'",
     )
     .bind(CHAIN)
     .bind(FIRST_BLOCK + 3)
@@ -12046,10 +12067,11 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
         FIRST_BLOCK + 3,
     )
     .await?;
-    let resolver_row: (String, String, String) = sqlx::query_as(
+    let resolver_row: (String, String, String, Value) = sqlx::query_as(
         "SELECT support_status,
                 declared_summary #>> '{classification,source_family}',
-                declared_summary #>> '{classification,role}'
+                declared_summary #>> '{classification,role}',
+                declared_summary #> '{classification,read_features}'
          FROM resolver_current current
          WHERE chain_id = $1 AND resolver_address = lower($2)",
     )
@@ -12062,7 +12084,8 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
         (
             "supported".into(),
             "ens_v1_resolver_l1".into(),
-            "public_resolver".into()
+            "public_resolver".into(),
+            json!(["ensip19_default_address"]),
         )
     );
     let binding: (String, Uuid) = sqlx::query_as(
@@ -12072,19 +12095,63 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(binding.0, RESOLVER.to_ascii_lowercase());
-    let records: Vec<(String, String)> = sqlx::query_as(
-        "SELECT entry ->> 'record_key', entry ->> 'value'
-         FROM record_inventory_current inventory
-         CROSS JOIN LATERAL jsonb_array_elements(inventory.entries) entry
-         WHERE inventory.resource_id = $1
-         ORDER BY entry ->> 'record_key'",
+    let inventory: (Value, Value) = sqlx::query_as(
+        "SELECT entries, provenance
+         FROM record_inventory_current
+         WHERE resource_id = $1",
     )
     .bind(binding.1)
-    .fetch_all(scratch.pool())
+    .fetch_one(scratch.pool())
     .await?;
     assert_eq!(
-        records,
-        vec![("text:url".into(), "https://sepolia-v1.example.test".into())]
+        inventory.1["read_rules"],
+        json!([{
+            "kind": "ensip19_default_address",
+            "source_record_key": ENSIP19_DEFAULT_RECORD_KEY,
+        }])
+    );
+    let extended_coin_type = (1_u64 << 31) | 10;
+    let derived = evaluate_indexed_record(
+        &inventory.0,
+        &inventory.1,
+        &inventory.1["coverage"],
+        &format!("addr:{extended_coin_type}"),
+        "addr",
+        Some(&extended_coin_type.to_string()),
+    );
+    assert_eq!(derived.status, IndexedRecordStatus::Success);
+    assert_eq!(
+        derived.value,
+        Some(json!("0x0000000000000000000000000000000000000000"))
+    );
+    assert_eq!(
+        derived.derivation.expect("ENSIP-19 derivation").rule,
+        ResolverReadFeature::Ensip19DefaultAddress
+    );
+    let coin_60 = evaluate_indexed_record(
+        &inventory.0,
+        &inventory.1,
+        &inventory.1["coverage"],
+        "addr:60",
+        "addr",
+        Some("60"),
+    );
+    assert_eq!(coin_60.status, IndexedRecordStatus::NotFound);
+    assert_eq!(
+        coin_60
+            .derivation
+            .expect("coin-60 ENSIP-19 derivation")
+            .rule,
+        ResolverReadFeature::Ensip19DefaultAddress
+    );
+    assert!(
+        inventory.0.as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry["record_key"] == "text:url"
+                    && entry["value"] == "https://sepolia-v1.example.test"
+            })
+        }),
+        "the original text record must remain in the projected inventory"
     );
     scratch.cleanup().await
 }
