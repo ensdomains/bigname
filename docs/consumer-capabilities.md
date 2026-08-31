@@ -69,6 +69,13 @@ The admitted archived-Sepolia implementation exposes the same two getter shapes
 | Default source unavailable or inventory non-authoritative | Explicit `unsupported` | Request-scoped verified fallback | Chain result |
 | Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |
 
+The auto column's exact-answer rule has one exception: for an Ethereum Mainnet
+ENS name whose projected exact resolver is null and whose ordinary direct row
+admits [Universal Resolver ancestor
+discovery](glossary.md#universal-resolver-ancestor-discovery), all requested
+keys execute through verified lookup. Retained exact inventory predates the
+resolver-clear boundary and does not satisfy auto for that route.
+
 The flagged deployments are the current ENS PublicResolver on mainnet, the
 current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`,
 and the admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation. The

@@ -141,7 +141,12 @@ pub fn interpret_schema_v2_batch(input: BatchInput) -> anyhow::Result<BatchOutpu
         let incremental_input = input.clone();
         let restore_input = input.clone();
         let expected = interpret_fresh(input)?;
-        let (actual, session) = interpret_schema_v2_batch_incremental(incremental_input, None)?;
+        let (actual, session) = prepare_schema_v2_batch_incremental(
+            incremental_input,
+            None,
+            StateCacheCapacity::Unlimited,
+        )?
+        .finish(Vec::new())?;
         anyhow::ensure!(
             actual == expected,
             "incremental adapter output differs from fresh one-shot interpretation"
@@ -177,19 +182,6 @@ fn interpret_fresh(input: BatchInput) -> anyhow::Result<BatchOutput> {
     );
     rethread_before_states(&mut output, prior_tails);
     Ok(output)
-}
-
-/// Interprets one batch and returns the retained state to move into the next batch.
-///
-/// A resumed session must belong to the same chain, and its input must not repeat restored prior
-/// events. Passing no session performs the full restore from `input.prior_events`.
-pub fn interpret_schema_v2_batch_incremental(
-    input: BatchInput,
-    session: Option<AdapterSession>,
-) -> anyhow::Result<(BatchOutput, AdapterSession)> {
-    let prepared =
-        prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?;
-    prepared.finish(Vec::new())
 }
 
 pub fn prepare_schema_v2_batch_incremental(

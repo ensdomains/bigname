@@ -463,8 +463,41 @@ Field ownership:
   `record_family_not_supported`.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
-  lookup. Exact indexed `ok` answers and authoritative ENSIP-19 derived answers
-  satisfy auto without a provider request. For `addr:<coin_type>`, exact `ok`
+  lookup. [Universal Resolver ancestor
+  discovery](glossary.md#universal-resolver-ancestor-discovery) applies when a
+  readable ENS name on Ethereum Mainnet has a null projected exact resolver, a
+  projected name identity and DNS wire name, no alias, linked-subregistry,
+  projected wildcard, or cross-chain transport path, and an admitted Universal
+  Resolver manifest entrypoint. This makes the indexed null-resolver miss
+  unsatisfying. `source=auto` therefore executes the requested
+  keys through verified lookup, and `source=verified` uses the same route. The
+  Universal Resolver walks to the nearest nonzero ancestor resolver and accepts
+  an ancestor only when it implements ENSIP-10
+  `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
+  `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f)`.
+  These responses use `meta.source=verified`; `data.resolver` remains null
+  because it reports the exact registry resolver, not the ancestor used during
+  live execution. `ResolverNotFound(bytes)` is a chain-proven per-key
+  `not_found` with `failure_reason=resolver_not_found` only when its embedded
+  DNS name equals the request name; it covers both no resolver and a nearest
+  non-extended ancestor. Other reverts remain failed. Every successfully
+  decoded call for one name and block must return the same effective resolver.
+  A `ResolverNotFound` outcome cannot coexist with a successfully decoded
+  effective resolver; either inconsistency fails the request closed. Ordinary
+  selector-local failed or unsupported results remain mixed per key. This route
+  has no indexed comparison: success and
+  live `not_found` write and clear no divergence rows, while CCIP-required
+  answers remain `unsupported` with `offchain_lookup_required` and likewise
+  write nothing. ENS continues not to follow CCIP-Read. Basenames and other
+  chains and namespaces do not enter this route. Outside this
+  null-exact-resolver class, exact indexed `ok` answers and authoritative
+  ENSIP-19 derived answers satisfy auto without a provider request. Within this
+  class, all requested keys execute through verified lookup because retained
+  exact inventory predates the resolver-clear boundary. If no admitted
+  Universal Resolver entrypoint is available at execution time, the requested
+  keys are explicitly `unsupported`; auto never turns that inability to execute
+  into an indexed null-resolver `not_found`. For
+  `addr:<coin_type>`, exact `ok`
   wins. An exact entry normalized to `not_found`, including empty address
   bytes, or a missing exact entry may read projected
   `addr:2147483648` only when the selected resolver's manifest-authorized
@@ -515,12 +548,14 @@ Field ownership:
   Node-keyed `ens_v1_resolver_l1` records written before the name surface
   existed enter that attributable history only when the selected pointer's
   source family is `ens_v1_registry_l1`, `ens_v1_registrar_l1`, or
-  `ens_v1_wrapper_l1`. For a name reached through an ENSv2-family or Basenames
-  pointer, those records are not attributed and currently read as authoritative
-  `not_found` with `coverage.status=projected`; whether cross-family history
-  should instead be attributed or receive a distinct coverage signal is
-  deliberately unresolved in
-  [#621](https://github.com/ensdomains/bigname/issues/621).
+  `ens_v1_wrapper_l1`. A selected `ens_v2_registry_l1` or `ens_v2_root_l1`
+  pointer may also admit them when its target resolver's final classification
+  is supported `ens_v1_resolver_l1` from an applicable exact declaration and
+  the classifying manifest's namespace matches the pointer's namespace. Under
+  that guard, absence from the projected inventory is authoritative
+  `not_found`. Other ENSv2-family pointers and Basenames pointers do not
+  attribute this node-keyed history; the Basenames question remains unresolved
+  in [#621](https://github.com/ensdomains/bigname/issues/621).
   An inventory in any other coverage state is not authoritative, and the
   request falls through to verified lookup or an explicit unsupported answer
   rather than reporting absence from the index as absence on chain.
@@ -572,6 +607,10 @@ Field ownership:
   evaluator before the guarded resolution-divergence-ledger write. Agreement
   can therefore clear an older exact-key false miss; provider output remains
   request-scoped and is never copied into inventory or another projection.
+  When projection changes a formerly direct resolver to null, projection
+  publication retires active observations for that old direct resolver as stale
+  evidence. This cleanup does not compare a live ancestor-served answer with the
+  former indexed miss and is not a wildcard divergence write.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 

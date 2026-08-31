@@ -233,9 +233,16 @@ async fn load_surfaces(
          LEFT JOIN LATERAL (
              SELECT event.after_state
              FROM normalized_events event
+             JOIN chain_lineage event_lineage
+               ON event_lineage.chain_id = event.chain_id
+              AND event_lineage.block_hash = event.block_hash
+              AND event_lineage.block_number = event.block_number
              WHERE event.chain_id = surface.chain_id
                AND event.logical_name_id = surface.logical_name_id
                AND event.after_state ? 'raw_labels_hex'
+               AND event.block_number <= surface.block_number
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND event_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
              ORDER BY event.block_number DESC NULLS LAST,
                       event.transaction_index DESC NULLS LAST,
                       event.log_index DESC NULLS LAST,
@@ -244,6 +251,8 @@ async fn load_surfaces(
          ) fallback ON true
          WHERE surface.chain_id = $1
            AND surface.block_number BETWEEN $2 AND $3
+           AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
          ORDER BY surface.block_number, surface.logical_name_id
          FOR UPDATE OF surface",
     )
@@ -330,11 +339,7 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
         None
     } else {
         surface.deactivated_at.or_else(|| {
-            let log_index = surface
-                .provenance
-                .get(LOG_INDEX_KEY)
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
+            let log_index = surface_log_index(&surface.provenance);
             Some(bigname_adapters::schema_v2::seam::event_time(
                 surface.block_timestamp,
                 log_index,
@@ -347,6 +352,13 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
         deactivation_reason: (!active).then_some("normalization_gate"),
         deactivated_at,
     })
+}
+
+fn surface_log_index(provenance: &Value) -> i64 {
+    provenance
+        .get(LOG_INDEX_KEY)
+        .and_then(Value::as_i64)
+        .unwrap_or(-1)
 }
 
 fn raw_surface_labels(surface: &SurfaceRow) -> Result<Vec<Vec<u8>>> {
@@ -478,25 +490,5 @@ fn normalization_flag(raw_label: &[u8]) -> NormalizationFlag {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dns_labels_and_hex_fallback_round_trip_raw_bytes() {
-        assert_eq!(
-            decode_dns_labels(&[5, b'a', b'l', b'i', b'c', b'e', 3, b'e', b't', b'h', 0]),
-            Ok(vec![b"alice".to_vec(), b"eth".to_vec()])
-        );
-        assert_eq!(decode_hex("00ff41", "ens:test").unwrap(), [0, 255, 65]);
-    }
-
-    #[test]
-    fn label_flag_matches_the_interpreter_normalization_gate() {
-        assert!(normalization_flag(b"alice").normalized);
-        assert_eq!(
-            normalization_flag(b"Alice").error.as_deref(),
-            Some("raw label is not byte-identical to its normalized form")
-        );
-        assert!(normalization_flag(&[0xff]).error.is_some());
-    }
-}
+#[path = "recompute_tests.rs"]
+mod tests;

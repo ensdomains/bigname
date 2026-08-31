@@ -9,6 +9,30 @@ use crate::{BatchRequest, Engine, RunMode};
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[test]
+fn missing_discovery_position_sorts_before_real_position_zero() {
+    let missing = DiscoveryEdge {
+        chain_id: "test".to_owned(),
+        edge_kind: "test".to_owned(),
+        from_contract_instance_id: Uuid::nil(),
+        to_contract_instance_id: Uuid::nil(),
+        discovery_source: "test".to_owned(),
+        admission_basis: "test".to_owned(),
+        source_manifest_id: 1,
+        observation_key: "test".to_owned(),
+        active_from_block_number: 1,
+        active_from_block_hash: "test".to_owned(),
+        canonicality_state: "canonical".to_owned(),
+        provenance: json!({}),
+    };
+    let positioned = DiscoveryEdge {
+        provenance: json!({TRANSACTION_INDEX_KEY: 0, LOG_INDEX_KEY: 0}),
+        ..missing.clone()
+    };
+    assert_eq!(Operation::Open(&missing).order_key(), (1, -1, -1, 1));
+    assert!(Operation::Open(&missing).order_key() < Operation::Open(&positioned).order_key());
+}
+
 #[tokio::test]
 async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair() -> TestResult {
     let database = TestDatabase::create(TestDatabaseConfig::new(
@@ -29,6 +53,7 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
         include_str!("../../../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
         include_str!("../../../../../schema-v2/baseline/12_project_generation_failures.sql"),
         include_str!("../../../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
+        include_str!("../../../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
     ] {
         sqlx::raw_sql(sql).execute(database.pool()).await?;
     }

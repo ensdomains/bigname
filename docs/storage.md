@@ -159,17 +159,38 @@ mandatory full Interpret and Project redos.
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
+| `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
-| `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen only a required Ingest redo recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker) while holding every phase writer lock | Phase progress, repair work, and runtime liveness. Manifest synchronization preserves the phase runner's lifecycle backup fields, clears resumable evidence when it changes the required range or [compiled watch plan](glossary.md#compiled-watch-plan), and never executes the redo. |
+| `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
-| `resolution_divergences` | guarded lookup functions | Active live/indexed resolver disagreements; diagnostic only. |
+| `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
+
+Interpret finalizes the discovery-watch admission snapshot in the same database
+transaction as the completed pass's discovery/address writes and any required
+Ingest stamp. It compares the complete normalized union of concrete
+address/topic intervals rather than a cursor-clipped view. An absent snapshot,
+an active manifest-authority fingerprint change, or a lineage-orphaning epoch
+change is a conservative empty baseline: existing discovery rows do not prove
+that earlier intake fetched their address-scoped logs. The snapshot records
+only that Interpret acknowledged the coverage demand; `chain_phase_state`
+remains the sole work and redo authority.
+
+Interpret redo may temporarily orphan and restage discovery rows without
+creating repeated intake work because the acknowledged snapshot survives that
+restaging. The row set is replaced only when a completed Interpret pass commits
+under the same active authority and lineage epoch. Dropping and recreating a
+chain starts a fresh comparison scope only when the wipe also clears that
+chain's rows from `discovery_watch_admissions`; changing its active authority
+fingerprint or advancing its lineage-orphaning epoch also starts a fresh scope.
+Rollback leaves discovery writes, the snapshot, and the required Ingest stamp
+unchanged together. Neither Project nor API code reads the snapshot.
 
 Each `interpret_decode_skips` row records the chain, block and transaction
 identity, log index, emitter, selected [source family](glossary.md#source-family)
@@ -606,7 +627,7 @@ loads the full range under those inputs. Existing active redo rows receive no
 backfill, so their first post-upgrade resume fails closed and requires that
 full-range reload.
 
-`chain_phase_state.redo_attempt_generation` has this contract: This nonnegative, row-local counter increments when an explicit redo begins and when the phase runner installs or extends a required redo stamp for a downstream phase (Interpret/Project). Manifest-synchronization Ingest stamps do not advance it; their superseded progress writes are fenced by the cleared manifest-authority fingerprint and stamped last_error instead.
+`chain_phase_state.redo_attempt_generation` has this contract: This nonnegative, row-local counter increments when an explicit redo begins, when the phase runner installs or extends a required redo stamp for a downstream phase (Interpret/Project), and when the shared required-Ingest installer records genuinely new manifest or discovery demand. New same-range demand advances the generation because an older attempt may already have passed those blocks under a narrower filter. Repeated observation of an unchanged discovery-watch admission never calls the installer and therefore does not advance the generation.
 A batch carries that generation together with the persisted redo mode and the actual execution
 range chosen at begin time. Its pool-backed progress update, including the
 per-source boundary-marker map, succeeds only while all three values still
@@ -818,9 +839,14 @@ reviving an older nonzero event; surface visibility does not participate in
 this pointer choice. Record events that already carry a logical name are joined
 without restricting either the pointer or record event's source family. An
 `ens_v1_resolver_l1` event with no logical-name attribution may instead join
-only when the selected pointer's source family is `ens_v1_registry_l1`,
-`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`; incremental staging applies the
-same pointer-family restriction. When an ended
+when the selected pointer's source family is `ens_v1_registry_l1`,
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`. A selected
+`ens_v2_registry_l1` or `ens_v2_root_l1` pointer may also join when its target
+resolver has a final supported `ens_v1_resolver_l1` classification from an
+applicable exact declaration, and that classifying manifest's namespace
+matches the pointer's namespace. Incremental staging applies the same guarded
+exception by requiring the pointer namespace and exact declared resolver
+address to match. When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
 resource-less. This does not restore a current binding: for ENSv1, name and record reads
@@ -1042,13 +1068,22 @@ refresh, or clear one active divergence observation. The API role receives
 `EXECUTE` on those functions but no direct write access to
 `resolution_divergences`. Ledger rows are durable operational observations;
 they are not projection input or a response cache.
+When projection publishes an ENS Mainnet exact resolver as null, a projection
+lifecycle trigger retires active observations for the former direct resolver as
+stale evidence. [Universal Resolver ancestor
+discovery](glossary.md#universal-resolver-ancestor-discovery) only revalidates
+the exact projected name, Ethereum head, Project publication, canonical
+positions, and Universal Resolver manifest authority. It does not compare,
+persist, or clear by agreement with the request-scoped ancestor-served result.
 The guard derives the same exact-or-ENSIP-19 indexed comparison from the locked
 inventory `entries` and `provenance.read_rules` before mutation. This baseline
 comparison normalizes the legacy indexed status alias `failed` to
-`execution_failed`, matching the Rust evaluator. This baseline function change
-adds no table, column, or reusable provider state; the release
-uses the documented empty-namespace replacement and full Project walk rather
-than an in-place schema-migration.
+`execution_failed`, matching the Rust evaluator. The null-resolver retirement
+trigger adds no table, column, or reusable provider state. Fresh databases
+receive it from the baseline; schema-migration
+`20260831120000_retire_direct_divergences_for_null_resolver.sql` installs it on
+initialized databases, retains every ledger row, and retires already-stale
+active rows without replacing the phase namespace.
 
 ## Inspection
 
@@ -1087,7 +1122,9 @@ objects.
 - `crates/interpret` plus adapters own derived identity, discovery, and
   normalized events.
 - `crates/project` and the phase runner own current projection publication.
-- `crates/lookup` owns verified lookup behavior and guarded divergence writes.
+- `crates/lookup` owns verified lookup behavior and guarded divergence writes;
+  Project publication may only clear outdated direct observations when an ENS
+  Mainnet exact resolver becomes null.
 - `crates/storage` provides the typed persistence and read boundaries above.
 - `apps/api` reads phase projections and lookup output; it does not write raw
   facts, interpretation output, projection rows, or legacy execution artifacts.

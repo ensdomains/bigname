@@ -91,4 +91,4 @@ justification = "Index timing, rebuild, throughput, memory measurement, and red-
 [[files]]
 path = "apps/phase-runner/src/redo_state.rs"
 loc = 608
-justification = "Redo marker state: PR #563 grew the file to exactly 600 on main and the #543 Verify-demotion stamping wiring adds ten lines; the stamp-at-Ingest-redo-begin logic belongs beside the marker transactions it locks with. Crossed the threshold only at the rebase combining the two; split on next substantive touch."
+justification = "Redo marker state owns the atomic redo-begin transition and its authority/progress fencing. Discovery repair adds only the shared downstream-stamp call at that boundary; the stamping implementation was extracted to redo_stamp.rs, ratcheting this file down from 610 lines."

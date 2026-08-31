@@ -33,7 +33,7 @@ use phase_runner::{
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     postgres::PgPoolOptions,
@@ -3615,6 +3615,52 @@ async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> 
         InterpretRunMode::Normal,
     )
     .await?;
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 2,
+        FIRST_BLOCK,
+        FIRST_BLOCK + 2,
+    )
+    .await?;
+    let projected_family: String = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{classification,source_family}'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(projected_family, "ens_v1_resolver_l1");
+    let projected_resolver: (String, String, String, String, bool, bool) = sqlx::query_as(
+        "SELECT current.support_status,
+                    current.declared_summary #>> '{classification,basis}',
+                    current.declared_summary #>> '{classification,role}',
+                    manifest.source_family,
+                    current.declared_summary #> '{classification,implementation}' IS NULL,
+                    current.provenance -> 'upgrade_event_id' IS NULL
+             FROM resolver_current current
+             JOIN manifest_versions manifest
+               ON manifest.manifest_id = (current.provenance ->> 'manifest_id')::bigint
+             WHERE current.chain_id = $1
+               AND current.resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        projected_resolver,
+        (
+            "supported".into(),
+            "manifest_declared_address".into(),
+            "public_resolver".into(),
+            "ens_v1_resolver_l1".into(),
+            true,
+            true,
+        )
+    );
     let record_event: (String, String, String) = sqlx::query_as(
         "SELECT source_family, after_state ->> 'record_key', after_state ->> 'value'
          FROM normalized_events
@@ -3651,8 +3697,9 @@ async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> 
             FIRST_BLOCK + 1,
         )
     );
-    let pointer_events: (i64, Option<String>) = sqlx::query_as(
-        "SELECT count(*), min(logical_name_id) FROM normalized_events
+    let pointer_events: (i64, Option<String>, i64) = sqlx::query_as(
+        "SELECT count(*), min(logical_name_id), min(normalized_event_id)
+         FROM normalized_events
          WHERE chain_id = $1 AND block_number = $2
            AND source_family = 'ens_v2_registry_l1'
            AND event_kind = 'ResolverChanged'
@@ -3668,8 +3715,39 @@ async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> 
         (
             1,
             Some(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"]))),
+            pointer_events.2,
         )
     );
+    let candidate_event_ids: Value = sqlx::query_scalar(
+        "SELECT provenance -> 'candidate_event_ids'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(candidate_event_ids.as_array().is_some_and(|event_ids| {
+        event_ids
+            .iter()
+            .any(|event_id| event_id == pointer_events.2)
+    }));
+    let inventory: (String, Value) = sqlx::query_as(
+        "SELECT inventory.support_status, inventory.entries
+         FROM record_inventory_current inventory
+         JOIN name_current name ON name.resource_id = inventory.resource_id
+         WHERE name.logical_name_id = $1",
+    )
+    .bind(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"])))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(inventory.0, "supported");
+    assert!(inventory.1.as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry["record_key"] == "text:url"
+                && entry["value"] == "https://declared-v1.example.test"
+        })
+    }));
     scratch.cleanup().await
 }
 

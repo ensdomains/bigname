@@ -16,6 +16,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "contract_instance_addresses",
     "contract_instances",
     "discovery_edges",
+    "discovery_watch_admissions",
     "ens_names",
     "ingest_cursors",
     "interpret_decode_skips",
@@ -100,6 +101,10 @@ const BASELINE: &[(&str, &str)] = &[
     (
         "interpret decode skips",
         include_str!("../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
+    ),
+    (
+        "discovery watch admissions",
+        include_str!("../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
     ),
 ];
 

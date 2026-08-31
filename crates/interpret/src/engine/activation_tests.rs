@@ -265,6 +265,7 @@ async fn database(prefix: &str) -> TestResult<TestDatabase> {
         include_str!("../../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
         include_str!("../../../../schema-v2/baseline/12_project_generation_failures.sql"),
         include_str!("../../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
+        include_str!("../../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
     ] {
         sqlx::raw_sql(statement).execute(database.pool()).await?;
     }

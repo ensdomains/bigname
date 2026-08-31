@@ -4358,11 +4358,19 @@ async fn write_primary_name_mock_rpc_response(
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": result,
-    })
+    let body = if let Some(error) = result.get("__rpc_error") {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": error,
+        })
+    } else {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result,
+        })
+    }
     .to_string();
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",

@@ -234,11 +234,11 @@ impl Operation<'_> {
                 edge.provenance
                     .get(TRANSACTION_INDEX_KEY)
                     .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0),
+                    .unwrap_or(-1),
                 edge.provenance
                     .get(LOG_INDEX_KEY)
                     .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0),
+                    .unwrap_or(-1),
                 1,
             ),
         }

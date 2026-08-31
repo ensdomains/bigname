@@ -47,7 +47,17 @@ entrypoint.[^ens-docs-univ][^v1-ur-deploy] The supported topology classes are:
 - exact-surface direct resolution;
 - exact-surface alias resolution with a declared non-empty alias path; and
 - exact-surface wildcard-derived resolution with a declared wildcard source
-  and matched labels.
+  and matched labels; and
+- [Universal Resolver ancestor
+  discovery](glossary.md#universal-resolver-ancestor-discovery): Ethereum
+  Mainnet exact-surface resolution with a null exact resolver and no
+  alias, linked-subregistry, projected wildcard, or transport path, executed
+  through the manifest-admitted Universal Resolver at the readable Ethereum
+  head. This last route has no indexed comparison and retains the exact resolver
+  as null in the API response. The entrypoint walks to the nearest nonzero
+  ancestor and accepts it only when it implements ENSIP-10
+  `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
+  `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f)`.
 
 Ancestor-selected non-alias paths, linked-subregistry ancestor selection,
 transport-assisted ENS paths, and CCIP-participating ENS paths remain explicit
@@ -68,6 +78,18 @@ upstream resolver `uint256 coinType` surface and is recorded in
 Selector-local results use `success`, `not_found`, `unsupported`, or `failed`.
 One unsupported selector does not discard successful answers for other
 selectors in the same request.
+
+For Universal Resolver ancestor discovery, `ResolverNotFound(bytes)` is a live
+`not_found` with reason `resolver_not_found` only when its embedded DNS name
+equals the request name. Other reverts fail execution, and `OffchainLookup`
+stays unsupported because ENS verified resolution does not follow CCIP-Read.
+Every successfully decoded call for one name at one block must identify the
+same effective resolver. A `ResolverNotFound` outcome cannot coexist with a
+successfully decoded effective resolver; either inconsistency fails the request
+closed. Ordinary selector-local failed or unsupported outcomes remain mixed per
+key.
+Provider results remain request-scoped and are not cached or copied into a
+projection.
 
 ## Primary-name lookup
 

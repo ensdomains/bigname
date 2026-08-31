@@ -122,17 +122,6 @@ impl PhaseRunner {
         self
     }
 
-    async fn run_phase_with_restart(
-        &self,
-        chain: &ChainConfig,
-        phase_name: PhaseName,
-        mode: RunMode,
-        cancellation: CancellationToken,
-    ) -> RunnerResult<()> {
-        self.run_phase_with_restart_inner(chain, phase_name, mode, cancellation, None)
-            .await
-    }
-
     async fn run_phase_with_restart_inner(
         &self,
         chain: &ChainConfig,
@@ -140,6 +129,7 @@ impl PhaseRunner {
         mode: RunMode,
         cancellation: CancellationToken,
         live_mismatch: Option<LiveMismatchReason>,
+        automatic_discovery_ingest: bool,
     ) -> RunnerResult<()> {
         let phase = self.phases.get(phase_name);
         let mut backoff = Backoff::new(&self.timing);
@@ -172,6 +162,7 @@ impl PhaseRunner {
                     mode.clone(),
                     cancellation.clone(),
                     live_mismatch.as_deref(),
+                    automatic_discovery_ingest,
                 )
                 .await;
             self.record_loop_progress(&chain.chain_id);
@@ -225,6 +216,7 @@ impl PhaseRunner {
         mode: RunMode,
         cancellation: CancellationToken,
         live_mismatch: Option<&OnceLock<String>>,
+        automatic_discovery_ingest: bool,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
         let mut phase_lock =
@@ -238,6 +230,7 @@ impl PhaseRunner {
                 mode,
                 cancellation,
                 live_mismatch,
+                automatic_discovery_ingest,
                 &mut phase_lock,
             )
             .await;
@@ -258,6 +251,7 @@ impl PhaseRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_locked_phase(
         &self,
         chain: &ChainConfig,
@@ -265,6 +259,7 @@ impl PhaseRunner {
         mode: RunMode,
         cancellation: CancellationToken,
         live_mismatch: Option<&OnceLock<String>>,
+        automatic_discovery_ingest: bool,
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
@@ -292,6 +287,7 @@ impl PhaseRunner {
                     chain.intake_sources().as_ref(),
                     supplied_manifest_authority_generation.as_deref(),
                     &self.instance_id,
+                    automatic_discovery_ingest,
                 )
                 .await?;
             if phase_name == PhaseName::Interpret

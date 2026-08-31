@@ -21,6 +21,7 @@ mod progress_monitor;
 mod project_failure_audit;
 pub mod project_phase;
 mod redo_completion;
+mod redo_discovery_authorization;
 mod redo_extent;
 mod redo_failure;
 mod redo_manifest_attestation;

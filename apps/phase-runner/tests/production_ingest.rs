@@ -1105,6 +1105,17 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
     );
     manifests.write_from(true, tip)?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let authority_marker: String = sqlx::query_scalar(
+        "SELECT input_content_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    let (_, authority_generation) = authority_marker
+        .rsplit_once(':')
+        .context("manifest-authority marker is missing its generation token")?;
+    let authority_generation = authority_generation.to_owned();
     let required: (i64, i64) = sqlx::query_as(
         "SELECT redo_from_block_number, redo_to_block_number
          FROM chain_phase_state
@@ -1122,6 +1133,9 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
             CancellationToken::new(),
         )
         .await?;
+    let attested_runner = runner
+        .clone()
+        .with_watch_set_coverage_attestation(BASE, authority_generation);
     assert_eq!(
         raw_log_count(
             scratch.pool(),
@@ -1133,6 +1147,14 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
         1,
         "the required Ingest redo must load the widened raw extent"
     );
+    attested_runner
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(required.0, required.1)?,
+            CancellationToken::new(),
+        )
+        .await?;
     let demoted: (String, Option<String>, bool, Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT phase_status, verification_level, redo_in_progress,
                 redo_from_block_number, redo_to_block_number
@@ -1157,7 +1179,11 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
         .run_chain(&chain, CancellationToken::new())
         .await
         .expect_err("Verify must reread the changed raw-fact extent");
-    assert_eq!(mismatch.kind(), ErrorKind::VerificationMismatch);
+    assert_eq!(
+        mismatch.kind(),
+        ErrorKind::VerificationMismatch,
+        "unexpected restart failure: {mismatch}"
+    );
     assert_eq!(
         references.calls.load(Ordering::SeqCst),
         2,
@@ -3401,6 +3427,18 @@ async fn cold_catch_up_fetches_events_after_registry_announcement() -> Result<()
     assert_eq!(announcement.0, "registry_announcement");
     assert_eq!(announcement.1, announcement.2);
     assert_eq!(announcement.3, 1);
+    let ingest_redo: (i64, bool) = sqlx::query_as(
+        "SELECT redo_attempt_generation, redo_in_progress
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        ingest_redo,
+        (0, false),
+        "the native same-window announcement supplement must not enqueue historical repair"
+    );
 
     let registered_topic = format!("{:#x}", LabelRegistered::SIGNATURE_HASH);
     let watch = bigname_ingest::load_watch_filter(scratch.pool(), chain_id, 0, 5).await?;

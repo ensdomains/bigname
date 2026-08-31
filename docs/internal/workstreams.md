@@ -6,11 +6,19 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 
 - Schema-v2 interpret writes identity rows, discovery edges, normalized events,
   and append-only diagnostics for malformed event logs from undeclared
-  emitters; adapters provide interpretation behavior and do not write database
-  rows or projections.
-- Schema-v2 Project owns projection tables and rebuild behavior.
+  emitters. At a completed pass boundary, it also atomically replaces the
+  [discovery-watch admission snapshot](../glossary.md#discovery-watch-admission-snapshot)
+  and may install required Ingest work
+  through the shared phase-state installer. That snapshot is coordination
+  state, not a work queue; `chain_phase_state` remains the sole work/redo
+  authority. Adapters provide interpretation behavior and do not write
+  database rows or projections.
+- Schema-v2 Project owns projection tables and rebuild behavior. Publication may
+  retire stale direct-resolution observations through the guarded projection
+  lifecycle trigger; it does not write a live/indexed comparison.
 - API code reads phase projections and request-scoped lookup output; lookup may
-  write only the guarded divergence ledger.
+  write only the guarded divergence ledger. Project may only retire ledger rows
+  when publication changes an ENS Mainnet exact resolver to null.
 - Storage owns [canonicality](../glossary.md#canonicality), snapshot selection, reusable row reads,
   and database invariants.
   API code owns route-specific joins, pagination, wire shaping, and GraphQL compatibility.
@@ -30,7 +38,7 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 | `crates/storage`, `migrations`, `docs/storage.md` | Storage and Domain | Schema, canonicality, snapshot selection, reusable row reads, database invariants, schema-migrations |
 | `crates/domain` | Storage and Domain | Narrow normalization helpers, the projected resolution-topology model and classifier, and their closed wire vocabularies; persisted identity types live in `crates/storage/src/identity/types.rs` |
 | `crates/manifests`, `manifests/**`, `docs/manifests.md` | Manifests and Discovery | Source authority, discovery, capability flags, watch-plan inputs |
-| `crates/lookup`, `docs/execution.md` | Verified Lookup | Request-scoped resolution/primary lookup and guarded divergence observations |
+| `crates/lookup`, `docs/execution.md` | Verified Lookup | Request-scoped resolution/primary lookup and guarded divergence observations; Project may only clear outdated direct observations when it publishes a null exact resolver |
 | `docs/consumer-capabilities.md` | Conformance and Fixtures | Replacement meaning, rollout/rollback evidence |
 | `.refs/MANIFEST.toml`, `docs/upstream.md` | Upstream Evidence | Pin rotation, citations, known divergences |
 | `.agents/**`, `.codex/agents/**`, `.codex/rules/**`, `.codex/config.toml`, `.codex/hooks/**`, `.claude/**`, `AGENTS.md`, `CLAUDE.md` | Agent Process | Skills, subagent definitions, hooks, automation, repo-local process rules |

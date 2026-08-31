@@ -152,7 +152,7 @@ pub(super) async fn resolve_contract(
         .await
         .with_context(|| format!("failed to refresh declared contract {chain_id}:{address}"))?;
         if repairs_legacy_floor {
-            super::sync_state::stamp_required_ingest(transaction, chain_id, 0).await?;
+            crate::install_manifest_required_ingest(transaction, chain_id, 0).await?;
             repaired_floor_chains.insert(chain_id.to_owned());
         }
     } else if let Some(previous_to) = existing.as_ref().and_then(|existing| existing.active_to) {
@@ -459,7 +459,7 @@ pub(super) async fn repair_retired_omitted_admission_floors(
     .await
     .context("failed to repair retired omitted-start admission floors")?;
     for chain_id in repaired.into_iter().collect::<BTreeSet<_>>() {
-        super::sync_state::stamp_required_ingest(transaction, &chain_id, 0).await?;
+        crate::install_manifest_required_ingest(transaction, &chain_id, 0).await?;
         repaired_floor_chains.insert(chain_id);
     }
     Ok(())
