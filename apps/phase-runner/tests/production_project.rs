@@ -807,6 +807,40 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
 }
 
 #[tokio::test]
+async fn marker_only_permission_is_retained_without_a_grant_source() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_permission_marker").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v2_registry_l1",
+        json!({
+            "subject":OWNER, "scope":{"kind":"resource"},
+            "effective_powers":["was_reserved"], "grant_source":null,
+            "revocation_source":null, "inheritance_path":[], "transfer_behavior":"retain"
+        }),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let row: (Value, Option<Value>) = sqlx::query_as(
+        "SELECT effective_powers, grant_source FROM permissions_current
+         WHERE resource_id = $1 AND subject = lower($2)",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .bind(OWNER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(row, (json!(["was_reserved"]), Some(json!({}))));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn shadow_identity_labels_retain_bytes_and_decode_only_exact_text() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_shadow_labels").await?;
     seed_project_fixture(scratch.pool()).await?;
