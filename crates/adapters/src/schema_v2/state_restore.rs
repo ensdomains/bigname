@@ -1,7 +1,13 @@
 use super::{model::PriorEventInput, protocol::v1::unmasked_word, state::State};
 use {serde_json::Value, uuid::Uuid};
+#[path = "state_restore_support.rs"]
+mod support;
 #[path = "state_restore_v1_transfer.rs"]
 mod v1_transfer;
+use support::{
+    expiry_retirement_is_projection_only, parse_i64, parse_u32, parse_u64, raw_label,
+    v1_registry_authority, v1_registry_read_anchor,
+};
 pub(super) fn rebuild_v2_indexes(state: &mut State) {
     state.rebuild_v2_token_indexes();
 }
@@ -179,35 +185,6 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
     let displaced_regeneration_event = event.after_state.get("source_event").and_then(Value::as_str) == Some("TokenRegenerated") && (event.event_kind == "SurfaceUnbound" || event.event_kind == "RegistrationReleased" && event.after_state.get("terminal_reason").and_then(Value::as_str) == Some("registry_name_binding_changed"));
     if !displaced_regeneration_event && let (Some(token), Some(logical_name_id)) = (token, event.logical_name_id.as_deref()) { state.remember_v2_logical_name(emitter, token, logical_name_id); }
 }
-fn expiry_retirement_is_projection_only(event: &PriorEventInput) -> bool {
-    [
-        ("source_event", "RegistryPathExpired"),
-        ("derived_from", "interpreter_state"),
-        ("terminal_reason", "registry_name_binding_expired"),
-    ]
-    .into_iter()
-    .all(|(key, value)| event.after_state.get(key).and_then(Value::as_str) == Some(value))
-}
-fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
-    after_state
-        .get("raw_label_hex")
-        .and_then(Value::as_str)
-        .and_then(|value| alloy_primitives::hex::decode(value).ok())
-        .or_else(|| {
-            after_state
-                .get("label")
-                .and_then(Value::as_str)
-                .map(|label| label.as_bytes().to_vec())
-        })
-        .or_else(|| {
-            after_state
-                .get("raw_labels")
-                .and_then(Value::as_array)
-                .and_then(|labels| labels.first())
-                .and_then(Value::as_str)
-                .map(|label| label.as_bytes().to_vec())
-        })
-}
 pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     let source_event = event
         .after_state
@@ -269,41 +246,13 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                 owner_getter.to_owned(),
                 owner_getter_reason,
             );
-            let anchor = super::state::V1RegistryReadAnchor {
-                logical_name_id: event
-                    .logical_name_id
-                    .clone()
-                    .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
-                surface_known: event.logical_name_id.is_some(),
-                resource_id: super::common::stable_uuid(&format!(
-                    "resource:registry-only:{}:{namehash}",
-                    event.chain_id
-                )),
-                source_family: event.source_family.clone(),
-                source_manifest_id: event.source_manifest_id,
-            };
+            let anchor = v1_registry_read_anchor(event, namehash);
             state.remember_v1_registry_read_anchor(&event.namespace, namehash, anchor.clone());
             if !owner_getter.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
                 state.remember_v1_registry_authority(
                     &event.namespace,
                     namehash,
-                    super::state::V1NameState {
-                        logical_name_id: anchor.logical_name_id,
-                        surface_known: anchor.surface_known,
-                        resource_id: anchor.resource_id,
-                        token_lineage_id: None,
-                        authority_source_family: event.source_family.clone(),
-                        source_manifest_id: event.source_manifest_id,
-                        labelhash: event
-                            .after_state
-                            .get("labelhash")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        expiry: None,
-                        owner: Some(owner_getter.to_owned()),
-                        authority_key: Some(format!("registry-only:{}:{namehash}", event.chain_id)),
-                        wrapper_fallback: false,
-                    },
+                    v1_registry_authority(event, namehash, owner_getter, &anchor),
                 );
             }
         }
@@ -645,22 +594,4 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     }
 
     v1_transfer::restore(state, event);
-}
-
-fn parse_i64(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
-        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-}
-
-fn parse_u64(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-}
-
-fn parse_u32(value: &Value) -> Option<u32> {
-    parse_u64(value).and_then(|value| u32::try_from(value).ok())
 }

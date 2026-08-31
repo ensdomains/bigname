@@ -16,11 +16,6 @@ loc = 601
 justification = "Exact-name record serving keeps indexed inventory, verified fallback, and ownerless V1 resolver reads in one route boundary; this branch crosses 600 LOC while preserving #627's nearby ENSIP-19 read rules."
 
 [[files]]
-path = "crates/lookup/src/store.rs"
-loc = 610
-justification = "Lookup topology selection keeps resource_id and serving_resource_id in one snapshot query; this branch crosses 600 LOC while preserving #627's ENSIP-19 selection."
-
-[[files]]
 path = "crates/manifests/src/schema_v2_persistence.rs"
 loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
@@ -47,13 +42,8 @@ justification = "Registry event decoding and its atomic control/read transition 
 
 [[files]]
 path = "crates/adapters/src/schema_v2/state.rs"
-loc = 698
+loc = 699
 justification = "The V1 interpreter keeps control state, literal registry owner history, and the resource retained for resolver reads together because restore and incremental interpretation must update them atomically; the file remains below the review threshold."
-
-[[files]]
-path = "crates/adapters/src/schema_v2/state_restore.rs"
-loc = 645
-justification = "Cold restore reconstructs literal owner, getter-visible owner, control authority, and resolver linkage from one ordered normalized-event stream; keeping the reconstruction together makes replay equivalence auditable and the file remains below the review threshold."
 
 [[files]]
 path = "crates/project/src/builders/name_authority.rs"

@@ -235,6 +235,7 @@ fn null_resolver_discovery_row() -> NameCurrentRow {
         namehash: logical_name_id.trim_start_matches("ens:").to_owned(),
         surface_binding_id: None,
         resource_id: None,
+        serving_resource_id: None,
         token_lineage_id: None,
         binding_kind: None,
         declared_summary: json!({
