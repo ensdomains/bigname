@@ -12332,6 +12332,33 @@ async fn declared_v1_shared_resolver_reclassifies_both_v2_pointer_origins_and_co
 }
 
 #[tokio::test]
+async fn declared_v1_node_only_record_update_matches_fresh_projection() -> Result<()> {
+    assert_declared_v1_node_only_delta(
+        "project-declared-v1-node-record-update",
+        DeclaredV1NodeOnlyDelta::RecordUpdate,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn declared_v1_node_only_version_reset_matches_fresh_projection() -> Result<()> {
+    assert_declared_v1_node_only_delta(
+        "project-declared-v1-node-version-reset",
+        DeclaredV1NodeOnlyDelta::VersionReset,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn declared_v1_node_only_unrelated_record_preserves_inventory_clock() -> Result<()> {
+    assert_declared_v1_node_only_delta(
+        "project-declared-v1-unrelated-node-record",
+        DeclaredV1NodeOnlyDelta::UnrelatedRecord,
+    )
+    .await
+}
+
+#[tokio::test]
 async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() -> Result<()> {
     const CHAIN: &str = "project-declared-v1-foreign-pointer";
 
@@ -18605,6 +18632,174 @@ const DECLARED_V1_SHARED_RESOLVER: &str = "0x00000000000000000000000000000000000
 const DECLARED_V1_UNDECLARED_RESOLVER: &str = "0x0000000000000000000000000000000000000d02";
 const DECLARED_V1_ALICE_RESOURCE: &str = "00000000-0000-0000-0000-000000000d01";
 const DECLARED_V1_BOB_RESOURCE: &str = "00000000-0000-0000-0000-000000000d02";
+
+#[derive(Clone, Copy)]
+enum DeclaredV1NodeOnlyDelta {
+    RecordUpdate,
+    VersionReset,
+    UnrelatedRecord,
+}
+
+async fn assert_declared_v1_node_only_delta(
+    chain: &str,
+    delta: DeclaredV1NodeOnlyDelta,
+) -> Result<()> {
+    let incremental = ScratchDatabase::create(&format!("{chain}-incremental")).await?;
+    let fresh = ScratchDatabase::create(&format!("{chain}-fresh")).await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), chain).await?;
+    let alice_node = format!("{:#x}", raw_namehash(&[b"alice", b"eth"]));
+
+    for (pool, manifest_id) in [
+        (incremental.pool(), manifests.0),
+        (fresh.pool(), manifests.1),
+    ] {
+        insert_manifest_update_event(
+            pool,
+            chain,
+            "ens_v1_resolver_l1",
+            manifest_id,
+            resolver_declaration_payload("ens", chain, DECLARED_V1_SHARED_RESOLVER),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_set(after_state, '{value}', '\"old\"')
+             WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+               AND after_state ->> 'node' = $2",
+        )
+        .bind(chain)
+        .bind(&alice_node)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 3).await?;
+    let before: (Option<String>, String) = sqlx::query_as(
+        "SELECT entries -> 0 ->> 'value', last_recomputed_at::text
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(DECLARED_V1_ALICE_RESOURCE)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(before.0.as_deref(), Some("old"));
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, chain, 4).await?;
+        let (event_kind, node, after_state) = match delta {
+            DeclaredV1NodeOnlyDelta::RecordUpdate => (
+                "RecordChanged",
+                alice_node.clone(),
+                json!({
+                    "node": alice_node,
+                    "resolver": DECLARED_V1_SHARED_RESOLVER,
+                    "record_key": "text:url",
+                    "record_family": "text",
+                    "selector_key": "url",
+                    "value_retained": true,
+                    "value": "new"
+                }),
+            ),
+            DeclaredV1NodeOnlyDelta::VersionReset => (
+                "RecordVersionChanged",
+                alice_node.clone(),
+                json!({
+                    "node": alice_node,
+                    "resolver": DECLARED_V1_SHARED_RESOLVER,
+                    "record_version": 2
+                }),
+            ),
+            DeclaredV1NodeOnlyDelta::UnrelatedRecord => {
+                let node = format!("{:#x}", raw_namehash(&[b"unrelated", b"eth"]));
+                (
+                    "RecordChanged",
+                    node.clone(),
+                    json!({
+                        "node": node,
+                        "resolver": DECLARED_V1_SHARED_RESOLVER,
+                        "record_key": "text:url",
+                        "record_family": "text",
+                        "selector_key": "url",
+                        "value_retained": true,
+                        "value": "unrelated"
+                    }),
+                )
+            }
+        };
+        insert_event(
+            pool,
+            chain,
+            4,
+            None,
+            None,
+            event_kind,
+            "ens_v1_resolver_l1",
+            after_state,
+            json!({"emitting_address": DECLARED_V1_SHARED_RESOLVER, "node": node}),
+        )
+        .await?;
+    }
+
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(incremental.pool())
+        .await?;
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(chain, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), chain, None, RunMode::Normal, 0, 4).await?;
+
+    let incremental_after: (Option<String>, String) = sqlx::query_as(
+        "SELECT entries -> 0 ->> 'value', last_recomputed_at::text
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(DECLARED_V1_ALICE_RESOURCE)
+    .fetch_one(incremental.pool())
+    .await?;
+    let fresh_value: Option<String> = sqlx::query_scalar(
+        "SELECT entries -> 0 ->> 'value'
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(DECLARED_V1_ALICE_RESOURCE)
+    .fetch_one(fresh.pool())
+    .await?;
+    match delta {
+        DeclaredV1NodeOnlyDelta::RecordUpdate => {
+            assert_eq!(incremental_after.0.as_deref(), Some("new"));
+            assert_eq!(fresh_value.as_deref(), Some("new"));
+        }
+        DeclaredV1NodeOnlyDelta::VersionReset => {
+            assert_eq!(incremental_after.0, None);
+            assert_eq!(fresh_value, None);
+        }
+        DeclaredV1NodeOnlyDelta::UnrelatedRecord => {
+            assert_eq!(incremental_after.0.as_deref(), Some("old"));
+            assert_eq!(fresh_value.as_deref(), Some("old"));
+            assert_eq!(
+                incremental_after.1, before.1,
+                "a node-only change for another name must not republish this inventory",
+            );
+        }
+    }
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "node-only record delta diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
 
 fn resolver_declaration_payload(namespace: &str, chain: &str, address: &str) -> Value {
     json!({
