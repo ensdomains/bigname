@@ -548,8 +548,10 @@ expiry when its expiry input is zero and then emits the copied value.
 (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@a971bd64)
 An `ExpiryUpdated` for that non-derived entry can still join its BaseRegistrar
 and bridge facts as a resource-less `synchronized_renewal`; correlation uses the
-logical name, emitted expiry, exact emitters, and log order rather than inventing
-a resource anchor.
+logical name, registry token ID, emitted expiry, exact emitters, and log order
+rather than inventing a resource anchor.
+The admitted old-model registrar renews and emits the same registry token ID.
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L87-L93 @ ens_v2_sepolia_20260629@ccaeb58)
 
 BaseRegistrar `NameRenewed` observations that participate in a bridge or
 NameWrapper synchronization use `correlation_kind=synchronized_renewal`.
