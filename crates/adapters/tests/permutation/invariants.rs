@@ -7,8 +7,8 @@ use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
     AdapterSession, AddressAdmissionInput, BatchInput, BatchOutput, InterpreterStateRequest,
     InterpreterStateValue, PriorEventInput, StateCacheCapacity, begin_schema_v2_adapter_restore,
-    interpret_schema_v2_batch, interpret_schema_v2_batch_incremental,
-    prepare_schema_v2_batch_incremental, seam, seam::ADMISSION_DISCOVERY_EDGE_KINDS,
+    interpret_schema_v2_batch, prepare_schema_v2_batch_incremental, seam,
+    seam::ADMISSION_DISCOVERY_EDGE_KINDS,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -551,8 +551,10 @@ pub struct Converged {
 pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> Result<Converged> {
     let fresh = interpret_schema_v2_batch(input.clone())
         .with_context(|| format!("{context}: fresh interpretation failed"))?;
-    let (incremental, live) = interpret_schema_v2_batch_incremental(input.clone(), None)
-        .with_context(|| format!("{context}: incremental interpretation failed"))?;
+    let (incremental, live) =
+        prepare_schema_v2_batch_incremental(input.clone(), None, StateCacheCapacity::Unlimited)
+            .and_then(|prepared| prepared.finish(Vec::new()))
+            .with_context(|| format!("{context}: incremental interpretation failed"))?;
     if incremental != fresh {
         bail!("{context}: incremental output differs from the fresh pass");
     }
@@ -599,13 +601,15 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         };
         let restored_output = interpret_schema_v2_batch(restored_input.clone())
             .with_context(|| format!("{context}: split batch {index} failed a restored pass"))?;
-        let (resumed_output, next) = interpret_schema_v2_batch_incremental(
+        let (resumed_output, next) = prepare_schema_v2_batch_incremental(
             BatchInput {
                 prior_events: Vec::new(),
                 ..restored_input.clone()
             },
             session,
+            StateCacheCapacity::Unlimited,
         )
+        .and_then(|prepared| prepared.finish(Vec::new()))
         .with_context(|| format!("{context}: split batch {index} failed a resumed pass"))?;
         if resumed_output != restored_output {
             bail!("{context}: split batch {index} resumed output differs from a restored pass");

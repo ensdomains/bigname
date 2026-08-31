@@ -13782,7 +13782,16 @@ fn interpret_test_batch_incremental(
         }
         input.blocks = blocks.into_values().collect();
     }
-    super::interpret_schema_v2_batch_incremental(input, session)
+    super::prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
+        .finish(Vec::new())
+}
+
+#[test]
+fn bounded_state_cannot_use_a_public_one_call_incremental_helper() {
+    let schema_source = include_str!("../schema_v2.rs");
+    let session_source = include_str!("session.rs");
+    assert!(!schema_source.contains("interpret_schema_v2_batch_incremental,"));
+    assert!(!session_source.contains("pub fn interpret_schema_v2_batch_incremental("));
 }
 
 fn assert_batch_referential_integrity(

@@ -53,7 +53,7 @@ pub(super) async fn predecessor_timestamp(
 mod tests {
     use bigname_adapters::schema_v2::{
         AddressAdmissionInput, BatchInput, ManifestInput, PriorEventInput, RawBlockInput,
-        StateCacheCapacity, begin_schema_v2_adapter_restore, interpret_schema_v2_batch_incremental,
+        StateCacheCapacity, begin_schema_v2_adapter_restore, prepare_schema_v2_batch_incremental,
     };
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
     use serde_json::{Value, json};
@@ -276,8 +276,18 @@ mod tests {
             }],
             raw_logs: Vec::new(),
         };
-        let (seeded_output, _) = interpret_schema_v2_batch_incremental(batch(), Some(seeded))?;
-        let (unseeded_output, _) = interpret_schema_v2_batch_incremental(batch(), Some(unseeded))?;
+        let (seeded_output, _) = prepare_schema_v2_batch_incremental(
+            batch(),
+            Some(seeded),
+            StateCacheCapacity::Unlimited,
+        )?
+        .finish(Vec::new())?;
+        let (unseeded_output, _) = prepare_schema_v2_batch_incremental(
+            batch(),
+            Some(unseeded),
+            StateCacheCapacity::Unlimited,
+        )?
+        .finish(Vec::new())?;
         let is_expiry = |event: &bigname_adapters::schema_v2::NormalizedEvent| {
             event
                 .after_state
