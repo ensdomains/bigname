@@ -34,6 +34,7 @@ pub(crate) enum RedoOutcome<'a> {
     Completed(&'a PhaseProgress),
     Failed(&'a RunnerError),
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn begin(
     pool: &PgPool,
     chain_id: &str,

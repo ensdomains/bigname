@@ -229,6 +229,7 @@ impl PhaseStore {
         Ok(StartDisposition::Started)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn begin_redo(
         &self,
         chain_id: &str,

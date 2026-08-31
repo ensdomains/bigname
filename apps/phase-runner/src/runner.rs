@@ -251,6 +251,7 @@ impl PhaseRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_locked_phase(
         &self,
         chain: &ChainConfig,

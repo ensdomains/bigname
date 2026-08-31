@@ -25,7 +25,7 @@ pub(super) async fn finalize(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<bool> {
-    let coverage = load_discovery_watch_coverage(&mut **transaction, chain_id)
+    let coverage = load_discovery_watch_coverage(transaction, chain_id)
         .await
         .map_err(|error| {
             InterpretError::database_anyhow(
