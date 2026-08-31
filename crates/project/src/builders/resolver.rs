@@ -267,13 +267,14 @@ pub(super) async fn build(
                    combined.resolver_address,
                    combined.source_family,
                    combined.classification_role,
-                   combined.classification_manifest_id
+                   combined.classification_manifest_id,
+                   combined.classification_admission_namespace
             FROM (
                 SELECT * FROM discovered WHERE source_family IS NOT NULL
                 UNION ALL
-                SELECT observed.*, NULL::bigint FROM observed
+                SELECT observed.*, NULL::bigint, NULL::text FROM observed
                 UNION ALL
-                SELECT retained.*, NULL::bigint
+                SELECT retained.*, NULL::bigint, NULL::text
                 FROM retained_permission_candidates retained
             ) combined
             WHERE combined.resolver_address <>
@@ -316,6 +317,7 @@ pub(super) async fn build(
         classified AS (
             SELECT candidate.resolver_address,
                    candidate.source_family,
+                   candidate.classification_admission_namespace,
                    manifest.manifest_id,
                    manifest.manifest_version,
                    manifest.manifest_payload,
@@ -514,6 +516,8 @@ pub(super) async fn build(
                jsonb_strip_nulls(jsonb_build_object(
                    'chain_id', $1, 'manifest_id', manifest_id,
                    'manifest_event_id', manifest_event_id,
+                   'classification_admission_namespace',
+                       classification_admission_namespace,
                    'upgrade_event_id', upgrade_event_id,
                    'candidate_event_ids', NULLIF(candidate_event_ids, '[]'::jsonb)
                )),

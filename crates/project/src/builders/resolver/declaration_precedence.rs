@@ -51,14 +51,16 @@ discovered AS (
            admission.source_family,
            NULL::text AS classification_role,
            1 AS priority,
-           NULL::bigint AS classification_manifest_id
+           NULL::bigint AS classification_manifest_id,
+           NULL::text AS classification_admission_namespace
     FROM active_discovery_admissions admission
     UNION ALL
     SELECT admission.resolver_address,
            declaration.source_family,
            declaration.classification_role,
            0 AS priority,
-           declaration.manifest_id AS classification_manifest_id
+           declaration.manifest_id AS classification_manifest_id,
+           admission.namespace AS classification_admission_namespace
     FROM active_discovery_admissions admission
     JOIN project_declared_resolver_addresses declaration
       ON declaration.namespace = admission.namespace

@@ -5,6 +5,7 @@ use crate::{
 };
 
 mod authority;
+mod classification;
 mod inventory;
 mod primary;
 mod resolver;
@@ -420,6 +421,9 @@ async fn include_classification_scope(
     .map_err(|error| {
         ProjectError::database("failed to scope resolver classification changes", error)
     })?;
+
+    classification::include_changed_declaration_winners(transaction, chain_id, target_block)
+        .await?;
 
     sqlx::query(
         "INSERT INTO project_scope_resolvers

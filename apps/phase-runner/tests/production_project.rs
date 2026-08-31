@@ -12403,6 +12403,204 @@ async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() ->
 }
 
 #[tokio::test]
+async fn cross_namespace_declared_resolver_collapse_is_deterministic_and_converges() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-cross-namespace";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_cross_ns_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_cross_ns_fresh").await?;
+    let ens_manifests =
+        seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    let mut basenames_manifests = Vec::new();
+    for pool in [incremental.pool(), fresh.pool()] {
+        basenames_manifests
+            .push(add_shared_resolver_discovery_namespace(pool, CHAIN, "basenames").await?);
+        sqlx::query(
+            "UPDATE normalized_events SET namespace = 'basenames'
+             WHERE chain_id = $1 AND resource_id = $2::uuid
+               AND event_kind = 'ResolverChanged'",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_BOB_RESOURCE)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let interim: (i64, String) = sqlx::query_as(
+        "SELECT (provenance ->> 'manifest_id')::bigint, support_status
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        interim,
+        (basenames_manifests[0], "supported".into()),
+        "the sole applicable same-namespace declaration must win before the second declaration",
+    );
+
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, ens_manifests)
+        .await?;
+    let mut outcomes = Vec::new();
+    for ((pool, ens_manifest_id), basenames_manifest_id) in [
+        (incremental.pool(), ens_manifests.0),
+        (fresh.pool(), ens_manifests.1),
+    ]
+    .into_iter()
+    .zip(basenames_manifests)
+    {
+        assert!(
+            ens_manifest_id < basenames_manifest_id,
+            "the fixture must make the ENS declaration the manifest-identity tie-break winner",
+        );
+        let winner: (i64, i64, String, String, String) = sqlx::query_as(
+            "SELECT count(*), min((provenance ->> 'manifest_id')::bigint),
+                    min(declared_summary #>> '{classification,source_family}'),
+                    min(declared_summary #>> '{classification,basis}'),
+                    min(support_status)
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        let losing_inventory: (i32, String, Option<String>) = sqlx::query_as(
+            "SELECT jsonb_array_length(entries), support_status, unsupported_reason
+             FROM record_inventory_current WHERE resource_id = $1::uuid",
+        )
+        .bind(DECLARED_V1_BOB_RESOURCE)
+        .fetch_one(pool)
+        .await?;
+        outcomes.push((winner, losing_inventory, ens_manifest_id));
+    }
+    assert_eq!(
+        outcomes[0].0, outcomes[1].0,
+        "cross-namespace declaration winner varied between incremental and fresh walks",
+    );
+    assert_eq!(
+        outcomes[0].1, outcomes[1].1,
+        "losing-namespace attribution varied between incremental and fresh walks",
+    );
+    for (winner, losing_inventory, ens_manifest_id) in outcomes {
+        assert_eq!(
+            winner,
+            (
+                1,
+                ens_manifest_id,
+                "ens_v1_resolver_l1".into(),
+                "manifest_declared_address".into(),
+                "supported".into(),
+            ),
+            "equal-rank declarations must collapse to the lower manifest identity",
+        );
+        assert_eq!(
+            losing_inventory,
+            (
+                0,
+                "unsupported".into(),
+                Some("resolver_classification_missing".into()),
+            ),
+            "the pointer in the losing declaration namespace must remain unsupported",
+        );
+    }
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "cross-namespace declaration collapse changed across incremental boundaries",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn declared_resolver_last_discovery_close_matches_fresh_rebuild() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-discovery-close";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_close_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_close_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND event_kind IN (
+                 'ResolverChanged', 'RecordChanged', 'RecordVersionChanged'
+             )",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        sqlx::query(
+            "UPDATE discovery_edges edge
+             SET active_to_block_number = 4, active_to_block_hash = $3
+             FROM contract_instance_addresses address
+             WHERE edge.chain_id = $1
+               AND edge.to_contract_instance_id = address.contract_instance_id
+               AND address.chain_id = edge.chain_id
+               AND lower(address.address) = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+
+    let incremental_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    let fresh_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .fetch_one(fresh.pool())
+    .await?;
+    assert_eq!(
+        fresh_count, 0,
+        "a declaration alone must not admit a resolver"
+    );
+    assert_eq!(
+        incremental_count, fresh_count,
+        "closing the last discovery admission left a stale declared resolver",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn registrar_transfer_nested_resolver_scope_matches_full_rebuild() -> Result<()> {
     assert_registrar_transfer_matches_full_rebuild("project-resolver-transfer", false).await
 }
@@ -18173,6 +18371,72 @@ async fn declared_v1_shared_clocks(pool: &PgPool, chain: &str) -> Result<(String
     .bind(DECLARED_V1_BOB_RESOURCE)
     .fetch_one(pool)
     .await?)
+}
+
+async fn add_shared_resolver_discovery_namespace(
+    pool: &PgPool,
+    chain: &str,
+    namespace: &str,
+) -> Result<i64> {
+    let declaration_manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id
+         FROM manifest_versions
+         WHERE chain_id = $1 AND namespace = $2
+           AND source_family = 'ens_v1_resolver_l1'",
+    )
+    .bind(chain)
+    .bind(namespace)
+    .fetch_one(pool)
+    .await?;
+    let origin_manifest = insert_namespaced_manifest(
+        pool,
+        namespace,
+        chain,
+        "ens_v2_registry_l1",
+        1,
+        "fixture",
+        "tests/project-shared-cross-namespace-v2-registry.toml",
+        json!({"contracts": []}),
+    )
+    .await?;
+    let resolver_instance: Uuid = sqlx::query_scalar(
+        "SELECT contract_instance_id
+         FROM contract_instance_addresses
+         WHERE chain_id = $1 AND address = lower($2)",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .fetch_one(pool)
+    .await?;
+    let source_instance = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind
+         ) VALUES ($1, $2, 'contract')",
+    )
+    .bind(source_instance)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             source_manifest_id, active_from_block_number,
+             active_from_block_hash, canonicality_state
+         ) VALUES (
+             $1, 'resolver', $2, $3, 'fixture', 'reachable_from_root',
+             $4, 1, $5, 'canonical'
+         )",
+    )
+    .bind(chain)
+    .bind(source_instance)
+    .bind(resolver_instance)
+    .bind(origin_manifest)
+    .bind(block_hash(chain, 1))
+    .execute(pool)
+    .await?;
+    Ok(declaration_manifest)
 }
 
 async fn seed_declared_v1_shared_resolver_fixture(
