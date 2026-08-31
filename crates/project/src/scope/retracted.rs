@@ -151,7 +151,9 @@ async fn seed_resources(
             SELECT row.resource_id, NULL, true
             FROM permissions_current_resource_summary row
             WHERE row.provenance ->> 'chain_id' = $1
-              AND NULLIF(row.chain_positions ->> 'block_number', '')::bigint
+              AND NULLIF(
+                  row.chain_positions ->> 'target_block_number', ''
+              )::bigint
                   BETWEEN $2 AND $3
         )
         INSERT INTO project_scope_resources

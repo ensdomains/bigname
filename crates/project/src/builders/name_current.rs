@@ -29,52 +29,47 @@ pub(super) async fn build(
                resource.token_lineage_id, binding.binding_kind,
                jsonb_build_object(
                    'registration', jsonb_build_object(
-                       'status', CASE COALESCE(registration.event_kind, CASE
-                           WHEN COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2'
-                           THEN registration_current.event_kind END)
-                           WHEN 'RegistrationReleased' THEN 'released'
-                           WHEN 'RegistrationReserved' THEN 'reserved'
-                           WHEN 'RegistrationGranted' THEN 'active'
-                           WHEN 'RegistrationRenewed' THEN 'active'
-                           ELSE CASE WHEN binding.resource_id IS NOT NULL
-                               THEN 'active' ELSE NULL END
+                       'status', CASE selected_registration.event_kind
+                           WHEN 'RegistrationReleased' THEN 'released' WHEN 'RegistrationReserved' THEN 'reserved'
+                           WHEN 'RegistrationGranted' THEN 'active' WHEN 'RegistrationRenewed' THEN 'active'
+                           ELSE CASE WHEN binding.resource_id IS NOT NULL THEN 'active' ELSE NULL END
                        END,
-                       'authority_kind', authority_context.authority_kind,
-                       'authority_key', authority_context.authority_key,
-                       'registrant', registrant.registrant,
-                       'expiry', COALESCE(to_jsonb(expiry.expiry_seconds), CASE WHEN COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' THEN registration_current.after_state -> 'expiry' END),
+                       'authority_kind', authority_context.authority_kind, 'authority_key', authority_context.authority_key,
+                       'registrant', registrant.registrant, 'expiry', CASE
+                           WHEN selected_registration.is_v2_lifecycle AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id
+                               THEN selected_registration.after_state -> 'expiry'
+                           ELSE COALESCE(to_jsonb(expiry.expiry_seconds), CASE
+                               WHEN selected_registration.is_v2_lifecycle THEN selected_registration.after_state -> 'expiry' END)
+                       END,
                        'registered_at', registration_grant.block_timestamp,
                        'created_at', created.block_timestamp,
-                       'released_at', registration.after_state -> 'released_at',
-                       'latest_event_kind', COALESCE(registration_latest.event_kind, CASE WHEN COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' THEN registration_current.event_kind END)
-                   ) || CASE WHEN registration.event_kind = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2'
+                       'released_at', selected_registration.after_state -> 'released_at',
+                       'latest_event_kind', CASE
+                           WHEN selected_registration.event_kind = 'RegistrationReserved' THEN selected_registration.event_kind
+                           ELSE COALESCE(registration_latest.event_kind,
+                               selected_registration.event_kind)
+                       END
+                   ) || CASE WHEN selected_registration.event_kind = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2'
                        THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
                            'registrant', NULL, 'expiry', NULL) ELSE '{}'::jsonb END,
                    'control', CASE
-                       WHEN registration.event_kind = 'RegistrationReleased' AND
-                            selected_authority.selected_authority_arm = 'ens_v2'
+                       WHEN selected_registration.event_kind = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2'
                            THEN jsonb_build_object('status', 'unregistered')
-                       WHEN COALESCE(
-                           resource.provenance ->> 'authority_kind',
-                           registration_grant.after_state ->> 'authority_kind'
-                       ) IN ('wrapper', 'name_wrapper')
-                           THEN jsonb_build_object(
-                               'status', 'unsupported',
-                               'unsupported_reason',
-                                   'ENSv1 wrapper effective control is not yet projected'
-                           )
+                       WHEN COALESCE(resource.provenance ->> 'authority_kind',
+                           registration_grant.after_state ->> 'authority_kind') IN ('wrapper', 'name_wrapper')
+                           THEN jsonb_build_object('status', 'unsupported', 'unsupported_reason',
+                               'ENSv1 wrapper effective control is not yet projected')
                        ELSE jsonb_build_object(
-                           'status', COALESCE(
-                               status.after_state ->> 'status', CASE WHEN COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2'
-                               THEN registration_current.after_state ->> 'status' END
-                           ),
+                           'status', CASE
+                               WHEN selected_registration.event_kind = 'RegistrationReserved'
+                                   THEN selected_registration.after_state ->> 'status'
+                               ELSE COALESCE(status.after_state ->> 'status',
+                                   selected_registration.after_state ->> 'status')
+                           END,
                            'expiry', CASE
                                WHEN expiry.expiry_seconds IS NULL THEN NULL
-                               ELSE to_jsonb(to_char(
-                                   to_timestamp(expiry.expiry_seconds)
-                                       AT TIME ZONE 'UTC',
-                                   'YYYY-MM-DD"T"HH24:MI:SS"Z"'
-                               ))
+                               ELSE to_jsonb(to_char(to_timestamp(expiry.expiry_seconds)
+                                   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                            END,
                            'registrant', registrant.registrant,
                            'registry_owner', control_owner.registry_owner,
@@ -83,16 +78,14 @@ pub(super) async fn build(
                    END,
                    'resolver', jsonb_build_object(
                        'chain_id', CASE
-                           WHEN resolver.resolver_address IS NOT NULL
-                            AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
-                            AND NOT (COALESCE(registration.event_kind, '') = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2')
+                           WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
+                            AND NOT (COALESCE(selected_registration.event_kind, '') = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2')
                                THEN resolver.chain_id
                            ELSE NULL
                        END,
                        'address', CASE
-                           WHEN resolver.resolver_address IS NOT NULL
-                            AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
-                            AND NOT (COALESCE(registration.event_kind, '') = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2')
+                           WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
+                            AND NOT (COALESCE(selected_registration.event_kind, '') = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2')
                                THEN resolver.resolver_address
                            ELSE NULL
                        END,
@@ -258,6 +251,13 @@ pub(super) async fn build(
             ORDER BY (event.event_kind = 'RegistrationReleased'), event.block_number DESC NULLS LAST, event.normalized_event_id DESC
             LIMIT 1
         ) registration_current ON TRUE
+        CROSS JOIN LATERAL (
+            SELECT CASE WHEN arm.is_v2 THEN registration_current.event_kind ELSE registration.event_kind END AS event_kind,
+                   CASE WHEN arm.is_v2 THEN registration_current.after_state ELSE registration.after_state END AS after_state,
+                   CASE WHEN arm.is_v2 THEN registration_current.resource_id ELSE registration.resource_id END AS resource_id,
+                   arm.is_v2 AS is_v2_lifecycle
+            FROM (SELECT COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AS is_v2) arm
+        ) selected_registration
         LEFT JOIN LATERAL (
             SELECT event.*, lineage.block_timestamp
             FROM project_authority_events event
@@ -624,7 +624,7 @@ pub(super) async fn build(
           AND surface.raw_name <> ''
           AND NOT COALESCE(
               registration_current.event_kind = 'RegistrationReleased' AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired' AND registration_current.after_state ->> 'derived_from' = 'interpreter_state' AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND
-              COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id), FALSE
+              selected_authority.selected_authority_arm = 'ens_v2' AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id), FALSE
           )
         ORDER BY surface.logical_name_id
         "#,

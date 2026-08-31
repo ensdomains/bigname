@@ -15456,6 +15456,10 @@ async fn surviving_reservation_drives_summary_after_other_resource_expires() -> 
         "RegistrationReserved"
     );
     assert_eq!(
+        incremental["declared_summary"]["registration"]["expiry"],
+        100
+    );
+    assert_eq!(
         incremental["declared_summary"]["control"]["status"],
         "reserved"
     );
@@ -15721,8 +15725,8 @@ async fn expiry_fixture_counts(pool: &PgPool) -> Result<(i64, i64)> {
 
 async fn expiry_fixture_name(pool: &PgPool) -> Result<Option<Value>> {
     Ok(sqlx::query_scalar(
-        "SELECT to_jsonb(current) - 'last_recomputed_at' - 'chain_positions' -
-                'canonicality_summary'
+        "SELECT to_jsonb(current) - 'last_recomputed_at' - 'inserted_at' -
+                'chain_positions' - 'canonicality_summary'
          FROM name_current current WHERE logical_name_id = $1",
     )
     .bind(EXPIRY_REDO_NAME)

@@ -365,9 +365,9 @@ async fn rebound_permission_provenance_includes_the_registration_event() -> Resu
     .execute(&pool)
     .await?;
     run(&pool, 102, None).await?;
-    let rebound: (i64, Value, i64, String, i64) = sqlx::query_as(
+    let rebound: (i64, Value, i64, String, i64, Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT normalized_event_id, raw_fact_ref, block_number,
-                source_family, manifest_version
+                source_family, manifest_version, transaction_index, log_index
          FROM normalized_events
          WHERE resource_id = $1::uuid AND event_kind = 'RegistrationRenewed'",
     )
@@ -405,6 +405,8 @@ async fn rebound_permission_provenance_includes_the_registration_event() -> Resu
     );
     assert_eq!(projected.1["block_number"], rebound.2);
     assert_eq!(projected.1["block_hash"], hash(rebound.2));
+    assert_eq!(projected.1["transaction_index"], json!(rebound.5));
+    assert_eq!(projected.1["log_index"], json!(rebound.6));
     assert_eq!(projected.2, rebound.4);
     database.cleanup().await
 }
@@ -433,19 +435,20 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(RESOURCE).bind(MAIN)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(live_state, (5, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into()), Some("RegistrationGranted".into()), Some(OWNER.into()), Some("1800000000".into()), Some("ens_v2_registry".into())));
-    let stale_state: (i64, i64, i64, Option<String>) = sqlx::query_as(
+    assert_eq!(live_state, (6, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into()), Some("RegistrationGranted".into()), Some(OWNER.into()), Some("1800000000".into()), Some("ens_v2_registry".into())));
+    let stale_state: (i64, i64, i64, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
                 (SELECT count(*) FROM permissions_current_resource_summary
                  WHERE resource_id = $2::uuid),
                 (SELECT unsupported_reason FROM permissions_current_resource_summary
-                 WHERE resource_id = $2::uuid)",
+                 WHERE resource_id = $2::uuid),
+                (SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1)",
     )
     .bind(STALE).bind(STALE_RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(stale_state, (0, 0, 1, Some("resource_permission_authority_not_projected".into())));
+    assert_eq!(stale_state, (1, 0, 1, Some("resource_permission_authority_not_projected".into()), Some("current_authority_not_projected".into())));
     let retired = run(&incremental, 101, Some(live)).await?;
     let (retired_db, retired_fresh) = fresh("v2_expiry_retired_fresh", 101).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&retired_fresh).await?);

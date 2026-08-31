@@ -81,11 +81,15 @@ pub(super) async fn build(
                 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
             )
         ),
-        latest AS (
-            SELECT * FROM ranked WHERE latest_rank = 1
-        ),
+        latest AS (SELECT * FROM ranked WHERE latest_rank = 1),
         v2_registration_current AS (
-            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.event_kind, event.after_state
+            SELECT DISTINCT ON (event.resource_id) event.*, event.event_kind <> 'RegistrationReleased' AND EXISTS (
+                       SELECT 1 FROM project_events expiry
+                       WHERE expiry.resource_id = event.resource_id AND expiry.event_kind = 'RegistrationReleased'
+                         AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state'
+                         AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND
+                             (expiry.block_number, expiry.normalized_event_id) < (event.block_number, event.normalized_event_id)
+                   ) AS rebound
             FROM project_events event
             WHERE event.resource_id IS NOT NULL AND (
                   (
@@ -102,11 +106,8 @@ pub(super) async fn build(
                                      AND (expiry.block_number, expiry.normalized_event_id) < (event.block_number, event.normalized_event_id)
                                    ORDER BY expiry.block_number DESC, expiry.normalized_event_id DESC LIMIT 1), FALSE))))
                   )
-                  OR (event.event_kind = 'RegistrationReleased'
-                      AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
-                      AND event.after_state ->> 'derived_from' = 'interpreter_state'
-                      AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
-                  )
+                  OR (event.event_kind = 'RegistrationReleased' AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+                      AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
               )
             ORDER BY event.resource_id, event.block_number DESC NULLS LAST, event.normalized_event_id DESC
         ),
@@ -195,7 +196,8 @@ pub(super) async fn build(
                    )
                END,
                jsonb_build_object(
-                   'normalized_event_ids', event.event_ids || CASE
+                   'normalized_event_ids', event.event_ids || CASE WHEN registration.rebound THEN jsonb_build_array(registration.normalized_event_id) ELSE '[]'::jsonb
+                   END || CASE
                        WHEN modifier.normalized_event_id IS NOT NULL
                         AND masked.effective_powers IS DISTINCT FROM
                             event.after_state -> 'effective_powers'
@@ -209,7 +211,8 @@ pub(super) async fn build(
                        ELSE '[]'::jsonb
                    END,
                    'permission_manifest_versions', event.manifest_versions,
-                   'raw_fact_refs', event.raw_fact_refs || CASE
+                   'raw_fact_refs', event.raw_fact_refs || CASE WHEN registration.rebound THEN jsonb_build_array(registration.raw_fact_ref) ELSE '[]'::jsonb
+                   END || CASE
                        WHEN modifier.normalized_event_id IS NOT NULL
                         AND masked.effective_powers IS DISTINCT FROM
                             event.after_state -> 'effective_powers'
@@ -222,7 +225,10 @@ pub(super) async fn build(
                            THEN jsonb_build_array(wrapper_expiry.raw_fact_ref)
                        ELSE '[]'::jsonb
                    END,
-                   'manifest_versions', event.manifest_versions || CASE
+                   'manifest_versions', event.manifest_versions || CASE WHEN registration.rebound THEN jsonb_build_array(jsonb_build_object(
+                       'source_manifest_id', registration.source_manifest_id, 'source_family', registration.source_family, 'manifest_version', registration.manifest_version))
+                       ELSE '[]'::jsonb
+                   END || CASE
                        WHEN modifier.normalized_event_id IS NOT NULL
                         AND masked.effective_powers IS DISTINCT FROM
                             event.after_state -> 'effective_powers'
@@ -251,25 +257,9 @@ pub(super) async fn build(
                    )
                ),
                jsonb_strip_nulls(jsonb_build_object(
-                   'block_number', GREATEST(
-                       event.block_number,
-                       modifier.block_number,
-                       wrapper_expiry.block_number
-                   ),
-                   'block_hash', CASE
-                       WHEN wrapper_expiry.block_number = GREATEST(
-                           event.block_number,
-                           modifier.block_number,
-                           wrapper_expiry.block_number
-                       ) THEN wrapper_expiry.block_hash
-                       WHEN modifier.block_number > event.block_number
-                           THEN modifier.block_hash
-                       ELSE event.block_hash
-                   END,
-                   'transaction_index', event.transaction_index,
-                   'log_index', event.log_index,
-                   'target_block_number', $2,
-                   'target_block_hash', $3
+                   'block_number', evidence_position.block_number, 'block_hash', evidence_position.block_hash,
+                   'transaction_index', evidence_position.transaction_index, 'log_index', evidence_position.log_index,
+                   'target_block_number', $2, 'target_block_hash', $3
                )),
                jsonb_build_object(
                    'state', event.canonicality_state,
@@ -288,6 +278,7 @@ pub(super) async fn build(
                             event.after_state -> 'effective_powers'
                            THEN wrapper_expiry.manifest_version
                    END,
+                   CASE WHEN registration.rebound THEN registration.manifest_version END,
                    event.manifest_version
                )
         FROM latest event
@@ -364,6 +355,15 @@ pub(super) async fn build(
                 ), '[]'::jsonb)
             END AS effective_powers
         ) masked
+        CROSS JOIN LATERAL (
+            SELECT position.block_number, position.block_hash, position.transaction_index, position.log_index FROM (VALUES
+                (event.block_number, event.block_hash, event.transaction_index, event.log_index, event.normalized_event_id),
+                (CASE WHEN registration.rebound THEN registration.block_number END, registration.block_hash, registration.transaction_index, registration.log_index, registration.normalized_event_id),
+                (modifier.block_number, modifier.block_hash, modifier.transaction_index, modifier.log_index, modifier.normalized_event_id),
+                (wrapper_expiry.block_number, wrapper_expiry.block_hash, wrapper_expiry.transaction_index, wrapper_expiry.log_index, wrapper_expiry.normalized_event_id)
+            ) position(block_number, block_hash, transaction_index, log_index, normalized_event_id)
+            WHERE position.block_number IS NOT NULL ORDER BY position.block_number DESC, position.transaction_index DESC NULLS LAST, position.log_index DESC NULLS LAST, position.normalized_event_id DESC NULLS LAST
+            LIMIT 1) evidence_position
         WHERE jsonb_array_length(masked.effective_powers) > 0
           AND NOT COALESCE(
               registration.event_kind = 'RegistrationReleased'
