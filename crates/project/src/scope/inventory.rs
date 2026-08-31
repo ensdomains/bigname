@@ -6,9 +6,10 @@ pub(super) async fn include_changed_node_record_dependents(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {
-    // Start from this window's node-only v1 record changes and follow only their exact currently
-    // published pointer. The declaration and namespace joins mirror the guarded attribution arm
-    // in builders/record_inventory.rs without changing resolver eligibility.
+    // Start from this window's node-only v1 record changes and follow only the pointer ID cited by
+    // the published inventory; redo expands retracted pointer dependents independently. The plain
+    // namehash equality keeps the targeted index lookup while the lowercase equality, declaration,
+    // and namespace joins mirror the guarded arm in builders/record_inventory.rs.
     sqlx::query(
         "CREATE TEMP TABLE project_changed_node_record_dependents ON COMMIT DROP AS
          SELECT DISTINCT pointer.logical_name_id, inventory.resource_id
@@ -16,6 +17,7 @@ pub(super) async fn include_changed_node_record_dependents(
          JOIN name_surfaces surface
            ON surface.chain_id = record.chain_id
           AND surface.namehash = lower(record.after_state ->> 'node')
+          AND lower(surface.namehash) = lower(record.after_state ->> 'node')
           AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
          JOIN normalized_events pointer
            ON pointer.chain_id = record.chain_id
@@ -23,6 +25,7 @@ pub(super) async fn include_changed_node_record_dependents(
           AND pointer.resource_id IS NOT NULL
           AND pointer.event_kind = 'ResolverChanged'
           AND pointer.source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+          AND pointer.canonicality_state IN ('canonical', 'safe', 'finalized')
          JOIN record_inventory_current inventory
            ON inventory.resource_id = pointer.resource_id
           AND (inventory.provenance ->> 'resolver_pointer_event_id')::bigint =
