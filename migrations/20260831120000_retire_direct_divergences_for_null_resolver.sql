@@ -16,46 +16,44 @@ BEGIN
         SECURITY DEFINER
         SET search_path = pg_catalog, bigname_phase, pg_temp
         AS $body$
-        DECLARE
-            surface_on_ethereum_mainnet boolean;
-        BEGIN
-            -- Rust lookup admission excludes resolver.status = 'unsupported', but
-            -- retirement intentionally does not: once the exact resolver is null,
-            -- prior direct-resolver observations are stale regardless of that status.
-            IF NEW.namespace = 'ens'
-                AND NEW.declared_summary -> 'resolver' ? 'chain_id'
-                AND NEW.declared_summary -> 'resolver' ? 'address'
-                AND NEW.declared_summary -> 'resolver' -> 'chain_id' = 'null'::jsonb
-                AND NEW.declared_summary -> 'resolver' -> 'address' = 'null'::jsonb
-            THEN
-                EXECUTE format(
-                    'SELECT EXISTS (
-                        SELECT 1 FROM %I.name_surfaces
-                        WHERE logical_name_id = $1
-                          AND chain_id = ''ethereum-mainnet''
-                    )',
-                    TG_TABLE_SCHEMA
-                )
-                INTO surface_on_ethereum_mainnet
-                USING NEW.logical_name_id;
+DECLARE
+    surface_on_ethereum_mainnet boolean;
+BEGIN
+    -- Rust lookup admission excludes resolver.status = 'unsupported', but
+    -- retirement intentionally does not: once the exact resolver is null,
+    -- prior direct-resolver observations are stale regardless of that status.
+    IF NEW.namespace = 'ens'
+        AND NEW.declared_summary -> 'resolver' ? 'chain_id'
+        AND NEW.declared_summary -> 'resolver' ? 'address'
+        AND NEW.declared_summary -> 'resolver' -> 'chain_id' = 'null'::jsonb
+        AND NEW.declared_summary -> 'resolver' -> 'address' = 'null'::jsonb
+    THEN
+        EXECUTE format(
+            'SELECT EXISTS (
+                SELECT 1 FROM %I.name_surfaces
+                WHERE logical_name_id = $1
+                  AND chain_id = ''ethereum-mainnet''
+            )',
+            TG_TABLE_SCHEMA
+        )
+        INTO surface_on_ethereum_mainnet
+        USING NEW.logical_name_id;
 
-                IF surface_on_ethereum_mainnet THEN
-                    EXECUTE format(
-                        'UPDATE %I.resolution_divergences
-                         SET cleared_at = GREATEST(
-                             statement_timestamp(), last_observed_at
-                         )
-                         WHERE logical_name_id = $1
-                           AND resolver_chain_id = ''ethereum-mainnet''
-                           AND cleared_at IS NULL',
-                        TG_TABLE_SCHEMA
-                    )
-                    USING NEW.logical_name_id;
-                END IF;
-            END IF;
-            RETURN NEW;
-        END
-        $body$
+        IF surface_on_ethereum_mainnet THEN
+            EXECUTE format(
+                'UPDATE %I.resolution_divergences
+                 SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
+                 WHERE logical_name_id = $1
+                   AND resolver_chain_id = ''ethereum-mainnet''
+                   AND cleared_at IS NULL',
+                TG_TABLE_SCHEMA
+            )
+            USING NEW.logical_name_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$body$
     $function$;
 
     REVOKE ALL ON FUNCTION
