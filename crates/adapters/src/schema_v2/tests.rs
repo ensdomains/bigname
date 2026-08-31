@@ -12869,6 +12869,7 @@ fn whitespace_text_key_is_retained_as_an_opaque_record_across_families() -> anyh
     for (manifest_id, namespace, source_family) in [
         (81, "ens", "ens_v1_resolver_l1"),
         (82, "basenames", "basenames_base_resolver"),
+        (83, "ens", "ens_v2_resolver_l1"),
     ] {
         let output = interpret_test_batch(BatchInput {
             chain_id: CHAIN.to_owned(),
@@ -12884,7 +12885,10 @@ fn whitespace_text_key_is_retained_as_an_opaque_record_across_families() -> anyh
                 )],
             )],
             discovery_rules: Vec::new(),
-            admissions: Vec::new(),
+            admissions: (source_family == "ens_v2_resolver_l1")
+                .then(|| admission(manifest_id, "resolver"))
+                .into_iter()
+                .collect(),
             prior_events: Vec::new(),
             blocks: Vec::new(),
             raw_logs: vec![raw(encoded.clone())],
