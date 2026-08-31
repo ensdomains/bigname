@@ -171,7 +171,7 @@ for migration_file in \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
     "$ROOT/migrations/20260826120100_manifest_applied_change_count.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
-    "$ROOT/migrations/20260831120000_discovery_watch_admissions.sql"
+    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -318,8 +318,8 @@ for migration_file in \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
-    "$ROOT/migrations/20260831120000_discovery_watch_admissions.sql" \
-    "$ROOT/migrations/20260831120000_discovery_watch_admissions.sql"
+    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
+    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -696,7 +696,7 @@ for ignored in 1 2; do
         "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
         | run_psql
     sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260831120000_discovery_watch_admissions.sql" \
+        "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
         | run_psql
 done
 redo_attempt_generation_upgrade_check="$({
