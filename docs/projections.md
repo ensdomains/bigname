@@ -81,6 +81,16 @@ before publication. Candidate events and events whose block is no longer on
 readable canonical lineage never widen this scope. `project_events` remains the
 single filter for data that builders may serve.
 
+Code that builds a replacement projection row may read normalized events staged
+for the current Project batch and fields that an earlier build deliberately
+stored for later reuse. A builder may obtain those stored reuse fields from
+retained rows only when its query proves that every such row is outside the
+batch's affected scope and merges staged replacements for affected rows. It
+must not fill a replacement row by joining a live projection row that may also
+be rebuilt in the batch: live projection values are one batch stale and related
+rows may be mid-replacement. Explicit existing-row-only carry-forward may also
+copy an unchanged row without using it to compute another rebuilt row.
+
 Rows outside an incremental tick's affected scope keep the target block number,
 hash, and timestamp from the last tick that rebuilt them. Readers require each
 stored block hash to remain canonical; they do not require an unaffected row's
@@ -117,6 +127,13 @@ outcomes, or durable traces.
 
 - Every row carries stable identity, provenance, manifest version, support, and
   chain-position or target-publication context.
+- Review every projection-builder change for replacement-row inputs: each value
+  must come from the current batch's staged normalized events or from a field
+  deliberately stored for later reuse. A live projection-table read is allowed
+  only to obtain such a stored reuse field when the query proves the row is
+  outside the affected scope and merges staged replacements for affected rows,
+  or for explicit existing-row-only carry-forward. It must never use a row that
+  may also be rebuilt in the batch.
 - Exact-name reads resolve snapshot selection first, then join only rows
   admitted at those positions.
 - A row published at an earlier target may serve a later selected head when the

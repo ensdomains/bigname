@@ -612,6 +612,29 @@ Field ownership:
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 
+#### Public record-field completeness
+
+The product record-key grammar is deliberately closed. The same grammar applies
+to the product and record-diagnostic routes; a family outside it is rejected as
+`400 invalid_input`, not returned with an invented or incomplete value.
+
+| Registry or resolver field family | Public status | Contract |
+| --- | --- | --- |
+| Address records | Served | `addr:<coin_type>`, with the coin type limited to an unsigned 64-bit integer; see the [coin-type selector divergence](upstream.md#verified-resolution-addr-coin-type-selector-narrowing). ENS defines both the legacy Ethereum-address getter and the multicoin getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L4-L11 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L4-L15 @ ens_v1@91c966f) |
+| Text records | Served | `text:<key>`. ENS defines text records by node and string key. (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L4-L19 @ ens_v1@91c966f) |
+| Avatar | Served | `avatar`, as the dedicated public selector for the `avatar` text key. (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L4-L19 @ ens_v1@91c966f) |
+| Content hash | Served | `contenthash`. The current Basenames admission has a narrower event family; see the [Basenames contenthash divergence](upstream.md#basenames-contenthash-admission-narrowing). (upstream: .refs/ens_v1/contracts/resolvers/profiles/IContentHashResolver.sol:L4-L10 @ ens_v1@91c966f) |
+| Registry TTL | Validated and discarded | `NewTTL` is decoded to validate admitted logs but produces no normalized event or public record key. The LLL-era low-byte validation exception is documented in the [registry-word divergence](upstream.md#ensv1-lll-era-registry-word-decoding). ENS declares the TTL event and getter as `uint64`. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L14-L15 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L49-L57 @ ens_v1@91c966f) |
+| ABI records | Outside the grammar | No public key. ENS defines ABI records by node and accepted content-type mask. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) |
+| Public keys | Outside the grammar | No public key. ENS defines a secp256k1 public-key record. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IPubkeyResolver.sol:L4-L12 @ ens_v1@91c966f) |
+| Interface declarations | Outside the grammar | No public key. ENS defines an interface-ID-to-implementer lookup. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L4-L22 @ ens_v1@91c966f) |
+| Resolver name records | Served outside the grammar | No record key. Reverse and primary-name routes own this field. ENS defines the resolver name field for reverse records. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
+| DNS record sets | Outside the grammar | No public key. ENS defines DNS record-set update/delete events and a wire-format getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L4-L24 @ ens_v1@91c966f) |
+| DNS zone hashes | Outside the grammar | No public key. ENS defines a DNS zone-hash update event and getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSZoneResolver.sol:L4-L15 @ ens_v1@91c966f) |
+| Legacy content and multihash | Outside the grammar | No public key. ENS retains these getters and setters as deprecated resolver functions. (upstream: .refs/ens_v1/contracts/resolvers/Resolver.sol:L86-L93 @ ens_v1@91c966f) |
+| ENSv1 arbitrary data records | Outside the grammar | No public key. ENS defines string-keyed arbitrary byte data, and its public resolver includes that profile. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDataResolver.sol:L5-L21 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L30 @ ens_v1@91c966f) |
+| ENSv2 generic data resources | Outside the grammar | No public key. The admitted archived Sepolia resolver ABI exposes `DataChanged` and `NamedDataResource`; their normalized-event exclusion is documented in the [ENSv2 admission divergence](upstream.md#ensv2-data-event-admission-narrowing). (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L360-L375 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L505-L519 @ ens_v2@a971bd64) |
+
 ### `GET /v2/names/{name}/subnames`
 
 - Method/path: `GET /v2/names/{name}/subnames`

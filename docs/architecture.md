@@ -684,9 +684,11 @@ Permissions and control are anchored to `resource_id`, never to surface text. Th
 
 ## Normalized event taxonomy
 
-Identity, preimage, discovery: `PreimageObserved`, `NameClassified`, `SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `MetadataChanged`, `SourceManifestUpdated`.
+Identity, preimage, discovery, and contract history: `PreimageObserved`,
+`SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `RegistryCreated`,
+`Upgraded`, `SourceManifestUpdated`.
 
-Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`, `PricingPolicyChanged`.
+Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`.
 
 For a version-zero initial `RegistrationReserved`, the emitted token ID also
 identifies the ENSv2 registry-entry resource, so interpretation materializes the
@@ -719,15 +721,13 @@ authority transition, or surface binding.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L154 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 
-Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`, `ResolutionEpochChanged`.
+Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`.
 
-Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `WildcardCoverageChanged`, `RecordChanged`, `RecordVersionChanged`, `RecordInventoryObserved`.
+Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `RecordChanged`, `RecordVersionChanged`.
 
 Permissions: `PermissionChanged`, `RootPermissionChanged`, `PermissionScopeChanged`.
 
-Reverse and primary: `ReverseChanged`, `PrimaryNameClaimed`, `PrimaryNameVerified`, `PrimaryNameInvalidated`.
-
-Execution and coverage: `VerifiedResolutionObserved`, `VerifiedResolutionInvalidated`, `CoverageChanged`.
+Reverse and primary: `ReverseChanged`.
 
 ENSv2 mappings:
 
@@ -1354,9 +1354,11 @@ v2 primary-name verification performs no write.
 
 ## Reorg, redo, and historical ranges
 
-The phase runner stores competing block lineage per chain. Head publication
-marks a displaced readable lineage branch `orphaned` and promotes the selected
-branch; interpretation selects raw facts through that lineage rather than
+The phase runner stores competing block hashes per chain, including observed and
+orphaned branches, while a partial unique index permits at most one `canonical`,
+`safe`, or `finalized` block at a given chain height. Head publication marks a
+displaced readable lineage branch `orphaned` before making the selected branch
+readable; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
 identity, discovery, and normalized-event output for its selected range, except
 for two bounded kinds of coordination state carried across redo preparation.
@@ -1455,7 +1457,9 @@ synchronization and phase redo path.
 - permissions are first-class
 - source manifests are first-class
 - preimage observation is first-class
-- projections are disposable and rebuildable
+- projections are disposable and rebuildable, but their foreign keys require
+  projection rows to be removed before identity rows and rebuilt only after the
+  identity rows exist; serving resumes after coherent Project publication
 - protocol-specific logic lives in adapters and execution drivers, not in the public contract
 - no silent cross-source fallback; every fallback appears in provenance/explain
 - no requirement to preserve the ENSv1 indexer API surface
