@@ -61,7 +61,7 @@ pub(crate) async fn initialize(
             ProjectError::database("failed to retain redo resolver-dependent scope", error)
         })?;
     }
-    include_classification_scope(transaction, chain_id, target.number).await?;
+    include_classification_scope(transaction, chain_id, window.previous, target.number).await?;
     include_resolver_dependents(transaction, chain_id, target.number).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
@@ -332,12 +332,12 @@ async fn include_topology_scope(
 async fn include_classification_scope(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
+    previous: Option<&Marker>,
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO project_scope_resolver_dependents
-         SELECT lower(live.resolver_address)
-         FROM resolver_current live
+         SELECT lower(live.resolver_address) FROM resolver_current live
          LEFT JOIN project_manifests manifest
            ON manifest.source_family =
               live.declared_summary -> 'classification' ->> 'source_family'
@@ -348,22 +348,20 @@ async fn include_classification_scope(
                   manifest.manifest_event_id::text
            )
          UNION
-         SELECT lower(declaration ->> 'address')
-         FROM project_manifests manifest
+         SELECT lower(declaration ->> 'address') FROM project_manifests manifest
          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
              manifest.manifest_payload -> 'contracts', '[]'::jsonb
          )) declaration
          LEFT JOIN resolver_current live
            ON live.chain_id = $1
           AND lower(live.resolver_address) = lower(declaration ->> 'address')
-         WHERE manifest.source_family IN (
-             'ens_v1_resolver_l1', 'basenames_base_resolver'
-         )
+         WHERE manifest.source_family IN ('ens_v1_resolver_l1', 'basenames_base_resolver')
            AND declaration ->> 'address' IS NOT NULL
            AND (
                live.resolver_address IS NULL
                OR live.provenance ->> 'manifest_event_id' IS DISTINCT FROM
                   manifest.manifest_event_id::text
+               OR (declaration ->> 'start_block')::bigint BETWEEN $3::bigint + 1 AND $2
            )
          UNION
          SELECT lower(upgrade.after_state ->> 'proxy_address')
@@ -399,6 +397,7 @@ async fn include_classification_scope(
     )
     .bind(chain_id)
     .bind(target_block)
+    .bind(previous.map(|marker| marker.number))
     .execute(&mut **transaction)
     .await
     .map_err(|error| {

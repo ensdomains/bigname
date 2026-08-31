@@ -1,4 +1,4 @@
-use bigname_project::{BatchRequest, Engine, RunMode};
+use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
@@ -84,10 +84,13 @@ async fn seed_duplicate_declarations(pool: &PgPool) -> TestResult {
     sqlx::query(
         "INSERT INTO chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state
-         ) VALUES ($1, $2, 20, '2026-08-01T00:00:20Z', 'canonical')",
+         ) VALUES
+             ($1, $2, 20, '2026-08-01T00:00:20Z', 'canonical'),
+             ($1, $3, 30, '2026-08-01T00:00:30Z', 'canonical')",
     )
     .bind(CHAIN)
     .bind(format!("0x{:064x}", 20_u64))
+    .bind(format!("0x{:064x}", 30_u64))
     .execute(pool)
     .await?;
     let payload = json!({
@@ -217,6 +220,33 @@ async fn duplicate_declarations_project_latest_role_and_features_together() -> T
     assert_eq!(classification["role"], json!("latest_at_target"));
     assert_eq!(
         classification["read_features"],
+        json!(["ensip19_default_address"])
+    );
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 30,
+            affected_from_block: 21,
+            affected_to_block: 30,
+            resume_current: Some(Marker {
+                number: 20,
+                hash: format!("0x{:064x}", 20_u64),
+            }),
+            mode: RunMode::Normal,
+        })
+        .await?;
+    let resumed_classification: Value = sqlx::query_scalar(
+        "SELECT declared_summary -> 'classification'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(resumed_classification["role"], json!("future_resolver"));
+    assert_eq!(
+        resumed_classification["read_features"],
         json!(["ensip19_default_address"])
     );
     database.cleanup().await?;
