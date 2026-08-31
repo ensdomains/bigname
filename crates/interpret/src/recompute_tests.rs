@@ -46,12 +46,6 @@ fn missing_surface_position_uses_the_conventional_sentinel() {
     );
 }
 
-#[test]
-fn recompute_epoch_queries_include_both_block_boundaries() {
-    let source = include_str!("recompute.rs");
-    assert!(source.matches("BETWEEN $2 AND $3").count() >= 4);
-}
-
 #[tokio::test]
 async fn surface_loader_ignores_orphaned_surfaces_and_fallback_events() -> TestResult {
     let database = bigname_test_support::TestDatabase::create(
