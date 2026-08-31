@@ -15573,13 +15573,163 @@ async fn expiry_release_redo_restores_deleted_permissions_like_fresh_rebuild() -
 }
 
 #[tokio::test]
+async fn expiry_release_redo_restores_ownerless_reservation_like_fresh_rebuild() -> Result<()> {
+    const CHAIN: &str = "project-ownerless-expiry-redo";
+    const NAME: &str = "ens:0x8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d";
+    const RESOURCE: &str = "00000000-0000-0000-0000-0000000008d1";
+    let incremental = ScratchDatabase::create("project_ownerless_expiry_redo").await?;
+    let fresh = ScratchDatabase::create("project_ownerless_expiry_redo_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_lineage(pool, CHAIN, 3).await?;
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+                 namehash, labelhashes, normalizer_version, visibility_state,
+                 chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, 'ens', 'ownerless.eth', ARRAY['ownerless','eth'],
+                 decode('00','hex'), $2, ARRAY['0xownerless','0xeth'], $3,
+                 'active', $4, $5, 1, 'canonical')",
+        )
+        .bind(NAME)
+        .bind(NAME.trim_start_matches("ens:"))
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 1, 'canonical')",
+        )
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(NAME),
+            Some(RESOURCE),
+            "RegistrationReserved",
+            "ens_v2_registry_l1",
+            json!({
+                "status":"reserved",
+                "expiry":2,
+                "token_id":"0x8d",
+                "reservation_resource":true
+            }),
+            json!({"fixture":"ownerless-expiry-reservation"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            2,
+            Some(NAME),
+            Some(RESOURCE),
+            "RegistrationReleased",
+            "ens_v2_registry_l1",
+            json!({
+                "source_event":"RegistryPathExpired",
+                "derived_from":"interpreter_state",
+                "terminal_reason":"registry_name_binding_expired",
+                "status":"released"
+            }),
+            json!({"fixture":"ownerless-expiry-release"}),
+        )
+        .await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 1).await?;
+    let live_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(NAME)
+            .fetch_one(incremental.pool())
+            .await?;
+    assert_eq!(live_count, 1);
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 1,
+            hash: block_hash(CHAIN, 1),
+        }),
+        RunMode::Normal,
+        2,
+        2,
+    )
+    .await?;
+    let expired_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(NAME)
+            .fetch_one(incremental.pool())
+            .await?;
+    assert_eq!(expired_count, 0);
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(CHAIN, 2),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND block_number = 2
+               AND event_kind = 'RegistrationReleased'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    let incremental_row: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(NAME)
+    .fetch_optional(incremental.pool())
+    .await?;
+    let fresh_row: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(NAME)
+    .fetch_optional(fresh.pool())
+    .await?;
+    assert!(fresh_row.is_some());
+    assert_eq!(incremental_row, fresh_row);
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn redo_restores_summary_only_permission_retraction_like_fresh_rebuild() -> Result<()> {
     const CHAIN: &str = "project-summary-only-permission-redo";
     const RESOURCE: &str = "00000000-0000-0000-0000-0000000008c1";
     let incremental = ScratchDatabase::create("project_summary_only_permission_redo").await?;
     let fresh = ScratchDatabase::create("project_summary_only_permission_redo_fresh").await?;
     for pool in [incremental.pool(), fresh.pool()] {
-        seed_lineage(pool, CHAIN, 2).await?;
+        seed_lineage(pool, CHAIN, 3).await?;
         sqlx::query(
             "INSERT INTO resources (
                  resource_id, chain_id, block_hash, block_number, canonicality_state
@@ -15620,6 +15770,15 @@ async fn redo_restores_summary_only_permission_retraction_like_fresh_rebuild() -
             .fetch_one(incremental.pool())
             .await?;
     assert_eq!(retired_count, 0);
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let republished_target: i64 = sqlx::query_scalar(
+        "SELECT (chain_positions ->> 'target_block_number')::bigint
+         FROM permissions_current_resource_summary WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(republished_target, 3);
     for pool in [incremental.pool(), fresh.pool()] {
         sqlx::query(
             "DELETE FROM normalized_events
@@ -15634,8 +15793,8 @@ async fn redo_restores_summary_only_permission_retraction_like_fresh_rebuild() -
         incremental.pool(),
         CHAIN,
         Some(Marker {
-            number: 2,
-            hash: block_hash(CHAIN, 2),
+            number: 3,
+            hash: block_hash(CHAIN, 3),
         }),
         RunMode::Redo,
         2,
