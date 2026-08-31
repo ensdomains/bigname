@@ -7,7 +7,11 @@ pub(super) async fn include_changed_record_consumers(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    // ENSv1 resolver writes may carry only the node and resolver emitter. Match those facts to
+    // ENSv1 resolver writes may carry only the node and resolver emitter: the record events
+    // identify the name solely by its node hash, with the resolver as the emitting address.
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5-L10 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f)
+    // Match those facts to
     // the previously published inventory's exact name surface so a record-only live window
     // rebuilds the consuming name and resource without expanding every name on a shared resolver.
     sqlx::query(
