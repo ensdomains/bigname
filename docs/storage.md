@@ -826,7 +826,8 @@ change that resource's rebuildable inventory row even though the event remains
 resource-less. This does not restore a current binding: for ENSv1, name and record reads
 join inventory through `name_current.resource_id`, which remains null for an
 explicitly released row. An explicitly released ENSv2 name instead keeps a
-released tombstone whose `resource_id` still references the released resource;
+row for a [released v2 authority](glossary.md#released-v2-authority) whose
+`resource_id` still references the released resource;
 the tombstone's summary nulls resolver state, so inventory attributed to that
 resource stays out of current serving. A state-derived ENSv2 expiry release
 removes the `name_current` row entirely, leaving the retained inventory
@@ -987,8 +988,9 @@ clears only the rebuildable current summary when the served projection timestamp
 passes wrapper expiry. Permission reads join this current summary by
 `resource_id` rather than persisting a second copy in `permissions_current`.
 For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
-permission rows without removing its partial-coverage summary. A same-token registration rebound
-readmits retained grants; a new versioned resource receives grants only from its own permission events.
+permission rows without removing its partial-coverage summary. A later registration
+on the same token readmits retained grants; a new versioned resource receives grants
+only from its own permission events.
 
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
