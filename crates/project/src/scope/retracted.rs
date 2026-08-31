@@ -89,9 +89,12 @@ async fn seed_names(
             WHERE affected.chain_id = $1
               AND affected.block_number BETWEEN $2 AND $3
               AND affected.canonicality_state IN ('canonical', 'safe', 'finalized')
-        ), latest_registration AS (
-            SELECT DISTINCT ON (event.logical_name_id)
-                   event.logical_name_id, event.event_kind, event.after_state
+        ), registration_events AS (
+            SELECT event.*, COALESCE(event.resource_id::text, NULLIF(CONCAT(
+                       COALESCE(event.after_state ->> 'registry_contract_instance_id',
+                                event.raw_fact_ref ->> 'emitting_address',
+                                event.after_state ->> 'registry'),
+                       ':', event.after_state ->> 'token_id'), ':')) AS lifecycle_key
             FROM normalized_events event
             JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
@@ -107,22 +110,37 @@ async fn seed_names(
               )
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            ORDER BY event.logical_name_id, event.block_number DESC,
+        ), lifecycle_heads AS (
+            SELECT DISTINCT ON (event.logical_name_id, event.lifecycle_key)
+                   event.logical_name_id, event.lifecycle_key, event.event_kind,
+                   event.after_state
+            FROM registration_events event
+            WHERE event.lifecycle_key IS NOT NULL
+              AND event.after_state ->> 'status' IN ('registered', 'reserved', 'released')
+            ORDER BY event.logical_name_id, event.lifecycle_key, event.block_number DESC,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ), expiry_heads AS (
+            SELECT DISTINCT ON (event.logical_name_id, event.lifecycle_key)
+                   event.logical_name_id, event.lifecycle_key,
+                   (event.after_state ->> 'expiry')::numeric AS expiry
+            FROM registration_events event
+            WHERE event.lifecycle_key IS NOT NULL
+              AND jsonb_typeof(event.after_state -> 'expiry') = 'number'
+            ORDER BY event.logical_name_id, event.lifecycle_key, event.block_number DESC,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
         )
         INSERT INTO project_scope_names
-        SELECT registration.logical_name_id
-        FROM latest_registration registration
+        SELECT DISTINCT lifecycle.logical_name_id
+        FROM lifecycle_heads lifecycle
+        JOIN expiry_heads expiry USING (logical_name_id, lifecycle_key)
         CROSS JOIN affected_times affected
-        WHERE registration.event_kind <> 'RegistrationReleased'
-          AND registration.after_state ->> 'status' IN ('registered', 'reserved')
-          AND jsonb_typeof(registration.after_state -> 'expiry') = 'number'
-          AND (registration.after_state ->> 'expiry')::numeric
-              > affected.prior_seconds
-          AND (registration.after_state ->> 'expiry')::numeric
-              <= affected.target_seconds
+        WHERE lifecycle.after_state ->> 'status' IN ('registered', 'reserved')
+          AND expiry.expiry > affected.prior_seconds
+          AND expiry.expiry <= affected.target_seconds
         ON CONFLICT DO NOTHING
         "#,
     )

@@ -265,7 +265,7 @@ pub(super) async fn build(
               ON lineage.chain_id = event.chain_id
              AND lineage.block_number = event.block_number
              AND lineage.block_hash = event.block_hash
-            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
               AND event.event_kind = 'RegistrationGranted'
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
@@ -276,7 +276,7 @@ pub(super) async fn build(
             SELECT event.after_state ->> 'authority_kind' AS authority_kind,
                    event.after_state ->> 'authority_key' AS authority_key
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
               AND event.event_kind IN (
                   'RegistrationGranted', 'AuthorityEpochChanged'
               )
@@ -291,7 +291,7 @@ pub(super) async fn build(
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
               AND event.event_kind IN (
                   'RegistrationGranted', 'TokenControlTransferred'
               )
@@ -311,7 +311,7 @@ pub(super) async fn build(
                        ELSE NULL
                    END AS expiry_seconds
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
               )
@@ -426,7 +426,7 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT event.*
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id) AND event.after_state ? 'status'
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id)) AND event.after_state ? 'status'
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
@@ -443,7 +443,7 @@ pub(super) async fn build(
                        )
                    END) AS registry_owner
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
               AND event.event_kind IN (
                   'AuthorityTransferred', 'AuthorityEpochChanged'
               )
@@ -456,7 +456,7 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT event.event_kind AS latest_event_kind
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
               AND event.event_kind IN (
                   'TokenControlTransferred', 'AuthorityTransferred',
                   'AuthorityEpochChanged'
@@ -469,7 +469,7 @@ pub(super) async fn build(
         ) control ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.* FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
               AND event.event_kind IN (
                   'AuthorityTransferred', 'TokenControlTransferred',
                   'AuthorityEpochChanged'
@@ -486,7 +486,7 @@ pub(super) async fn build(
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind = 'ResolverChanged'
-              AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
+              AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
