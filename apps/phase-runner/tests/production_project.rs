@@ -12359,6 +12359,214 @@ async fn declared_v1_node_only_unrelated_record_preserves_inventory_clock() -> R
 }
 
 #[tokio::test]
+async fn declared_v1_node_only_update_rebuilds_retained_pointer_resource() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-retained-pointer-resource";
+    const REPLACEMENT_RESOURCE: &str = "00000000-0000-0000-0000-000000000d03";
+    const ALIAS_BINDING: &str = "00000000-0000-0000-0000-000000000d13";
+    const REPLACEMENT_BINDING: &str = "00000000-0000-0000-0000-000000000d14";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_retained_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_retained_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    let alice_node = format!("{:#x}", raw_namehash(&[b"alice", b"eth"]));
+    let alice_name = format!("ens:{alice_node}");
+    let alias_node = format!("{:#x}", raw_namehash(&[b"alias", b"eth"]));
+    let alias_name = format!("ens:{alias_node}");
+
+    for (pool, manifest_id) in [
+        (incremental.pool(), manifests.0),
+        (fresh.pool(), manifests.1),
+    ] {
+        insert_manifest_update_event(
+            pool,
+            CHAIN,
+            "ens_v1_resolver_l1",
+            manifest_id,
+            resolver_declaration_payload("ens", CHAIN, DECLARED_V1_SHARED_RESOLVER),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_set(after_state, '{value}', '\"old\"')
+             WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+               AND after_state ->> 'node' = $2",
+        )
+        .bind(CHAIN)
+        .bind(&alice_node)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, 'ens', 'alias.eth', ARRAY['alias', 'eth'],
+                 decode('00', 'hex'), $2, ARRAY[$3, $4], $5,
+                 'active', $6, $7, 1, 'canonical'
+             )",
+        )
+        .bind(&alias_name)
+        .bind(&alias_node)
+        .bind(format!("{:#x}", keccak256(b"alias")))
+        .bind(format!("{:#x}", keccak256(b"eth")))
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, $2, $3::uuid, 'declared_registry_path', 'ens_v2',
+                 to_timestamp(1), $4, $5, 1, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(ALIAS_BINDING)?)
+        .bind(&alias_name)
+        .bind(DECLARED_V1_ALICE_RESOURCE)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1::uuid, $2, $3, 4, 'canonical')",
+        )
+        .bind(REPLACEMENT_RESOURCE)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE surface_bindings SET active_to = to_timestamp(4)
+             WHERE logical_name_id = $1 AND resource_id = $2::uuid",
+        )
+        .bind(&alice_name)
+        .bind(DECLARED_V1_ALICE_RESOURCE)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, $2, $3::uuid, 'declared_registry_path', 'ens_v2',
+                 to_timestamp(4), $4, $5, 4, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(REPLACEMENT_BINDING)?)
+        .bind(&alice_name)
+        .bind(REPLACEMENT_RESOURCE)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    let rebound_resources: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT logical_name_id, resource_id
+         FROM name_current WHERE logical_name_id IN ($1, $2)
+         ORDER BY CASE WHEN logical_name_id = $1 THEN 0 ELSE 1 END",
+    )
+    .bind(&alice_name)
+    .bind(&alias_name)
+    .fetch_all(incremental.pool())
+    .await?;
+    assert_eq!(
+        rebound_resources,
+        vec![
+            (alice_name.clone(), Uuid::parse_str(REPLACEMENT_RESOURCE)?),
+            (
+                alias_name.clone(),
+                Uuid::parse_str(DECLARED_V1_ALICE_RESOURCE)?,
+            ),
+        ],
+        "the pointer name must rebind while another name retains the old resource",
+    );
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 5).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            5,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node": alice_node,
+                "resolver": DECLARED_V1_SHARED_RESOLVER,
+                "record_key": "text:url",
+                "record_family": "text",
+                "selector_key": "url",
+                "value_retained": true,
+                "value": "new"
+            }),
+            json!({"emitting_address": DECLARED_V1_SHARED_RESOLVER}),
+        )
+        .await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT entries -> 0 ->> 'value'
+             FROM record_inventory_current WHERE resource_id = $1::uuid",
+        )
+        .bind(DECLARED_V1_ALICE_RESOURCE)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(value.as_deref(), Some("new"));
+    }
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "retained pointer resource update diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() -> Result<()> {
     const CHAIN: &str = "project-declared-v1-foreign-pointer";
 

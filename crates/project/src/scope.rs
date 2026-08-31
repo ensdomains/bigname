@@ -36,6 +36,7 @@ pub(crate) async fn initialize(
 
     stage_changed_events(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_direct_scope(transaction, chain_id, window.from_block, window.to_block).await?;
+    inventory::include_changed_node_record_dependents(transaction, chain_id).await?;
     authority::include_changed_child_proofs(
         transaction,
         chain_id,
