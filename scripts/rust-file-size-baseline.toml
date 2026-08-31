@@ -67,7 +67,7 @@ justification = "Exact-name projection selects control authority and the indepen
 
 [[files]]
 path = "crates/project/src/scope.rs"
-loc = 676
+loc = 675
 justification = "Incremental scope closure keeps direct events, parent names, control resources, resources retained for resolver reads, resolvers, and permission subjects in one fixed-point operation so fresh and incremental publication cannot diverge; the file remains below the review threshold."
 
 [[files]]
