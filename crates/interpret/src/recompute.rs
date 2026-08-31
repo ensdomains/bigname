@@ -330,11 +330,7 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
         None
     } else {
         surface.deactivated_at.or_else(|| {
-            let log_index = surface
-                .provenance
-                .get(LOG_INDEX_KEY)
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
+            let log_index = surface_log_index(&surface.provenance);
             Some(bigname_adapters::schema_v2::seam::event_time(
                 surface.block_timestamp,
                 log_index,
@@ -347,6 +343,13 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
         deactivation_reason: (!active).then_some("normalization_gate"),
         deactivated_at,
     })
+}
+
+fn surface_log_index(provenance: &Value) -> i64 {
+    provenance
+        .get(LOG_INDEX_KEY)
+        .and_then(Value::as_i64)
+        .unwrap_or(-1)
 }
 
 fn raw_surface_labels(surface: &SurfaceRow) -> Result<Vec<Vec<u8>>> {
@@ -498,5 +501,36 @@ mod tests {
             Some("raw label is not byte-identical to its normalized form")
         );
         assert!(normalization_flag(&[0xff]).error.is_some());
+    }
+
+    #[test]
+    fn missing_surface_position_precedes_real_log_zero() {
+        let timestamp = OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let surface = SurfaceRow {
+            logical_name_id: "ens:test".to_owned(),
+            raw_labels: vec!["Alice".to_owned()],
+            dns_encoded_name: Vec::new(),
+            normalizer_version: "old".to_owned(),
+            visibility_state: "active".to_owned(),
+            normalization_errors: json!([]),
+            deactivation_reason: None,
+            deactivated_at: None,
+            block_number: 1,
+            block_timestamp: timestamp,
+            provenance: json!({}),
+            fallback_raw_labels_hex: None,
+        };
+        assert_eq!(surface_log_index(&surface.provenance), -1);
+        let desired = surface_normalization(&surface).unwrap();
+        assert_eq!(
+            desired.deactivated_at,
+            Some(bigname_adapters::schema_v2::seam::event_time(timestamp, -1))
+        );
+    }
+
+    #[test]
+    fn recompute_epoch_queries_include_both_block_boundaries() {
+        let source = include_str!("recompute.rs");
+        assert!(source.matches("BETWEEN $2 AND $3").count() >= 4);
     }
 }
