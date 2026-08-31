@@ -159,6 +159,7 @@ mandatory full Interpret and Project redos.
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
+| `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
@@ -170,6 +171,25 @@ mandatory full Interpret and Project redos.
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
+
+Interpret finalizes the discovery-watch admission snapshot in the same database
+transaction as the completed pass's discovery/address writes and any required
+Ingest stamp. It compares the complete normalized union of concrete
+address/topic intervals rather than a cursor-clipped view. An absent snapshot,
+an active manifest-authority fingerprint change, or a lineage-orphaning epoch
+change is a conservative empty baseline: existing discovery rows do not prove
+that earlier intake fetched their address-scoped logs. The snapshot records
+only that Interpret acknowledged the coverage demand; `chain_phase_state`
+remains the sole work and redo authority.
+
+Interpret redo may temporarily orphan and restage discovery rows without
+creating repeated intake work because the acknowledged snapshot survives that
+restaging. The row set is replaced only when a completed Interpret pass commits
+under the same active authority and lineage epoch. Dropping and recreating a
+chain, changing its active authority fingerprint, or advancing its lineage
+orphaning epoch starts a fresh comparison scope. Rollback leaves discovery
+writes, the snapshot, and the required Ingest stamp unchanged together. Neither
+Project nor API code reads the snapshot.
 
 Each `interpret_decode_skips` row records the chain, block and transaction
 identity, log index, emitter, selected [source family](glossary.md#source-family)
