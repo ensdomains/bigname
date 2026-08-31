@@ -4429,7 +4429,7 @@ async fn quiet_v2_expiry_reorg_matches_full_redo_on_the_winning_fork() -> Result
         .await?;
     }
     run_engine(scratch.pool(), chain, 1, 2, InterpretRunMode::Normal).await?;
-    assert_eq!(readable_v2_expiries(scratch.pool(), chain).await?.len(), 2);
+    assert_eq!(readable_v2_expiries(scratch.pool(), chain).await?.len(), 5);
 
     let mut reorg = scratch.pool().begin().await?;
     sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = $1 AND block_number = 2")
@@ -4457,7 +4457,7 @@ async fn quiet_v2_expiry_reorg_matches_full_redo_on_the_winning_fork() -> Result
             .iter()
             .map(|(_, block, _)| *block)
             .collect::<Vec<_>>(),
-        [3, 3]
+        [3, 3, 3, 3, 3]
     );
     run_engine(scratch.pool(), chain, 1, 3, InterpretRunMode::Redo).await?;
     assert_eq!(

@@ -10,6 +10,8 @@ const THIRD: &str = "0x0000000000000000000000000000000000000044";
 const NEST_ROOT: &str = "0x0000000000000000000000000000000000000050";
 const NEST: &str = "0x0000000000000000000000000000000000000051";
 const NAMESPACE: &str = "ens";
+#[path = "state_v2_expiry_tests.rs"]
+mod expiry_tests;
 #[path = "state_v2_pointer_tests.rs"]
 mod pointer_tests;
 #[test]
@@ -322,6 +324,7 @@ fn retained_token_events(expiry: u64) -> Vec<PriorEventInput> {
         ),
     ]
 }
+
 #[test]
 fn production_shaped_v2_refresh_visits_only_the_dirty_token() {
     const TOKENS: usize = 4_096;

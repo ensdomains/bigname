@@ -344,7 +344,8 @@ fn settle_block_boundary(
             identity::materialize_v2_boundary(&source, block, interpreted, state, output)?;
             continue;
         }
-        let mut interpreted = protocol::v2_boundary_expiration(transition)?;
+        let mut interpreted =
+            protocol::v2_boundary_expiration(transition, block.block_timestamp.unix_timestamp())?;
         if !interpreted.labels.is_empty()
             || !interpreted.names.is_empty()
             || !interpreted.resources.is_empty()

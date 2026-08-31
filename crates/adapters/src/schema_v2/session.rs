@@ -460,6 +460,19 @@ fn interpret_raw(
     };
     *state = candidate_state;
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
+    super::normalized::materialize_boundary(
+        &selected.source,
+        &super::model::RawBlockInput {
+            chain_id: raw.chain_id.clone(),
+            block_hash: raw.block_hash.clone(),
+            block_number: raw.block_number,
+            block_timestamp: raw.block_timestamp,
+            canonicality_state: raw.canonicality_state.clone(),
+        },
+        interpreted.boundary_events.clone(),
+        state,
+        output,
+    );
     super::identity::materialize(&selected, raw, &interpreted, state, output)?;
     super::discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;
     if let Some(migration_source) = registrar_migration_source {

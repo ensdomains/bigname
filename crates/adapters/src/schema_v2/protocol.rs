@@ -43,6 +43,7 @@ pub(super) fn event_allows_empty_emitter_roles(
 #[derive(Clone, Debug)]
 pub(super) struct Interpreted {
     pub events: Vec<EventDraft>,
+    pub boundary_events: Vec<EventDraft>,
     pub labels: Vec<LabelDraft>,
     pub names: Vec<NameDraft>,
     pub shadow_names: Vec<ShadowNameDraft>,
@@ -60,6 +61,7 @@ impl Interpreted {
     pub(super) fn new() -> Self {
         Self {
             events: Vec::new(),
+            boundary_events: Vec::new(),
             labels: Vec::new(),
             names: Vec::new(),
             shadow_names: Vec::new(),
@@ -74,6 +76,7 @@ impl Interpreted {
 
     pub(super) fn append(&mut self, other: &mut Self) {
         self.events.append(&mut other.events);
+        self.boundary_events.append(&mut other.boundary_events);
         self.labels.append(&mut other.labels);
         self.names.append(&mut other.names);
         self.shadow_names.append(&mut other.shadow_names);
@@ -101,8 +104,9 @@ pub(super) struct MigrationObservation {
 
 pub(super) fn v2_boundary_expiration(
     transition: super::state::V2NameTransition,
+    released_at: i64,
 ) -> anyhow::Result<Interpreted> {
-    v2_registry::boundary_expiration(transition)
+    v2_registry::boundary_expiration(transition, released_at)
 }
 
 #[derive(Clone, Debug)]

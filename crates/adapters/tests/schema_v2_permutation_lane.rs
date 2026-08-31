@@ -3291,10 +3291,10 @@ fn child_node_from_topics(path: &[String]) -> Option<String> {
 
 /// An event that clears a subregistry the name was carrying — a different interpretation path from
 /// the one an attaching `SubregistryUpdated` takes. Every one the corpus reaches comes from the
-/// terminal boundary the interpreter derives on `LabelUnregistered`; the interpreter derives the
-/// same boundary for a registration that replaces a live token, which these pools never produce
-/// because each label is registered once. A `SubregistryUpdated` naming the zero address would also
-/// clear a subregistry and would count here; the pools never emit one. The match is on payload
+/// terminal boundary the interpreter derives on `LabelUnregistered` or registry-path expiry; the
+/// interpreter derives the same boundary for a registration that replaces a live token, which
+/// these pools never produce because each label is registered once. A `SubregistryUpdated` naming
+/// the zero address would also clear a subregistry and would count here; the pools never emit one. The match is on payload
 /// shape, so it is ENSv2-only in practice: ENSv1 derives the same event kind from `NewOwner` but
 /// carries an owner rather than a subregistry, and would start counting if that payload ever gained
 /// one.
@@ -3420,7 +3420,7 @@ const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded d
 const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] = &[
     (ENS_V1_MAINNET.label, 0),
     (ENS_V1_SEPOLIA.label, 0),
-    (ENS_V2_SEPOLIA.label, 33),
+    (ENS_V2_SEPOLIA.label, 51),
 ];
 
 /// Per-world corpus volume floors — minimum raw-log and normalized-event totals the default
