@@ -15,6 +15,31 @@ mod expiry_tests;
 #[path = "state_v2_pointer_tests.rs"]
 mod pointer_tests;
 #[test]
+fn v2_named_expiry_retains_registration_state() {
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, "0x01", b"alpha", 10);
+    state.link_v2_resource(
+        ROOT,
+        "0x01",
+        "resource".to_owned(),
+        Uuid::from_u128(9),
+        None,
+    );
+    state.refresh_dirty_v2_names(9);
+    let retired = state
+        .refresh_dirty_v2_names(10)
+        .into_iter()
+        .next()
+        .expect("named registration retires");
+    assert!(retired.previous.is_some());
+    assert!(retired.registration.is_some());
+    let retained = state
+        .v2_token(ROOT, "0x01")
+        .expect("expired token remains retained");
+    assert!(retained.name.is_none());
+    assert!(retained.registration.is_some());
+}
+#[test]
 fn v2_dirty_refresh_deduplicates_one_token_and_isolates_irrelevant_tokens() {
     let mut state = anchored_state();
     install_token(&mut state, ROOT, "0x01", b"alpha", 100);

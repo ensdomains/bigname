@@ -21,6 +21,7 @@ const VERSION_RESOURCE: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 const VERSION_LINEAGE: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 const DETACHED_RESOURCE: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
 const TOKEN: &str = "0x0000000000000000000000000000000000000000000000000000000000000065";
+const DETACHED_TOKEN: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee00000000";
 const VERSION_TOKEN: &str = "0x0000000100000000000000000000000000000000000000000000000000000065";
 const STALE_TOKEN: &str = "0x0000000000000000000000000000000000000000000000000000000100000000";
 const REGISTRY: &str = "0x00000000000000000000000000000000000020aa";
@@ -193,17 +194,17 @@ async fn seed(pool: &PgPool) -> Result<()> {
     add!(MIXED, Some(RESOURCE), 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64}));
     event(pool, MIXED, None, 100, Some(7), "AuthorityTransferred", json!({"source_event":"NewOwner","owner":OWNER})).await?;
     add!(STALE, Some(STALE_RESOURCE), 100, Some(8), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); exact_events(pool, exact, 100, &["RegistrationReleased"]).await?;
-    add!(STALE, Some(STALE_RESOURCE), 100, Some(9), "PermissionChanged", permission.clone()); add!(DETACHED, Some(DETACHED_RESOURCE), 100, Some(10), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000)); add!(DETACHED, Some(DETACHED_RESOURCE), 100, Some(11), "PermissionChanged", permission);
+    add!(STALE, Some(STALE_RESOURCE), 100, Some(9), "PermissionChanged", permission.clone()); add!(DETACHED, Some(DETACHED_RESOURCE), 100, Some(10), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64,"token_id":DETACHED_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(DETACHED, Some(DETACHED_RESOURCE), 100, Some(11), "PermissionChanged", permission);
     exact_events(pool, exact, 101, &["SurfaceUnbound", "RegistrationReleased", "ResolverChanged", "SubregistryChanged"]).await?;
     add!(MAIN, Some(RESOURCE), 101, Some(9), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
     add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(9), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000)); add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(10), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"})); add!(MAIN, Some(RESOURCE), 101, Some(11), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"registered","expiry":1_900_000_000_i64,"token_id":TOKEN,"revived_from_expiry":true}));
     add!(RESERVATION, None, 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
-    add!(MIXED, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000)); add!(DETACHED, Some(DETACHED_RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
+    add!(MIXED, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000)); add!(DETACHED, Some(DETACHED_RESOURCE), 101, None, "RegistrationReleased", expired(DETACHED_TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 102, Some(1), "ExpiryChanged", json!({"source_event":"ExpiryUpdated","expiry":1_900_000_000_i64,"token_id":TOKEN}));
     exact_events(pool, exact, 102, &["RegistrationGranted"]).await?;
-    add!(STALE, Some(STALE_RESOURCE), 102, Some(2), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":STALE_TOKEN,"revived_from_expiry":true,"reservation_resource":true})); add!(DETACHED, Some(DETACHED_RESOURCE), 102, Some(3), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","expiry":1_900_000_000_i64,"token_id":TOKEN,"revived_from_expiry":true}));
+    add!(STALE, Some(STALE_RESOURCE), 102, Some(2), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":STALE_TOKEN,"revived_from_expiry":true,"reservation_resource":true})); add!(DETACHED, Some(DETACHED_RESOURCE), 102, Some(3), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":DETACHED_TOKEN,"revived_from_expiry":true,"reservation_resource":true}));
     add!(RESERVATION, None, 102, Some(2), "RegistrationReserved", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
-    add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(DETACHED, Some(DETACHED_RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
+    add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(DETACHED, Some(DETACHED_RESOURCE), 103, None, "RegistrationReleased", expired(DETACHED_TOKEN, 1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
     add!(MAIN, Some(VERSION_RESOURCE), 104, Some(0), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
     sqlx::query("UPDATE normalized_events SET logical_name_id = NULL WHERE resource_id = $1::uuid AND event_kind IN ('RegistrationReleased', 'RegistrationRenewed')").bind(DETACHED_RESOURCE).execute(pool).await?;
     Ok(())
@@ -243,6 +244,110 @@ async fn fresh(prefix: &str, target: i64) -> Result<(TestDatabase, PgPool)> {
     seed(&pool).await?;
     run(&pool, target, None).await?;
     Ok((database, pool))
+}
+
+#[rustfmt::skip]
+async fn seed_formerly_named_flag_only_renewal(pool: &PgPool) -> Result<()> {
+    for (block, timestamp) in [(100, 1_700_000_100_i64), (101, 1_800_000_000), (102, 1_800_000_001)] {
+        sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) VALUES ($1, $2, $3, to_timestamp($4), 'canonical')").bind(CHAIN).bind(hash(block)).bind(block).bind(timestamp).execute(pool).await?;
+    }
+    raw_sql(&format!(
+        "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('{LINEAGE}', '{CHAIN}', '{}', 100, 'canonical');
+         INSERT INTO resources (resource_id, token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('{RESOURCE}', '{LINEAGE}', '{CHAIN}', '{}', 100, 'canonical');
+         INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+             labelhashes, normalizer_version, visibility_state, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('{MAIN}', 'ens', 'alice.eth', ARRAY['alice','eth'], '\\x05616c6963650365746800',
+             '{}', ARRAY['0x{:064x}','0x{:064x}'], 'ensip15', 'active', '{CHAIN}', '{}', 100, 'canonical');
+         INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm,
+             active_from, active_to, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('6347b94d-744e-5e3c-a8a9-38cefbcf0e25', '{MAIN}', '{RESOURCE}', 'declared_registry_path', 'ens_v2',
+             to_timestamp(1700000100), to_timestamp(1800000000), '{CHAIN}', '{}', 100, 'canonical')",
+        hash(100), hash(100), MAIN.trim_start_matches("ens:"), 1_u64, 2_u64, hash(100), hash(100),
+    )).execute(pool).await?;
+    let granted = json!({"source_event":"TokenResource","status":"registered","authority_kind":"ens_v2_registry","registrant":OWNER,"expiry":1_800_000_000_i64,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"});
+    let permission = json!({"subject":SUBJECT,"scope":{"kind":"registry","chain_id":CHAIN,"registry_address":REGISTRY},"effective_powers":["resource_control"],"grant_source":{"kind":"raw_log","source_event":"EACRolesChanged","changed_powers":["resource_control"],"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"},"revocation_source":null,"inheritance_path":[],"transfer_behavior":{},"source_event":"EACRolesChanged","upstream_resource":format!("0x{:064x}", 5001_u64),"role_bitmap":format!("0x{:064x}", 1_u64),"old_role_bitmap":format!("0x{:064x}", 0_u64),"root_resource":false,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"});
+    event(pool, MAIN, Some(RESOURCE), 100, Some(1), "RegistrationGranted", granted).await?;
+    event(pool, MAIN, Some(RESOURCE), 100, Some(2), "PermissionChanged", permission).await?;
+    event(pool, MAIN, Some(RESOURCE), 101, None, "SurfaceUnbound", json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","registry":REGISTRY,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001","expiry":1_800_000_000_i64,"previous_namehash":MAIN.trim_start_matches("ens:"),"current_namehash":null,"topology_rebind":true})).await?;
+    event(pool, MAIN, Some(RESOURCE), 101, Some(1), "RegistrationReleased", expired(TOKEN, 1_800_000_000)).await?;
+    event(pool, MAIN, Some(RESOURCE), 102, Some(1), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"registered","expiry":1_900_000_000_i64,"token_id":TOKEN,"revived_from_expiry":true,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})).await?;
+    Ok(())
+}
+
+async fn omit_silent_renewal_status(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = after_state - 'status'
+         WHERE resource_id = $1::uuid AND event_kind = 'RegistrationRenewed'",
+    )
+    .bind(RESOURCE)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn make_registered_lifecycle_bindingless(pool: &PgPool) -> Result<()> {
+    omit_silent_renewal_status(pool).await?;
+    sqlx::query("DELETE FROM normalized_events WHERE resource_id = $1::uuid AND event_kind = 'SurfaceUnbound'")
+        .bind(RESOURCE)
+        .execute(pool)
+        .await?;
+    sqlx::query("UPDATE normalized_events SET logical_name_id = NULL WHERE resource_id = $1::uuid")
+        .bind(RESOURCE)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE resource_id = $1::uuid")
+        .bind(RESOURCE)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM name_surfaces WHERE logical_name_id = $1")
+        .bind(MAIN)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn current_name_and_permission_counts(pool: &PgPool) -> Result<(i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
+                (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid)",
+    )
+    .bind(MAIN)
+    .bind(RESOURCE)
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn formerly_named_flag_only_renewal_does_not_resurrect_name_or_permissions() -> Result<()> {
+    let (incremental_db, incremental) = database("v2_expiry_flag_only_incremental").await?; seed_formerly_named_flag_only_renewal(&incremental).await?;
+    let live = run(&incremental, 100, None).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (1, 1));
+    let retired = run(&incremental, 101, Some(live)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 0));
+    run(&incremental, 102, Some(retired)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 0));
+    let (fresh_db, fresh) = database("v2_expiry_flag_only_fresh").await?; seed_formerly_named_flag_only_renewal(&fresh).await?; run(&fresh, 102, None).await?;
+    assert_eq!(current_name_and_permission_counts(&fresh).await?, (0, 0)); assert_eq!(snapshot(&incremental).await?, snapshot(&fresh).await?);
+    let (emitted_db, emitted) = database("v2_expiry_flag_only_emitted_incremental").await?; seed_formerly_named_flag_only_renewal(&emitted).await?; omit_silent_renewal_status(&emitted).await?;
+    let emitted_live = run(&emitted, 100, None).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (1, 1));
+    let emitted_retired = run(&emitted, 101, Some(emitted_live)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (0, 0));
+    run(&emitted, 102, Some(emitted_retired)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (0, 0));
+    let (emitted_fresh_db, emitted_fresh) = database("v2_expiry_flag_only_emitted_fresh").await?; seed_formerly_named_flag_only_renewal(&emitted_fresh).await?; omit_silent_renewal_status(&emitted_fresh).await?; run(&emitted_fresh, 102, None).await?;
+    assert_eq!(current_name_and_permission_counts(&emitted_fresh).await?, (0, 0)); assert_eq!(snapshot(&emitted).await?, snapshot(&emitted_fresh).await?);
+    emitted_fresh_db.cleanup().await?; emitted_db.cleanup().await?; fresh_db.cleanup().await?; incremental_db.cleanup().await?; Ok(())
+}
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn bindingless_registered_renewal_restores_retained_permissions() -> Result<()> {
+    let (incremental_db, incremental) = database("v2_expiry_bindingless_incremental").await?; seed_formerly_named_flag_only_renewal(&incremental).await?; make_registered_lifecycle_bindingless(&incremental).await?;
+    let live = run(&incremental, 100, None).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 1));
+    let retired = run(&incremental, 101, Some(live)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 0));
+    run(&incremental, 102, Some(retired)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 1));
+    let (fresh_db, fresh) = database("v2_expiry_bindingless_fresh").await?; seed_formerly_named_flag_only_renewal(&fresh).await?; make_registered_lifecycle_bindingless(&fresh).await?; run(&fresh, 102, None).await?;
+    assert_eq!(current_name_and_permission_counts(&fresh).await?, (0, 1)); assert_eq!(snapshot(&incremental).await?, snapshot(&fresh).await?);
+    fresh_db.cleanup().await?; incremental_db.cleanup().await?; Ok(())
 }
 
 #[tokio::test]
