@@ -101,11 +101,25 @@ async fn seed_duplicate_declarations(pool: &PgPool) -> TestResult {
                 "start_block": 10
             },
             {
-                "role": "latest_resolver",
+                "role": "first_at_target",
                 "address": RESOLVER,
                 "proxy_kind": "none",
                 "read_features": ["ensip19_default_address"],
                 "start_block": 20
+            },
+            {
+                "role": "latest_at_target",
+                "address": RESOLVER,
+                "proxy_kind": "none",
+                "read_features": ["ensip19_default_address"],
+                "start_block": 20
+            },
+            {
+                "role": "future_resolver",
+                "address": RESOLVER,
+                "proxy_kind": "none",
+                "read_features": ["ensip19_default_address"],
+                "start_block": 30
             }
         ]
     });
@@ -200,7 +214,7 @@ async fn duplicate_declarations_project_latest_role_and_features_together() -> T
     .bind(RESOLVER)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(classification["role"], json!("latest_resolver"));
+    assert_eq!(classification["role"], json!("latest_at_target"));
     assert_eq!(
         classification["read_features"],
         json!(["ensip19_default_address"])
