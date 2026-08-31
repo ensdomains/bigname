@@ -17,6 +17,7 @@ pub(super) async fn build(
             SELECT DISTINCT ON (event.resource_id)
                    event.resource_id,
                    event.logical_name_id,
+                   event.namespace AS pointer_namespace,
                    event.source_family AS pointer_source_family,
                    lower(surface.namehash) AS namehash,
                    lower(event.after_state ->> 'resolver') AS resolver_address,
@@ -73,6 +74,36 @@ pub(super) async fn build(
                   'ens_v1_registry_l1',
                   'ens_v1_registrar_l1',
                   'ens_v1_wrapper_l1'
+              )
+            UNION ALL
+            -- The guarded ENSv2-origin exception uses the exact declaration already selected by
+            -- resolver classification and applies only to pointers in that declaration's namespace.
+            SELECT pointer.resource_id AS attributed_resource_id, event.*
+            FROM pointers pointer
+            JOIN project_stage_resolver_current resolver
+              ON resolver.chain_id = $1
+             AND resolver.resolver_address = pointer.resolver_address
+             AND resolver.support_status = 'supported'
+             AND resolver.declared_summary #>> '{classification,source_family}' =
+                 'ens_v1_resolver_l1'
+             AND resolver.declared_summary #>> '{classification,basis}' =
+                 'manifest_declared_address'
+            JOIN project_manifests declaration_manifest
+              ON declaration_manifest.manifest_id =
+                 (resolver.provenance ->> 'manifest_id')::bigint
+             AND declaration_manifest.namespace = pointer.pointer_namespace
+            JOIN project_events event
+              ON event.chain_id = $1
+             AND event.logical_name_id IS NULL
+             AND event.source_family = 'ens_v1_resolver_l1'
+             AND lower(event.after_state ->> 'node') = pointer.namehash
+             AND lower(COALESCE(
+                    NULLIF(event.after_state ->> 'resolver', ''),
+                    NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
+                 )) = pointer.resolver_address
+            WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+              AND pointer.pointer_source_family IN (
+                  'ens_v2_registry_l1', 'ens_v2_root_l1'
               )
         ),
         ranked_versions AS (
