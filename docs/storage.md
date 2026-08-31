@@ -823,11 +823,14 @@ only when the selected pointer's source family is `ens_v1_registry_l1`,
 same pointer-family restriction. When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
-resource-less. This does not restore a current binding: name and record reads
+resource-less. This does not restore a current binding: for ENSv1, name and record reads
 join inventory through `name_current.resource_id`, which remains null for an
-explicitly released row. A state-derived ENSv2 expiry release removes the
-`name_current` row entirely, leaving the retained inventory reachable only
-through history. ENSv2 stores resolver records by node and version.
+explicitly released row. An explicitly released ENSv2 name instead keeps a
+released tombstone whose `resource_id` still references the released resource;
+the tombstone's summary nulls resolver state, so inventory attributed to that
+resource stays out of current serving. A state-derived ENSv2 expiry release
+removes the `name_current` row entirely, leaving the retained inventory
+reachable only through history. ENSv2 stores resolver records by node and version.
 `setName` passes
 part zero, selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no
