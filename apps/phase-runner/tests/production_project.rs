@@ -15390,7 +15390,27 @@ async fn surviving_reservation_drives_summary_after_other_resource_expires() -> 
         Some(REGISTERED_RESOURCE),
         "RegistrationGranted",
         "ens_v2_registry_l1",
-        json!({"status":"registered","expiry":3,"token_id":"0x01","registry":"0xregistry"}),
+        json!({
+            "status":"registered",
+            "expiry":3,
+            "token_id":"0x01",
+            "registry":"0xregistry",
+            "registrant":OWNER,
+            "authority_kind":"ens_v2_registry",
+            "authority_key":"expired-registration"
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        1,
+        Some(logical_name_id),
+        Some(REGISTERED_RESOURCE),
+        "ResolverChanged",
+        "ens_v2_registry_l1",
+        json!({"resolver":RESOLVER}),
         json!({}),
     )
     .await?;
@@ -15464,6 +15484,26 @@ async fn surviving_reservation_drives_summary_after_other_resource_expires() -> 
     assert_eq!(
         incremental["declared_summary"]["control"]["status"],
         "reserved"
+    );
+    assert_eq!(
+        incremental["declared_summary"]["registration"]["registrant"],
+        Value::Null
+    );
+    assert_eq!(
+        incremental["declared_summary"]["registration"]["registered_at"],
+        Value::Null
+    );
+    assert_eq!(
+        incremental["declared_summary"]["registration"]["authority_kind"],
+        Value::Null
+    );
+    assert_eq!(
+        incremental["declared_summary"]["control"]["registrant"],
+        Value::Null
+    );
+    assert_eq!(
+        incremental["declared_summary"]["resolver"]["address"],
+        Value::Null
     );
 
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 3).await?;
@@ -15624,6 +15664,18 @@ async fn expiry_release_redo_restores_ownerless_reservation_like_fresh_rebuild()
                 "reservation_resource":true
             }),
             json!({"fixture":"ownerless-expiry-reservation"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(NAME),
+            Some(RESOURCE),
+            "ExpiryChanged",
+            "ens_v2_registry_l1",
+            json!({"source_event":"ExpiryUpdated","expiry":2,"token_id":"0x8d"}),
+            json!({"fixture":"ownerless-expiry-renewal"}),
         )
         .await?;
         insert_event(
