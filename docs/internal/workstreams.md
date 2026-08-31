@@ -6,8 +6,12 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 
 - Schema-v2 interpret writes identity rows, discovery edges, normalized events,
   and append-only diagnostics for malformed event logs from undeclared
-  emitters; adapters provide interpretation behavior and do not write database
-  rows or projections.
+  emitters. At a completed pass boundary, it also atomically replaces the
+  discovery-watch admission snapshot and may install required Ingest work
+  through the shared phase-state installer. That snapshot is coordination
+  state, not a work queue; `chain_phase_state` remains the sole work/redo
+  authority. Adapters provide interpretation behavior and do not write
+  database rows or projections.
 - Schema-v2 Project owns projection tables and rebuild behavior. Publication may
   retire stale direct-resolution observations through the guarded projection
   lifecycle trigger; it does not write a live/indexed comparison.
