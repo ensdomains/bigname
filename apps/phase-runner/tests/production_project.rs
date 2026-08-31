@@ -266,6 +266,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                 },
                 "manifest_version": 1,
                 "provenance": {
+                    "authority_event_id": 6,
                     "chain_id": "project-fixture",
                     "coverage": {
                         "exhaustiveness": "not_asserted",
@@ -789,6 +790,7 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                 },
                 "manifest_version": 3,
                 "provenance": {
+                    "authority_event_id": 13,
                     "chain_id": "project-fixture",
                     "coverage": {
                         "exhaustiveness": "not_asserted",
