@@ -13,6 +13,15 @@ const BASENAMES_PARENT: &str =
     "basenames:0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const BASENAMES_CHILD: &str =
     "basenames:0xddd1dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const OTHER_CHAIN: &str = "issue-435-other";
+const OTHER_PARENT_A: &str =
+    "ens:0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const OTHER_CHILD_A: &str =
+    "ens:0xccc1cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const OTHER_PARENT_B: &str =
+    "ens:0x9999999999999999999999999999999999999999999999999999999999999999";
+const OTHER_CHILD_B: &str =
+    "ens:0x9991999999999999999999999999999999999999999999999999999999999999";
 const REVEALED_NAME: &str =
     "ens:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const LABEL: &str = "0x3177317affd6342ed2401ccea23053d41b86d0914b5b1bee0faa1efcb7221a61";
@@ -700,6 +709,82 @@ async fn hash_only_event_does_not_propagate_a_foreign_preimage() -> Result<()> {
         ],
         "a local hash-only event may rebuild its own child but must not propagate another chain's label to its cousin"
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn label_observation_does_not_restage_another_chains_children() -> Result<()> {
+    let (database, pool) = database("issue_435_cross_chain_preimage").await?;
+    seed(&pool).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES ($1, $2, 8, to_timestamp(8), 'canonical')",
+    )
+    .bind(OTHER_CHAIN)
+    .bind(hash(8))
+    .execute(&pool)
+    .await?;
+    for (id, name) in [
+        (OTHER_PARENT_A, "other-a.eth"),
+        (OTHER_CHILD_A, "www.other-a.eth"),
+        (OTHER_PARENT_B, "other-b.eth"),
+        (OTHER_CHILD_B, "www.other-b.eth"),
+    ] {
+        insert_surface_for_chain(&pool, OTHER_CHAIN, id, name).await?;
+    }
+    insert_edge_for_chain(
+        &pool,
+        OTHER_CHAIN,
+        "other-edge-a-8",
+        8,
+        OTHER_PARENT_A,
+        OTHER_CHILD_A,
+    )
+    .await?;
+    insert_edge_for_chain(
+        &pool,
+        OTHER_CHAIN,
+        "other-edge-b-8",
+        8,
+        OTHER_PARENT_B,
+        OTHER_CHILD_B,
+    )
+    .await?;
+
+    run(&pool, 8, None).await?;
+    run_chain(&pool, OTHER_CHAIN, 8, None).await?;
+    insert_observed_preimage(&pool, 9).await?;
+    insert_label_event(&pool, "cross-chain-label-9", "PreimageObserved", None).await?;
+    run(&pool, 9, Some(8)).await?;
+
+    let observing_labels: Vec<(Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
+        "SELECT raw_label, decoded_label FROM children_current
+         WHERE provenance ->> 'chain_id' = $1 AND lower(labelhash) = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(LABEL)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(observing_labels.len(), 2);
+    assert!(
+        observing_labels
+            .iter()
+            .all(|(raw, decoded)| raw.as_deref() == Some(b"www")
+                && decoded.as_deref() == Some("www"))
+    );
+
+    let other_labels: Vec<(Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
+        "SELECT raw_label, decoded_label FROM children_current
+         WHERE provenance ->> 'chain_id' = $1 AND lower(labelhash) = lower($2)",
+    )
+    .bind(OTHER_CHAIN)
+    .bind(LABEL)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(other_labels, vec![(None, None), (None, None)]);
 
     database.cleanup().await?;
     Ok(())

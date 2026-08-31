@@ -32,6 +32,8 @@ pub(super) async fn include_changed_children(
     // Child publication joins that winner without a namespace, so one observation restages
     // matching ENS and Basenames children within this Project chain. Cross-chain propagation has
     // separate lifecycle and readiness requirements.
+    // children_current_labelhash_idx is namespace-leading, so the SQL keeps one indexable branch
+    // per admitted namespace; extend this UNION when another namespace is admitted.
     sqlx::query(
         "WITH changed_labels AS MATERIALIZED (
              SELECT

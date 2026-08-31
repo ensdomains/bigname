@@ -250,8 +250,9 @@ is the child builder's labelhash join. Within one projection chain, a newly
 observed mapping restages matching children in every namespace only when their
 published label bytes would change; repeated observations of the same mapping
 do not rebuild already-correct children. Label restaging is per projection
-chain; cross-chain preimage propagation is tracked separately. Proof-checked
-rainbow imports retain their separate explicit Project-redo path.
+chain; cross-chain preimage propagation is tracked separately in issue
+[#672](https://github.com/ensdomains/bigname/issues/672). Proof-checked rainbow
+imports retain their separate explicit Project-redo path.
 
 ## History
 
