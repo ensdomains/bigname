@@ -176,8 +176,7 @@ pub(crate) async fn begin(
     let preserve_started_at = resume_same_epoch || same_active_audit;
     let attempt_generation = sqlx::query_scalar::<_, i64>(
         "
-        UPDATE chain_phase_state
-        SET phase_status = 'running',
+        UPDATE chain_phase_state SET phase_status = 'running',
             redo_in_progress = true,
             redo_attempt_generation = redo_attempt_generation + 1,
             redo_mode = $3,

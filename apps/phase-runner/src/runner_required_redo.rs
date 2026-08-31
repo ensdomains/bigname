@@ -274,8 +274,29 @@ impl PhaseRunner {
             return Ok(());
         };
         for _iteration in 1..=iteration_limit {
+            if cancellation.is_cancelled() {
+                return Ok(());
+            }
             self.catch_up_for_required_redo(chain, cancellation.clone())
                 .await?;
+            if cancellation.is_cancelled() {
+                return Ok(());
+            }
+            let Some(discovery_owned) = self
+                .discovery_required_ingest_pending(&chain.chain_id, &cancellation)
+                .await?
+            else {
+                return Ok(());
+            };
+            if discovery_owned {
+                self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
+                    .await?;
+                if cancellation.is_cancelled() {
+                    return Ok(());
+                }
+                continue;
+            }
+            self.reject_pending_required_ingest(&chain.chain_id).await?;
             self.run_spine_phase(chain, PhaseName::Interpret, cancellation.clone())
                 .await?;
             if cancellation.is_cancelled() {
@@ -290,6 +311,9 @@ impl PhaseRunner {
             if discovery_owned {
                 self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
                     .await?;
+                if cancellation.is_cancelled() {
+                    return Ok(());
+                }
                 continue;
             }
             self.reject_pending_required_ingest(&chain.chain_id).await?;

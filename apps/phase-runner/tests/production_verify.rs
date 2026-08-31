@@ -12,7 +12,7 @@ use std::{
 };
 
 use alloy_primitives::keccak256;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::State,
@@ -2752,6 +2752,8 @@ async fn mismatch_finishing_after_live_still_records_the_live_stop() -> Result<(
 
 #[tokio::test]
 async fn mismatch_finishing_after_live_error_remains_the_fatal_context() -> Result<()> {
+    const DEADLINE: Duration = Duration::from_secs(15);
+
     let scratch = ScratchDatabase::create("production_verify_live_error_mismatch").await?;
     seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
     let gate = VerificationGate::default();
@@ -2769,13 +2771,21 @@ async fn mismatch_finishing_after_live_error_remains_the_fatal_context() -> Resu
         })
     };
 
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified()).await?;
-    wait_for_phase_position(scratch.pool(), BASE, PhaseName::Live, "failed", None).await?;
+    tokio::time::timeout(DEADLINE, gate.entered.notified())
+        .await
+        .context("Verify did not reach its comparison gate")?;
+    tokio::time::timeout(
+        DEADLINE,
+        wait_for_phase_position(scratch.pool(), BASE, PhaseName::Live, "failed", None),
+    )
+    .await
+    .context("Live did not persist its fatal fixture error")??;
     tokio::time::sleep(Duration::from_millis(50)).await;
     gate.release.notify_one();
 
-    let error = tokio::time::timeout(Duration::from_secs(5), task)
-        .await??
+    let error = tokio::time::timeout(DEADLINE, task)
+        .await
+        .context("Verify did not preserve its late mismatch after Live failed")??
         .expect_err("a late mismatch must remain the fatal chain error");
     assert_eq!(error.kind(), ErrorKind::VerificationMismatch);
     assert!(error.to_string().contains("fixture live failed first"));

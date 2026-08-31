@@ -349,6 +349,10 @@ impl PhaseRunner {
     ) -> RunnerResult<()> {
         self.redo_phase_only(chain, phase, range, cancellation.clone())
             .await?;
+        if phase == PhaseName::Interpret {
+            self.repair_discovery_after_operator_interpret(chain, cancellation.clone())
+                .await?;
+        }
         if phase == PhaseName::Interpret
             && self.store.status(&chain.chain_id, phase).await?
                 == crate::state::PhaseStatus::Completed
@@ -483,11 +487,17 @@ impl PhaseRunner {
             cancellation.clone(),
         )
         .await?;
+        self.repair_discovery_after_operator_interpret(chain, cancellation.clone())
+            .await?;
         let project_stamp = self
             .store
             .required_redo_range(&chain.chain_id, PhaseName::Project)
             .await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, project_stamp, Some(range), None)
+        let verify_stamp = self
+            .store
+            .required_redo_range(&chain.chain_id, PhaseName::Verify)
+            .await?;
+        self.require_no_pending_redo_for_all(&chain.chain_id, project_stamp, verify_stamp, None)
             .await?;
         let project_range = project_stamp.unwrap_or(range);
         self.run_all_redo_phase(
@@ -498,12 +508,38 @@ impl PhaseRunner {
             cancellation.clone(),
         )
         .await?;
-        self.require_no_pending_redo_for_all(&chain.chain_id, None, Some(range), None)
+        let verify_stamp = self
+            .store
+            .required_redo_range(&chain.chain_id, PhaseName::Verify)
             .await?;
-        self.run_all_redo_phase(chain, PhaseName::Verify, range, range, cancellation)
+        self.require_no_pending_redo_for_all(&chain.chain_id, None, verify_stamp, None)
+            .await?;
+        let verify_range = verify_stamp.unwrap_or(range);
+        self.run_all_redo_phase(chain, PhaseName::Verify, verify_range, range, cancellation)
             .await?;
         Ok(())
     }
+
+    async fn repair_discovery_after_operator_interpret(
+        &self,
+        chain: &ChainConfig,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        if !matches!(
+            self.discovery_required_ingest_pending(&chain.chain_id, &cancellation)
+                .await?,
+            Some(true)
+        ) {
+            return Ok(());
+        }
+        self.scope_manifest_attestation(
+            &chain.chain_id,
+            None,
+            self.repair_discovery_coverage(chain, cancellation),
+        )
+        .await
+    }
+
     async fn run_all_redo_phase(
         &self,
         chain: &ChainConfig,

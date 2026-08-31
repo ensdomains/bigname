@@ -364,6 +364,14 @@ async fn initialize_phase_state(
     through_block: i64,
     block_hash: &str,
 ) -> Result<()> {
+    // Sepolia keeps its Anvil endpoint under the production dRPC source identity so a later
+    // Ingest redo can read newly selected logs through the real provider path. Other fixture
+    // chains retain the synthetic source because their production intake requires local data.
+    let (source_kind, seed_basis) = if chain_id == "ethereum-sepolia" {
+        ("drpc", "ethereum_head")
+    } else {
+        ("fixture", "new_signature_range")
+    };
     for phase in ["ingest", "interpret", "project", "verify", "live"] {
         sqlx::query(
             "INSERT INTO chain_phase_state (chain_id, phase_name)
@@ -409,10 +417,11 @@ async fn initialize_phase_state(
              chain_id, source_key, source_kind, seed_basis,
              start_block_number, next_block_number, target_block_number,
              last_processed_block_number, last_processed_block_hash
-         ) VALUES ($1, 'e2e-fixture', 'fixture', 'new_signature_range',
-                   0, $2 + 1, $2, $2, $3)
+         ) VALUES ($1, 'e2e-fixture', $4, $5, 0, $2 + 1, $2, $2, $3)
          ON CONFLICT (chain_id, source_key) DO UPDATE
-         SET next_block_number = EXCLUDED.next_block_number,
+         SET source_kind = EXCLUDED.source_kind,
+             seed_basis = EXCLUDED.seed_basis,
+             next_block_number = EXCLUDED.next_block_number,
              target_block_number = EXCLUDED.target_block_number,
              last_processed_block_number = EXCLUDED.last_processed_block_number,
              last_processed_block_hash = EXCLUDED.last_processed_block_hash,
@@ -421,6 +430,8 @@ async fn initialize_phase_state(
     .bind(chain_id)
     .bind(through_block)
     .bind(block_hash)
+    .bind(source_kind)
+    .bind(seed_basis)
     .execute(pool)
     .await?;
     Ok(())

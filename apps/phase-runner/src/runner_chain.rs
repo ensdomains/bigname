@@ -96,6 +96,9 @@ impl PhaseRunner {
             .await?;
         self.repair_discovery_coverage(chain, cancellation.clone())
             .await?;
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
         self.run_spine_phase(chain, PhaseName::Project, cancellation.clone())
             .await?;
         // This barrier applies to both serial Verify and the Verify/live combined path.

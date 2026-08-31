@@ -1207,10 +1207,12 @@ intervals add coverage over already-ingested blocks, Interpret records required
 Ingest work. The runner automatically re-fetches the affected retained range
 with the discovery-aware filter and re-runs Interpret before Project and Verify
 proceed. Interrupted discovery repairs remain durable and resume through the
-normal runner recovery path. At startup and after Live, the runner can repeat
-the sequence of re-fetching newly admitted historical logs and re-running
+normal runner recovery path. At startup, after Live, and after an
+operator-requested Interpret or all-phase redo, the runner can repeat the
+sequence of re-fetching newly admitted historical logs and re-running
 Interpret once for each active admitted discovery rule, plus eight additional
-times. This fixed ceiling is a runaway backstop, not a tuning control:
+times before downstream phases proceed. This fixed ceiling is a runaway
+backstop, not a tuning control:
 exhausting it stops the chain with an operator-visible error while Project and
 Verify remain fenced. Keep serving disabled, inspect
 `discovery_watch_admissions` and `chain_phase_state`, correct the

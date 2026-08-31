@@ -509,10 +509,15 @@ async fn run_phase_redo(
 ) -> Result<()> {
     let from_block = from_block.to_string();
     let target = target.to_string();
-    let source =
-        format!("{chain}:e2e-fixture:fixture:new_signature_range:0=BIGNAME_E2E_FIXTURE_SOURCE");
+    let (source_kind, seed_basis, source_endpoint) = match (chain, hydration_rpc_url) {
+        ("ethereum-sepolia", Some(rpc_url)) => ("drpc", "ethereum_head", rpc_url),
+        _ => ("fixture", "new_signature_range", "fixture://upfront"),
+    };
+    let source = format!(
+        "{chain}:e2e-fixture:{source_kind}:{seed_basis}:0=BIGNAME_E2E_FIXTURE_SOURCE"
+    );
     let mut command = pipeline_command(repo_root, binary);
-    command.env("BIGNAME_E2E_FIXTURE_SOURCE", "fixture://upfront");
+    command.env("BIGNAME_E2E_FIXTURE_SOURCE", source_endpoint);
     command
         .args(["redo", "--database-url", database_url, "--manifests-root"])
         .arg(manifests_root)
