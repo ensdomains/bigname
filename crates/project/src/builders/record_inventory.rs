@@ -48,12 +48,7 @@ pub(super) async fn build(
                    COALESCE(
                        resolver.support_status = 'supported'
                        AND NOT (
-                           pointer.pointer_source_family IN (
-                               'ens_v2_registry_l1', 'ens_v2_root_l1'
-                           )
-                           AND resolver.declared_summary #>>
-                               '{classification,source_family}' = 'ens_v1_resolver_l1'
-                           AND resolver.declared_summary #>> '{classification,basis}' =
+                           resolver.declared_summary #>> '{classification,basis}' =
                                'manifest_declared_address'
                            AND declaration_manifest.manifest_id IS NULL
                        ),
@@ -67,12 +62,7 @@ pub(super) async fn build(
                                resolver.unsupported_reason,
                                'resolver_classification_missing'
                            )
-                       WHEN pointer.pointer_source_family IN (
-                               'ens_v2_registry_l1', 'ens_v2_root_l1'
-                            )
-                        AND resolver.declared_summary #>>
-                            '{classification,source_family}' = 'ens_v1_resolver_l1'
-                        AND resolver.declared_summary #>> '{classification,basis}' =
+                       WHEN resolver.declared_summary #>> '{classification,basis}' =
                             'manifest_declared_address'
                         AND declaration_manifest.manifest_id IS NULL
                            THEN 'resolver_classification_missing'

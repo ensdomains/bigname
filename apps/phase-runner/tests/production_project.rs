@@ -12415,7 +12415,8 @@ async fn cross_namespace_declared_resolver_collapse_is_deterministic_and_converg
         basenames_manifests
             .push(add_shared_resolver_discovery_namespace(pool, CHAIN, "basenames").await?);
         sqlx::query(
-            "UPDATE normalized_events SET namespace = 'basenames'
+            "UPDATE normalized_events
+             SET namespace = 'basenames', source_family = 'basenames_base_registry'
              WHERE chain_id = $1 AND resource_id = $2::uuid
                AND event_kind = 'ResolverChanged'",
         )
@@ -12625,6 +12626,79 @@ async fn declaration_winner_requires_same_namespace_admission_after_close() -> R
 
     incremental.cleanup().await?;
     fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn same_namespace_declared_resolver_uses_greatest_applicable_start_role() -> Result<()> {
+    assert_same_namespace_declared_resolver_role(
+        "project-declared-v1-multi-role-start",
+        ("later_start_resolver_role", 1),
+        ("earlier_start_resolver_role", 0),
+        "later_start_resolver_role",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn same_namespace_declared_resolver_uses_later_equal_start_role() -> Result<()> {
+    assert_same_namespace_declared_resolver_role(
+        "project-declared-v1-multi-role-order",
+        ("first_equal_start_role", 0),
+        ("later_equal_start_role", 0),
+        "later_equal_start_role",
+    )
+    .await
+}
+
+async fn assert_same_namespace_declared_resolver_role(
+    chain: &str,
+    first_role: (&str, i64),
+    second_role: (&str, i64),
+    expected_role: &str,
+) -> Result<()> {
+    let first = ScratchDatabase::create(&format!("{chain}_first")).await?;
+    let second = ScratchDatabase::create(&format!("{chain}_second")).await?;
+    let manifests = seed_declared_v1_shared_pair(first.pool(), second.pool(), chain).await?;
+
+    for (pool, manifest_id) in [(first.pool(), manifests.0), (second.pool(), manifests.1)] {
+        let mut payload = resolver_declaration_payload("ens", chain, DECLARED_V1_SHARED_RESOLVER);
+        payload["contracts"] = json!([
+            {
+                "role": first_role.0,
+                "address": DECLARED_V1_SHARED_RESOLVER,
+                "proxy_kind": "none",
+                "start_block": first_role.1
+            },
+            {
+                "role": second_role.0,
+                "address": DECLARED_V1_SHARED_RESOLVER,
+                "proxy_kind": "none",
+                "start_block": second_role.1
+            }
+        ]);
+        insert_manifest_update_event(pool, chain, "ens_v1_resolver_l1", manifest_id, payload)
+            .await?;
+        run_project(pool, chain, None, RunMode::Normal, 0, 3).await?;
+    }
+
+    let mut roles = Vec::new();
+    for pool in [first.pool(), second.pool()] {
+        roles.push(
+            sqlx::query_scalar::<_, String>(
+                "SELECT declared_summary #>> '{classification,role}'
+                 FROM resolver_current
+                 WHERE chain_id = $1 AND resolver_address = lower($2)",
+            )
+            .bind(chain)
+            .bind(DECLARED_V1_SHARED_RESOLVER)
+            .fetch_one(pool)
+            .await?,
+        );
+    }
+    assert_eq!(roles, vec![expected_role, expected_role]);
+
+    first.cleanup().await?;
+    second.cleanup().await
 }
 
 #[tokio::test]

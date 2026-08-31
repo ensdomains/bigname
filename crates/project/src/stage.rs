@@ -114,13 +114,14 @@ async fn create_declared_resolver_addresses(
                 lower(declaration ->> 'address') AS resolver_address,
                 declaration ->> 'role' AS classification_role,
                 (declaration ->> 'start_block')::bigint AS declaration_start_block,
+                declaration_ordinality AS classification_declaration_ordinality,
                 manifest.manifest_id,
                 manifest.manifest_version,
                 manifest.manifest_event_id
          FROM project_manifests manifest
          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
              manifest.manifest_payload -> 'contracts', '[]'::jsonb
-         )) declaration
+         )) WITH ORDINALITY declarations(declaration, declaration_ordinality)
          WHERE manifest.source_family = 'ens_v1_resolver_l1'
            AND declaration ->> 'address' IS NOT NULL
            AND btrim(declaration ->> 'address') <> ''

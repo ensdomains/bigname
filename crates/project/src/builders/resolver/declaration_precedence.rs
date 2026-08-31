@@ -52,7 +52,9 @@ discovered AS (
            NULL::text AS classification_role,
            1 AS priority,
            NULL::bigint AS classification_manifest_id,
-           NULL::text AS classification_admission_namespace
+           NULL::text AS classification_admission_namespace,
+           NULL::bigint AS classification_declaration_start_block,
+           NULL::bigint AS classification_declaration_ordinality
     FROM active_discovery_admissions admission
     UNION ALL
     SELECT admission.resolver_address,
@@ -60,7 +62,9 @@ discovered AS (
            declaration.classification_role,
            0 AS priority,
            declaration.manifest_id AS classification_manifest_id,
-           admission.namespace AS classification_admission_namespace
+           admission.namespace AS classification_admission_namespace,
+           declaration.declaration_start_block AS classification_declaration_start_block,
+           declaration.classification_declaration_ordinality
     FROM active_discovery_admissions admission
     JOIN project_declared_resolver_addresses declaration
       ON declaration.namespace = admission.namespace

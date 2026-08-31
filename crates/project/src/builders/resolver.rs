@@ -271,10 +271,10 @@ pub(super) async fn build(
                    combined.classification_admission_namespace
             FROM (
                 SELECT * FROM discovered WHERE source_family IS NOT NULL
-                UNION ALL
-                SELECT observed.*, NULL::bigint, NULL::text FROM observed
-                UNION ALL
-                SELECT retained.*, NULL::bigint, NULL::text
+                UNION ALL SELECT observed.*, NULL::bigint, NULL::text,
+                                 NULL::bigint, NULL::bigint FROM observed
+                UNION ALL SELECT retained.*, NULL::bigint, NULL::text,
+                                 NULL::bigint, NULL::bigint
                 FROM retained_permission_candidates retained
             ) combined
             WHERE combined.resolver_address <>
@@ -294,7 +294,10 @@ pub(super) async fn build(
             ORDER BY combined.resolver_address,
                      combined.priority,
                      combined.source_family,
-                     combined.classification_manifest_id NULLS LAST
+                     combined.classification_manifest_id NULLS LAST,
+                     COALESCE(combined.classification_declaration_start_block, 0) DESC,
+                     combined.classification_declaration_ordinality DESC NULLS LAST,
+                     combined.classification_role
         ),
         upgrade_ranked AS (
             SELECT event.*,

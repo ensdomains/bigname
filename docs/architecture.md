@@ -533,14 +533,21 @@ declaration in the same namespace has classification rank 0, ahead of the
 original discovery admission at rank 1. This changes only the address's
 Project family classification: it does not remove or rewrite the discovery
 edge, the ENSv2-origin `ResolverChanged` event, its `logical_name_id`, or their
-provenance. Resolver classification is address-level, so once the address is
-supported as `ens_v1_resolver_l1`, every current pointer to that address uses
-that classification. Project attributes a node-keyed ENSv1 record through an
-ENSv2-origin pointer only when the pointer target's final staged
-classification is supported `ens_v1_resolver_l1` from an applicable exact
-declaration. Without that declaration, the safe serving result remains
-explicit `unsupported`; this precedence restores availability and completeness
-rather than correcting previously served values.
+provenance. When one manifest has repeated applicable declarations for the
+address, Project follows the [manifest field rule](manifests.md#required-fields):
+the greatest `start_block` at or below the target wins, and equal starts select
+the later manifest-array entry. Resolver classification is address-level, so
+once the address is supported as `ens_v1_resolver_l1`, every current pointer to
+that address uses that classification. A pointer may consume a
+`manifest_declared_address` classification only when its namespace matches the
+classifying manifest's namespace; otherwise its inventory is explicitly
+unsupported with `resolver_classification_missing`, regardless of the pointer
+family. Project attributes a node-keyed ENSv1 record through an ENSv2-origin
+pointer only when the pointer target's final staged classification is supported
+`ens_v1_resolver_l1` from an applicable exact declaration. Without that
+declaration, the safe serving result remains explicit `unsupported`; this
+precedence restores availability and completeness rather than correcting
+previously served values.
 
 [Watch-plan](glossary.md) expansion includes manifest-declared instances, registry-announcement admissions, resolver admissions, and proxy/implementation targets. Announcement admission is forward-only from the observed event; bootstrap can discover earlier announcements only back to the configured ingest coverage start and therefore assumes that coverage reaches the deployment. A `subregistry` edge changes parent-child topology only; it never admits the child emitter. Match-all signature scopes are manifest event subscriptions rather than address rows.
 
