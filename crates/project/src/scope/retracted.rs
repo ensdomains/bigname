@@ -10,8 +10,9 @@ pub(super) async fn seed(
     chain_id: &str,
     from_block: i64,
     to_block: i64,
+    target_block: i64,
 ) -> Result<()> {
-    seed_names(transaction, chain_id).await?;
+    seed_names(transaction, chain_id, from_block, to_block, target_block).await?;
     seed_children(transaction, chain_id).await?;
     seed_resources(transaction, chain_id, from_block, to_block).await?;
     seed_resolvers(transaction, chain_id, from_block, to_block).await?;
@@ -19,7 +20,13 @@ pub(super) async fn seed(
     Ok(())
 }
 
-async fn seed_names(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) -> Result<()> {
+async fn seed_names(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+    target_block: i64,
+) -> Result<()> {
     sqlx::query(
         r#"
         WITH citations AS (
@@ -59,6 +66,67 @@ async fn seed_names(transaction: &mut Transaction<'_, Postgres>, chain_id: &str)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to retain retracted name scope", error))?;
+    sqlx::query(
+        r#"
+        WITH affected_times AS (
+            SELECT COALESCE((
+                       SELECT extract(epoch FROM prior.block_timestamp)
+                       FROM chain_lineage prior
+                       WHERE prior.chain_id = $1
+                         AND prior.block_number < $2
+                         AND prior.canonicality_state IN ('canonical', 'safe', 'finalized')
+                       ORDER BY prior.block_number DESC
+                       LIMIT 1
+                   ), -1::numeric) AS prior_seconds,
+                   max(extract(epoch FROM affected.block_timestamp)) AS target_seconds
+            FROM chain_lineage affected
+            WHERE affected.chain_id = $1
+              AND affected.block_number BETWEEN $2 AND $3
+              AND affected.canonicality_state IN ('canonical', 'safe', 'finalized')
+        ), latest_registration AS (
+            SELECT DISTINCT ON (event.logical_name_id)
+                   event.logical_name_id, event.event_kind, event.after_state
+            FROM normalized_events event
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = event.chain_id
+             AND lineage.block_hash = event.block_hash
+             AND lineage.block_number = event.block_number
+            WHERE event.chain_id = $1
+              AND event.block_number <= $4
+              AND event.logical_name_id IS NOT NULL
+              AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+              AND event.event_kind IN (
+                  'RegistrationGranted', 'RegistrationReserved',
+                  'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged'
+              )
+              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+            ORDER BY event.logical_name_id, event.block_number DESC,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        )
+        INSERT INTO project_scope_names
+        SELECT registration.logical_name_id
+        FROM latest_registration registration
+        CROSS JOIN affected_times affected
+        WHERE registration.event_kind <> 'RegistrationReleased'
+          AND registration.after_state ->> 'status' IN ('registered', 'reserved')
+          AND jsonb_typeof(registration.after_state -> 'expiry') = 'number'
+          AND (registration.after_state ->> 'expiry')::numeric
+              > affected.prior_seconds
+          AND (registration.after_state ->> 'expiry')::numeric
+              <= affected.target_seconds
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to retain expiry name scope", error))?;
     Ok(())
 }
 
@@ -143,17 +211,12 @@ async fn seed_resources(
             SELECT row.resource_id, citation.event_id, false
             FROM permissions_current_resource_summary row
             CROSS JOIN LATERAL (VALUES
+                (row.provenance ->> 'authority_event_id'),
                 (row.provenance -> 'wrapper_expiry_boundary' ->> 'fuses_event_id'),
                 (row.provenance -> 'wrapper_expiry_boundary' ->> 'expiry_event_id'),
                 (row.provenance ->> 'expiry_retirement_event_id')
             ) citation(event_id)
             WHERE row.provenance ->> 'chain_id' = $1
-            UNION ALL
-            SELECT row.resource_id, NULL, true
-            FROM permissions_current_resource_summary row
-            WHERE row.provenance ->> 'chain_id' = $1
-              AND NULLIF(row.chain_positions ->> 'target_block_number', '')::bigint
-                  BETWEEN $2 AND $3
         )
         INSERT INTO project_scope_resources
         SELECT DISTINCT citation.resource_id

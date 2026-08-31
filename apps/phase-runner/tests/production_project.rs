@@ -15801,7 +15801,7 @@ async fn redo_restores_summary_only_permission_retraction_like_fresh_rebuild() -
         2,
     )
     .await?;
-    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 2).await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
     normalize_projection_clocks(incremental.pool()).await?;
     normalize_projection_clocks(fresh.pool()).await?;
     let incremental_snapshot =
