@@ -86,6 +86,8 @@ pub(super) fn validate_block_constraint(
     let head = head.ok_or_else(|| {
         async_graphql::Error::new("served head is unavailable for the requested block")
     })?;
+    // Block matching is bound to the single active chain; revisit this together with `_meta.block`
+    // when one ENS request can activate a second chain.
     let position = head
         .selected()
         .chain_positions
@@ -143,6 +145,10 @@ pub(super) async fn load_graphql_indexing_errors(
     selected: &SelectedSnapshot,
     operation: &str,
 ) -> Result<bool> {
+    #[cfg(test)]
+    graphql_indexing_status_test_hooks::run(&state.pool)
+        .await
+        .map_err(|error| internal_error(operation, error))?;
     let status = bigname_storage::load_phase_indexing_status(&state.pool)
         .await
         .map_err(|error| internal_error(operation, error))?;
@@ -154,17 +160,74 @@ pub(super) async fn load_graphql_indexing_errors(
         else {
             return true;
         };
-        row.canonical_block != Some(position.block_number)
-            || row.latest_projected_block != Some(position.block_number)
-            || !matches!(
-                row.project_phase_status.as_deref(),
-                Some("completed" | "running")
-            )
-            || !row.project_generation_current
+        !matches!(
+            row.project_phase_status.as_deref(),
+            Some("completed" | "running")
+        ) || !row.project_generation_current
             || row.project_redo_in_progress
             || row.any_phase_settled_while_unconfigured
             || required_verification_has_error(row)
     }))
+}
+
+#[cfg(test)]
+pub(crate) mod graphql_indexing_status_test_hooks {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+    use tokio::sync::Barrier;
+
+    #[derive(Clone)]
+    pub(crate) struct StatusHook {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct StatusControl {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl StatusControl {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, StatusHook> = ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> Result<(ScopedTestHookGuard<String, StatusHook>, StatusControl)> {
+        let database = current_test_database(pool).await?;
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            StatusHook {
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((guard, StatusControl { reached, resume }))
+    }
+
+    pub(super) async fn run(pool: &PgPool) -> Result<()> {
+        let database = current_test_database(pool).await?;
+        if let Some(hook) = HOOKS.take(&database) {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
 }
 
 fn required_verification_has_error(row: &bigname_storage::IndexingStatusChainRow) -> bool {

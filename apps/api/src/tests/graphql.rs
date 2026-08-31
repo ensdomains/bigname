@@ -1041,6 +1041,80 @@ async fn graphql_meta_reports_the_served_head_and_real_readiness() -> Result<()>
             .is_some_and(|errors| !errors.is_empty())
     );
 
+    // Advance intake and Project after this request selects block 500 but before it reads indexing
+    // status. The final served-head revalidation must reject the now-old publication, so the
+    // transient equality mismatch never reaches the wire as an indexing error.
+    const NEXT_HASH: &str =
+        "0x3333333333333333333333333333333333333333333333333333333333333333";
+    let (_guard, control) =
+        crate::graphql::graphql_indexing_status_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let lag_request = tokio::spawn(async move {
+        post_graphql_allow_errors(
+            state,
+            r#"query { _meta { block { number } hasIndexingErrors } }"#,
+            json!({}),
+        )
+        .await
+    });
+    control.wait_until_reached().await;
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES (
+            'ethereum-mainnet', $1, $2, $3, '2027-01-15T08:00:01Z', 'canonical'
+        )
+        "#,
+    )
+    .bind(NEXT_HASH)
+    .bind(HEAD_HASH)
+    .bind(HEAD_NUMBER + 1)
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_heads SET latest_block_hash = $1, \
+         latest_block_number = $2 WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .bind(NEXT_HASH)
+    .bind(HEAD_NUMBER + 1)
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state SET current_block_hash = $1, \
+         current_block_number = $2, target_block_hash = $1, target_block_number = $2 \
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .bind(NEXT_HASH)
+    .bind(HEAD_NUMBER + 1)
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+    let lag_payload = lag_request.await.context("GraphQL lag request panicked")??;
+    assert_eq!(lag_payload["data"]["_meta"], Value::Null);
+    assert_eq!(
+        lag_payload["errors"][0]["extensions"]["code"],
+        json!("internal_error")
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.chain_heads SET latest_block_hash = $1, \
+         latest_block_number = $2 WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .bind(HEAD_HASH)
+    .bind(HEAD_NUMBER)
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state SET current_block_hash = $1, \
+         current_block_number = $2, target_block_hash = $1, target_block_number = $2 \
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .bind(HEAD_HASH)
+    .bind(HEAD_NUMBER)
+    .execute(&database.lookup_pool)
+    .await?;
+
     sqlx::query(
         "UPDATE chain_phase_state SET settled_while_unconfigured = true \
          WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",

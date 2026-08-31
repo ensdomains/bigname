@@ -27,4 +27,6 @@ pub(crate) use schema::graphql_routes;
 #[cfg(test)]
 pub(crate) use schema::subgraph_sdl;
 #[cfg(test)]
+pub(crate) use snapshot::graphql_indexing_status_test_hooks;
+#[cfg(test)]
 pub(crate) use snapshot::nested_inventory_test_hooks;

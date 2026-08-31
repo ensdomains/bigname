@@ -39,6 +39,8 @@ pub(crate) async fn resolve_meta(
         return Ok(None);
     };
     let constraint = validate_block_constraint(Some(&head), block.as_ref(), "_meta")?;
+    // `_meta.block` is bound to the single active chain; revisit this together with block matching
+    // when one ENS request can activate a second chain.
     let position = head
         .selected()
         .chain_positions
