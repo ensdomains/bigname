@@ -91,8 +91,9 @@ async fn seed_names(
               AND affected.canonicality_state IN (
                   'canonical', 'safe', 'finalized', 'orphaned'
               )
-        ), registration_events AS (
-            SELECT event.*, COALESCE(event.resource_id::text, NULLIF(CONCAT(
+        ), expiry_candidate_events AS MATERIALIZED (
+            SELECT event.logical_name_id,
+                   COALESCE(event.resource_id::text, NULLIF(CONCAT(
                        COALESCE(event.after_state ->> 'registry_contract_instance_id',
                                 event.raw_fact_ref ->> 'emitting_address',
                                 event.after_state ->> 'registry'),
@@ -102,6 +103,7 @@ async fn seed_names(
               ON lineage.chain_id = event.chain_id
              AND lineage.block_hash = event.block_hash
              AND lineage.block_number = event.block_number
+            CROSS JOIN affected_times affected
             WHERE event.chain_id = $1
               AND event.block_number <= $4
               AND event.logical_name_id IS NOT NULL
@@ -112,6 +114,42 @@ async fn seed_names(
               )
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND jsonb_typeof(event.after_state -> 'expiry') = 'number'
+              AND (event.after_state ->> 'expiry')::numeric > affected.prior_seconds
+              AND (event.after_state ->> 'expiry')::numeric <= affected.target_seconds
+        ), candidate_lifecycles AS MATERIALIZED (
+            SELECT DISTINCT event.logical_name_id, event.lifecycle_key
+            FROM expiry_candidate_events event
+            WHERE event.lifecycle_key IS NOT NULL
+        ), registration_events AS (
+            SELECT event.*, candidate.lifecycle_key
+            FROM candidate_lifecycles candidate
+            JOIN LATERAL (
+                SELECT history.*
+                FROM normalized_events history
+                JOIN chain_lineage lineage
+                  ON lineage.chain_id = history.chain_id
+                 AND lineage.block_hash = history.block_hash
+                 AND lineage.block_number = history.block_number
+                WHERE history.chain_id = $1
+                  AND history.block_number <= $4
+                  AND history.logical_name_id = candidate.logical_name_id
+                  AND history.source_family IN (
+                      'ens_v2_root_l1', 'ens_v2_registry_l1'
+                  )
+                  AND history.event_kind IN (
+                      'RegistrationGranted', 'RegistrationReserved',
+                      'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged'
+                  )
+                  AND history.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  AND COALESCE(history.resource_id::text, NULLIF(CONCAT(
+                      COALESCE(history.after_state ->> 'registry_contract_instance_id',
+                               history.raw_fact_ref ->> 'emitting_address',
+                               history.after_state ->> 'registry'),
+                      ':', history.after_state ->> 'token_id'), ':')) =
+                      candidate.lifecycle_key
+            ) event ON TRUE
         ), lifecycle_heads AS (
             SELECT DISTINCT ON (event.logical_name_id, event.lifecycle_key)
                    event.logical_name_id, event.lifecycle_key, event.event_kind,
