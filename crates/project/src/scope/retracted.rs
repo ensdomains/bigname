@@ -88,7 +88,9 @@ async fn seed_names(
             FROM chain_lineage affected
             WHERE affected.chain_id = $1
               AND affected.block_number BETWEEN $2 AND $3
-              AND affected.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND affected.canonicality_state IN (
+                  'canonical', 'safe', 'finalized', 'orphaned'
+              )
         ), registration_events AS (
             SELECT event.*, COALESCE(event.resource_id::text, NULLIF(CONCAT(
                        COALESCE(event.after_state ->> 'registry_contract_instance_id',
