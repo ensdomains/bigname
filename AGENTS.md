@@ -27,7 +27,8 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
   resolver references, retired address ranges, and decode-failure diagnostics
   are coordination or diagnostic state, not projection or serving data.
   At a completed pass boundary, Interpret also owns the
-  `discovery_watch_admissions` coordination snapshot and may atomically install
+  [`discovery_watch_admissions` coordination snapshot](docs/glossary.md#discovery-watch-admission-snapshot)
+  and may atomically install
   required Ingest work through the shared `chain_phase_state` installer when
   newly discovered physical watch coverage overlaps retained intake history.
   The snapshot is not a work queue: `chain_phase_state` remains the sole
