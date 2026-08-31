@@ -839,9 +839,14 @@ reviving an older nonzero event; surface visibility does not participate in
 this pointer choice. Record events that already carry a logical name are joined
 without restricting either the pointer or record event's source family. An
 `ens_v1_resolver_l1` event with no logical-name attribution may instead join
-only when the selected pointer's source family is `ens_v1_registry_l1`,
-`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`; incremental staging applies the
-same pointer-family restriction. When an ended
+when the selected pointer's source family is `ens_v1_registry_l1`,
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`. A selected
+`ens_v2_registry_l1` or `ens_v2_root_l1` pointer may also join when its target
+resolver has a final supported `ens_v1_resolver_l1` classification from an
+applicable exact declaration, and that classifying manifest's namespace
+matches the pointer's namespace. Incremental staging applies the same guarded
+exception by requiring the pointer namespace and exact declared resolver
+address to match. When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
 resource-less. This does not restore a current binding: name and record reads
