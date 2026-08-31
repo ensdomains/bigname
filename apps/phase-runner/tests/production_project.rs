@@ -16591,6 +16591,122 @@ async fn mixed_authority_survives_v2_expiry_as_explicitly_unsupported() -> Resul
 }
 
 #[tokio::test]
+async fn mixed_authority_expiry_release_preserves_guarded_summary_fields() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_mixed_authority_summary_guard").await?;
+    let fresh = ScratchDatabase::create("project_mixed_authority_summary_guard_fresh").await?;
+    let chain = "project-mixed-authority-summary-guard";
+    let mut logical_name_id = String::new();
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let seeded_name = seed_dual_open_cross_arm_fixture(pool, chain, 4).await?;
+        if logical_name_id.is_empty() {
+            logical_name_id = seeded_name;
+        } else {
+            assert_eq!(logical_name_id, seeded_name);
+        }
+        InterpretEngine::new(pool.clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: 0,
+                to_block: 5,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+        insert_lineage_block(pool, chain, 6).await?;
+        let v2_resource: Uuid = sqlx::query_scalar(
+            "SELECT resource_id FROM surface_bindings
+             WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'",
+        )
+        .bind(chain)
+        .bind(&logical_name_id)
+        .fetch_one(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE surface_bindings SET active_to = to_timestamp(6)
+             WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'",
+        )
+        .bind(chain)
+        .bind(&logical_name_id)
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            chain,
+            6,
+            Some(&logical_name_id),
+            Some(&v2_resource.to_string()),
+            "RegistrationReleased",
+            "ens_v2_registry_l1",
+            json!({
+                "source_event":"RegistryPathExpired",
+                "derived_from":"interpreter_state",
+                "terminal_reason":"registry_name_binding_expired",
+                "expiry":4_000_000_000_i64,
+                "status":"released"
+            }),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 5,
+            hash: block_hash(chain, 5),
+        }),
+        RunMode::Normal,
+        6,
+        6,
+    )
+    .await?;
+    run_project(fresh.pool(), chain, None, RunMode::Normal, 0, 6).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+
+    let incremental_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(incremental.pool())
+    .await?;
+    let fresh_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(fresh.pool())
+    .await?;
+    assert_eq!(incremental_row, fresh_row);
+    assert_eq!(
+        incremental_row["unsupported_reason"],
+        "conflicting_current_ens_authority"
+    );
+    assert_eq!(
+        (
+            incremental_row.pointer("/declared_summary/registration/registrant"),
+            incremental_row.pointer("/declared_summary/registration/expiry"),
+            incremental_row.pointer("/declared_summary/registration/authority_kind"),
+            incremental_row.pointer("/declared_summary/registration/authority_key"),
+            incremental_row.pointer("/declared_summary/control/status"),
+        ),
+        (
+            Some(&Value::Null),
+            Some(&json!(4_000_000_000_i64)),
+            Some(&Value::Null),
+            Some(&Value::Null),
+            Some(&json!("released")),
+        ),
+        "an unresolved mixed-authority release must preserve its exact summary fields",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn surviving_reservation_drives_summary_after_other_resource_expires() -> Result<()> {
     const REGISTERED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008a1";
     const RESERVED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008a2";

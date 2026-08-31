@@ -351,6 +351,32 @@ async fn bindingless_registered_renewal_restores_retained_permissions() -> Resul
 }
 
 #[tokio::test]
+#[rustfmt::skip]
+async fn explicit_v2_release_does_not_retire_effective_permissions() -> Result<()> {
+    let (incremental_db, incremental) = database("v2_expiry_explicit_release_incremental").await?; seed_formerly_named_flag_only_renewal(&incremental).await?;
+    let (fresh_db, fresh) = database("v2_expiry_explicit_release_fresh").await?; seed_formerly_named_flag_only_renewal(&fresh).await?;
+    for pool in [&incremental, &fresh] {
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_build_object(
+                 'source_event', 'LabelUnregistered', 'status', 'released'
+             )
+             WHERE resource_id = $1::uuid AND event_kind = 'RegistrationReleased'",
+        )
+        .bind(RESOURCE)
+        .execute(pool)
+        .await?;
+    }
+
+    let live = run(&incremental, 100, None).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?.1, 1);
+    run(&incremental, 101, Some(live)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?.1, 1, "an explicit ENSv2 release must retain effective permissions");
+    run(&fresh, 101, None).await?; assert_eq!(current_name_and_permission_counts(&fresh).await?.1, 1);
+    assert_eq!(snapshot(&incremental).await?, snapshot(&fresh).await?);
+
+    fresh_db.cleanup().await?; incremental_db.cleanup().await?; Ok(())
+}
+
+#[tokio::test]
 async fn rebound_permission_provenance_includes_the_registration_event() -> Result<()> {
     let (database, pool) = database("v2_expiry_rebound_provenance").await?;
     seed_formerly_named_flag_only_renewal(&pool).await?;
