@@ -12352,16 +12352,21 @@ async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() ->
     run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
     activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
     for pool in [incremental.pool(), fresh.pool()] {
-        let bob_entry_count: i32 = sqlx::query_scalar(
-            "SELECT jsonb_array_length(entries)
+        let bob_inventory: (i32, String, Option<String>) = sqlx::query_as(
+            "SELECT jsonb_array_length(entries), support_status, unsupported_reason
              FROM record_inventory_current WHERE resource_id = $1::uuid",
         )
         .bind(DECLARED_V1_BOB_RESOURCE)
         .fetch_one(pool)
         .await?;
         assert_eq!(
-            bob_entry_count, 0,
-            "a foreign-namespace pointer must not claim node-keyed v1 records",
+            bob_inventory,
+            (
+                0,
+                "unsupported".into(),
+                Some("resolver_classification_missing".into()),
+            ),
+            "a foreign-namespace pointer must not claim authoritative v1 coverage",
         );
     }
     let clocks_before = declared_v1_shared_clocks(incremental.pool(), CHAIN).await?;

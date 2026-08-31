@@ -43,6 +43,50 @@ pub(super) async fn build(
                   '0x0000000000000000000000000000000000000000', ''
               )
         ),
+        pointer_eligibility AS (
+            SELECT pointer.resource_id,
+                   COALESCE(
+                       resolver.support_status = 'supported'
+                       AND NOT (
+                           pointer.pointer_source_family IN (
+                               'ens_v2_registry_l1', 'ens_v2_root_l1'
+                           )
+                           AND resolver.declared_summary #>>
+                               '{classification,source_family}' = 'ens_v1_resolver_l1'
+                           AND resolver.declared_summary #>> '{classification,basis}' =
+                               'manifest_declared_address'
+                           AND declaration_manifest.manifest_id IS NULL
+                       ),
+                       false
+                   ) AS supported,
+                   CASE
+                       WHEN resolver.resolver_address IS NULL
+                           THEN 'resolver_classification_missing'
+                       WHEN resolver.support_status IS DISTINCT FROM 'supported'
+                           THEN COALESCE(
+                               resolver.unsupported_reason,
+                               'resolver_classification_missing'
+                           )
+                       WHEN pointer.pointer_source_family IN (
+                               'ens_v2_registry_l1', 'ens_v2_root_l1'
+                            )
+                        AND resolver.declared_summary #>>
+                            '{classification,source_family}' = 'ens_v1_resolver_l1'
+                        AND resolver.declared_summary #>> '{classification,basis}' =
+                            'manifest_declared_address'
+                        AND declaration_manifest.manifest_id IS NULL
+                           THEN 'resolver_classification_missing'
+                       ELSE NULL
+                   END AS unsupported_reason
+            FROM pointers pointer
+            LEFT JOIN project_stage_resolver_current resolver
+              ON resolver.chain_id = $1
+             AND resolver.resolver_address = pointer.resolver_address
+            LEFT JOIN project_manifests declaration_manifest
+              ON declaration_manifest.manifest_id =
+                 (resolver.provenance ->> 'manifest_id')::bigint
+             AND declaration_manifest.namespace = pointer.pointer_namespace
+        ),
         attributed_events AS (
             SELECT pointer.resource_id AS attributed_resource_id, event.*
             FROM pointers pointer
@@ -370,13 +414,10 @@ pub(super) async fn build(
                ),
                COALESCE(records.selectors, '[]'::jsonb),
                COALESCE(records.unsupported_families, '[]'::jsonb) || CASE
-                   WHEN resolver.support_status = 'supported' THEN '[]'::jsonb
+                   WHEN eligibility.supported THEN '[]'::jsonb
                    ELSE jsonb_build_array(jsonb_build_object(
                        'record_family', 'resolver_classification',
-                       'unsupported_reason', COALESCE(
-                           resolver.unsupported_reason,
-                           'resolver_classification_missing'
-                       )
+                       'unsupported_reason', eligibility.unsupported_reason
                    ))
                END,
                COALESCE(records.last_change, jsonb_build_object(
@@ -397,15 +438,9 @@ pub(super) async fn build(
                    ))
                )),
                COALESCE(records.entries, '[]'::jsonb),
-               CASE WHEN resolver.support_status = 'supported'
+               CASE WHEN eligibility.supported
                    THEN 'supported' ELSE 'unsupported' END,
-               CASE
-                   WHEN resolver.resolver_address IS NULL
-                       THEN 'resolver_classification_missing'
-                   WHEN resolver.support_status <> 'supported'
-                       THEN resolver.unsupported_reason
-                   ELSE NULL
-               END,
+               eligibility.unsupported_reason,
                jsonb_build_object(
                    'chain_id', $1,
                    'logical_name_id', pointer.logical_name_id,
@@ -444,6 +479,7 @@ pub(super) async fn build(
                    COALESCE(resolver.manifest_version, 1)
                )
         FROM pointers pointer
+        JOIN pointer_eligibility eligibility USING (resource_id)
         LEFT JOIN project_stage_resolver_current resolver
           ON resolver.chain_id = $1
          AND lower(resolver.resolver_address) = pointer.resolver_address
