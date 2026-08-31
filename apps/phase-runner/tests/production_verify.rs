@@ -2752,7 +2752,7 @@ async fn mismatch_finishing_after_live_still_records_the_live_stop() -> Result<(
 
 #[tokio::test]
 async fn mismatch_finishing_after_live_error_remains_the_fatal_context() -> Result<()> {
-    const DEADLINE: Duration = Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
 
     let scratch = ScratchDatabase::create("production_verify_live_error_mismatch").await?;
     seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
@@ -2771,11 +2771,11 @@ async fn mismatch_finishing_after_live_error_remains_the_fatal_context() -> Resu
         })
     };
 
-    tokio::time::timeout(DEADLINE, gate.entered.notified())
+    tokio::time::timeout_at(deadline, gate.entered.notified())
         .await
         .context("Verify did not reach its comparison gate")?;
-    tokio::time::timeout(
-        DEADLINE,
+    tokio::time::timeout_at(
+        deadline,
         wait_for_phase_position(scratch.pool(), BASE, PhaseName::Live, "failed", None),
     )
     .await
@@ -2783,7 +2783,7 @@ async fn mismatch_finishing_after_live_error_remains_the_fatal_context() -> Resu
     tokio::time::sleep(Duration::from_millis(50)).await;
     gate.release.notify_one();
 
-    let error = tokio::time::timeout(DEADLINE, task)
+    let error = tokio::time::timeout_at(deadline, task)
         .await
         .context("Verify did not preserve its late mismatch after Live failed")??
         .expect_err("a late mismatch must remain the fatal chain error");

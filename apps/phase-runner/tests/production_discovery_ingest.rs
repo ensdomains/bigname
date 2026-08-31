@@ -23,12 +23,14 @@ use phase_runner::{
     error::{RunnerError, RunnerResult},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
+    live_phase::LivePhase,
     phase::{
-        CompletedPhaseFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
-        PhaseProgress, PhaseSet, RunMode, VerificationLevel,
+        CompletedPhaseFuture, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture,
+        PhaseName, PhaseProgress, PhaseSet, RunMode, VerificationLevel,
     },
     project_phase::ProjectPhase,
     runner::PhaseRunner,
+    state::PhaseStore,
     verify_phase::{
         VerificationReferenceFuture, VerificationReferenceProvider, VerificationSource, VerifyPhase,
     },
@@ -283,6 +285,152 @@ async fn run_fresh_case(producer: Producer) -> Result<()> {
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn live_fetched_discovery_beyond_ingest_cursor_installs_and_drains_repair() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_discovery_ingest_live_suffix").await?;
+    seed_manifest_configuration(scratch.pool(), Producer::Root).await?;
+    seed_pre_live_spine(scratch.pool()).await?;
+    let fixture = RpcFixture::spawn(Producer::Root).await?;
+    let observations = Arc::new(Observations::default());
+    let phases = PhaseSet::new([
+        observed(
+            Arc::new(IngestPhase::new(scratch.pool().clone())),
+            scratch.pool().clone(),
+            Arc::clone(&observations),
+        ),
+        observed(
+            Arc::new(InterpretPhase::new(scratch.pool().clone())),
+            scratch.pool().clone(),
+            Arc::clone(&observations),
+        ),
+        observed(
+            Arc::new(LoopbackPhase::new(PhaseName::Project)),
+            scratch.pool().clone(),
+            Arc::clone(&observations),
+        ),
+        Arc::new(QuickVerifyPhase),
+        observed(
+            Arc::new(LivePhase::new(scratch.pool().clone())),
+            scratch.pool().clone(),
+            Arc::clone(&observations),
+        ),
+    ])?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-discovery-ingest-live-suffix",
+        fast_timing(),
+    )?;
+    let chain = ChainConfig::new(
+        CHAIN,
+        vec![SourceConfig::new_with_role(
+            CHAIN,
+            "intake",
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            SourceRole::Intake,
+            fixture.endpoint.clone(),
+        )?],
+        true,
+    )?;
+
+    runner.run_chain(&chain, CancellationToken::new()).await?;
+
+    assert_eq!(
+        fixture.resolver_range_requests.load(Ordering::SeqCst),
+        1,
+        "discovery from the Live-loaded suffix must trigger one address-aware historical fetch"
+    );
+    let recovered: (i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM raw_logs
+              WHERE chain_id = $1 AND lower(emitting_address) = lower($2)),
+             (SELECT count(*) FROM normalized_events
+              WHERE chain_id = $1 AND event_kind = 'RecordChanged')",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(recovered, (1, 1));
+    let ingest: (bool, i64, Option<i64>) = sqlx::query_as(
+        "SELECT state.redo_in_progress, state.redo_attempt_generation,
+                cursor.last_processed_block_number
+         FROM chain_phase_state state
+         JOIN ingest_cursors cursor USING (chain_id)
+         WHERE state.chain_id = $1 AND state.phase_name = 'ingest'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        ingest,
+        (false, 2, Some(0)),
+        "the repair must drain without pretending Live advanced the finite cursor"
+    );
+    assert_subsequence(
+        &observations
+            .sequence
+            .lock()
+            .expect("observation lock")
+            .clone(),
+        &[
+            (PhaseName::Live, "normal"),
+            (PhaseName::Interpret, "normal"),
+            (PhaseName::Ingest, "redo"),
+            (PhaseName::Interpret, "redo"),
+            (PhaseName::Project, "normal"),
+        ],
+    );
+    let snapshot_before: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT lower(address), lower(topic0), active_from_block_number,
+                active_to_block_number
+         FROM discovery_watch_admissions WHERE chain_id = $1
+         ORDER BY 1, 2, 3, 4",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert!(!snapshot_before.is_empty());
+
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: 0,
+            to_block: 2,
+            resume_current: Some(InterpretMarker {
+                number: 2,
+                hash: BLOCK_2.to_owned(),
+            }),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let settled: (bool, i64) = sqlx::query_as(
+        "SELECT redo_in_progress, redo_attempt_generation
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(settled, (false, 2));
+    let snapshot_after: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT lower(address), lower(topic0), active_from_block_number,
+                active_to_block_number
+         FROM discovery_watch_admissions WHERE chain_id = $1
+         ORDER BY 1, 2, 3, 4",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(snapshot_after, snapshot_before);
+    assert_eq!(fixture.resolver_range_requests.load(Ordering::SeqCst), 1);
+
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
 async fn assert_replay_stable_across_redo_batches(
     pool: &sqlx::PgPool,
     fixture: &RpcFixture,
@@ -349,7 +497,8 @@ async fn assert_replay_stable_across_redo_batches(
     sqlx::query(
         "UPDATE chain_phase_state SET current_block_number = 501,
              current_block_hash = $2, target_block_number = 501,
-             target_block_hash = $2
+             target_block_hash = $2, live_handoff_block_number = 501,
+             live_handoff_block_hash = $2
          WHERE chain_id = $1 AND phase_name = 'ingest'",
     )
     .bind(CHAIN)
@@ -854,6 +1003,23 @@ impl Phase for CompleteLivePhase {
     }
 }
 
+struct QuickVerifyPhase;
+
+impl Phase for QuickVerifyPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async {
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                verification_level: Some(VerificationLevel::QuickSynced),
+                ..PhaseProgress::default()
+            }))
+        })
+    }
+}
+
 fn assert_subsequence(
     actual: &[(PhaseName, &'static str)],
     expected: &[(PhaseName, &'static str)],
@@ -1240,6 +1406,64 @@ async fn seed_completed_discovery_state(pool: &sqlx::PgPool) -> Result<()> {
     }
     sqlx::query("INSERT INTO ingest_cursors (chain_id, source_key, source_kind, seed_basis, start_block_number, next_block_number, target_block_number, last_processed_block_number, last_processed_block_hash) VALUES ($1,'intake','drpc','ethereum_head',0,3,2,2,$2)").bind(CHAIN).bind(BLOCK_2).execute(pool).await?;
     add_discovered_resolver(pool, RESOLVER, 1).await
+}
+
+async fn seed_pre_live_spine(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, NULL, 0, to_timestamp(0), 'finalized')",
+    )
+    .bind(CHAIN)
+    .bind(BLOCK_0)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (
+             chain_id, latest_block_hash, latest_block_number,
+             safe_block_hash, safe_block_number,
+             finalized_block_hash, finalized_block_number
+         ) VALUES ($1, $2, 0, $2, 0, $2, 0)",
+    )
+    .bind(CHAIN)
+    .bind(BLOCK_0)
+    .execute(pool)
+    .await?;
+    PhaseStore::new(pool.clone())
+        .initialize_chain(CHAIN)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', current_block_number = 0,
+             current_block_hash = $2, target_block_number = 0,
+             target_block_hash = $2,
+             live_handoff_block_number = CASE WHEN phase_name = 'ingest' THEN 0 END,
+             live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $2 END,
+             input_content_hash = CASE
+                 WHEN phase_name IN ('interpret', 'project') THEN $3 END,
+             verification_level = CASE WHEN phase_name = 'verify' THEN 'quick_synced' END,
+             started_at = now(), finished_at = now(), updated_at = now()
+         WHERE chain_id = $1
+           AND phase_name IN ('ingest', 'interpret', 'project', 'verify')",
+    )
+    .bind(CHAIN)
+    .bind(BLOCK_0)
+    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO ingest_cursors (
+             chain_id, source_key, source_kind, seed_basis, start_block_number,
+             next_block_number, target_block_number, last_processed_block_number,
+             last_processed_block_hash
+         ) VALUES ($1, 'intake', 'drpc', 'ethereum_head', 0, 1, 0, 0, $2)",
+    )
+    .bind(CHAIN)
+    .bind(BLOCK_0)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn add_discovered_resolver(pool: &sqlx::PgPool, address: &str, from: i64) -> Result<()> {

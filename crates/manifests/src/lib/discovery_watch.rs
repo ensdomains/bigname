@@ -249,9 +249,17 @@ fn payload_topics(
                 .and_then(Value::as_str)
                 .context("compiled watch entry is missing its topic0")?
                 .to_ascii_lowercase();
-            topics.insert(topic0.clone());
-            if entry.pointer("/emitter/kind").and_then(Value::as_str) == Some("all") {
-                all_emitter.insert(topic0);
+            match entry.pointer("/emitter/kind").and_then(Value::as_str) {
+                Some("all") => {
+                    topics.insert(topic0.clone());
+                    all_emitter.insert(topic0);
+                }
+                Some("family") => {
+                    topics.insert(topic0);
+                }
+                Some("address") => {}
+                Some(kind) => anyhow::bail!("compiled watch entry has unknown emitter kind {kind}"),
+                None => anyhow::bail!("compiled watch entry is missing its emitter kind"),
             }
         }
         return Ok((topics, all_emitter));
@@ -262,9 +270,13 @@ fn payload_topics(
     };
     let topics = manifest
         .abi
-        .event_topic0s()
-        .context("failed to decode active manifest ABI for discovery watch coverage")?
+        .events
+        .iter()
+        .filter(|event| event.emitter_roles.is_empty())
+        .map(|event| event.parsed_event_view().map(|event| event.topic0()))
+        .collect::<Result<Vec<Option<String>>>>()?
         .into_iter()
+        .flatten()
         .map(|topic| topic.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     let all_emitter =
@@ -357,5 +369,39 @@ mod tests {
             ),
             [interval(5, 7), interval(11, 14)]
         );
+    }
+
+    #[test]
+    fn compiled_address_topics_do_not_expand_discovered_family_coverage() {
+        let (topics, all_emitter) = payload_topics(
+            "ens_v1_resolver_l1",
+            serde_json::json!({
+                "_bigname_compiled_watch": [
+                    {"emitter": {"kind": "all"}, "topic0": "0x01", "start": 0},
+                    {
+                        "emitter": {
+                            "kind": "family",
+                            "namespace": "ens",
+                            "family": "ens_v1_resolver_l1"
+                        },
+                        "topic0": "0x02",
+                        "start": 0
+                    },
+                    {
+                        "emitter": {
+                            "kind": "address",
+                            "family": "ens_v1_resolver_l1",
+                            "address": "0x00000000000000000000000000000000000000aa"
+                        },
+                        "topic0": "0x03",
+                        "start": 10
+                    }
+                ]
+            }),
+        )
+        .expect("compiled emitter kinds are valid");
+
+        assert_eq!(topics, BTreeSet::from(["0x01".into(), "0x02".into()]));
+        assert_eq!(all_emitter, BTreeSet::from(["0x01".into()]));
     }
 }

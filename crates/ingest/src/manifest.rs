@@ -404,8 +404,7 @@ pub async fn load_persisted_watch_filter(
         bigname_manifests::load_discovery_watch_coverage(&mut discovery_connection, chain_id)
             .await
             .map_err(|error| {
-                IngestError::with_source(
-                    ErrorKind::DataIntegrity,
+                IngestError::database_anyhow(
                     format!(
                         "failed to load discovery-derived ingest intervals for chain {chain_id}"
                     ),

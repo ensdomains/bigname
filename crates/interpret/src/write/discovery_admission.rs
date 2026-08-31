@@ -9,7 +9,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use crate::{InterpretError, Result};
 
 type SnapshotRow = (String, String, String, String, String, i64, i64);
-type CursorRow = (String, i64, i64, Option<i64>);
+type CursorRow = (String, String, i64, i64, Option<i64>);
 
 pub(crate) async fn finalize_empty_completion(pool: &PgPool, chain_id: &str) -> Result<()> {
     let mut transaction = pool.begin().await.map_err(|error| {
@@ -96,7 +96,7 @@ pub(super) async fn finalize(
     }
 
     let cursors: Vec<CursorRow> = sqlx::query_as(
-        "SELECT source_key, start_block_number, next_block_number,
+        "SELECT source_key, source_kind, start_block_number, next_block_number,
                 last_processed_block_number
          FROM ingest_cursors
          WHERE chain_id = $1
@@ -108,12 +108,14 @@ pub(super) async fn finalize(
     .map_err(|error| {
         InterpretError::database("failed to load completed source intake coverage", error)
     })?;
-    let readable_through: Option<i64> = sqlx::query_scalar(
+    let (readable_through, live_handoff): (Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT COALESCE(
              (SELECT latest_block_number FROM chain_heads WHERE chain_id = $1),
              (SELECT current_block_number FROM chain_phase_state
               WHERE chain_id = $1 AND phase_name = 'ingest')
-         )",
+         ),
+         (SELECT live_handoff_block_number FROM chain_phase_state
+          WHERE chain_id = $1 AND phase_name = 'ingest')",
     )
     .bind(chain_id)
     .fetch_one(&mut **transaction)
@@ -121,7 +123,7 @@ pub(super) async fn finalize(
     .map_err(|error| {
         InterpretError::database("failed to load readable retained intake extent", error)
     })?;
-    let completed = completed_source_intervals(cursors, readable_through, chain_id)?;
+    let completed = completed_source_intervals(cursors, readable_through, live_handoff, chain_id)?;
 
     let mut earliest_repair = None;
     for (key, desired) in &coverage.discovered {
@@ -171,13 +173,34 @@ pub(super) async fn finalize(
 fn completed_source_intervals(
     cursors: Vec<CursorRow>,
     readable_through: Option<i64>,
+    live_handoff: Option<i64>,
     chain_id: &str,
 ) -> Result<Vec<DiscoveryWatchInterval>> {
     let Some(readable_through) = readable_through else {
         return Ok(Vec::new());
     };
+    let live_source = if live_handoff.is_some_and(|handoff| readable_through > handoff) {
+        let chain_providers = cursors
+            .iter()
+            .filter(|(_, kind, _, _, _)| !is_coinbase_source(kind))
+            .collect::<Vec<_>>();
+        let [(_, _, _, _, Some(last))] = chain_providers.as_slice() else {
+            return Err(InterpretError::data_integrity(format!(
+                "cannot identify exactly one Live-followed source for chain {chain_id}"
+            )));
+        };
+        let handoff = live_handoff.expect("checked Live suffix");
+        if *last != handoff {
+            return Err(InterpretError::data_integrity(format!(
+                "Live-followed source for chain {chain_id} ends at {last} instead of its Ingest handoff {handoff}"
+            )));
+        }
+        Some(chain_providers[0].0.clone())
+    } else {
+        None
+    };
     let mut intervals = Vec::new();
-    for (source, start, next, last) in cursors {
+    for (source, _, start, next, last) in cursors {
         let Some(last) = last else {
             continue;
         };
@@ -186,12 +209,23 @@ fn completed_source_intervals(
                 "ingest cursor {source} for chain {chain_id} has next block {next} but last processed block {last}"
             )));
         }
-        let to = last.min(readable_through);
+        let to = if live_source.as_deref() == Some(source.as_str()) {
+            readable_through
+        } else {
+            last.min(readable_through)
+        };
         if start <= to {
             intervals.push(DiscoveryWatchInterval { from: start, to });
         }
     }
     Ok(intervals)
+}
+
+fn is_coinbase_source(kind: &str) -> bool {
+    matches!(
+        kind.trim().to_ascii_lowercase().replace('-', "_").as_str(),
+        "coinbase" | "coinbase_sql" | "cdp_sql"
+    )
 }
 
 fn earliest_completed_overlap(
@@ -303,6 +337,26 @@ mod tests {
                 ]
             ),
             None
+        );
+    }
+
+    #[test]
+    fn live_suffix_extends_only_the_chain_provider_source() {
+        assert_eq!(
+            completed_source_intervals(
+                vec![
+                    ("bulk".into(), "coinbase-sql".into(), 0, 11, Some(10)),
+                    ("rpc".into(), "drpc".into(), 10, 11, Some(10)),
+                ],
+                Some(20),
+                Some(10),
+                "base-mainnet",
+            )
+            .expect("one chain provider identifies the contiguous Live suffix"),
+            [
+                DiscoveryWatchInterval { from: 0, to: 10 },
+                DiscoveryWatchInterval { from: 10, to: 20 },
+            ]
         );
     }
 }

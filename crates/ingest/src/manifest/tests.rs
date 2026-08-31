@@ -199,12 +199,24 @@ fn only_existing_generic_resolver_topics_are_selected_without_addresses() {
 }
 
 #[tokio::test]
-async fn runtime_filter_keeps_approvals_role_and_interval_scoped() -> AnyResult<()> {
+async fn runtime_filter_keeps_approvals_role_scoped_on_discovered_resolvers() -> AnyResult<()> {
     let database = range_database("ingest_address_scoped_approvals").await?;
     let chain_id = "approval-watch-chain";
     let allowed = "0x00000000000000000000000000000000000000aa";
     let old_generation = "0x00000000000000000000000000000000000000bb";
     let foreign = "0x00000000000000000000000000000000000000cc";
+    let approval_for_all = format!(
+        "{}",
+        alloy_primitives::keccak256("ApprovalForAll(address,address,bool)".as_bytes())
+    );
+    let approved = format!(
+        "{}",
+        alloy_primitives::keccak256("Approved(address,bytes32,address,bool)".as_bytes())
+    );
+    let name_changed = format!(
+        "{}",
+        alloy_primitives::keccak256("NameChanged(bytes32,string)".as_bytes())
+    );
     let payload = json!({
         "manifest_version": 1,
         "namespace": "ens",
@@ -240,7 +252,28 @@ async fn runtime_filter_keeps_approvals_role_and_interval_scoped() -> AnyResult<
                 "emitter_roles":["public_resolver"],
                 "normalized_events":[]
             }
-        ], "calls":[]}
+        ], "calls":[]},
+        "_bigname_compiled_watch": [
+            {"emitter":{"kind":"all"}, "topic0":name_changed, "start":0},
+            {
+                "emitter":{
+                    "kind":"address",
+                    "family":ENS_V1_RESOLVER_SOURCE_FAMILY,
+                    "address":allowed
+                },
+                "topic0":approval_for_all,
+                "start":10
+            },
+            {
+                "emitter":{
+                    "kind":"address",
+                    "family":ENS_V1_RESOLVER_SOURCE_FAMILY,
+                    "address":allowed
+                },
+                "topic0":approved,
+                "start":10
+            }
+        ]
     });
     let manifest_id: i64 = sqlx::query_scalar(
         "INSERT INTO manifest_versions (
@@ -318,23 +351,73 @@ async fn runtime_filter_keeps_approvals_role_and_interval_scoped() -> AnyResult<
         .await?;
     }
 
+    let source_manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version,
+             file_path, manifest_payload
+         ) VALUES (
+             1, 'ens', 'ens_v1_registry_l1', $1, 'fixture', 'active',
+             'ensip15@ens-normalize-0.1.1', 'tests/approval-source.toml', $2
+         ) RETURNING manifest_id",
+    )
+    .bind(chain_id)
+    .bind(json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_registry_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": {"events": [], "calls": []},
+        "_bigname_compiled_watch": []
+    }))
+    .fetch_one(database.pool())
+    .await?;
+    let source_instance = insert_contract_instance(database.pool(), chain_id).await?;
+    let discovered_instance = insert_contract_instance(database.pool(), chain_id).await?;
+    for (instance, address) in [(source_instance, "0x01"), (discovered_instance, foreign)] {
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address, active_from_block_number,
+                 source_manifest_id, provenance
+             ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+        )
+        .bind(instance)
+        .bind(chain_id)
+        .bind(address)
+        .bind(source_manifest_id)
+        .execute(database.pool())
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, canonicality_state
+         ) VALUES (
+             $1, 'resolver', $2, $3, 'event', 'reachable_from_root', $4,
+             5, 'fixture-block-5', 'canonical'
+         )",
+    )
+    .bind(chain_id)
+    .bind(source_instance)
+    .bind(discovered_instance)
+    .bind(source_manifest_id)
+    .execute(database.pool())
+    .await?;
+
     let filter = load_persisted_watch_filter(database.pool(), chain_id, 0, 20).await?;
-    let approval_for_all = format!(
-        "{}",
-        alloy_primitives::keccak256("ApprovalForAll(address,address,bool)".as_bytes())
-    );
-    let approved = format!(
-        "{}",
-        alloy_primitives::keccak256("Approved(address,bytes32,address,bool)".as_bytes())
-    );
-    let name_changed = format!(
-        "{}",
-        alloy_primitives::keccak256("NameChanged(bytes32,string)".as_bytes())
-    );
     assert!(!filter.includes(allowed, &approval_for_all, 9));
     assert!(filter.includes(allowed, &approval_for_all, 10));
     assert!(filter.includes(allowed, &approved, 10));
     assert!(!filter.includes(old_generation, &approval_for_all, 10));
+    assert!(!filter.includes(foreign, &approval_for_all, 10));
     assert!(!filter.includes(foreign, &approved, 10));
     assert!(filter.includes(foreign, &name_changed, 10));
     for query in filter.queries().iter().filter(|query| {

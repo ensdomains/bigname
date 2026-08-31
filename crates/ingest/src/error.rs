@@ -50,19 +50,32 @@ impl IngestError {
     }
 
     pub fn database(message: impl Into<String>, error: sqlx::Error) -> Self {
-        let kind = match &error {
-            sqlx::Error::Database(database)
-                if database.code().is_some_and(|code| code.starts_with("23")) =>
-            {
-                ErrorKind::DataIntegrity
-            }
-            _ => ErrorKind::Transient,
-        };
+        let kind = database_error_kind(&error);
+        Self::with_source(kind, message, error)
+    }
+
+    pub fn database_anyhow(message: impl Into<String>, error: anyhow::Error) -> Self {
+        let kind = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<sqlx::Error>())
+            .map_or(ErrorKind::DataIntegrity, database_error_kind);
         Self::with_source(kind, message, error)
     }
 
     pub const fn kind(&self) -> ErrorKind {
         self.kind
+    }
+}
+
+fn database_error_kind(error: &sqlx::Error) -> ErrorKind {
+    if matches!(
+        error,
+        sqlx::Error::Database(database)
+            if database.code().is_some_and(|code| code.starts_with("23"))
+    ) {
+        ErrorKind::DataIntegrity
+    } else {
+        ErrorKind::Transient
     }
 }
 
@@ -85,3 +98,30 @@ impl Error for IngestError {
 }
 
 pub type Result<T> = std::result::Result<T, IngestError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anyhow_wrapped_transient_database_error_stays_retryable() {
+        let error = anyhow::Error::new(sqlx::Error::PoolTimedOut)
+            .context("injected discovery watch database timeout");
+        let classified = IngestError::database_anyhow(
+            "failed to load discovery-derived ingest intervals",
+            error,
+        );
+
+        assert_eq!(classified.kind(), ErrorKind::Transient);
+    }
+
+    #[test]
+    fn anyhow_without_a_database_error_stays_data_integrity() {
+        let classified = IngestError::database_anyhow(
+            "failed to load discovery-derived ingest intervals",
+            anyhow::anyhow!("invalid discovery watch payload"),
+        );
+
+        assert_eq!(classified.kind(), ErrorKind::DataIntegrity);
+    }
+}
