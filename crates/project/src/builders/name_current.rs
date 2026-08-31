@@ -624,7 +624,7 @@ pub(super) async fn build(
           AND surface.raw_name <> ''
           AND NOT COALESCE(
               registration_current.event_kind = 'RegistrationReleased' AND registration_current.after_state ->> 'source_event' = 'RegistryPathExpired' AND registration_current.after_state ->> 'derived_from' = 'interpreter_state' AND registration_current.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND
-              selected_authority.selected_authority_arm = 'ens_v2' AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id), FALSE
+              (selected_authority.selected_authority_arm = 'ens_v2' OR (selected_authority.selected_authority_arm IS NULL AND selected_authority.unsupported_reason = 'current_authority_not_projected')) AND (binding.resource_id IS NULL OR registration_current.resource_id = binding.resource_id), FALSE
           )
         ORDER BY surface.logical_name_id
         "#,
