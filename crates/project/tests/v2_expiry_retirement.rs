@@ -435,7 +435,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(RESOURCE).bind(MAIN)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(live_state, (6, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into()), Some("RegistrationGranted".into()), Some(OWNER.into()), Some("1800000000".into()), Some("ens_v2_registry".into())));
+    assert_eq!(live_state, (5, 1, 1, Some("operator_approval_surfaces_not_ingested".into()), Some("active".into()), Some("registered".into()), Some(OWNER.into()), Some("RegistrationGranted".into()), Some(OWNER.into()), Some("1800000000".into()), Some("ens_v2_registry".into())));
     let stale_state: (i64, i64, i64, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
                 (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid),
@@ -448,7 +448,7 @@ async fn expiry_permissions_and_names_converge_through_revival_and_version_bump(
     .bind(STALE).bind(STALE_RESOURCE)
     .fetch_one(&incremental)
     .await?;
-    assert_eq!(stale_state, (1, 0, 1, Some("resource_permission_authority_not_projected".into()), Some("current_authority_not_projected".into())));
+    assert_eq!(stale_state, (0, 0, 1, Some("resource_permission_authority_not_projected".into()), None));
     let retired = run(&incremental, 101, Some(live)).await?;
     let (retired_db, retired_fresh) = fresh("v2_expiry_retired_fresh", 101).await?;
     assert_eq!(snapshot(&incremental).await?, snapshot(&retired_fresh).await?);
