@@ -38,6 +38,7 @@ pub(crate) use build::{
 
 pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
 const VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON: &str = "verified_answer_stale_for_snapshot";
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 #[cfg(test)]
 pub(crate) mod auto_fallback_test_hooks {
@@ -218,6 +219,8 @@ pub(crate) async fn get_name_records(
                 )?,
             ),
             RequestSource::Verified => {
+                let admit_null_resolver_discovery =
+                    ens_universal_resolver_discovery_candidate(&row);
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
@@ -226,6 +229,10 @@ pub(crate) async fn get_name_records(
                     &mut selected_snapshot,
                 )
                 .await?;
+                ensure_verified_route_matches_admission(
+                    &verified_lookup,
+                    admit_null_resolver_discovery,
+                )?;
                 (
                     Source::Verified,
                     build_verified_name_records(
@@ -258,9 +265,11 @@ pub(crate) async fn get_name_records(
                         records,
                         admit_null_resolver_discovery,
                     )?;
-                    if namespace == BASENAMES_NAMESPACE && !fallback_records.is_empty() {
-                        #[cfg(test)]
+                    #[cfg(test)]
+                    if !fallback_records.is_empty() {
                         auto_fallback_test_hooks::run(&state.pool).await?;
+                    }
+                    if namespace == BASENAMES_NAMESPACE && !fallback_records.is_empty() {
                         (selected_snapshot, row, record_inventory) =
                             load_name_records_snapshot_state(
                                 &state,
@@ -301,6 +310,10 @@ pub(crate) async fn get_name_records(
                         &mut selected_snapshot,
                     )
                     .await?;
+                    ensure_verified_route_matches_admission(
+                        &verified_lookup,
+                        admit_null_resolver_discovery,
+                    )?;
                     build_auto_name_records(
                         &row,
                         record_inventory.as_ref(),
@@ -322,6 +335,32 @@ pub(crate) async fn get_name_records(
         page: None,
         meta,
     }))
+}
+
+fn ensure_verified_route_matches_admission(
+    verified_lookup: &Option<VerifiedRecordLookup>,
+    admit_null_resolver_discovery: bool,
+) -> V2Result<()> {
+    if let Some(VerifiedRecordLookup::Found { response }) = verified_lookup {
+        ensure_executed_route_matches_admission(
+            &response.resolver_address,
+            admit_null_resolver_discovery,
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_executed_route_matches_admission(
+    resolver_address: &str,
+    admit_null_resolver_discovery: bool,
+) -> V2Result<()> {
+    let executed_null_resolver_discovery = resolver_address.eq_ignore_ascii_case(ZERO_ADDRESS);
+    if admit_null_resolver_discovery != executed_null_resolver_discovery {
+        return Err(V2Error::stale(
+            "name records changed while preparing verified fallback; retry the request",
+        ));
+    }
+    Ok(())
 }
 
 async fn load_name_records_snapshot_state(
@@ -528,4 +567,19 @@ fn records_include_inventory(include: &[String]) -> V2Result<bool> {
         }
     }
     Ok(include_inventory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ZERO_ADDRESS, ensure_executed_route_matches_admission};
+
+    #[test]
+    fn verified_route_guard_rejects_disagreement_in_both_directions() {
+        let direct_resolver = "0x1000000000000000000000000000000000000001";
+
+        assert!(ensure_executed_route_matches_admission(direct_resolver, true).is_err());
+        assert!(ensure_executed_route_matches_admission(ZERO_ADDRESS, false).is_err());
+        assert!(ensure_executed_route_matches_admission(direct_resolver, false).is_ok());
+        assert!(ensure_executed_route_matches_admission(ZERO_ADDRESS, true).is_ok());
+    }
 }

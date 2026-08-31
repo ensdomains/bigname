@@ -1040,6 +1040,98 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
 }
 
 #[tokio::test]
+async fn v2_null_resolver_auto_rejects_direct_route_selected_after_admission() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    let execution_block_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let lookup_pool = database.lookup_pool().await?;
+    let namehash = seed_schema_v2_ens_record_lookup(
+        &lookup_pool,
+        21_000_003,
+        execution_block_hash,
+        "2026-04-17T00:00:03Z",
+        "0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+    let logical_name_id = format!("ens:{namehash}");
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |row| {
+            row.namehash = namehash;
+            row.declared_summary["resolver"] = json!({"chain_id":null,"address":null});
+            row.declared_summary["topology"]["resolver_path"][0]["address"] = Value::Null;
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+        |_, _, _| {},
+    )
+    .await?;
+
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_basenames_l1_addr60_response(
+            "0x0000000000000000000000000000000000000e0e",
+        ),
+    ])
+    .await?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={rpc_url}"),
+        ])?)
+        .await?;
+    let (_guard, control) =
+        crate::v2::name_records_auto_fallback_test_hooks::install(&database.pool).await?;
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/names/Alice.eth/records?source=auto&keys=addr:60")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    let direct_resolver = "0x1000000000000000000000000000000000000001";
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             jsonb_set(declared_summary, '{resolver}', $2),
+             '{topology,resolver_path,0,address}', $3
+         )
+         WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .bind(json!({"chain_id":"ethereum-mainnet","address":direct_resolver}))
+    .bind(json!(direct_resolver))
+    .execute(&lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("v2 discovery-route mismatch request task panicked")?
+        .context("v2 discovery-route mismatch request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert!(payload.get("data").is_none());
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 1);
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_default_source_matches_explicit_indexed() -> Result<()> {
     let default_payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
     let indexed_payload = v2_name_record_payload("/v2/names/Alice.eth?source=indexed").await?;
