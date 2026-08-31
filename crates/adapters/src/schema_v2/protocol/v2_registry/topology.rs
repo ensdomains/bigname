@@ -11,7 +11,7 @@ use anyhow::Context;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-pub(super) fn append_v2_name_transitions(
+#[rustfmt::skip] pub(super) fn append_v2_name_transitions(
     output: &mut Interpreted,
     transitions: Vec<V2NameTransition>,
     raw: &crate::schema_v2::RawLogInput,
@@ -91,7 +91,7 @@ pub(super) fn append_v2_name_transitions(
                 namehash: current.namehash.clone(),
                 source_kind: format!("{source_event}_registry_suffix"),
             });
-            if !identity_reassertion && source_event != "LabelReserved" {
+            if !identity_reassertion && (source_event != "LabelReserved" || transition.registration.is_none()) {
                 let id = &current.logical_name_id;
                 let resource = transition.resource_id;
                 emit(output, &transition, id, resource, source_event);
@@ -177,7 +177,7 @@ pub(super) fn append_v2_name_transitions(
             let resource_id = Some(resource_id);
             let id = &current.logical_name_id;
             emit(output, &transition, id, resource_id, source_event);
-        } else if !identity_reassertion && source_event != "LabelReserved" {
+        } else if !identity_reassertion && (source_event != "LabelReserved" || transition.registration.is_none()) {
             let resource_id = transition.resource_id;
             let id = &current.logical_name_id;
             emit(output, &transition, id, resource_id, source_event);
@@ -330,7 +330,7 @@ fn append_removed_name(
     Ok(())
 }
 
-fn emit(
+#[rustfmt::skip] fn emit(
     output: &mut Interpreted,
     transition: &V2NameTransition,
     logical_name_id: &str,
@@ -384,7 +384,7 @@ fn emit(
             }),
             state_scope: transition_scope(transition, source_event),
         });
-        output.events.push(EventDraft {
+        if source_event != "LabelRegistered" { output.events.push(EventDraft {
             event_kind: "AuthorityTransferred".to_owned(),
             logical_name_id: Some(logical_name_id.to_owned()),
             resource_id,
@@ -401,8 +401,8 @@ fn emit(
                 "upstream_resource":upstream_resource,
             }),
             state_scope: transition_scope(transition, source_event),
-        });
-        if !expiry.is_null() {
+        }); }
+        if source_event != "LabelRegistered" && !expiry.is_null() {
             output.events.push(EventDraft {
                 event_kind: "ExpiryChanged".to_owned(),
                 logical_name_id: Some(logical_name_id.to_owned()),
@@ -442,12 +442,12 @@ fn emit(
                 "token_id":transition.token_id,
                 "current_token_id":transition.token_id,
                 "upstream_resource":upstream_resource,
-                "reservation_resource":true,
+                "reservation_resource":resource_id.is_some(),
                 "registry_contract_instance_id":registry_instance,
             }),
             state_scope: transition_scope(transition, source_event),
         });
-        output.events.push(EventDraft {
+        if source_event != "LabelReserved" { output.events.push(EventDraft {
             event_kind: "ExpiryChanged".to_owned(),
             logical_name_id: Some(logical_name_id.to_owned()),
             resource_id,
@@ -464,7 +464,7 @@ fn emit(
                 "upstream_resource":upstream_resource,
             }),
             state_scope: transition_scope(transition, source_event),
-        });
+        }); }
     }
     for (event_kind, field, target) in [
         (

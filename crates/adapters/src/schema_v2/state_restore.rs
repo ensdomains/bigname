@@ -5,7 +5,7 @@ mod v1_transfer;
 pub(super) fn rebuild_v2_indexes(state: &mut State) {
     state.rebuild_v2_token_indexes();
 }
-pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
+#[rustfmt::skip] pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
     if event.source_family == "ens_v2_resolver_l1" && event.event_kind == "PreimageObserved" {
         if event
             .after_state
@@ -123,7 +123,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             if expiry_retirement_is_projection_only(event)
                 && let Some(token) = token
             {
-                state.mark_v2_expiry_retirement(emitter, token, event.logical_name_id.is_none());
+                state.mark_v2_expiry_retirement(emitter, token, event.after_state.get("expiry").and_then(parse_u64).zip(event.block_timestamp.map(time::OffsetDateTime::unix_timestamp)).is_some_and(|(expiry, timestamp)| u64::try_from(timestamp).is_ok_and(|timestamp| expiry <= timestamp)));
             }
             if !matches!(
                 event
@@ -161,7 +161,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             else {
                 return;
             };
-            state.set_v2_expiry(emitter, token, expiry);
+            state.set_v2_expiry(emitter, token, expiry); if event.block_timestamp.is_some_and(|timestamp| super::state::v2_expiry_is_live(Some(expiry), timestamp.unix_timestamp())) { state.clear_v2_expiry_retirement(emitter, token); }
         }
         "ParentChanged" => {
             let Some(raw_label) = raw_label(&event.after_state) else {
@@ -176,9 +176,8 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
         }
         _ => {}
     }
-    if let (Some(token), Some(logical_name_id)) = (token, event.logical_name_id.as_deref()) {
-        state.remember_v2_logical_name(emitter, token, logical_name_id);
-    }
+    let displaced_regeneration_event = event.after_state.get("source_event").and_then(Value::as_str) == Some("TokenRegenerated") && (event.event_kind == "SurfaceUnbound" || event.event_kind == "RegistrationReleased" && event.after_state.get("terminal_reason").and_then(Value::as_str) == Some("registry_name_binding_changed"));
+    if !displaced_regeneration_event && let (Some(token), Some(logical_name_id)) = (token, event.logical_name_id.as_deref()) { state.remember_v2_logical_name(emitter, token, logical_name_id); }
 }
 fn expiry_retirement_is_projection_only(event: &PriorEventInput) -> bool {
     [

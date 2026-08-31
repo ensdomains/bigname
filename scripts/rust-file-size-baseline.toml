@@ -17,7 +17,7 @@ justification = "Manifest state, address-epoch persistence, and derived-phase in
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v2_registry.rs"
-loc = 665
+loc = 663
 justification = "ENSv2 registry dispatch keeps raw registration and reservation admission adjacent to retained topology refresh while expiry lifecycle helpers live in the bounded sibling module."
 
 [[files]]
@@ -27,7 +27,7 @@ justification = "ENSv2 topology removal and rebound groups remain adjacent while
 
 [[files]]
 path = "crates/adapters/src/schema_v2/state_restore.rs"
-loc = 616
+loc = 615
 justification = "Normalized-event restore keeps destructive lifecycle mutations and projection-only ENSv2 expiry deltas in one event-kind fold so cold restore cannot silently diverge from live interpretation."
 
 [[files]]

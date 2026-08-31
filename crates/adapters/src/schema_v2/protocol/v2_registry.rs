@@ -539,9 +539,7 @@ fn label_event(
         };
         let mut retirement =
             topology::boundary_expiration(transition, raw.block_timestamp.unix_timestamp())?;
-        let resource_only =
-            matches!(retirement.events.first(), Some(event) if event.logical_name_id.is_none());
-        state.mark_v2_expiry_retirement(&raw.emitting_address, &token_id, resource_only);
+        state.mark_v2_expiry_retirement(&raw.emitting_address, &token_id, true);
         retirement.boundary_events.append(&mut retirement.events);
         output.append(&mut retirement);
     }

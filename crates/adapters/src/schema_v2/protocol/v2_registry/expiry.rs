@@ -16,7 +16,7 @@ pub(super) fn resource_revival(
 ) -> Option<EventDraft> {
     (after.resource_id.is_some()
         && after.registration.is_none()
-        && before.last_logical_name_id.is_none()
+        && before.resource_expiry_retirement_emitted
         && revived
         && transitions
             .iter()

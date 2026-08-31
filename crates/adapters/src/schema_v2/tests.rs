@@ -8533,6 +8533,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
                 &["registry"],
                 &["RegistrationGranted"],
             ),
+            ("LabelReserved", "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)", &["registry"], &["RegistrationReserved"]),
             ("TokenResource", "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)", &["registry"], &["TokenResourceLinked"]),
             (
                 "SubregistryUpdated",
@@ -8625,6 +8626,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
                 CHILD,
             ),
             raw_at(with_topic0(raw_v2_registry::RawLabelRegistered { tokenId: versioned_token_bytes(b"c\0d", 1), labelHash: keccak256(b"c\0d"), label: b"c\0d".to_vec().into(), owner, expiry: 100, sender }.encode_log_data(), v2_registry::LabelRegistered::SIGNATURE_HASH), 5, 0, CHILD),
+            raw_at(v2_registry::LabelReserved { tokenId: versioned_token_bytes(b"e\0f", 1), labelHash: keccak256(b"e\0f"), label: "e\0f".to_owned(), expiry: 100, sender }.encode_log_data(), 6, 0, CHILD),
         ],
     })?;
     let shadow_namehash = super::common::namehash_raw(
@@ -8651,7 +8653,10 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
         None,
     )?;
     let shadow_id = format!("ens:{shadow_namehash}");
-    assert_eq!(first.normalized_events.iter().filter(|event| event.event_kind == "RegistrationGranted" && event.logical_name_id.as_ref() == Some(&format!("ens:{}", super::common::namehash_raw([b"c\0d".as_slice(), b"sub".as_slice(), b"eth".as_slice()].into_iter())))).count(), 1);
+    let direct_shadow_id = format!("ens:{}", super::common::namehash_raw([b"c\0d".as_slice(), b"sub".as_slice(), b"eth".as_slice()].into_iter())); let reserved_shadow_id = format!("ens:{}", super::common::namehash_raw([b"e\0f".as_slice(), b"sub".as_slice(), b"eth".as_slice()].into_iter()));
+    assert_eq!(first.normalized_events.iter().filter(|event| event.logical_name_id.as_deref() == Some(direct_shadow_id.as_str())).map(|event| event.event_kind.as_str()).collect::<Vec<_>>(), ["RegistrationGranted", "PreimageObserved"]);
+    assert_eq!(first.normalized_events.iter().filter(|event| event.logical_name_id.as_deref() == Some(reserved_shadow_id.as_str())).map(|event| event.event_kind.as_str()).collect::<Vec<_>>(), ["RegistrationReserved", "PreimageObserved"]);
+    assert_eq!(first.normalized_events.iter().find(|event| event.event_kind == "RegistrationReserved" && event.logical_name_id.as_deref() == Some(reserved_shadow_id.as_str())).and_then(|event| event.after_state.get("reservation_resource")).and_then(serde_json::Value::as_bool), Some(false));
     assert!(
         boundary
             .binding_closures
@@ -8683,6 +8688,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
         Some(session),
     )?;
     assert!(revived.normalized_events.iter().any(|event| event.event_kind == "RegistrationGranted" && event.logical_name_id.as_deref() == Some(shadow_id.as_str()) && event.resource_id.is_some()));
+    assert!(revived.normalized_events.iter().any(|event| event.event_kind == "RegistrationReserved" && event.logical_name_id.as_deref() == Some(reserved_shadow_id.as_str()) && event.resource_id.is_none()));
     Ok(())
 }
 
@@ -10057,9 +10063,19 @@ fn immediate_named_reservation_expiry_replays_across_physical_batches() -> anyho
     let (split, _) = interpret_test_batch_incremental(contested_claim_path_input(suffix.clone(), Vec::new(), (7..=10).map(test_block).collect())?, Some(session))?;
     let prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &(2..=6).map(test_block).collect::<Vec<_>>())?;
     let restored = interpret_test_batch(contested_claim_path_input(suffix, prior, (7..=10).map(test_block).collect())?)?;
-    let releases = |output: &BatchOutput| output.normalized_events.iter().filter(|event| event.block_number == Some(10) && event.event_kind == "RegistrationReleased" && event.after_state["source_event"] == "RegistryPathExpired").count();
-    assert_eq!((releases(&full), releases(&split), releases(&restored)), (0, 0, 0));
+    let releases = |output: &BatchOutput| output.normalized_events.iter().filter(|event| event.block_number == Some(10) && event.event_kind == "RegistrationReleased" && event.after_state["source_event"] == "RegistryPathExpired").count(); let renewals = |output: &BatchOutput| output.normalized_events.iter().filter(|event| event.block_number == Some(8) && event.event_kind == "RegistrationRenewed" && event.after_state["revived_from_expiry"] == true).count();
+    assert_eq!((renewals(&full), renewals(&split), renewals(&restored)), (1, 1, 1)); assert_eq!((releases(&full), releases(&split), releases(&restored)), (1, 1, 1));
     assert_eq!(split, restored);
+    Ok(())
+}
+
+#[test]
+#[rustfmt::skip]
+fn detached_formerly_named_reservation_renewal_restates_its_resource_lifecycle() -> anyhow::Result<()> {
+    const CLAIM_REGISTRY: &str = "0x0000000000000000000000000000000000000059"; let sender: Address = "0x0000000000000000000000000000000000000002".parse()?; let token = versioned_token("beta", 0); let mut prefix = contested_claim_path_logs(100)?; prefix.extend([raw_at(v2_registry::LabelReserved { tokenId: token, labelHash: keccak256(b"beta"), label: "beta".to_owned(), expiry: 8, sender }.encode_log_data(), 6, 0, CLAIM_REGISTRY), raw_at(v2_registry::ParentUpdated { parent: Address::ZERO, label: "eth".to_owned(), sender }.encode_log_data(), 7, 0, CLAIM_REGISTRY)]); let suffix = vec![raw_at(v2_registry::ExpiryUpdated { tokenId: token, newExpiry: 8, sender }.encode_log_data(), 9, 0, CLAIM_REGISTRY), raw_at(v2_registry::ExpiryUpdated { tokenId: token, newExpiry: 20, sender }.encode_log_data(), 10, 0, CLAIM_REGISTRY)];
+    let (first, session) = interpret_test_batch_incremental(contested_claim_path_input(prefix, Vec::new(), (1..=8).map(test_block).collect())?, None)?; let (live, _) = interpret_test_batch_incremental(contested_claim_path_input(suffix.clone(), Vec::new(), vec![test_block(9), test_block(10)])?, Some(session))?;
+    let prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &(1..=8).map(test_block).collect::<Vec<_>>())?; let restored = interpret_test_batch(contested_claim_path_input(suffix, prior, vec![test_block(9), test_block(10)])?)?; assert_eq!(live, restored); let release = first.normalized_events.iter().find(|event| event.block_number == Some(8) && event.event_kind == "RegistrationReleased" && event.after_state["source_event"] == "RegistryPathExpired" && event.logical_name_id.is_none()).expect("detached own-expiry release");
+    assert_eq!(live.normalized_events.iter().filter(|event| event.event_kind == "RegistrationRenewed" && event.resource_id == release.resource_id && event.logical_name_id.is_none() && event.after_state["revived_from_expiry"] == true && event.after_state["status"] == "reserved" && event.after_state["reservation_resource"] == true).map(|event| event.block_number).collect::<Vec<_>>(), [Some(10)]);
     Ok(())
 }
 
