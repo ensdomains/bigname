@@ -77,7 +77,7 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
                 &raw_label,
                 expiry,
                 (event.event_kind == "RegistrationGranted").then(|| event.after_state.clone()),
-            );
+            ); if event.block_timestamp.is_some_and(|timestamp| super::state::v2_expiry_is_live(Some(expiry), timestamp.unix_timestamp())) { state.clear_v2_expiry_retirement(emitter, token, false); }
             state.restore_v2_unbound_resource(emitter, token, event);
         }
         "TokenResourceLinked" => {
@@ -161,7 +161,7 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
             else {
                 return;
             };
-            state.set_v2_expiry(emitter, token, expiry); if event.block_timestamp.is_some_and(|timestamp| super::state::v2_expiry_is_live(Some(expiry), timestamp.unix_timestamp())) { state.clear_v2_expiry_retirement(emitter, token); }
+            state.set_v2_expiry(emitter, token, expiry); if event.block_timestamp.is_some_and(|timestamp| super::state::v2_expiry_is_live(Some(expiry), timestamp.unix_timestamp())) { state.clear_v2_expiry_retirement(emitter, token, true); }
         }
         "ParentChanged" => {
             let Some(raw_label) = raw_label(&event.after_state) else {

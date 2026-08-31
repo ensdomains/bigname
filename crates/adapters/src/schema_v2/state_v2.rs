@@ -301,7 +301,7 @@ impl State {
         self.replace_v2_expiry_index(&key, previous_expiry, Some(expiry));
         self.mark_v2_token_component_dirty(&key);
     }
-    #[rustfmt::skip]    pub(in crate::schema_v2) fn clear_v2_expiry_retirement(&mut self, emitter: &str, token_id: &str) { if let Some(entry) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) && entry.resource_expiry_retirement_emitted { entry.expiry_retirement_emitted = false; entry.resource_expiry_retirement_emitted = false; } }
+    #[rustfmt::skip]    pub(in crate::schema_v2) fn clear_v2_expiry_retirement(&mut self, emitter: &str, token_id: &str, preserve_ancestor_expiry: bool) { if let Some(entry) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) && (!preserve_ancestor_expiry || entry.resource_expiry_retirement_emitted) { entry.expiry_retirement_emitted = false; entry.resource_expiry_retirement_emitted = false; } }
     pub(in crate::schema_v2) fn transfer_v2_registrant(
         &mut self,
         emitter: &str,
