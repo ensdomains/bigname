@@ -61,6 +61,8 @@ can affect a watch plan.
 The loader also rejects two active manifest versions on the same chain when both declare the same address as roots or both declare it as contracts, their open-ended `start_block` ranges overlap, and either family feeds manifest-declared event data into `PreimageObserved` rows produced directly from block logs. Those families are `ens_v1_registrar_l1`, `basenames_base_registrar`, `ens_v1_wrapper_l1`, `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, `ens_v2_resolver_l1`, and `ens_v2_migration_l1`. This check does not compare a root declaration with a contract declaration or inspect `correlation_addresses`. Two roots or two contracts may still share an address when neither family is in that list; this is why the shared `l1_resolver` declaration in `basenames_l1_compat` and `basenames_execution` is accepted.
 
 Each `[[roots]]` and `[[contracts]]` entry may declare an optional `start_block`.
+When resolver classification sees repeated declarations for one address, it selects the matching
+entry with the greatest `start_block` at or below the target; equal starts select the later manifest-array entry.
 `start_block` is the inclusive first historical block for that target. Omitted
 means deployment provenance is unknown, and manifest storage preserves it as
 null. Runtime watch and Interpret selection use block zero as its conservative
