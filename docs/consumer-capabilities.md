@@ -11,7 +11,7 @@ Wire format and route details live in [`api-v2.md`](api-v2.md) and
 | Lookup | `POST /v2/lookup`, `GET /v2/status` | Batched name/address lookup and indexing readiness. |
 | Product reads | `/v2/names/*`, `/v2/addresses/*`, `/v2/permissions`, `/v2/search`, `/v2/events`, `/v2/resolvers/*`, `/v2/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
 | Diagnostics | `/v2/diagnostics/*` | Coverage, binding, authority, record, manifest, and event inspection. |
-| GraphQL compatibility | `POST /graphql` | The documented narrow subgraph-compatible operations. |
+| GraphQL compatibility | `POST /graphql` | The subgraph-shaped compatibility surface described below. |
 | Operator health | `GET /healthz` | API process, opaque running-database-instance identity, and phase-runner heartbeat readiness. This is not a product route. |
 
 The v1 REST surface has been removed. In particular,
@@ -384,12 +384,60 @@ traffic by omitting or bypassing that phase. Slices 1 and 2 remain
 separately reviewed capabilities but share the deployment boundary above; slice
 3 remains a later consumer capability.
 
-The GraphQL compatibility operations read the schema-v2 current projections
-and preserve the committed Manager response contract. Name inputs are ENS-normalized and
-matched by namehash within the `ens`
-namespace. While the `project` phase has not completed at the newest stored chain head,
-operations that would return projection rows fail rather than serve the prior
-publication. Unsupported name rows are omitted, and
+### GraphQL compatibility
+
+`POST /graphql` exposes a subgraph-shaped `Query` root over the schema-v2
+current projections. The existing `domain`, `domains`,
+`registrationConnection`, and `domainConnection` operations remain available;
+`Domain.normalizedName`, `Domain.tokenId`, and both connection count operations
+are bigname additions to the subgraph-shaped surface. `domain(id:)` accepts an
+`ID!` containing the same ENS name or namehash strings accepted previously.
+
+The schema includes graph-node-compatible `BigInt` and `Bytes` scalars,
+`Block_height`, `_SubgraphErrorPolicy_`, and `_meta`/`_Meta_`/`_Block_` shapes.
+`BigInt` is a decimal string of arbitrary width and `Bytes` is an even-length,
+`0x`-prefixed hexadecimal string. The reference implementation serializes
+these two values as a decimal string and prefixed hex bytes, respectively
+(upstream: .refs/graph_node/graph/src/data/store/scalar/bigint.rs:L297-L318 @ graph_node@aefe1737)
+(upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L16-L18 @ graph_node@aefe1737)
+(upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L41-L51 @ graph_node@aefe1737).
+`Domain.createdAt` and `Domain.expiryDate` use `BigInt`; the existing
+[ENSv2 max-expiry projection narrowing](upstream.md#known-divergences) remains
+in force, so an unrepresentable max expiry is still `null` rather than a
+fabricated decimal value. The comparison shapes follow graph-node's generated
+schema conventions
+(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L27-L28 @ graph_node@aefe1737)
+(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L41-L52 @ graph_node@aefe1737)
+(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L59-L81 @ graph_node@aefe1737).
+`BigDecimal` is not part of this compatibility surface.
+
+Entity operations accept `block: Block_height` and
+`subgraphError: _SubgraphErrorPolicy_! = deny`. The endpoint resolves an omitted block,
+an equal block number or hash, or a satisfied `number_gte` constraint against
+the current [served head](glossary.md#served-head). It rejects historical or future block constraints;
+future capability work may add database-backed historical execution, but no
+serving path filters current rows in memory. The endpoint accepts the `subgraphError`
+argument and emits the graph-node default without changing the existing
+Manager response path. The served-head eligibility gate remains authoritative;
+per-entity `allow`/`deny` behavior belongs to future entity capabilities that can
+define it without inventing in-process filtering.
+
+`_meta(block:)` reports the served head used by entity reads, including its
+number, hash, timestamp, and parent hash. All root fields within one HTTP
+GraphQL request share one request-scoped served-head selection. `deployment` is the interpreter
+[content hash](glossary.md#interpreter-content-hash) for the serving binary.
+When a head is eligible to serve, `hasIndexingErrors` derives from durable
+indexing state: a non-current or rebuilding [Project publication](glossary.md#projection),
+a phase that settled while unconfigured, or an unmet required verification
+floor set it to `true`.
+A failed or otherwise ineligible publication is rejected by the served-head
+gate before `_meta` can be returned. The value is not a constant or a
+network-freshness guess.
+
+Name inputs are ENS-normalized and matched by namehash within the `ens`
+namespace. While the `project` phase has not completed at the newest stored
+chain head, operations that would return projection rows fail rather than
+serve the prior publication. Unsupported name rows are omitted, and
 unsupported record inventories preserve the existing empty record shapes.
 
 All top-level v2 collections use the standard `page` object. Latest-state

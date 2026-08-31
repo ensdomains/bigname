@@ -1519,6 +1519,13 @@ named-resource resolver hint and diverge from a fresh walk
 in as an ignored collision probe). See [interpretation
 replay](storage.md#interpretation-replay).
 
+<a id="served-head"></a>
+**Served head** — the current set of chain positions whose matching Project
+publication has completed and remains eligible for public reads. It is not the
+latest block reported by a provider. A GraphQL HTTP request selects this set
+once for all of its root fields and rechecks the Project publication before
+returning data.
+
 **Shadow** — (1) manifest rollout/capability value: facts may be interpreted
 but general public reads are not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing

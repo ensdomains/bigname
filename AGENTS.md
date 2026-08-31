@@ -50,7 +50,8 @@ The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. A
 - `.refs/ens_rainbow/` — Graph Protocol ENS rainbow-table tooling, labelhash preimage import table-shape evidence only
 - `.refs/ens_subgraph/`, `.refs/ensnode/` — reference indexers for cross-check only
 - `.refs/ens_app_v3/` — ENS app known-resolver metadata for first-party app admission rows only
-- `.refs/ponder/`, `.refs/graph_node/` — reference indexers for chain-intake cross-check only
+- `.refs/ponder/` — reference indexer for chain-intake cross-check only
+- `.refs/graph_node/` — reference indexer for chain-intake and subgraph GraphQL convention cross-check only
 - `.refs/reth/` — reference Ethereum execution client for node-level chain-intake cross-check only
 
 Pins live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`; verify with `scripts/sync-refs --check`. Rotation policy and known divergences live in `docs/upstream.md`.

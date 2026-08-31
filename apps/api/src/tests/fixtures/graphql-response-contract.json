@@ -5,8 +5,8 @@
       "response": {
         "data": {
           "domain": {
-            "createdAt": 1700000000,
-            "expiryDate": 1900000000,
+            "createdAt": "1700000000",
+            "expiryDate": "1900000000",
             "id": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
             "name": "alice.eth",
             "normalizedName": "alice.eth",
@@ -151,7 +151,7 @@
       "response": {
         "data": {
           "domain": {
-            "expiryDate": 1950000000,
+            "expiryDate": "1950000000",
             "owner": {
               "id": "0x000000000000000000000000000000000000000d"
             }
@@ -164,7 +164,7 @@
       "response": {
         "data": {
           "domain": {
-            "createdAt": 0,
+            "createdAt": "0",
             "expiryDate": null,
             "owner": {
               "id": "0x0000000000000000000000000000000000000000"
@@ -326,8 +326,8 @@
       "response": {
         "data": {
           "domain": {
-            "createdAt": 1700000000,
-            "expiryDate": 1900000000,
+            "createdAt": "1700000000",
+            "expiryDate": "1900000000",
             "id": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
             "name": "alice.eth",
             "normalizedName": "alice.eth",
@@ -364,8 +364,8 @@
         "data": {
           "domains": [
             {
-              "createdAt": 1700000000,
-              "expiryDate": 1900000000,
+              "createdAt": "1700000000",
+              "expiryDate": "1900000000",
               "id": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
               "name": "alice.eth",
               "normalizedName": "alice.eth",
@@ -394,8 +394,8 @@
               "tokenId": null
             },
             {
-              "createdAt": 1650000000,
-              "expiryDate": 1800000000,
+              "createdAt": "1650000000",
+              "expiryDate": "1800000000",
               "id": "0xbe11069ec59144113f438b6ef59dd30497769fc2dce8e2b52e3ae71ac18e47c9",
               "name": "bob.eth",
               "normalizedName": "bob.eth",
