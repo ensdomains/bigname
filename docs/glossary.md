@@ -1489,7 +1489,7 @@ their row-local finalized state because they have no chain observation anchor
 and are not reorg-addressable. Durable raw facts and competing chain lineage,
 not superseded normalized events, are the permanent audit trail for chain
 events. The current event stream is what projections consume. See the [reorg
-and redo boundary](storage.md#reorg-and-redo-boundary).
+and redo boundary](storage.md#canonicality-and-reorgs).
 
 ## Persisted Ingest coverage
 
@@ -1787,7 +1787,7 @@ an on-chain name identity
 (`logical_name_id = namespace:namehash`), distinct from whatever authority
 currently backs it. Raw labels and their normalization flags are observations,
 not identity; display names are derived when read, following the audit's
-[normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity).
+[normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
 A **surface binding** is the time-ranged record of which resource backed a
 surface when. Surfaces survive re-registration; resources rotate.
 

@@ -210,7 +210,7 @@ back to an active retained ENSv1 binding.
 coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
-in [`architecture.md`](architecture.md#identity-strategy).
+in [`architecture.md`](architecture.md#identity-model).
 Its projection provenance stores the [source family](glossary.md#source-family)
 of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's

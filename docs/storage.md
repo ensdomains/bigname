@@ -86,7 +86,7 @@ publication.
 ## Identity
 
 Stable identity follows [ADR 0002](adrs/0002-surface-resource-identity.md) and
-the continuity rules in [`architecture.md`](architecture.md#identity-strategy).
+the continuity rules in [`architecture.md`](architecture.md#identity-model).
 
 - deterministic namehash-based IDs identify chain-native name surfaces;
 - opaque UUIDs identify backing resources, bindings, and token lineages where

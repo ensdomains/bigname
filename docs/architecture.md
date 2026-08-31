@@ -80,7 +80,7 @@ Four identity layers, each with its own continuity rules:
 
 ### `logical_name_id`
 
-Stable identity for an on-chain name within a namespace, written as `<namespace>:<namehash>` where `namehash` is the lowercase `0x`-prefixed 32-byte node. It survives backing-resource rotation, token regeneration, lapses, re-registrations, and normalizer-version changes. Raw label text and normalization results are attributes, never identity inputs, under the audit's [normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity).
+Stable identity for an on-chain name within a namespace, written as `<namespace>:<namehash>` where `namehash` is the lowercase `0x`-prefixed 32-byte node. It survives backing-resource rotation, token regeneration, lapses, re-registrations, and normalizer-version changes. Raw label text and normalization results are attributes, never identity inputs, under the audit's [normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
 
 ### `resource_id`
 
