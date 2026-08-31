@@ -139,9 +139,7 @@ pub(crate) async fn begin(
         ));
     }
     let redo_mode = redo_mode(mode)?;
-    // The work stamped by manifest synchronization is not yet a resumable
-    // operator attempt. Its first explicit execution binds the checkpoint to
-    // the exact event/emitter set being loaded; a later crash retry resumes it.
+    // Manifest synchronization is not resumable; first execution binds its exact event/emitter set.
     let same_active_redo =
         matches_active_redo(&previous, redo_mode, execution_range) && !unbound_required_ingest;
     let attestation_audit = crate::redo_manifest_audit::record_or_resume(
