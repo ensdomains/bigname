@@ -149,6 +149,16 @@ when the concurrent index is already valid. Do not allow the versioned
 schema-migration to perform the first build against a populated production
 `normalized_events` table.
 
+The release containing
+`20260831150000_normalized_events_v2_expiry_scope_idx.sql` adds the bounded
+ENSv2 expiry redo-scope lookup. On an initialized production namespace, build
+`normalized_events_v2_expiry_scope_idx` concurrently in step 3 with the
+reviewed statement below and validate that it is ready and valid. Then apply
+the schema-migration in step 4; its `IF NOT EXISTS` build is a no-op when the
+concurrent index is already valid. Do not allow the versioned schema-migration
+to perform the first build against a populated production `normalized_events`
+table.
+
 ```sql
 SELECT
     to_regclass('bigname_phase.project_redo_resolver_evidence') IS NOT NULL
@@ -162,6 +172,16 @@ SELECT
           AND index_state.indisvalid
           AND index_state.indisready
     ) AS redo_handoff_range_index_ready;
+
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_class index_relation
+    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+    WHERE index_relation.oid =
+          to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx')
+      AND index_state.indisvalid
+      AND index_state.indisready
+) AS normalized_events_v2_expiry_scope_index_ready;
 ```
 
 Apply the following index statements one at a time with the writer role. Do not
@@ -244,6 +264,18 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_ens_v1_record_node_res
       AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v2_expiry_scope_idx
+    ON bigname_phase.normalized_events
+       (chain_id, ((after_state ->> 'expiry')::numeric),
+        block_number, logical_name_id)
+    WHERE logical_name_id IS NOT NULL
+      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND event_kind IN (
+          'RegistrationGranted', 'RegistrationReserved',
+          'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged'
+      )
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND jsonb_typeof(after_state -> 'expiry') = 'number';
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_chain_block_number_idx
     ON bigname_phase.name_surfaces (chain_id, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS surface_bindings_chain_block_number_idx
@@ -305,8 +337,10 @@ indexes are additive; rollback may leave them in place.
    re-walk](../glossary.md#re-derivation-boundary). Execute the [owner-ratified
    rollout section](../deployment.md#owner-ratified-sepolia-source-role-rollout)
    at step 9;
-3. for the release containing Issue #400 or Issue #591, apply and validate the
-   applicable concurrent baseline indexes above; otherwise skip this step;
+3. for the release containing Issue #400, Issue #591, or
+   `20260831150000_normalized_events_v2_expiry_scope_idx.sql`, apply and
+   validate the applicable concurrent baseline indexes above; otherwise skip
+   this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
    cannot take the required `NOT NULL` column without the forbidden historical
