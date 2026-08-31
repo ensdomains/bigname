@@ -595,7 +595,7 @@ fn named_v2_expiry_retains_registration_for_markerless_silent_renewal() -> Resul
             .collect(),
         data: encoded.data.to_vec(),
     };
-    let (expired, session) = interpret_schema_v2_batch_incremental(
+    let (expired, session) = prepare_schema_v2_batch_incremental(
         input(
             vec![
                 raw(
@@ -624,7 +624,9 @@ fn named_v2_expiry_retains_registration_for_markerless_silent_renewal() -> Resul
             vec![block(1), block(2)],
         ),
         None,
-    )?;
+        StateCacheCapacity::Unlimited,
+    )?
+    .finish(Vec::new())?;
     assert!(expired.normalized_events.iter().any(|event| {
         event.block_number == Some(2)
             && event.event_kind == "RegistrationReleased"
@@ -632,7 +634,7 @@ fn named_v2_expiry_retains_registration_for_markerless_silent_renewal() -> Resul
             && event.after_state["source_event"] == "RegistryPathExpired"
     }));
 
-    let (renewed, _) = interpret_schema_v2_batch_incremental(
+    let (renewed, _) = prepare_schema_v2_batch_incremental(
         input(
             vec![raw(
                 ExpiryUpdated {
@@ -647,7 +649,9 @@ fn named_v2_expiry_retains_registration_for_markerless_silent_renewal() -> Resul
             vec![block(3)],
         ),
         Some(session),
-    )?;
+        StateCacheCapacity::Unlimited,
+    )?
+    .finish(Vec::new())?;
     let renewal = renewed
         .normalized_events
         .iter()
