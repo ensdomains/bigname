@@ -11929,6 +11929,134 @@ async fn identity_only_name_has_no_projected_current_authority() -> Result<()> {
 }
 
 #[tokio::test]
+async fn bindingless_resolver_summary_ignores_selected_head_resource_shape() -> Result<()> {
+    const SELECTED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008f1";
+    let incremental = ScratchDatabase::create("project_bindingless_resolver_head_resource").await?;
+    let fresh = ScratchDatabase::create("project_bindingless_resolver_head_resource_fresh").await?;
+    let chain = "project-bindingless-resolver-head-resource";
+    let resourceful = format!(
+        "ens:{:#x}",
+        raw_namehash(&[b"resourceful-head", b"classifier", b"eth"])
+    );
+    let resourceless = format!(
+        "ens:{:#x}",
+        raw_namehash(&[b"resourceless-head", b"classifier", b"eth"])
+    );
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_lineage(pool, chain, 3).await?;
+        declare_sepolia_post_audit_profile(pool, chain).await?;
+        insert_namespaced_manifest(
+            pool,
+            "ens",
+            chain,
+            "ens_v2_registry_l1",
+            1,
+            "ens_v2_sepolia_post_audit",
+            "tests/project-bindingless-resolver-head-resource-registry.toml",
+            json!({}),
+        )
+        .await?;
+        insert_namespaced_manifest(
+            pool,
+            "ens",
+            chain,
+            "ens_v2_registrar_l1",
+            1,
+            "ens_v2_sepolia_post_audit",
+            "tests/project-bindingless-resolver-head-resource-registrar.toml",
+            json!({"capability_flags":{"exact_name_profile":{"status":"supported"}}}),
+        )
+        .await?;
+        seed_authority_classifier_case(pool, chain, &resourceful, EnsArmSet::Empty, EnsArmSet::V2)
+            .await?;
+        seed_authority_classifier_case(pool, chain, &resourceless, EnsArmSet::Empty, EnsArmSet::V2)
+            .await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 2, 'canonical')",
+        )
+        .bind(Uuid::parse_str(SELECTED_RESOURCE)?)
+        .bind(chain)
+        .bind(block_hash(chain, 2))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events SET resource_id = $1
+             WHERE chain_id = $2 AND logical_name_id = $3
+               AND event_kind = 'RegistrationGranted'",
+        )
+        .bind(Uuid::parse_str(SELECTED_RESOURCE)?)
+        .bind(chain)
+        .bind(&resourceful)
+        .execute(pool)
+        .await?;
+        for logical_name_id in [&resourceful, &resourceless] {
+            insert_event(
+                pool,
+                chain,
+                3,
+                Some(logical_name_id),
+                None,
+                "ResolverChanged",
+                "ens_v2_registry_l1",
+                json!({"resolver":RESOLVER}),
+                json!({}),
+            )
+            .await?;
+        }
+    }
+
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 2).await?;
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(chain, 2),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await?;
+    run_project(fresh.pool(), chain, None, RunMode::Normal, 0, 3).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        for logical_name_id in [&resourceful, &resourceless] {
+            let summary: (String, Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT support_status, unsupported_reason,
+                        declared_summary #>> '{resolver,address}'
+                 FROM name_current WHERE logical_name_id = $1",
+            )
+            .bind(logical_name_id)
+            .fetch_one(pool)
+            .await?;
+            assert_eq!(
+                summary,
+                (
+                    "unsupported".into(),
+                    Some("current_authority_not_projected".into()),
+                    Some(RESOLVER.into()),
+                ),
+                "bindingless resolver summary changed with the selected head's resource shape",
+            );
+        }
+    }
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "incremental bindingless resolver publication diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn raw_ingest_fixture_flows_through_interpret_then_project() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_raw_flow").await?;
     let chain = "project-raw-flow";
