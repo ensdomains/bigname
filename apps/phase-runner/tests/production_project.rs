@@ -15238,6 +15238,326 @@ async fn project_redo_retracts_a_missing_reverse_resolver_pointer() -> Result<()
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn mixed_authority_survives_v2_expiry_as_explicitly_unsupported() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_mixed_authority_v2_expiry").await?;
+    let chain = "project-mixed-authority-v2-expiry";
+    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    let initial_reason: Option<String> = sqlx::query_scalar(
+        "SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        initial_reason.as_deref(),
+        Some("conflicting_current_ens_authority")
+    );
+
+    insert_lineage_block(scratch.pool(), chain, 6).await?;
+    let v2_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(6)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        6,
+        Some(&logical_name_id),
+        Some(&v2_resource.to_string()),
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({
+            "source_event":"RegistryPathExpired",
+            "derived_from":"interpreter_state",
+            "terminal_reason":"registry_name_binding_expired",
+            "status":"released"
+        }),
+        json!({}),
+    )
+    .await?;
+    run_project(
+        scratch.pool(),
+        chain,
+        Some(Marker {
+            number: 5,
+            hash: block_hash(chain, 5),
+        }),
+        RunMode::Normal,
+        6,
+        6,
+    )
+    .await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let incremental: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_optional(scratch.pool())
+    .await?;
+    let incremental = incremental.expect("mixed authority must remain explicitly unsupported");
+    assert_eq!(
+        incremental["unsupported_reason"],
+        "conflicting_current_ens_authority"
+    );
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let fresh: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(incremental, fresh);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn surviving_reservation_drives_summary_after_other_resource_expires() -> Result<()> {
+    const REGISTERED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008a1";
+    const RESERVED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008a2";
+    const BINDING: &str = "00000000-0000-0000-0000-0000000008a3";
+    let scratch = ScratchDatabase::create("project_registration_reservation_lifecycle").await?;
+    let chain = "project-registration-reservation-lifecycle";
+    let logical_name_id = "ens:0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a";
+    seed_lineage(scratch.pool(), chain, 3).await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, 'ens', 'combined.eth', ARRAY['combined','eth'],
+             decode('00','hex'), $2, ARRAY['0xcombined','0xeth'], $3,
+             'active', $4, $5, 1, 'canonical')",
+    )
+    .bind(logical_name_id)
+    .bind(logical_name_id.trim_start_matches("ens:"))
+    .bind(NORMALIZER)
+    .bind(chain)
+    .bind(block_hash(chain, 1))
+    .execute(scratch.pool())
+    .await?;
+    insert_classifier_resource_and_binding(
+        scratch.pool(),
+        chain,
+        logical_name_id,
+        "ens_v2",
+        Uuid::parse_str(REGISTERED_RESOURCE)?,
+        Uuid::parse_str(BINDING)?,
+        1,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 2, 'canonical')",
+    )
+    .bind(Uuid::parse_str(RESERVED_RESOURCE)?)
+    .bind(chain)
+    .bind(block_hash(chain, 2))
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        1,
+        Some(logical_name_id),
+        Some(REGISTERED_RESOURCE),
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({"status":"registered","expiry":3,"token_id":"0x01","registry":"0xregistry"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        2,
+        Some(logical_name_id),
+        Some(RESERVED_RESOURCE),
+        "RegistrationReserved",
+        "ens_v2_registry_l1",
+        json!({"status":"reserved","expiry":100,"token_id":"0x02","registry":"0xregistry"}),
+        json!({}),
+    )
+    .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 2).await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(3) WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::parse_str(BINDING)?)
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        chain,
+        3,
+        Some(logical_name_id),
+        Some(REGISTERED_RESOURCE),
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({
+            "source_event":"RegistryPathExpired",
+            "derived_from":"interpreter_state",
+            "terminal_reason":"registry_name_binding_expired",
+            "status":"released"
+        }),
+        json!({}),
+    )
+    .await?;
+    run_project(
+        scratch.pool(),
+        chain,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(chain, 2),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let incremental: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        incremental["declared_summary"]["registration"]["status"],
+        "reserved"
+    );
+    assert_eq!(
+        incremental["declared_summary"]["registration"]["latest_event_kind"],
+        "RegistrationReserved"
+    );
+    assert_eq!(
+        incremental["declared_summary"]["control"]["status"],
+        "reserved"
+    );
+
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 3).await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let fresh: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(incremental, fresh);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn expiry_release_redo_restores_deleted_name_like_fresh_rebuild() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_expiry_name_redo").await?;
+    let fresh = ScratchDatabase::create("project_expiry_name_redo_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_expiry_release_redo_fixture(pool).await?;
+    }
+    publish_and_retract_expiry_fixture(incremental.pool()).await?;
+    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 0);
+    for pool in [incremental.pool(), fresh.pool()] {
+        orphan_expiry_release_and_reopen_binding(pool).await?;
+    }
+    run_project(
+        incremental.pool(),
+        "project-expiry-release-redo",
+        Some(Marker {
+            number: 2,
+            hash: block_hash("project-expiry-release-redo", 2),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(
+        fresh.pool(),
+        "project-expiry-release-redo",
+        None,
+        RunMode::Normal,
+        0,
+        2,
+    )
+    .await?;
+    assert_eq!(expiry_fixture_counts(fresh.pool()).await?.0, 1);
+    assert_eq!(
+        expiry_fixture_name(incremental.pool()).await?,
+        expiry_fixture_name(fresh.pool()).await?,
+        "redo failed to restore the reopened name"
+    );
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn expiry_release_redo_restores_deleted_permissions_like_fresh_rebuild() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_expiry_permission_redo").await?;
+    let fresh = ScratchDatabase::create("project_expiry_permission_redo_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_expiry_release_redo_fixture(pool).await?;
+    }
+    publish_and_retract_expiry_fixture(incremental.pool()).await?;
+    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.1, 0);
+    for pool in [incremental.pool(), fresh.pool()] {
+        orphan_expiry_release_and_reopen_binding(pool).await?;
+    }
+    run_project(
+        incremental.pool(),
+        "project-expiry-release-redo",
+        Some(Marker {
+            number: 2,
+            hash: block_hash("project-expiry-release-redo", 2),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(
+        fresh.pool(),
+        "project-expiry-release-redo",
+        None,
+        RunMode::Normal,
+        0,
+        2,
+    )
+    .await?;
+    assert_eq!(expiry_fixture_counts(fresh.pool()).await?.1, 1);
+    assert_eq!(
+        expiry_fixture_permissions(incremental.pool()).await?,
+        expiry_fixture_permissions(fresh.pool()).await?,
+        "redo failed to restore the reopened resource permissions"
+    );
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
 async fn run_project(
     pool: &PgPool,
     chain_id: &str,
@@ -15261,6 +15581,165 @@ async fn run_project(
         .await?;
     assert!(outcome.complete);
     Ok(())
+}
+
+const EXPIRY_REDO_CHAIN: &str = "project-expiry-release-redo";
+const EXPIRY_REDO_NAME: &str =
+    "ens:0x8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b";
+const EXPIRY_REDO_RESOURCE: &str = "00000000-0000-0000-0000-0000000008b1";
+const EXPIRY_REDO_BINDING: &str = "00000000-0000-0000-0000-0000000008b2";
+
+async fn seed_expiry_release_redo_fixture(pool: &PgPool) -> Result<()> {
+    seed_lineage(pool, EXPIRY_REDO_CHAIN, 2).await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, 'ens', 'redo.eth', ARRAY['redo','eth'], decode('00','hex'),
+             $2, ARRAY['0xredo','0xeth'], $3, 'active', $4, $5, 1, 'canonical')",
+    )
+    .bind(EXPIRY_REDO_NAME)
+    .bind(EXPIRY_REDO_NAME.trim_start_matches("ens:"))
+    .bind(NORMALIZER)
+    .bind(EXPIRY_REDO_CHAIN)
+    .bind(block_hash(EXPIRY_REDO_CHAIN, 1))
+    .execute(pool)
+    .await?;
+    insert_classifier_resource_and_binding(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        EXPIRY_REDO_NAME,
+        "ens_v2",
+        Uuid::parse_str(EXPIRY_REDO_RESOURCE)?,
+        Uuid::parse_str(EXPIRY_REDO_BINDING)?,
+        1,
+    )
+    .await?;
+    insert_event(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        1,
+        Some(EXPIRY_REDO_NAME),
+        Some(EXPIRY_REDO_RESOURCE),
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({"status":"registered","token_id":"0x01","registry":"0xregistry"}),
+        json!({"fixture":"expiry-redo-registration"}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        1,
+        Some(EXPIRY_REDO_NAME),
+        Some(EXPIRY_REDO_RESOURCE),
+        "PermissionChanged",
+        "ens_v2_registry_l1",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":["resource_control"],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"retain"
+        }),
+        json!({"fixture":"expiry-redo-permission"}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(2) WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::parse_str(EXPIRY_REDO_BINDING)?)
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        2,
+        Some(EXPIRY_REDO_NAME),
+        Some(EXPIRY_REDO_RESOURCE),
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({
+            "source_event":"RegistryPathExpired",
+            "derived_from":"interpreter_state",
+            "terminal_reason":"registry_name_binding_expired",
+            "status":"released"
+        }),
+        json!({"fixture":"expiry-redo-release"}),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn publish_and_retract_expiry_fixture(pool: &PgPool) -> Result<()> {
+    run_project(pool, EXPIRY_REDO_CHAIN, None, RunMode::Normal, 0, 1).await?;
+    assert_eq!(expiry_fixture_counts(pool).await?, (1, 1));
+    run_project(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        Some(Marker {
+            number: 1,
+            hash: block_hash(EXPIRY_REDO_CHAIN, 1),
+        }),
+        RunMode::Normal,
+        2,
+        2,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn orphan_expiry_release_and_reopen_binding(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 2
+           AND event_kind = 'RegistrationReleased'",
+    )
+    .bind(EXPIRY_REDO_CHAIN)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE surface_bindings SET active_to = NULL WHERE surface_binding_id = $1")
+        .bind(Uuid::parse_str(EXPIRY_REDO_BINDING)?)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn expiry_fixture_counts(pool: &PgPool) -> Result<(i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT (SELECT count(*) FROM name_current WHERE logical_name_id = $1),
+                (SELECT count(*) FROM permissions_current WHERE resource_id = $2)",
+    )
+    .bind(EXPIRY_REDO_NAME)
+    .bind(Uuid::parse_str(EXPIRY_REDO_RESOURCE)?)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn expiry_fixture_name(pool: &PgPool) -> Result<Option<Value>> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_jsonb(current) - 'last_recomputed_at' - 'chain_positions' -
+                'canonicality_summary'
+         FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(EXPIRY_REDO_NAME)
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn expiry_fixture_permissions(pool: &PgPool) -> Result<Vec<Value>> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_jsonb(current) - 'last_recomputed_at' - 'inserted_at' -
+                'chain_positions' - 'canonicality_summary'
+         FROM permissions_current current WHERE resource_id = $1
+         ORDER BY subject, scope",
+    )
+    .bind(Uuid::parse_str(EXPIRY_REDO_RESOURCE)?)
+    .fetch_all(pool)
+    .await?)
 }
 
 #[tokio::test]

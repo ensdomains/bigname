@@ -351,6 +351,65 @@ async fn bindingless_registered_renewal_restores_retained_permissions() -> Resul
 }
 
 #[tokio::test]
+async fn rebound_permission_provenance_includes_the_registration_event() -> Result<()> {
+    let (database, pool) = database("v2_expiry_rebound_provenance").await?;
+    seed_formerly_named_flag_only_renewal(&pool).await?;
+    make_registered_lifecycle_bindingless(&pool).await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET raw_fact_ref = '{\"fixture\":\"rebound-registration\"}'::jsonb,
+             manifest_version = 7
+         WHERE resource_id = $1::uuid AND event_kind = 'RegistrationRenewed'",
+    )
+    .bind(RESOURCE)
+    .execute(&pool)
+    .await?;
+    run(&pool, 102, None).await?;
+    let rebound: (i64, Value, i64, String, i64) = sqlx::query_as(
+        "SELECT normalized_event_id, raw_fact_ref, block_number,
+                source_family, manifest_version
+         FROM normalized_events
+         WHERE resource_id = $1::uuid AND event_kind = 'RegistrationRenewed'",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    let projected: (Value, Value, i64) = sqlx::query_as(
+        "SELECT provenance, chain_positions, manifest_version
+         FROM permissions_current WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        projected.0["normalized_event_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(rebound.0))),
+        "rebound registration event ID missing from permission provenance"
+    );
+    assert!(
+        projected.0["raw_fact_refs"]
+            .as_array()
+            .is_some_and(|refs| refs.contains(&rebound.1)),
+        "rebound raw reference missing from permission provenance"
+    );
+    assert!(
+        projected.0["manifest_versions"]
+            .as_array()
+            .is_some_and(|versions| versions.contains(&json!({
+                "source_manifest_id":Value::Null,
+                "source_family":rebound.3,
+                "manifest_version":rebound.4,
+            }))),
+        "rebound source family and manifest version missing from permission provenance"
+    );
+    assert_eq!(projected.1["block_number"], rebound.2);
+    assert_eq!(projected.1["block_hash"], hash(rebound.2));
+    assert_eq!(projected.2, rebound.4);
+    database.cleanup().await
+}
+
+#[tokio::test]
 #[rustfmt::skip]
 #[allow(clippy::type_complexity)]
 async fn expiry_permissions_and_names_converge_through_revival_and_version_bump() -> Result<()> {
