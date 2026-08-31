@@ -1123,8 +1123,18 @@ Public verified support is narrower than the topology model. ENS supports:
 - exact-surface direct path: `resolver_path[0].logical_name_id == route surface`, `wildcard.source=null`, `alias.final_target=null`, all `transport=null`
 - exact-surface alias-only non-direct: same but `alias.final_target` non-null with non-empty `hops`
 - exact-surface wildcard-derived: `wildcard.source` non-null with non-empty `matched_labels`, `resolver_path[0].logical_name_id == wildcard.source.logical_name_id`, `alias.final_target=null`, `subregistry_path=[]`, `transport=null`
+- [Universal Resolver ancestor
+  discovery](glossary.md#universal-resolver-ancestor-discovery): an Ethereum
+  Mainnet exact surface whose projected exact resolver is null, DNS wire name
+  is available, and alias, linked-subregistry, wildcard, and transport detail
+  are empty. The manifest-admitted Universal Resolver performs the ancestor
+  walk at the selected block; the API keeps the exact resolver null
+  `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
+  `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f)`.
 
-Other ENS classes (non-alias ancestor-selected, linked-subregistry ancestor-selected, transport-assisted, CCIP-participating) return selector-local `unsupported`.
+Other ENS classes (projected non-alias ancestor-selected,
+linked-subregistry ancestor-selected, transport-assisted, CCIP-participating)
+return selector-local `unsupported`.
 
 Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified [path classes](glossary.md) return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 

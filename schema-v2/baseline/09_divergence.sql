@@ -675,6 +675,61 @@ BEFORE INSERT OR UPDATE ON resolution_divergences
 FOR EACH ROW
 EXECUTE FUNCTION validate_resolution_divergence_positions();
 
+CREATE OR REPLACE FUNCTION retire_direct_divergences_for_null_resolver()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, bigname_phase, pg_temp
+AS $$
+DECLARE
+    surface_on_ethereum_mainnet boolean;
+BEGIN
+    -- Rust lookup admission excludes resolver.status = 'unsupported', but
+    -- retirement intentionally does not: once the exact resolver is null,
+    -- prior direct-resolver observations are stale regardless of that status.
+    IF NEW.namespace = 'ens'
+        AND NEW.declared_summary -> 'resolver' ? 'chain_id'
+        AND NEW.declared_summary -> 'resolver' ? 'address'
+        AND NEW.declared_summary -> 'resolver' -> 'chain_id' = 'null'::jsonb
+        AND NEW.declared_summary -> 'resolver' -> 'address' = 'null'::jsonb
+    THEN
+        EXECUTE format(
+            'SELECT EXISTS (
+                SELECT 1 FROM %I.name_surfaces
+                WHERE logical_name_id = $1
+                  AND chain_id = ''ethereum-mainnet''
+            )',
+            TG_TABLE_SCHEMA
+        )
+        INTO surface_on_ethereum_mainnet
+        USING NEW.logical_name_id;
+
+        IF surface_on_ethereum_mainnet THEN
+            EXECUTE format(
+                'UPDATE %I.resolution_divergences
+                 SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
+                 WHERE logical_name_id = $1
+                   AND resolver_chain_id = ''ethereum-mainnet''
+                   AND cleared_at IS NULL',
+                TG_TABLE_SCHEMA
+            )
+            USING NEW.logical_name_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION retire_direct_divergences_for_null_resolver()
+    FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS name_current_retire_null_resolver_divergences
+    ON name_current;
+CREATE TRIGGER name_current_retire_null_resolver_divergences
+AFTER INSERT OR UPDATE OF declared_summary ON name_current
+FOR EACH ROW
+EXECUTE FUNCTION retire_direct_divergences_for_null_resolver();
+
 CREATE OR REPLACE FUNCTION clear_resolution_divergences_for_block()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -736,7 +791,7 @@ COMMENT ON COLUMN resolution_divergences.first_observed_at IS
 COMMENT ON COLUMN resolution_divergences.last_observed_at IS
     'This time records the latest disagreement.';
 COMMENT ON COLUMN resolution_divergences.cleared_at IS
-    'This time records agreement restoration.';
+    'This time records agreement restoration or guarded retirement after the exact resolver becomes null.';
 COMMENT ON FUNCTION write_resolution_divergence(
     uuid, text, text, text, bigint, text, jsonb, text, text, text,
     text, jsonb, jsonb, boolean
@@ -746,3 +801,5 @@ COMMENT ON FUNCTION revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
 ) IS
     'Locks and revalidates the authoritative head, project generation, optional exact name and inventory rows, manifest declarations, and all observed canonical positions without granting the caller UPDATE on those relations.';
+COMMENT ON FUNCTION retire_direct_divergences_for_null_resolver() IS
+    'Retires active direct-resolver observations during projection publication when an ENS Mainnet exact resolver becomes null; it performs no live/indexed comparison.';
