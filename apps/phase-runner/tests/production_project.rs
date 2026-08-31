@@ -15572,6 +15572,110 @@ async fn expiry_release_redo_restores_deleted_permissions_like_fresh_rebuild() -
     fresh.cleanup().await
 }
 
+#[tokio::test]
+async fn redo_restores_summary_only_permission_retraction_like_fresh_rebuild() -> Result<()> {
+    const CHAIN: &str = "project-summary-only-permission-redo";
+    const RESOURCE: &str = "00000000-0000-0000-0000-0000000008c1";
+    let incremental = ScratchDatabase::create("project_summary_only_permission_redo").await?;
+    let fresh = ScratchDatabase::create("project_summary_only_permission_redo_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_lineage(pool, CHAIN, 2).await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 1, 'canonical')",
+        )
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        for (block, powers) in [(1, json!(["resource_control"])), (2, json!([]))] {
+            insert_event(
+                pool,
+                CHAIN,
+                block,
+                None,
+                Some(RESOURCE),
+                "PermissionChanged",
+                "ens_v2_registry_l1",
+                json!({
+                    "subject":OWNER,
+                    "scope":{"kind":"resource"},
+                    "effective_powers":powers,
+                    "grant_source":{"kind":"fixture"},
+                    "revocation_source":{"kind":"fixture"},
+                    "inheritance_path":[],
+                    "transfer_behavior":"retain"
+                }),
+                json!({"fixture":format!("summary-only-{block}")}),
+            )
+            .await?;
+        }
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 2).await?;
+    let retired_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1")
+            .bind(Uuid::parse_str(RESOURCE)?)
+            .fetch_one(incremental.pool())
+            .await?;
+    assert_eq!(retired_count, 0);
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND resource_id = $2 AND block_number = 2",
+        )
+        .bind(CHAIN)
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .execute(pool)
+        .await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(CHAIN, 2),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 2).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    let incremental_snapshot =
+        summary_only_permission_snapshot(incremental.pool(), RESOURCE).await?;
+    let fresh_snapshot = summary_only_permission_snapshot(fresh.pool(), RESOURCE).await?;
+    assert_eq!(fresh_snapshot.0.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        incremental_snapshot, fresh_snapshot,
+        "redo retained a summary-only revoked permission state"
+    );
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+async fn summary_only_permission_snapshot(pool: &PgPool, resource: &str) -> Result<(Value, Value)> {
+    let resource = Uuid::parse_str(resource)?;
+    let permissions = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(row) ORDER BY subject, scope), '[]'::jsonb)
+         FROM permissions_current row WHERE resource_id = $1",
+    )
+    .bind(resource)
+    .fetch_one(pool)
+    .await?;
+    let summary = sqlx::query_scalar(
+        "SELECT to_jsonb(row) FROM permissions_current_resource_summary row
+         WHERE resource_id = $1",
+    )
+    .bind(resource)
+    .fetch_one(pool)
+    .await?;
+    Ok((permissions, summary))
+}
+
 async fn run_project(
     pool: &PgPool,
     chain_id: &str,
