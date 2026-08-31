@@ -63,6 +63,24 @@ pub(crate) async fn stamp_orphaned_suffix(
     Ok(())
 }
 
+pub(crate) async fn stamp_ingest_redo_dependents(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    range: BlockRange,
+) -> RunnerResult<()> {
+    for phase in [PhaseName::Interpret, PhaseName::Verify] {
+        stamp_required_in_transaction(
+            transaction,
+            chain_id,
+            phase,
+            range,
+            "ingest redo may change the raw-fact extent",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn stamp_required_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

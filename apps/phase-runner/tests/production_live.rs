@@ -1260,7 +1260,7 @@ redo)"
         .redo(
             &live_chain(chain, &fixture.endpoint)?,
             RedoPhase::Phase(PhaseName::Interpret),
-            BlockRange::new(0, 0)?,
+            BlockRange::new(0, 3)?,
             CancellationToken::new(),
         )
         .with_subscriber(subscriber)

@@ -170,7 +170,8 @@ for migration_file in \
     "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
     "$ROOT/migrations/20260826120100_manifest_applied_change_count.sql" \
-    "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql"
+    "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
+    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -316,7 +317,9 @@ for migration_file in \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
-    "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql"
+    "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
+    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
+    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -692,6 +695,9 @@ for ignored in 1 2; do
     sed "s/bigname_phase/$scratch_schema/g" \
         "$ROOT/migrations/20260825041728_redo_attempt_generation_comment.sql" \
         | run_psql
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
+        | run_psql
 done
 redo_attempt_generation_upgrade_check="$({
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
@@ -722,7 +728,7 @@ SELECT CASE WHEN
          WHERE attrelid = 'chain_phase_state'::regclass
            AND attname = 'redo_attempt_generation'
            AND NOT attisdropped)
-    ) = 'This nonnegative, row-local counter increments when an explicit redo begins and when the phase runner installs or extends a required redo stamp for a downstream phase (Interpret/Project). Manifest-synchronization Ingest stamps do not advance it; their superseded progress writes are fenced by the cleared manifest-authority fingerprint and stamped last_error instead.'
+    ) = 'This nonnegative, row-local counter increments when an explicit redo begins, when the phase runner installs or extends required downstream redo, and when the shared required-Ingest installer records genuinely new manifest or discovery demand. Repeated observation of unchanged semantic demand is suppressed before installation and does not advance it.'
 THEN 'redo_attempt_generation_upgrade_ok'
 ELSE 'redo_attempt_generation_upgrade_wrong' END;
 SQL
@@ -1094,6 +1100,7 @@ BEGIN
             ('children_current'),
             ('contract_instance_addresses'),
             ('contract_instances'),
+            ('discovery_watch_admissions'),
             ('discovery_edges'),
             ('ens_names'),
             ('ingest_cursors'),
@@ -1149,6 +1156,7 @@ BEGIN
             ('children_current'),
             ('contract_instance_addresses'),
             ('contract_instances'),
+            ('discovery_watch_admissions'),
             ('discovery_edges'),
             ('ens_names'),
             ('ingest_cursors'),
@@ -1232,6 +1240,7 @@ BEGIN
     WITH maintainer_authorized_allowlist(table_name, column_name) AS (
         VALUES
             ('chain_heads', 'lineage_orphaning_epoch'),
+            ('discovery_watch_admissions', 'lineage_orphaning_epoch'),
             ('manifest_authority_attestations', 'generation_token'),
             ('chain_phase_state', 'redo_attempt_generation')
     )

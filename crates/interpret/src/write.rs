@@ -1,12 +1,14 @@
 mod batching;
 mod decode_skips;
 mod discovery;
+pub(crate) mod discovery_admission;
 mod identity;
 mod identity_names;
 mod migration;
 mod normalized;
 mod redo;
 
+use crate::Result;
 use bigname_adapters::schema_v2::BatchOutput;
 use bigname_adapters::schema_v2::seam::{
     EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, MIGRATION_APPLIED_EVENT_KIND,
@@ -15,9 +17,6 @@ use bigname_adapters::schema_v2::seam::{
     SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY, TRANSACTION_INDEX_KEY,
 };
 use sqlx::{PgPool, Postgres, Transaction};
-
-use crate::Result;
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn batch(
     pool: &PgPool,
@@ -51,6 +50,9 @@ pub(crate) async fn batch(
     migration::write(&mut transaction, output).await?;
     if let Some((from_block, to_block)) = redo_range.filter(|_| complete) {
         reanchor_stable_identities(&mut transaction, chain_id, from_block, to_block).await?;
+    }
+    if complete {
+        discovery_admission::finalize(&mut transaction, chain_id).await?;
     }
     transaction.commit().await.map_err(|error| {
         crate::InterpretError::database("failed to commit interpret write transaction", error)

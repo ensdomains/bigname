@@ -1200,11 +1200,30 @@ marker](glossary.md#manifest-authority-marker). With overlapping completed
 retained Ingest history, synchronization rejects the transaction atomically:
 the prior manifest payload, child rules, authority history, phase hashes, and
 redo state remain unchanged. That retained database cannot install the rule in
-place; replacing it with a rebuilt database does not make one pass sufficient.
-On the replacement database, and on any fresh rebuild, historical coverage
-requires a second full-history Ingest pass after Interpret has materialized the
-resolver address intervals. Use `phase-runner redo --phase ingest` with the
-Sepolia manifest root explicitly selected (`--manifests-root
+place; replacing it with a rebuilt database does not make one pass sufficient
+by itself. On a fresh replacement database, Interpret can discover resolver
+address/topic intervals after the initial Ingest pass has completed. When those
+intervals add coverage over already-ingested blocks, Interpret records required
+Ingest work. The runner automatically re-fetches the affected retained range
+with the discovery-aware filter and re-runs Interpret before Project and Verify
+proceed. Interrupted discovery repairs remain durable and resume through the
+normal runner recovery path. At startup, after Live, and after an
+operator-requested Interpret or all-phase redo, the runner can repeat the
+sequence of re-fetching newly admitted historical logs and re-running
+Interpret once for each active admitted discovery rule, plus eight additional
+times before downstream phases proceed. This fixed ceiling is a runaway
+backstop, not a tuning control:
+exhausting it stops the chain with an operator-visible error while Project and
+Verify remain fenced. Keep serving disabled, inspect
+`discovery_watch_admissions` and `chain_phase_state`, correct the
+non-converging admission or redo lifecycle, and then restart the runner.
+Operators do not need to schedule the former manual second pass for the
+ordinary convergent case. Keep serving disabled until repair, projection, and
+the configured verification gate have completed.
+
+For a pre-[#652](https://github.com/ensdomains/bigname/issues/652) binary only,
+the fallback remains a manual second pass. Use `phase-runner redo --phase
+ingest` with the Sepolia manifest root explicitly selected (`--manifests-root
 manifests/sepolia`) and the required database, chain, and source options while
 normal and Live processing are held at a fixed target already completed by both
 Interpret and Project, with Interpret's discovery edges materialized through
@@ -1214,9 +1233,7 @@ target, then explicitly rerun Interpret and Project through the same target. If
 verification](glossary.md#stored-history-verification) halted on the missing
 logs, restart the normal runner to complete Verify and keep serving traffic
 disabled until Verify succeeds; otherwise complete Verify before resuming
-normal and Live processing. A fresh rebuild alone remains insufficient until
-[#652](https://github.com/ensdomains/bigname/issues/652) makes the second pass
-and recovery routing automatic.
+normal and Live processing.
 
 `registry_announcement` rules use the same namespace-scoped comparison. In the
 `ens_v2_registry_l1` family they are backfillable in one Ingest redo: Ingest

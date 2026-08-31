@@ -331,90 +331,45 @@ pub async fn load_persisted_watch_filter(
                   OR address.active_to_block_number IS NOT NULL
               )
         ),
-        discovered_intervals AS (
+        registry_announcement_intervals AS (
             SELECT lower(address.address) AS address,
                    GREATEST(
                        COALESCE(edge.active_from_block_number, 0),
                        COALESCE(address.active_from_block_number, 0)
                    ) AS active_from_block_number,
                    LEAST(
-                       COALESCE(
-                           edge.active_to_block_number,
-                           9223372036854775807
-                       ),
-                       COALESCE(
-                           address.active_to_block_number,
-                           9223372036854775807
-                       )
+                       COALESCE(edge.active_to_block_number, 9223372036854775807),
+                       COALESCE(address.active_to_block_number, 9223372036854775807)
                    ) AS active_to_block_number,
-                   COALESCE(target_manifest.manifest_id, source_manifest.manifest_id)
-                       AS watch_manifest_id,
+                   source_manifest.manifest_id AS watch_manifest_id,
                    NULL::text AS watch_role
             FROM discovery_edges edge
             JOIN manifest_versions source_manifest
               ON source_manifest.manifest_id = edge.source_manifest_id
              AND source_manifest.chain_id = edge.chain_id
-            LEFT JOIN manifest_versions target_manifest
-              ON target_manifest.rollout_status = 'active'
-             AND target_manifest.namespace = source_manifest.namespace
-             AND target_manifest.chain_id = edge.chain_id
-             AND target_manifest.deployment_label = source_manifest.deployment_label
-             AND target_manifest.source_family = CASE
-                 WHEN edge.edge_kind = 'resolver'
-                  AND source_manifest.source_family = 'ens_v1_registry_l1'
-                     THEN 'ens_v1_resolver_l1'
-                 WHEN edge.edge_kind = 'resolver'
-                  AND source_manifest.source_family IN (
-                      'ens_v2_registry_l1',
-                      'ens_v2_root_l1'
-                  )
-                     THEN 'ens_v2_resolver_l1'
-                 WHEN edge.edge_kind = 'resolver'
-                  AND source_manifest.source_family = 'basenames_base_registry'
-                     THEN 'basenames_base_resolver'
-                 ELSE NULL
-             END
+             AND source_manifest.rollout_status = 'active'
             JOIN contract_instance_addresses address
               ON address.contract_instance_id = edge.to_contract_instance_id
              AND address.chain_id = edge.chain_id
             WHERE edge.chain_id = $1
-              AND source_manifest.rollout_status = 'active'
+              AND edge.edge_kind = 'registry_announcement'
               AND edge.canonicality_state <> 'orphaned'
-              AND edge.edge_kind IN ('resolver', 'registry_announcement')
-              AND (
-                  edge.edge_kind <> 'resolver'
-                  OR source_manifest.source_family NOT IN (
-                      'ens_v1_registry_l1',
-                      'ens_v2_registry_l1',
-                      'ens_v2_root_l1',
-                      'basenames_base_registry'
-                  )
-                  OR target_manifest.manifest_id IS NOT NULL
-              )
-              AND (
-                  edge.deactivated_at IS NULL
-                  OR edge.active_to_block_number IS NOT NULL
-              )
-              AND (
-                  address.deactivated_at IS NULL
-                  OR address.active_to_block_number IS NOT NULL
-                  OR edge.active_to_block_number IS NOT NULL
-              )
-              AND (
-                  edge.active_from_block_number IS NULL
-                  OR address.active_to_block_number IS NULL
-                  OR edge.active_from_block_number <= address.active_to_block_number
-              )
-              AND (
-                  address.active_from_block_number IS NULL
-                  OR edge.active_to_block_number IS NULL
-                  OR address.active_from_block_number <= edge.active_to_block_number
-              )
+              AND (edge.deactivated_at IS NULL
+                   OR edge.active_to_block_number IS NOT NULL)
+              AND (address.deactivated_at IS NULL
+                   OR address.active_to_block_number IS NOT NULL
+                   OR edge.active_to_block_number IS NOT NULL)
+              AND (edge.active_from_block_number IS NULL
+                   OR address.active_to_block_number IS NULL
+                   OR edge.active_from_block_number <= address.active_to_block_number)
+              AND (address.active_from_block_number IS NULL
+                   OR edge.active_to_block_number IS NULL
+                   OR address.active_from_block_number <= edge.active_to_block_number)
         ),
         watched_intervals AS (
             SELECT * FROM declared_intervals
             UNION
-            SELECT * FROM discovered_intervals
+            SELECT * FROM registry_announcement_intervals
         )
         SELECT address,
                GREATEST(active_from_block_number, $2),
@@ -439,12 +394,31 @@ pub async fn load_persisted_watch_filter(
         )
     })?;
 
-    if (address_rows.is_empty() && all_emitter_ranges.is_empty()) || topic0s.is_empty() {
+    let mut discovery_connection = pool.acquire().await.map_err(|error| {
+        IngestError::database(
+            format!("failed to acquire discovery watch connection for chain {chain_id}"),
+            error,
+        )
+    })?;
+    let discovery =
+        bigname_manifests::load_discovery_watch_coverage(&mut discovery_connection, chain_id)
+            .await
+            .map_err(|error| {
+                IngestError::database_anyhow(
+                    format!(
+                        "failed to load discovery-derived ingest intervals for chain {chain_id}"
+                    ),
+                    error,
+                )
+            })?;
+    if (address_rows.is_empty() && discovery.discovered.is_empty() && all_emitter_ranges.is_empty())
+        || topic0s.is_empty()
+    {
         return Err(IngestError::configuration(format!(
             "chain {chain_id} active manifests provide no admitted addresses or event topics"
         )));
     }
-    let address_ranges = address_rows
+    let mut address_ranges: Vec<AddressRange> = address_rows
         .into_iter()
         .filter_map(|(address, from_block, to_block, manifest_id, role)| {
             if from_block > to_block {
@@ -473,6 +447,23 @@ pub async fn load_persisted_watch_filter(
             })
         })
         .collect();
+    for (key, intervals) in discovery.discovered {
+        if discovery.globally_covered_topics.contains(&key.topic0) {
+            continue;
+        }
+        for interval in intervals {
+            let clipped_from = interval.from.max(from_block);
+            let clipped_to = interval.to.min(to_block);
+            if clipped_from <= clipped_to {
+                address_ranges.push(AddressRange {
+                    address: key.address.clone(),
+                    from_block: clipped_from,
+                    to_block: clipped_to,
+                    topic0s: vec![key.topic0.clone()],
+                });
+            }
+        }
+    }
     let filter = WatchFilter {
         address_ranges,
         all_emitter_ranges,

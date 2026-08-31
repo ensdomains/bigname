@@ -255,6 +255,16 @@ announcement admits an ENSv2 registry independently of parent reachability,
 while a subregistry edge records parent-child reachability without admitting
 its target.
 
+<a id="discovery-watch-admission-snapshot"></a>
+**Discovery-watch admission snapshot** — Interpret-owned coordination state
+that records the last acknowledged normalized union of concrete
+discovery-derived address/topic intervals for one chain, active
+manifest-authority fingerprint, and lineage-orphaning epoch. It lets a replayed
+Interpret pass distinguish genuinely new historical intake demand from the
+same discovery coverage being restaged. It is not evidence that raw facts were
+fetched and is not a second redo queue; `chain_phase_state` remains the sole
+work and redo authority.
+
 **Discovery-rule widening and narrowing** — manifest-synchronization
 classifications for address-admitting `resolver` and `registry_announcement`
 discovery rules and their emitting declarations. Widening adds a rule or
