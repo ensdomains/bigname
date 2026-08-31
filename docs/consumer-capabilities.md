@@ -70,7 +70,7 @@ The admitted archived-Sepolia implementation exposes the same two getter shapes
 | Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |
 
 The flagged deployments are the current ENS PublicResolver on mainnet, the
-current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56F03b55b6bbC4BBE49b5`,
+current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`,
 and the admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation. The
 admitted Basenames address is the legacy resolver and remains unflagged; its
 vendored coin-type getter reads exact storage, while the fallback-bearing
