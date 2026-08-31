@@ -91,3 +91,15 @@ name = "NewTTL"
 fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
 emitter_roles = ["registry", "registry_old"]
 normalized_events = []
+
+# Both declared Sepolia registry generations expose owner-wide operator
+# approvals. The older contract is Solidity ENSRegistry, unlike mainnet's LLL
+# predecessor.
+# (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L2-L32 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L17-L22 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f).
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["registry", "registry_old"]
+normalized_events = []

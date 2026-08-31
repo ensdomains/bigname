@@ -989,10 +989,13 @@ permission coverage; `ensv1_wrapper_holder_permissions_not_projected` remains a
 separate unsupported class. Readers reject inconsistent typed combinations and
 map an unrecognized persisted unsupported reason to unknown partial product
 coverage rather than treating it as wrapper support or returning an internal
-server error. Raw facts and normalized-event semantics are unchanged, but the
-Project source change rotates the shared interpreter content hash. Deployment
-therefore follows the planned full-history Interpret and Project walk instead
-of a Project-only continuation.
+server error. The scoped ENSv1 and Basenames approval declarations widen raw
+intake without changing normalized-event semantics. A retained database must
+complete the manifest-sync-required Ingest redo for the widened address/topic
+intervals before the shared interpreter content-hash rotation permits the
+planned full-history Interpret and Project walk. A fresh deployment instead
+loads the final manifests before its block-zero historical walk, so the new raw
+facts arrive in that initial pass.
 
 ## Snapshot serving
 

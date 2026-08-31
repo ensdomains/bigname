@@ -1173,6 +1173,15 @@ request.
 used by the old runtime's raw-log mutation fence and replay caches. Its Rust
 writer and consumers were deleted before the legacy schema was dropped.
 
+<a id="intake-only-event"></a>
+**Intake-only event** — a manifest-declared event whose empty
+`normalized_events` list promises raw-log intake and ABI validation without a
+normalized event or permission-state change. This is a closed, typed adapter
+capability rather than a general bypass for declarations with empty output.
+When its watch policy is address-scoped, only contract roles named by that
+event declaration contribute watched addresses and historical intervals;
+discovered emitters and all-emitter watches do not inherit it.
+
 **Interpreter content hash** — the build-time identifier for checked-in inputs
 that can change Interpret or Project output. Derived phase state records this
 hash, and a binary with a different value must re-walk the complete retained

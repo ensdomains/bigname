@@ -6,6 +6,9 @@ pub const ENS_V2_REGISTRY_SOURCE_FAMILY: &str = "ens_v2_registry_l1";
 pub const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
 
 const REGISTRY_CREATED_SIGNATURE: &str = "RegistryCreated()";
+pub const APPROVAL_FOR_ALL_SIGNATURE: &str = "ApprovalForAll(address,address,bool)";
+pub const APPROVAL_SIGNATURE: &str = "Approval(address,address,uint256)";
+pub const APPROVED_SIGNATURE: &str = "Approved(address,bytes32,address,bool)";
 const ENS_V2_UNIQUE_RESOLVER_EVENT_SIGNATURES: &[&str] = &[
     "AliasChanged(bytes,bytes,bytes,bytes)",
     "NamedResource(uint256,bytes)",
@@ -53,6 +56,22 @@ pub fn uses_discovered_emitters(source_family: &str) -> bool {
             | ENS_V2_REGISTRY_SOURCE_FAMILY
             | ENS_V2_RESOLVER_SOURCE_FAMILY
     )
+}
+
+/// Returns whether an approval [intake-only event](../../../../docs/glossary.md#intake-only-event)
+/// uses only the contract roles named by its manifest declaration. Keep this list closed: empty
+/// normalized output is not by itself an admission or watch-policy bypass.
+pub fn is_address_scoped_approval(source_family: &str, signature: &str) -> bool {
+    match source_family {
+        "ens_v1_registry_l1" | "basenames_base_registry" => signature == APPROVAL_FOR_ALL_SIGNATURE,
+        "ens_v1_registrar_l1" | "basenames_base_registrar" | "ens_v1_wrapper_l1" => {
+            matches!(signature, APPROVAL_SIGNATURE | APPROVAL_FOR_ALL_SIGNATURE)
+        }
+        ENS_V1_RESOLVER_SOURCE_FAMILY | BASENAMES_BASE_RESOLVER_SOURCE_FAMILY => {
+            matches!(signature, APPROVAL_FOR_ALL_SIGNATURE | APPROVED_SIGNATURE)
+        }
+        _ => false,
+    }
 }
 
 pub fn generic_resolver_topic0s() -> Vec<String> {

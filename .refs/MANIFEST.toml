@@ -25,6 +25,30 @@ authoritative_for = [
   "ENSv1 reverse-claim and primary-name semantics in docs/api-v1.md and docs/storage.md",
 ]
 
+[refs.ens_v1_mainnet_1a2ac5c]
+repo = "https://github.com/ensdomains/ens-contracts"
+commit = "1a2ac5cb2b4aec511a90fc1366c231e76fcec8dc"
+purpose = "Historical deployment ABI evidence for Mainnet PublicResolver 0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63 only."
+authoritative_for = [
+  "ApprovalForAll and Approved ABI shape on the admitted public_resolver_231b0ee generation",
+]
+
+[refs.ens_v1_sepolia_8209157]
+repo = "https://github.com/ensdomains/ens-contracts"
+commit = "820915755463ac5bfed98ad97a89bcd9da5e364a"
+purpose = "Historical deployment ABI evidence for Sepolia PublicResolver 0x8948458626811dd0c23EB25Cc74291247077cC51 only."
+authoritative_for = [
+  "ApprovalForAll and Approved ABI shape on the admitted public_resolver_8948458 generation",
+]
+
+[refs.ens_v1_sepolia_ac32490]
+repo = "https://github.com/ensdomains/ens-contracts"
+commit = "ac324904a66c95e51584c90f9d2d61c4eb831afc"
+purpose = "Historical deployment ABI evidence for Sepolia PublicResolver 0x8FADE66B79cC9f707aB26799354482EB93a5B7dD only."
+authoritative_for = [
+  "ApprovalForAll and Approved ABI shape on the admitted public_resolver_8fade66 generation",
+]
+
 # The pin is upstream's `mainnet` tag (2017-04-30), the era's release tag: its
 # contracts/ENS.lll is identical to the file's last pre-deployment edit
 # (5c2167b, a pure directory move), the tag's committed contracts/ENS.lll.bin

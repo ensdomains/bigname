@@ -74,13 +74,21 @@ impl WatchFilter {
     }
 
     pub fn queries(&self) -> Vec<WatchQuery> {
+        let mut topics_by_address_and_range =
+            BTreeMap::<(String, i64, i64), BTreeSet<String>>::new();
+        for range in &self.address_ranges {
+            topics_by_address_and_range
+                .entry((range.address.clone(), range.from_block, range.to_block))
+                .or_default()
+                .extend(range.topic0s.iter().cloned());
+        }
         let mut addresses_by_range_and_topics =
             BTreeMap::<(i64, i64, Vec<String>), BTreeSet<String>>::new();
-        for range in &self.address_ranges {
+        for ((address, from_block, to_block), topics) in topics_by_address_and_range {
             addresses_by_range_and_topics
-                .entry((range.from_block, range.to_block, range.topic0s.clone()))
+                .entry((from_block, to_block, topics.into_iter().collect()))
                 .or_default()
-                .insert(range.address.clone());
+                .insert(address);
         }
         let mut queries = addresses_by_range_and_topics
             .into_iter()
@@ -207,6 +215,7 @@ pub async fn load_persisted_watch_filter(
 
     let mut topic0s = BTreeSet::new();
     let mut topics_by_manifest = BTreeMap::new();
+    let mut role_topics_by_manifest = BTreeMap::new();
     let mut all_emitter_topics_by_manifest = BTreeMap::new();
     let mut all_emitter_ranges = Vec::new();
     let announcement_topic0 = registry_announcement_topic0();
@@ -219,25 +228,38 @@ pub async fn load_persisted_watch_filter(
                 error,
             )
         })?;
-        let manifest_topics = manifest.abi.event_topic0s().map_err(|error| {
-            IngestError::with_source(
-                ErrorKind::DataIntegrity,
-                format!(
-                    "stored active manifest {} ABI is invalid",
-                    manifest.source_family
-                ),
-                error,
-            )
-        })?;
-        let mut manifest_topics = manifest_topics
-            .into_iter()
-            .map(|topic| topic.to_ascii_lowercase())
-            .collect::<Vec<_>>();
-        manifest_topics.sort();
-        manifest_topics.dedup();
-        for topic in &manifest_topics {
-            topic0s.insert(topic.clone());
+        let mut manifest_topics = BTreeSet::new();
+        let mut role_topics = BTreeMap::<String, BTreeSet<String>>::new();
+        for event in &manifest.abi.events {
+            let parsed = event.parsed_event_view().map_err(|error| {
+                IngestError::with_source(
+                    ErrorKind::DataIntegrity,
+                    format!(
+                        "stored active manifest {} ABI is invalid",
+                        manifest.source_family
+                    ),
+                    error,
+                )
+            })?;
+            let Some(topic0) = parsed.topic0().map(|topic| topic.to_ascii_lowercase()) else {
+                continue;
+            };
+            topic0s.insert(topic0.clone());
+            if bigname_manifests::is_address_scoped_approval(
+                &manifest.source_family,
+                &parsed.canonical_signature(),
+            ) {
+                for role in &event.emitter_roles {
+                    role_topics
+                        .entry(role.clone())
+                        .or_default()
+                        .insert(topic0.clone());
+                }
+            } else {
+                manifest_topics.insert(topic0);
+            }
         }
+        let manifest_topics = manifest_topics.into_iter().collect::<Vec<_>>();
         if matches!(
             manifest.source_family.as_str(),
             ENS_V1_RESOLVER_SOURCE_FAMILY
@@ -259,6 +281,7 @@ pub async fn load_persisted_watch_filter(
                 });
             }
         }
+        role_topics_by_manifest.insert(manifest_id, role_topics);
         if manifest.source_family == ENS_V2_REGISTRY_SOURCE_FAMILY
             && manifest_topics.contains(&announcement_topic0)
         {
@@ -280,7 +303,7 @@ pub async fn load_persisted_watch_filter(
 
     ranges::validate(pool, chain_id).await?;
 
-    let address_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+    let address_rows: Vec<(String, i64, i64, i64, Option<String>)> = sqlx::query_as(
         "
         WITH declared_intervals AS (
             SELECT lower(address.address) AS address,
@@ -292,7 +315,8 @@ pub async fn load_persisted_watch_filter(
                        address.active_to_block_number,
                        9223372036854775807
                    ) AS active_to_block_number,
-                   manifest.manifest_id AS watch_manifest_id
+                   manifest.manifest_id AS watch_manifest_id,
+                   declaration.role AS watch_role
             FROM manifest_versions manifest
             JOIN manifest_contract_instances declaration
               ON declaration.manifest_id = manifest.manifest_id
@@ -324,7 +348,8 @@ pub async fn load_persisted_watch_filter(
                        )
                    ) AS active_to_block_number,
                    COALESCE(target_manifest.manifest_id, source_manifest.manifest_id)
-                       AS watch_manifest_id
+                       AS watch_manifest_id,
+                   NULL::text AS watch_role
             FROM discovery_edges edge
             JOIN manifest_versions source_manifest
               ON source_manifest.manifest_id = edge.source_manifest_id
@@ -394,7 +419,8 @@ pub async fn load_persisted_watch_filter(
         SELECT address,
                GREATEST(active_from_block_number, $2),
                LEAST(active_to_block_number, $3),
-               watch_manifest_id
+               watch_manifest_id,
+               watch_role
         FROM watched_intervals
         WHERE active_from_block_number <= $3
           AND active_to_block_number >= $2
@@ -420,7 +446,7 @@ pub async fn load_persisted_watch_filter(
     }
     let address_ranges = address_rows
         .into_iter()
-        .filter_map(|(address, from_block, to_block, manifest_id)| {
+        .filter_map(|(address, from_block, to_block, manifest_id, role)| {
             if from_block > to_block {
                 return None;
             }
@@ -430,6 +456,14 @@ pub async fn load_persisted_watch_filter(
                 .unwrap_or_default();
             if let Some(all_emitter_topics) = all_emitter_topics_by_manifest.get(&manifest_id) {
                 topic0s.retain(|topic| !all_emitter_topics.contains(topic));
+            }
+            if let Some(role_topics) = role
+                .as_ref()
+                .and_then(|role| role_topics_by_manifest.get(&manifest_id)?.get(role))
+            {
+                topic0s.extend(role_topics.iter().cloned());
+                topic0s.sort();
+                topic0s.dedup();
             }
             (!topic0s.is_empty()).then_some(AddressRange {
                 address,

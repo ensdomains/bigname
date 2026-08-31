@@ -30,10 +30,11 @@ proxy_kind = "none"
 # (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4-L32 @ basenames@1809bbc)
 # (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)
 
-# L2Resolver event ABI fragments consumed by manifest-derived authority topic
-# lookup. These events have no emitter_roles because the complete signature set
-# is matched across every Base emitter. The concrete resolver emits profile
-# events through these profile implementations:
+# Generic L2Resolver event ABI fragments consumed by manifest-derived authority
+# topic lookup. These events have no emitter_roles because this generic
+# signature set is matched across every Base emitter. The approvals declared
+# below are a separate address-scoped surface. The concrete resolver emits
+# resolver-interface events through these resolver-interface implementations:
 # (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L61 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L63 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L30 @ basenames@1809bbc)
@@ -63,3 +64,19 @@ normalized_events = ["RecordChanged"]
 name = "VersionChanged"
 fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
 normalized_events = ["RecordVersionChanged"]
+
+# The admitted legacy L2Resolver emits both owner-wide and node-delegate
+# approval changes.
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L79-L91 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L141-L166 @ basenames@1809bbc).
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["resolver"]
+normalized_events = []
+
+[[abi.events]]
+name = "Approved"
+fragment = "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)"
+emitter_roles = ["resolver"]
+normalized_events = []

@@ -652,6 +652,222 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
 }
 
 #[test]
+fn checked_in_approval_intake_inventory_is_exact_and_raw_only() -> Result<()> {
+    let approval =
+        "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)";
+    let approval_for_all =
+        "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)";
+    let approved = "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)";
+    let expected = [
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_registry_l1/v3.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['a'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_registry_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['b'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_registrar_l1/v1.toml",
+            "Approval",
+            approval,
+            &['c'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_registrar_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['c'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_registrar_l1/v1.toml",
+            "Approval",
+            approval,
+            &['c'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_registrar_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['c'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_resolver_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['d'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_resolver_l1/v1.toml",
+            "Approved",
+            approved,
+            &['d'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_resolver_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['e'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_resolver_l1/v1.toml",
+            "Approved",
+            approved,
+            &['e'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['f'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+            "Approval",
+            approval,
+            &['f'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['f'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+            "Approval",
+            approval,
+            &['f'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_registry/v2.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['g'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_registrar/v1.toml",
+            "Approval",
+            approval,
+            &['c'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_registrar/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['c'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_resolver/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['h'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_resolver/v1.toml",
+            "Approved",
+            approved,
+            &['h'][..],
+        ),
+    ];
+    let role_sets = std::collections::BTreeMap::from([
+        ('a', &["registry"][..]),
+        ('b', &["registry", "registry_old"][..]),
+        ('c', &["registrar"][..]),
+        ('d', &["public_resolver", "public_resolver_231b0ee"][..]),
+        (
+            'e',
+            &[
+                "public_resolver",
+                "public_resolver_8948458",
+                "public_resolver_8fade66",
+            ][..],
+        ),
+        ('f', &["name_wrapper"][..]),
+        ('g', &["registry"][..]),
+        ('h', &["resolver"][..]),
+    ]);
+    let repositories = std::collections::BTreeMap::from([
+        (
+            "mainnet",
+            load_repository(checked_in_manifest_root("manifests/mainnet"))?,
+        ),
+        (
+            "sepolia",
+            load_repository(checked_in_manifest_root("manifests/sepolia"))?,
+        ),
+    ]);
+
+    for (profile, path, name, fragment, role_key) in expected {
+        let manifest = repositories[profile]
+            .manifests()
+            .iter()
+            .find(|loaded| loaded.relative_path == std::path::Path::new(path))
+            .unwrap_or_else(|| panic!("missing {profile} manifest {path}"));
+        assert_eq!(
+            manifest.manifest.normalizer_version,
+            "ensip15@ens-normalize-0.1.1"
+        );
+        let event = manifest
+            .manifest
+            .abi
+            .events
+            .iter()
+            .find(|event| event.name == name)
+            .unwrap_or_else(|| panic!("missing {name} in {path}"));
+        assert_eq!(event.fragment, fragment, "wrong ABI shape in {path}");
+        assert_eq!(
+            event.emitter_roles, role_sets[&role_key[0]],
+            "wrong approval emitter roles in {path}"
+        );
+        assert!(
+            event.normalized_events.is_empty(),
+            "{path} {name} must remain raw-only"
+        );
+    }
+
+    let declared = repositories
+        .values()
+        .flat_map(|repository| repository.manifests())
+        .flat_map(|loaded| &loaded.manifest.abi.events)
+        .filter(|event| {
+            matches!(
+                event.name.as_str(),
+                "Approval" | "ApprovalForAll" | "Approved"
+            )
+        })
+        .count();
+    assert_eq!(
+        declared, 19,
+        "approval declaration inventory must stay exact"
+    );
+    Ok(())
+}
+
+#[test]
 fn checked_in_resolver_read_features_are_generation_scoped() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
     let ens = repository
@@ -1114,6 +1330,13 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
         event_surface(registry),
         vec![
             (
+                "ApprovalForAll".to_owned(),
+                "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+                    .to_owned(),
+                registry_emitters.to_owned(),
+                String::new(),
+            ),
+            (
                 "NewOwner".to_owned(),
                 "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
                     .to_owned(),
@@ -1154,6 +1377,20 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
     assert_eq!(
         event_surface(wrapper),
         vec![
+            (
+                "Approval".to_owned(),
+                "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                String::new(),
+            ),
+            (
+                "ApprovalForAll".to_owned(),
+                "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                String::new(),
+            ),
             (
                 "ExpiryExtended".to_owned(),
                 "event ExpiryExtended(bytes32 indexed node, uint64 expiry)".to_owned(),
@@ -1222,6 +1459,8 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
     assert_eq!(
         registrar_surface,
         [
+            "Approval|event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)|registrar|",
+            "ApprovalForAll|event ApprovalForAll(address indexed owner, address indexed operator, bool approved)|registrar|",
             "ControllerAdded|event ControllerAdded(address indexed controller)|registrar|PermissionChanged",
             "ControllerRemoved|event ControllerRemoved(address indexed controller)|registrar|PermissionChanged",
             "NameRegistered|event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)|registrar|RegistrationReleased",
@@ -1238,13 +1477,23 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
         .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
         .map(|loaded| &loaded.manifest)
         .expect("Mainnet ENSv1 resolver family");
-    assert_eq!(event_surface(resolver), event_surface(mainnet_resolver));
+    let generic_resolver_surface = |manifest: &SourceManifest| {
+        event_surface(manifest)
+            .into_iter()
+            .filter(|(name, _, _, _)| name != "ApprovalForAll" && name != "Approved")
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        generic_resolver_surface(resolver),
+        generic_resolver_surface(mainnet_resolver)
+    );
     assert!(
         resolver
             .abi
             .events
             .iter()
-            .all(|event| { event.emitter_roles.is_empty() && event.status.is_none() })
+            .filter(|event| event.name != "ApprovalForAll" && event.name != "Approved")
+            .all(|event| event.emitter_roles.is_empty() && event.status.is_none())
     );
 
     let v1_addresses = resolver

@@ -4,7 +4,11 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{SourceManifest, all_emitter_topic0s, normalize_address};
+use crate::{SourceManifest, normalize_address};
+
+#[path = "schema_v2_watch/compile.rs"]
+mod compile;
+use compile::compile_watch_scope;
 
 pub(super) use super::watch_widening::{
     CoverageInterval, PersistedWatchCoverage, normalize_coverage, widening_start,
@@ -322,67 +326,6 @@ fn discovery_start(
         .map_or(declared_start, |floor| declared_start.min(*floor))
 }
 
-fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<CompiledWatchEntry>> {
-    let topics = manifest
-        .abi
-        .event_topic0s()
-        .with_context(|| format!("failed to compile {} watch topics", manifest.source_family))?
-        .into_iter()
-        .map(|topic| topic.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let all_emitter_topics = all_emitter_topic0s(&manifest.source_family, &topics)
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let mut watch = BTreeMap::new();
-    for topic0 in &all_emitter_topics {
-        insert_watch(&mut watch, WatchEmitter::All, topic0, 0);
-    }
-    if crate::uses_discovered_emitters(&manifest.source_family) {
-        for topic0 in &topics {
-            insert_watch(
-                &mut watch,
-                WatchEmitter::Family {
-                    namespace: manifest.namespace.clone(),
-                    family: manifest.source_family.clone(),
-                },
-                topic0,
-                0,
-            );
-        }
-    }
-    for (address, start) in manifest
-        .roots
-        .iter()
-        .map(|root| (&root.address, root.start_block))
-        .chain(
-            manifest
-                .contracts
-                .iter()
-                .map(|contract| (&contract.address, contract.start_block)),
-        )
-    {
-        for topic0 in &topics {
-            insert_watch(
-                &mut watch,
-                WatchEmitter::Address {
-                    family: manifest.source_family.clone(),
-                    address: normalize_address(address),
-                },
-                topic0,
-                start.unwrap_or(0),
-            );
-        }
-    }
-    Ok(watch
-        .into_iter()
-        .map(|(key, start)| CompiledWatchEntry {
-            emitter: key.emitter,
-            topic0: key.topic0,
-            start,
-        })
-        .collect())
-}
-
 fn record_discovery_rules(snapshot: &mut Snapshot, manifest: &SourceManifest) -> Result<()> {
     let registry_announcement_topic =
         discovery_producer_topic0(manifest, "registry_announcement", None, false)?;
@@ -581,5 +524,67 @@ pub(super) fn watch_is_covered(
             family: family.clone(),
             address: address.clone(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_in_approvals_compile_only_for_declared_roles_and_intervals() -> Result<()> {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut approval_count = 0;
+        for profile in ["mainnet", "sepolia"] {
+            let repository =
+                crate::load_repository(workspace_root.join("manifests").join(profile))?;
+            for loaded in repository.manifests() {
+                let compiled = compile_watch_scope(&loaded.manifest)?;
+                for event in &loaded.manifest.abi.events {
+                    let parsed = event.parsed_event_view()?;
+                    if !crate::is_address_scoped_approval(
+                        &loaded.manifest.source_family,
+                        &parsed.canonical_signature(),
+                    ) {
+                        continue;
+                    }
+                    approval_count += 1;
+                    let topic0 = parsed.topic0().expect("approval event topic0");
+                    let actual = compiled
+                        .iter()
+                        .filter(|entry| entry.topic0 == topic0)
+                        .map(|entry| match &entry.emitter {
+                            WatchEmitter::Address { family, address } => {
+                                assert_eq!(family, &loaded.manifest.source_family);
+                                (address.clone(), entry.start)
+                            }
+                            WatchEmitter::All | WatchEmitter::Family { .. } => panic!(
+                                "{} {} must not compile an all-emitter or discovered-family watch",
+                                loaded.manifest.source_family, event.name
+                            ),
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let expected = loaded
+                        .manifest
+                        .contracts
+                        .iter()
+                        .filter(|contract| event.emitter_roles.contains(&contract.role))
+                        .map(|contract| {
+                            (
+                                crate::normalize_address(&contract.address),
+                                contract.start_block.unwrap_or(0),
+                            )
+                        })
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(
+                        actual, expected,
+                        "{} {} must follow its role declarations exactly",
+                        loaded.manifest.source_family, event.name
+                    );
+                }
+            }
+        }
+        assert_eq!(approval_count, 19);
+        Ok(())
     }
 }

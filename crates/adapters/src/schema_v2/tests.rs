@@ -95,6 +95,16 @@ mod resolver {
     }
 }
 
+mod approvals {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
+        event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
+        event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved);
+    }
+}
+
 mod resolver_name {
     use alloy_sol_types::sol;
 
@@ -11843,6 +11853,203 @@ fn basenames_resolver_signatures_match_all_emitters() -> anyhow::Result<()> {
             .filter(|event| event.event_kind == "RecordVersionChanged")
             .count(),
         1
+    );
+    Ok(())
+}
+
+#[test]
+fn declared_approval_grants_revocations_and_clears_are_decode_only() -> anyhow::Result<()> {
+    let owner = CONTRACT.parse::<Address>()?;
+    let operator = "0x0000000000000000000000000000000000000043".parse::<Address>()?;
+    let zero = Address::ZERO;
+    let approval_for_all = [true, false].map(|approved| {
+        approvals::ApprovalForAll {
+            owner,
+            operator,
+            approved,
+        }
+        .encode_log_data()
+    });
+    let approval = [operator, zero].map(|approved| {
+        approvals::Approval {
+            owner,
+            approved,
+            tokenId: U256::from(7),
+        }
+        .encode_log_data()
+    });
+    let approved = [true, false].map(|approved| {
+        approvals::Approved {
+            owner,
+            node: B256::repeat_byte(0x11),
+            delegate: operator,
+            approved,
+        }
+        .encode_log_data()
+    });
+    let cases = [
+        (
+            "ens_v1_registry_l1",
+            "registry",
+            "ApprovalForAll",
+            "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
+            approval_for_all.as_slice(),
+        ),
+        (
+            "basenames_base_registry",
+            "registry",
+            "ApprovalForAll",
+            "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
+            approval_for_all.as_slice(),
+        ),
+        (
+            "ens_v1_registrar_l1",
+            "registrar",
+            "Approval",
+            "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)",
+            approval.as_slice(),
+        ),
+        (
+            "basenames_base_registrar",
+            "registrar",
+            "Approval",
+            "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)",
+            approval.as_slice(),
+        ),
+        (
+            "ens_v1_wrapper_l1",
+            "name_wrapper",
+            "Approval",
+            "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)",
+            approval.as_slice(),
+        ),
+        (
+            "ens_v1_resolver_l1",
+            "public_resolver",
+            "Approved",
+            "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)",
+            approved.as_slice(),
+        ),
+        (
+            "basenames_base_resolver",
+            "resolver",
+            "Approved",
+            "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)",
+            approved.as_slice(),
+        ),
+    ];
+    for (manifest_id, (source_family, role, name, fragment, encoded)) in (100_i64..).zip(cases) {
+        let namespace = if source_family.starts_with("basenames_") {
+            "basenames"
+        } else {
+            "ens"
+        };
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest_with_events(
+                manifest_id,
+                namespace,
+                source_family,
+                &[(name, fragment, &[role], &[])],
+            )],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(manifest_id, role)],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: encoded.iter().cloned().map(raw).collect(),
+        })?;
+        assert_eq!(
+            output,
+            BatchOutput::default(),
+            "{source_family} {name} must not mutate interpretation state"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn resolver_approval_cannot_use_match_all_fallback() -> anyhow::Result<()> {
+    let encoded = approvals::Approved {
+        owner: CONTRACT.parse()?,
+        node: B256::repeat_byte(0x22),
+        delegate: "0x0000000000000000000000000000000000000043".parse()?,
+        approved: true,
+    }
+    .encode_log_data();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            108,
+            "ens_v1_resolver_l1",
+            "Approved",
+            "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)",
+            &["public_resolver"],
+            &[],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            encoded,
+            1,
+            0,
+            "0x0000000000000000000000000000000000000099",
+        )],
+    })?;
+    assert_eq!(output, BatchOutput::default());
+    Ok(())
+}
+
+#[test]
+fn approval_admission_rejects_unknown_output_and_malformed_logs() -> anyhow::Result<()> {
+    let unsupported = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            109,
+            "ens_v1_registry_l1",
+            "UnknownApproval",
+            "event UnknownApproval(address indexed owner)",
+            &["registry"],
+            &[],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(109, "registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: Vec::new(),
+    })
+    .expect_err("an arbitrary empty-output signature must remain unsupported");
+    assert!(
+        unsupported
+            .to_string()
+            .contains("has no typed schema-v2 adapter")
+    );
+
+    let topic0 = format!(
+        "{}",
+        keccak256("ApprovalForAll(address,address,bool)".as_bytes())
+    );
+    let malformed = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            110,
+            "ens_v1_registry_l1",
+            "ApprovalForAll",
+            "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
+            &["registry"],
+            &[],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(110, "registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_with_topic0(topic0)],
+    })
+    .expect_err("a malformed declared approval must remain fatal");
+    assert!(
+        format!("{malformed:#}").contains("ApprovalForAll log is malformed"),
+        "unexpected error: {malformed:#}"
     );
     Ok(())
 }
