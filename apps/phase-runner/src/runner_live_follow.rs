@@ -101,7 +101,13 @@ impl PhaseRunner {
         chain: &ChainConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        loop {
+        let Some((rule_count, iteration_limit)) = self
+            .discovery_repair_iteration_limit(&chain.chain_id, &cancellation)
+            .await?
+        else {
+            return Ok(());
+        };
+        for _iteration in 1..=iteration_limit {
             let Some(mut ingest_fence) = self
                 .acquire_post_live_fence(chain, PhaseName::Ingest, &cancellation)
                 .await?
@@ -120,17 +126,13 @@ impl PhaseRunner {
                         if cancellation.is_cancelled() {
                             return Ok(PostLiveDownstream::Complete);
                         }
-                        if bigname_manifests::discovery_required_ingest_pending(
-                            self.store.pool(),
-                            &chain.chain_id,
-                        )
-                        .await
-                        .map_err(|error| {
-                            crate::error::RunnerError::data_integrity(format!(
-                                "failed to classify post-Live Ingest work for chain {}: {error:#}",
-                                chain.chain_id
-                            ))
-                        })? {
+                        let Some(discovery_owned) = self
+                            .discovery_required_ingest_pending(&chain.chain_id, &cancellation)
+                            .await?
+                        else {
+                            return Ok(PostLiveDownstream::Complete);
+                        };
+                        if discovery_owned {
                             return Ok(PostLiveDownstream::RepairDiscovery);
                         }
                         return Err(crate::transitions::required_ingest_redo_error(
@@ -145,17 +147,13 @@ impl PhaseRunner {
                         .required_redo_range(&chain.chain_id, PhaseName::Ingest)
                         .await?
                     {
-                        if bigname_manifests::discovery_required_ingest_pending(
-                            self.store.pool(),
-                            &chain.chain_id,
-                        )
-                        .await
-                        .map_err(|error| {
-                            crate::error::RunnerError::data_integrity(format!(
-                                "failed to classify discovery repair after Live Interpret for chain {}: {error:#}",
-                                chain.chain_id
-                            ))
-                        })? {
+                        let Some(discovery_owned) = self
+                            .discovery_required_ingest_pending(&chain.chain_id, &cancellation)
+                            .await?
+                        else {
+                            return Ok(PostLiveDownstream::Complete);
+                        };
+                        if discovery_owned {
                             return Ok(PostLiveDownstream::RepairDiscovery);
                         }
                         return Err(crate::transitions::required_ingest_redo_error(
@@ -188,6 +186,11 @@ impl PhaseRunner {
                 }
             }
         }
+        Err(Self::discovery_repair_exhausted_error(
+            &chain.chain_id,
+            rule_count,
+            iteration_limit,
+        ))
     }
 
     pub(super) async fn run_live_follow(

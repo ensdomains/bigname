@@ -186,10 +186,11 @@ Interpret redo may temporarily orphan and restage discovery rows without
 creating repeated intake work because the acknowledged snapshot survives that
 restaging. The row set is replaced only when a completed Interpret pass commits
 under the same active authority and lineage epoch. Dropping and recreating a
-chain, changing its active authority fingerprint, or advancing its lineage
-orphaning epoch starts a fresh comparison scope. Rollback leaves discovery
-writes, the snapshot, and the required Ingest stamp unchanged together. Neither
-Project nor API code reads the snapshot.
+chain starts a fresh comparison scope only when the wipe also clears that
+chain's rows from `discovery_watch_admissions`; changing its active authority
+fingerprint or advancing its lineage-orphaning epoch also starts a fresh scope.
+Rollback leaves discovery writes, the snapshot, and the required Ingest stamp
+unchanged together. Neither Project nor API code reads the snapshot.
 
 Each `interpret_decode_skips` row records the chain, block and transaction
 identity, log index, emitter, selected [source family](glossary.md#source-family)

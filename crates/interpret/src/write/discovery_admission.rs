@@ -28,9 +28,10 @@ pub(super) async fn finalize(
     let coverage = load_discovery_watch_coverage(&mut **transaction, chain_id)
         .await
         .map_err(|error| {
-            InterpretError::data_integrity(format!(
-                "failed to derive final discovery watch admissions for chain {chain_id}: {error:#}"
-            ))
+            InterpretError::database_anyhow(
+                format!("failed to derive final discovery watch admissions for chain {chain_id}"),
+                error,
+            )
         })?;
     let snapshot_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (
@@ -155,9 +156,10 @@ pub(super) async fn finalize(
         )
         .await
         .map_err(|error| {
-            InterpretError::data_integrity(format!(
-                "failed to install discovery coverage repair for chain {chain_id}: {error:#}"
-            ))
+            InterpretError::database_anyhow(
+                format!("failed to install discovery coverage repair for chain {chain_id}"),
+                error,
+            )
         })?;
     }
     if snapshot_changed {

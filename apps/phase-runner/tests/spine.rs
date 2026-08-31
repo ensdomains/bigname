@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use phase_runner::{
     RunnerPhaseProgress,
     capacity::{CapacityFuture, CapacityGuard, CapacityMeasurement, CapacityProbe},
@@ -486,6 +486,275 @@ async fn runner_loop_heartbeat_refreshes_across_completed_live_follow_passes() -
 
     cancellation.cancel();
     task.await??;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn discovery_repair_converges_after_reinterpret_adds_further_coverage() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_second_level_discovery_repair").await?;
+    let chain_id = "second-level-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 2, target_block_number = 1,
+             last_processed_block_number = 1,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-1"))
+    .execute(scratch.pool())
+    .await?;
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::new([
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(heads.clone()),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(SecondLevelDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::clone(&interpret_calls),
+            stamp_limit: 2,
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Project,
+            None,
+            Arc::clone(&sequence),
+        )),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(heads),
+            Arc::clone(&sequence),
+        )),
+    ])?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = true;
+    runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "second-level-discovery-repair-runner",
+    )?
+    .run_chain(&configured_chain, CancellationToken::new())
+    .await?;
+
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 3);
+    assert_subsequence(
+        &sequence.lock().expect("phase sequence lock"),
+        &[
+            "ingest:normal",
+            "interpret:normal",
+            "ingest:redo",
+            "interpret:redo",
+            "ingest:redo",
+            "interpret:redo",
+            "project:normal",
+        ],
+    );
+    let ingest: (bool, i64) = sqlx::query_as(
+        "SELECT redo_in_progress, redo_attempt_generation
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(ingest, (false, 4));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn discovery_repair_runaway_stops_at_operator_bound() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_discovery_repair_bound").await?;
+    let chain_id = "discovery-repair-bound-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 2, target_block_number = 1,
+             last_processed_block_number = 1,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-1"))
+    .execute(scratch.pool())
+    .await?;
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::new([
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(heads.clone()),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(SecondLevelDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::clone(&interpret_calls),
+            stamp_limit: usize::MAX,
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Project,
+            None,
+            Arc::clone(&sequence),
+        )),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(heads),
+            Arc::clone(&sequence),
+        )),
+    ])?;
+    let error = runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "discovery-repair-bound-runner",
+    )?
+    .run_chain(&chain(chain_id)?, CancellationToken::new())
+    .await
+    .expect_err("non-monotonic discovery work must stop at the operator bound");
+
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("did not converge after 8 passes")
+    );
+    assert!(error.to_string().contains("keep serving disabled"));
+    assert!(error.to_string().contains("discovery_watch_admissions"));
+    assert!(error.to_string().contains("chain_phase_state"));
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 8);
+    assert!(
+        !sequence
+            .lock()
+            .expect("phase sequence lock")
+            .iter()
+            .any(|event| event.starts_with("project:")),
+        "Project must remain fenced when repair does not converge"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn post_live_discovery_repair_runaway_stops_at_operator_bound() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_post_live_discovery_repair_bound").await?;
+    let chain_id = "post-live-discovery-repair-bound-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "WITH manifest AS (
+             INSERT INTO manifest_versions (
+                 manifest_version, namespace, source_family, chain_id,
+                 deployment_label, rollout_status, normalizer_version,
+                 file_path, manifest_payload
+             ) VALUES (1, 'fixture', 'repair_bound_source', $1,
+                       'fixture', 'active', 'fixture', $2, '{}'::jsonb)
+             RETURNING manifest_id
+         )
+         INSERT INTO manifest_discovery_rules (
+             manifest_id, edge_kind, admission, rule_payload
+         )
+         SELECT manifest_id, 'resolver', 'fixture', '{}'::jsonb FROM manifest",
+    )
+    .bind(chain_id)
+    .bind(format!("fixtures/{chain_id}.toml"))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 1, target_block_number = 0,
+             last_processed_block_number = 0,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-0"))
+    .execute(scratch.pool())
+    .await?;
+    let initial_heads = HeadMarkers {
+        latest: BlockMarker::new(0, format!("{chain_id}-block-0"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &initial_heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(initial_heads),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(PostLiveRunawayDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::clone(&interpret_calls),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Project,
+            None,
+            Arc::clone(&sequence),
+        )),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(live_heads),
+            Arc::clone(&sequence),
+        )),
+    )?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = true;
+    let phase_runner = runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "post-live-discovery-repair-bound-runner",
+    )?;
+    let task = tokio::spawn(async move {
+        phase_runner
+            .run_chain(&configured_chain, CancellationToken::new())
+            .await
+    });
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .context("post-Live discovery repair did not stop at its operator bound")?;
+    let error = result?.expect_err("non-monotonic post-Live repair must fail loudly");
+
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("did not converge after 9 passes")
+    );
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 10);
+    assert!(
+        sequence
+            .lock()
+            .expect("phase sequence lock")
+            .iter()
+            .any(|event| event == "live:normal"),
+        "the runaway must begin only after Live"
+    );
     scratch.cleanup().await
 }
 
@@ -4458,6 +4727,122 @@ struct DiscoveryStampInterpretPhase {
     pool: sqlx::PgPool,
     calls: AtomicUsize,
     sequence: Arc<Mutex<Vec<String>>>,
+}
+
+struct SecondLevelDiscoveryStampInterpretPhase {
+    pool: sqlx::PgPool,
+    calls: Arc<AtomicUsize>,
+    stamp_limit: usize,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+struct PostLiveRunawayDiscoveryStampInterpretPhase {
+    pool: sqlx::PgPool,
+    calls: Arc<AtomicUsize>,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+impl Phase for PostLiveRunawayDiscoveryStampInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "interpret:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            if call > 0 {
+                let mut transaction = pool.begin().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to begin post-Live runaway stamp fixture: {error}"
+                    ))
+                })?;
+                bigname_manifests::install_required_ingest(
+                    &mut transaction,
+                    &context.chain_id,
+                    0,
+                    bigname_manifests::RequiredIngestCause::DiscoveryWatchAdmission,
+                )
+                .await
+                .map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to install post-Live runaway stamp fixture: {error:#}"
+                    ))
+                })?;
+                transaction.commit().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to commit post-Live runaway stamp fixture: {error}"
+                    ))
+                })?;
+            }
+            LoopbackPhase::new(PhaseName::Interpret)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+impl Phase for SecondLevelDiscoveryStampInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "interpret:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let pool = self.pool.clone();
+        let stamp_limit = self.stamp_limit;
+        Box::pin(async move {
+            if call < stamp_limit {
+                let mut transaction = pool.begin().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to begin second-level discovery stamp fixture: {error}"
+                    ))
+                })?;
+                bigname_manifests::install_required_ingest(
+                    &mut transaction,
+                    &context.chain_id,
+                    if call == 0 { 1 } else { 0 },
+                    bigname_manifests::RequiredIngestCause::DiscoveryWatchAdmission,
+                )
+                .await
+                .map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to install second-level discovery stamp fixture: {error:#}"
+                    ))
+                })?;
+                transaction.commit().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to commit second-level discovery stamp fixture: {error}"
+                    ))
+                })?;
+            }
+            LoopbackPhase::new(PhaseName::Interpret)
+                .run_batch(context)
+                .await
+        })
+    }
 }
 
 impl Phase for DiscoveryStampInterpretPhase {

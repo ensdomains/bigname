@@ -14,8 +14,8 @@ use bigname_ingest::{
     VerificationBatch, VerificationLog, VerificationMarker, VerificationProviderKind, WatchFilter,
 };
 use bigname_interpret::{
-    BatchRequest as InterpretRequest, Engine as InterpretEngine, Marker as InterpretMarker,
-    RunMode as InterpretRunMode,
+    BatchRequest as InterpretRequest, Engine as InterpretEngine, ErrorKind as InterpretErrorKind,
+    Marker as InterpretMarker, RunMode as InterpretRunMode,
 };
 use phase_runner::{
     capacity::CapacityGuard,
@@ -660,6 +660,61 @@ async fn cross_family_all_emitter_coverage_keeps_discovery_repair_idle() -> Resu
         admissions, 1,
         "the complete admission snapshot retains tuples already covered from all emitters"
     );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn transient_required_ingest_stamp_failure_is_retryable_and_atomic() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_discovery_ingest_transient_stamp").await?;
+    seed_manifest_configuration(scratch.pool(), Producer::Root).await?;
+    seed_completed_discovery_state(scratch.pool()).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_discovery_ingest_stamp_once() RETURNS trigger
+         LANGUAGE plpgsql AS $$ BEGIN
+             RAISE EXCEPTION 'fixture transient stamp failure' USING ERRCODE = '40001';
+         END $$;
+         CREATE TRIGGER reject_discovery_ingest_stamp_once
+         BEFORE UPDATE ON chain_phase_state
+         FOR EACH ROW
+         WHEN (NEW.phase_name = 'ingest' AND NEW.redo_in_progress)
+         EXECUTE FUNCTION reject_discovery_ingest_stamp_once();",
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    let error = InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: 0,
+            to_block: 2,
+            resume_current: Some(InterpretMarker {
+                number: 2,
+                hash: BLOCK_2.to_owned(),
+            }),
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("the injected stamp failure must abort Interpret finalization");
+    assert_eq!(error.kind(), InterpretErrorKind::Transient);
+    assert!(
+        error
+            .to_string()
+            .contains("fixture transient stamp failure")
+    );
+    let ingest: (i64, bool) = sqlx::query_as(
+        "SELECT redo_attempt_generation, redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(ingest, (0, false));
+    let snapshots: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM discovery_watch_admissions WHERE chain_id = $1")
+            .bind(CHAIN)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(snapshots, 0);
     scratch.cleanup().await
 }
 

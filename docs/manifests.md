@@ -1207,9 +1207,17 @@ intervals add coverage over already-ingested blocks, Interpret records required
 Ingest work. The runner automatically re-fetches the affected retained range
 with the discovery-aware filter and re-runs Interpret before Project and Verify
 proceed. Interrupted discovery repairs remain durable and resume through the
-normal runner recovery path. Operators do not need to schedule the former
-manual second pass for this case. Keep serving disabled until repair,
-projection, and the configured verification gate have completed.
+normal runner recovery path. At startup and after Live, the runner can repeat
+the sequence of re-fetching newly admitted historical logs and re-running
+Interpret once for each active admitted discovery rule, plus eight additional
+times. This fixed ceiling is a runaway backstop, not a tuning control:
+exhausting it stops the chain with an operator-visible error while Project and
+Verify remain fenced. Keep serving disabled, inspect
+`discovery_watch_admissions` and `chain_phase_state`, correct the
+non-converging admission or redo lifecycle, and then restart the runner.
+Operators do not need to schedule the former manual second pass for the
+ordinary convergent case. Keep serving disabled until repair, projection, and
+the configured verification gate have completed.
 
 For a pre-[#652](https://github.com/ensdomains/bigname/issues/652) binary only,
 the fallback remains a manual second pass. Use `phase-runner redo --phase

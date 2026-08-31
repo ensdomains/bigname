@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 bigname-adapters.workspace = true
 bigname-domain.workspace = true
 bigname-manifests.workspace = true
