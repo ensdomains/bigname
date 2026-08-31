@@ -21,10 +21,7 @@ COALESCE((
     )) WITH ORDINALITY implementations(admitted, admitted_ordinality)
     WHERE lower(admitted ->> 'address') =
           lower(upgrade.after_state ->> 'implementation')
-      AND (admitted ->> 'start_block' IS NULL
-           OR (admitted ->> 'start_block')::bigint <= $2)
-    ORDER BY COALESCE((admitted ->> 'start_block')::bigint, 0) DESC,
-             admitted_ordinality DESC
+    ORDER BY admitted_ordinality DESC
     LIMIT 1
 ), '[]'::jsonb)
 "#;

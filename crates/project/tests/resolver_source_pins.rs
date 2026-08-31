@@ -1,7 +1,12 @@
+use bigname_project::{BatchRequest, Engine, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
+use sqlx::{PgPool, raw_sql};
 
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const CHAIN: &str = "ethereum-mainnet";
+const RESOLVER: &str = "0x1111111111111111111111111111111111111111";
 
 fn production_order(source: &str, selection: &str) -> String {
     let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -11,84 +16,194 @@ fn production_order(source: &str, selection: &str) -> String {
     let order_end = selection[order_start..]
         .find("LIMIT 1")
         .expect("selection limit");
-    selection[order_start..order_start + order_end].to_owned()
+    selection[order_start..order_start + order_end]
+        .trim()
+        .to_owned()
 }
 
-#[tokio::test]
-async fn duplicate_declarations_source_role_and_features_from_the_same_latest_epoch() -> TestResult
-{
-    let resolver = include_str!("../src/builders/resolver.rs");
-    let features = include_str!("../src/builders/resolver/read_features.rs");
-    let contract_role_order = production_order(resolver, "SELECT declaration ->> 'role'");
-    let contract_feature_order =
-        production_order(features, "SELECT declaration -> 'read_features'");
-    let implementation_role_order = production_order(resolver, "SELECT implementation ->> 'role'");
-    let implementation_feature_order =
-        production_order(features, "SELECT admitted -> 'read_features'");
+fn quote_identifier(identifier: &str) -> String {
+    format!(r#""{}""#, identifier.replace('"', r#""""#))
+}
+
+async fn migrated_pool() -> TestResult<(TestDatabase, PgPool)> {
     let database = TestDatabase::create(TestDatabaseConfig::new(
         "project_resolver_declaration_alignment",
     ))
     .await?;
+    let pool = database.pool().clone();
+    let database_name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("CREATE SCHEMA bigname_phase")
+        .execute(&mut *transaction)
+        .await?;
+    raw_sql(&format!(
+        "ALTER DATABASE {} SET search_path TO bigname_phase, public",
+        quote_identifier(&database_name)
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+        .execute(&mut *transaction)
+        .await?;
+    for script in [
+        include_str!("../../../schema-v2/baseline/01_chain.sql"),
+        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
+        include_str!("../../../schema-v2/baseline/03_identity.sql"),
+        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
+        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../../schema-v2/baseline/06_projections.sql"),
+        include_str!("../../../schema-v2/baseline/07_labels.sql"),
+        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
+        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
+        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+    ] {
+        raw_sql(script).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+    pool.set_connect_options(
+        pool.connect_options()
+            .as_ref()
+            .clone()
+            .options([("search_path", "bigname_phase,public")]),
+    );
+    let mut connections = Vec::new();
+    for _ in 0..pool.options().get_max_connections() {
+        connections.push(pool.acquire().await?);
+    }
+    for connection in &mut connections {
+        sqlx::query("SET search_path TO bigname_phase, public")
+            .execute(&mut **connection)
+            .await?;
+    }
+    Ok((database, pool))
+}
+
+async fn seed_duplicate_declarations(pool: &PgPool) -> TestResult {
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES ($1, $2, 20, '2026-08-01T00:00:20Z', 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(format!("0x{:064x}", 20_u64))
+    .execute(pool)
+    .await?;
     let payload = json!({
+        "deployment_epoch": "test",
         "contracts": [
-            {"address":"0x01", "role":"old", "read_features":["old"], "start_block":10},
-            {"address":"0x01", "role":"first", "read_features":["first"], "start_block":20},
-            {"address":"0x01", "role":"latest", "read_features":["latest"], "start_block":20},
-            {"address":"0x01", "role":"future", "read_features":["future"], "start_block":30}
-        ],
-        "resolver_implementations": [
-            {"address":"0x02", "role":"old_impl", "read_features":["old"], "start_block":10},
-            {"address":"0x02", "role":"first_impl", "read_features":["first"], "start_block":20},
-            {"address":"0x02", "role":"latest_impl", "read_features":["latest"], "start_block":20},
-            {"address":"0x02", "role":"future_impl", "read_features":["future"], "start_block":30}
+            {
+                "role": "old_resolver",
+                "address": RESOLVER,
+                "proxy_kind": "none",
+                "read_features": ["ensip19_default_address"],
+                "start_block": 10
+            },
+            {
+                "role": "latest_resolver",
+                "address": RESOLVER,
+                "proxy_kind": "none",
+                "read_features": ["ensip19_default_address"],
+                "start_block": 20
+            }
         ]
     });
-    let query = format!(
-        "SELECT
-           (SELECT declaration ->> 'role'
-            FROM jsonb_array_elements($1::jsonb -> 'contracts') WITH ORDINALITY
-                 declarations(declaration, declaration_ordinality)
-            WHERE lower(declaration ->> 'address') = $2
-              AND (declaration ->> 'start_block' IS NULL
-                   OR (declaration ->> 'start_block')::bigint <= $4)
-            {contract_role_order} LIMIT 1),
-           (SELECT declaration -> 'read_features'
-            FROM jsonb_array_elements($1::jsonb -> 'contracts') WITH ORDINALITY
-                 declarations(declaration, declaration_ordinality)
-            WHERE lower(declaration ->> 'address') = $2
-              AND (declaration ->> 'start_block' IS NULL
-                   OR (declaration ->> 'start_block')::bigint <= $4)
-            {contract_feature_order} LIMIT 1),
-           (SELECT implementation ->> 'role'
-            FROM jsonb_array_elements($1::jsonb -> 'resolver_implementations') WITH ORDINALITY
-                 implementations(implementation, implementation_ordinality)
-            WHERE lower(implementation ->> 'address') = $3
-              AND (implementation ->> 'start_block' IS NULL
-                   OR (implementation ->> 'start_block')::bigint <= $4)
-            {implementation_role_order} LIMIT 1),
-           (SELECT admitted -> 'read_features'
-            FROM jsonb_array_elements($1::jsonb -> 'resolver_implementations') WITH ORDINALITY
-                 implementations(admitted, admitted_ordinality)
-            WHERE lower(admitted ->> 'address') = $3
-              AND (admitted ->> 'start_block' IS NULL
-                   OR (admitted ->> 'start_block')::bigint <= $4)
-            {implementation_feature_order} LIMIT 1)"
-    );
-    let selected: (String, Value, String, Value) = sqlx::query_as(&query)
-        .bind(payload)
-        .bind("0x01")
-        .bind("0x02")
-        .bind(20_i64)
-        .fetch_one(database.pool())
-        .await?;
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload
+         ) VALUES (1, 'ens', 'ens_v1_resolver_l1', $1, 'test', 'active',
+                   'test', 'test/resolver.toml', $2)
+         RETURNING manifest_id",
+    )
+    .bind(CHAIN)
+    .bind(payload.clone())
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, derivation_kind, canonicality_state, after_state
+         ) VALUES (
+             'manifest:test', 'ens', 'SourceManifestUpdated', 'ens_v1_resolver_l1', 1,
+             $1, $2, 'manifest_sync', 'canonical', $3
+         )",
+    )
+    .bind(manifest_id)
+    .bind(CHAIN)
+    .bind(json!({
+        "rollout_status": "active",
+        "normalizer_version": "test",
+        "manifest_payload": payload
+    }))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state, after_state
+         ) VALUES (
+             'alias:test', 'ens', 'AliasChanged', 'ens_v1_resolver_l1', 1,
+             $1, $2, 20, $3, 'raw_log_preimage_observation', 'canonical', $4
+         )",
+    )
+    .bind(manifest_id)
+    .bind(CHAIN)
+    .bind(format!("0x{:064x}", 20_u64))
+    .bind(json!({"resolver": RESOLVER, "active": false}))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_declarations_project_latest_role_and_features_together() -> TestResult {
+    let resolver = include_str!("../src/builders/resolver.rs");
+    let features = include_str!("../src/builders/resolver/read_features.rs");
     assert_eq!(
-        selected,
-        (
-            "latest".into(),
-            json!(["latest"]),
-            "latest_impl".into(),
-            json!(["latest"])
-        )
+        production_order(resolver, "SELECT declaration ->> 'role'"),
+        "ORDER BY COALESCE((declaration ->> 'start_block')::bigint, 0) DESC, declaration_ordinality DESC"
+    );
+    assert_eq!(
+        production_order(features, "SELECT declaration -> 'read_features'"),
+        "ORDER BY COALESCE((declaration ->> 'start_block')::bigint, 0) DESC, declaration_ordinality DESC"
+    );
+    assert_eq!(
+        production_order(resolver, "SELECT implementation ->> 'role'"),
+        "ORDER BY implementation_ordinality DESC"
+    );
+    assert_eq!(
+        production_order(features, "SELECT admitted -> 'read_features'"),
+        "ORDER BY admitted_ordinality DESC"
+    );
+
+    let (database, pool) = migrated_pool().await?;
+    seed_duplicate_declarations(&pool).await?;
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 20,
+            affected_from_block: 20,
+            affected_to_block: 20,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    let classification: Value = sqlx::query_scalar(
+        "SELECT declared_summary -> 'classification'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(classification["role"], json!("latest_resolver"));
+    assert_eq!(
+        classification["read_features"],
+        json!(["ensip19_default_address"])
     );
     database.cleanup().await?;
     Ok(())
