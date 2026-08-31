@@ -747,13 +747,24 @@ async fn post_live_discovery_repair_runaway_stops_at_operator_bound() -> Result<
             .contains("did not converge after 9 passes")
     );
     assert_eq!(interpret_calls.load(Ordering::SeqCst), 10);
+    let sequence = sequence.lock().expect("phase sequence lock").clone();
+    let live_position = sequence
+        .iter()
+        .position(|event| event == "live:normal")
+        .expect("the runaway must begin only after Live");
+    let project_positions = sequence
+        .iter()
+        .enumerate()
+        .filter_map(|(position, event)| event.starts_with("project:").then_some(position))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        project_positions.len(),
+        1,
+        "only the startup Project pass may run when post-Live repair does not converge: {sequence:?}"
+    );
     assert!(
-        sequence
-            .lock()
-            .expect("phase sequence lock")
-            .iter()
-            .any(|event| event == "live:normal"),
-        "the runaway must begin only after Live"
+        project_positions[0] < live_position,
+        "Project must remain fenced after Live when repair does not converge: {sequence:?}"
     );
     scratch.cleanup().await
 }
