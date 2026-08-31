@@ -1,6 +1,6 @@
 use sqlx::{Postgres, Transaction};
 
-use crate::{ProjectError, Result};
+use crate::{ProjectError, Result, scope::Window};
 
 /// Interpret redo replaces normalized events in-place. Retain the incremental keys of current
 /// rows whose cited event disappeared so project can retract losing-fork output after interpret
@@ -8,14 +8,20 @@ use crate::{ProjectError, Result};
 pub(super) async fn seed(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-    from_block: i64,
-    to_block: i64,
+    window: &Window<'_>,
     target_block: i64,
 ) -> Result<()> {
-    seed_names(transaction, chain_id, from_block, to_block, target_block).await?;
+    seed_names(
+        transaction,
+        chain_id,
+        window.from_block,
+        window.to_block,
+        target_block,
+    )
+    .await?;
     seed_children(transaction, chain_id).await?;
-    seed_resources(transaction, chain_id, from_block, to_block).await?;
-    seed_resolvers(transaction, chain_id, from_block, to_block).await?;
+    seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
+    seed_resolvers(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_primary(transaction, chain_id).await?;
     Ok(())
 }

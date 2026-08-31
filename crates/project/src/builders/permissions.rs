@@ -390,9 +390,7 @@ pub(super) async fn build(
                    candidate.authority_kind,
                    candidate.raw_fact_ref,
                    candidate.block_number,
-                   candidate.block_hash,
-                   candidate.manifest_version,
-                   event.normalized_event_id,
+                   candidate.block_hash, candidate.manifest_version, event.normalized_event_id,
                    row_number() OVER (
                        PARTITION BY event.resource_id, candidate.summary_kind
                        ORDER BY event.block_number DESC NULLS LAST,
@@ -456,9 +454,7 @@ pub(super) async fn build(
                    max(manifest_version) FILTER (
                        WHERE summary_kind = 'latest' AND latest_rank = 1
                    ) AS authority_manifest_version,
-                   max(normalized_event_id) FILTER (
-                       WHERE summary_kind = 'latest' AND latest_rank = 1
-                   ) AS authority_event_id
+                   max(normalized_event_id) FILTER (WHERE summary_kind = 'latest' AND latest_rank = 1) AS authority_event_id
             FROM resource_event_candidates
             GROUP BY resource_id
         ),
@@ -528,8 +524,7 @@ pub(super) async fn build(
                        )
                    END AS authority_kind,
                    summary.raw_fact_ref, summary.authority_block_number,
-                   summary.authority_block_hash, summary.authority_manifest_version,
-                   summary.authority_event_id,
+                   summary.authority_block_hash, summary.authority_manifest_version, summary.authority_event_id,
                    modifier.fuses AS wrapper_fuses,
                    modifier.normalized_event_id AS wrapper_modifier_event_id,
                    modifier.block_number AS wrapper_modifier_block_number,
@@ -565,8 +560,7 @@ pub(super) async fn build(
                    ELSE 'resource_permission_authority_not_projected'
                END,
                COALESCE(resource.raw_fact_ref, resource.provenance) || jsonb_strip_nulls(jsonb_build_object(
-                   'chain_id', $1,
-                   'authority_event_id', resource.authority_event_id,
+                   'chain_id', $1, 'authority_event_id', resource.authority_event_id,
                    'expiry_retirement_event_id', resource.expiry_retirement_event_id,
                    'coverage', jsonb_build_object(
                        'status', 'projected',

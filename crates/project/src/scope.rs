@@ -45,14 +45,7 @@ pub(crate) async fn initialize(
     .await?;
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
     if window.retain_retracted {
-        retracted::seed(
-            transaction,
-            chain_id,
-            window.from_block,
-            window.to_block,
-            target.number,
-        )
-        .await?;
+        retracted::seed(transaction, chain_id, &window, target.number).await?;
         // Resource citations retain the losing projected pointer while canonical history supplies
         // its replacement; both resolver keys must expand before redo rebuilds either row family.
         resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
