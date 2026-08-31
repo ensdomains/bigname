@@ -1840,6 +1840,36 @@ async fn invalidated_project_generation_is_stale_before_rpc() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn project_generation_change_during_rpc_rejects_the_lookup() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            sqlx::query(
+                "UPDATE chain_phase_state
+                 SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
+                 WHERE chain_id = $1 AND phase_name = 'project'",
+            )
+            .bind(ETHEREUM)
+            .execute(&update_pool)
+            .await
+            .expect("second session must invalidate the project generation");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must reject a replaced project generation");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn null_exact_resolver_rejects_project_generation_change_during_rpc() -> AnyResult<()> {
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
@@ -1863,6 +1893,35 @@ async fn null_exact_resolver_rejects_project_generation_change_during_rpc() -> A
         .await;
 
     let error = result.expect_err("lookup must reject a replaced project generation");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn manifest_declaration_change_during_rpc_rejects_the_lookup() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            sqlx::query(
+                "UPDATE manifest_contract_instances
+                 SET declared_address = declared_address
+                 WHERE role = 'universal_resolver'",
+            )
+            .execute(&update_pool)
+            .await
+            .expect("second session must replace the selected manifest declaration");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must retain the exact selected manifest declaration");
     assert_eq!(error.kind(), ErrorKind::ConcurrentState);
     assert_eq!(ledger_count(&pool).await?, 0);
     fixture.cleanup().await?;
@@ -2002,6 +2061,30 @@ async fn projection_publication_lock_order_does_not_deadlock_lookup() -> AnyResu
         error.message(),
         "projected name state changed while live lookup was running"
     );
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn head_change_between_read_and_commit_rejects_the_lookup() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let head_pool = pool.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            advance_head(&head_pool)
+                .await
+                .expect("second session must advance the readable head");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must revalidate the execution head through commit");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
     assert_eq!(ledger_count(&pool).await?, 0);
     fixture.cleanup().await?;
     join_rpc(rpc_handle).await?;

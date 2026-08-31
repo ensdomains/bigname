@@ -19,6 +19,9 @@ BEGIN
         DECLARE
             surface_on_ethereum_mainnet boolean;
         BEGIN
+            -- Rust lookup admission excludes resolver.status = 'unsupported', but
+            -- retirement intentionally does not: once the exact resolver is null,
+            -- prior direct-resolver observations are stale regardless of that status.
             IF NEW.namespace = 'ens'
                 AND NEW.declared_summary -> 'resolver' ? 'chain_id'
                 AND NEW.declared_summary -> 'resolver' ? 'address'
