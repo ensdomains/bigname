@@ -122,10 +122,11 @@ authoritative_for = [
 [refs.graph_node]
 repo = "https://github.com/graphprotocol/graph-node"
 commit = "aefe17371c67ea4090034f61a4e69631d2270a5a"
-purpose = "Reference Graph Node indexer. Not authoritative for ENS, ENSv2, or Basenames; used to cross-check chain reorg, revert, and deterministic indexing design."
+purpose = "Reference Graph Node indexer. Not authoritative for ENS, ENSv2, or Basenames; used to cross-check chain reorg, revert, deterministic indexing design, and subgraph GraphQL conventions."
 authoritative_for = [
   "cross-check scope for chain reorg and revert handling in docs/chain-intake.md",
   "comparison source for deterministic indexing and rollback boundaries",
+  "comparison source for subgraph GraphQL scalar, block constraint, metadata, and indexing-error policy conventions",
 ]
 
 [refs.reth]

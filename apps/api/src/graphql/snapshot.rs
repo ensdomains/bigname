@@ -1,4 +1,6 @@
-use async_graphql::Result;
+use async_graphql::{Context, MaybeUndefined, Result};
+use bigname_storage::SelectedSnapshot;
+use tokio::sync::OnceCell;
 
 use crate::{
     AppState,
@@ -11,21 +13,171 @@ use crate::{
     },
 };
 
+use super::enums::SubgraphErrorPolicy;
 use super::error::internal_error;
+use super::inputs::BlockHeight;
 use super::name_queries::{PhaseGraphqlNameCount, PhaseGraphqlNameListRow};
 
 const NAMESPACE: &str = "ens";
 
+/// One [served head](../../../../docs/glossary.md#served-head) shared by every root field in an HTTP
+/// GraphQL request.
+#[derive(Default)]
+pub(super) struct GraphqlRequestHead {
+    selected: OnceCell<Option<ServedHead>>,
+}
+
+pub(super) enum BlockConstraint {
+    Latest,
+    Number,
+}
+
+impl BlockConstraint {
+    pub(super) fn hides_hash(&self) -> bool {
+        matches!(self, Self::Number)
+    }
+}
+
 pub(super) async fn load_graphql_head(
-    state: &AppState,
+    ctx: &Context<'_>,
     operation: &str,
 ) -> Result<Option<ServedHead>> {
-    let scope = v2_exact_name_snapshot_scope(state, NAMESPACE, None)
+    let state = ctx.data::<AppState>()?;
+    let select = || async {
+        let scope = v2_exact_name_snapshot_scope(state, NAMESPACE, None)
+            .await
+            .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
+        load_served_head(&state.pool, &scope)
+            .await
+            .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))
+    };
+    let Some(request_head) = ctx.data_opt::<GraphqlRequestHead>() else {
+        return select().await;
+    };
+    request_head.selected.get_or_try_init(select).await.cloned()
+}
+
+pub(super) async fn load_graphql_entity_head(
+    ctx: &Context<'_>,
+    block: Option<&BlockHeight>,
+    _subgraph_error: SubgraphErrorPolicy,
+    operation: &str,
+) -> Result<Option<ServedHead>> {
+    let head = load_graphql_head(ctx, operation).await?;
+    validate_block_constraint(head.as_ref(), block, operation)?;
+    // Accept the policy argument without changing the existing Manager response path. The current
+    // projections do not record an indexing error against individual names.
+    Ok(head)
+}
+
+pub(super) fn validate_block_constraint(
+    head: Option<&ServedHead>,
+    block: Option<&BlockHeight>,
+    operation: &str,
+) -> Result<BlockConstraint> {
+    let Some(block) = block else {
+        return Ok(BlockConstraint::Latest);
+    };
+    if block.hash.is_undefined() && block.number.is_undefined() && block.number_gte.is_undefined() {
+        return Err(async_graphql::Error::new(
+            "block must contain hash, number, or number_gte",
+        ));
+    }
+    let head = head.ok_or_else(|| {
+        async_graphql::Error::new("served head is unavailable for the requested block")
+    })?;
+    let position = head
+        .selected()
+        .chain_positions
+        .as_map()
+        .values()
+        .next()
+        .ok_or_else(|| internal_error(operation, anyhow::anyhow!("served head has no block")))?;
+    if !block.hash.is_undefined() {
+        let MaybeUndefined::Value(hash) = &block.hash else {
+            return Err(async_graphql::Error::new("block.hash must not be null"));
+        };
+        if !position.block_hash.eq_ignore_ascii_case(hash.as_str()) {
+            return Err(async_graphql::Error::new(
+                "the requested block hash is not the served head",
+            ));
+        }
+        return Ok(BlockConstraint::Latest);
+    }
+    if !block.number.is_undefined() {
+        let MaybeUndefined::Value(number) = block.number else {
+            return Err(async_graphql::Error::new("block.number must not be null"));
+        };
+        if number < 0 {
+            return Err(async_graphql::Error::new(
+                "block number constraints must be non-negative",
+            ));
+        }
+        if position.block_number != i64::from(number) {
+            return Err(async_graphql::Error::new(
+                "the requested block number is not the served head",
+            ));
+        }
+        return Ok(BlockConstraint::Number);
+    }
+    let MaybeUndefined::Value(number_gte) = block.number_gte else {
+        return Err(async_graphql::Error::new(
+            "block.number_gte must not be null",
+        ));
+    };
+    if number_gte < 0 {
+        return Err(async_graphql::Error::new(
+            "block number constraints must be non-negative",
+        ));
+    }
+    if position.block_number < i64::from(number_gte) {
+        return Err(async_graphql::Error::new(
+            "the served head has not reached block.number_gte",
+        ));
+    }
+    Ok(BlockConstraint::Latest)
+}
+
+pub(super) async fn load_graphql_indexing_errors(
+    state: &AppState,
+    selected: &SelectedSnapshot,
+    operation: &str,
+) -> Result<bool> {
+    let status = bigname_storage::load_phase_indexing_status(&state.pool)
         .await
-        .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
-    load_served_head(&state.pool, &scope)
-        .await
-        .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))
+        .map_err(|error| internal_error(operation, error))?;
+    Ok(selected.chain_positions.as_map().values().any(|position| {
+        let Some(row) = status
+            .chains
+            .iter()
+            .find(|row| row.chain_id == position.chain_id)
+        else {
+            return true;
+        };
+        row.canonical_block != Some(position.block_number)
+            || row.latest_projected_block != Some(position.block_number)
+            || !matches!(
+                row.project_phase_status.as_deref(),
+                Some("completed" | "running")
+            )
+            || !row.project_generation_current
+            || row.project_redo_in_progress
+            || row.any_phase_settled_while_unconfigured
+            || required_verification_has_error(row)
+    }))
+}
+
+fn required_verification_has_error(row: &bigname_storage::IndexingStatusChainRow) -> bool {
+    if !row.provider_trusted_verification_required {
+        return false;
+    }
+    row.ingest_phase_status.as_deref() != Some("completed")
+        || row.verify_phase_status.as_deref() != Some("completed")
+        || row.verify_settled_while_unconfigured
+        || !matches!(
+            row.verify_verification_level.as_deref(),
+            Some("quick_synced" | "cross_checked" | "node_checked")
+        )
 }
 
 pub(super) fn graphql_snapshot_chain_ids(head: Option<&ServedHead>) -> Vec<String> {

@@ -1,4 +1,17 @@
-use async_graphql::InputObject;
+use async_graphql::{InputObject, MaybeUndefined};
+
+use super::scalars::Bytes;
+
+/// Subgraph block constraint. The endpoint currently accepts constraints satisfied by the indexed
+/// state eligible for reads; it does not execute queries against historical data.
+#[derive(Clone, Default, InputObject)]
+#[graphql(name = "Block_height")]
+pub(crate) struct BlockHeight {
+    pub(crate) hash: MaybeUndefined<Bytes>,
+    pub(crate) number: MaybeUndefined<i32>,
+    #[graphql(name = "number_gte")]
+    pub(crate) number_gte: MaybeUndefined<i32>,
+}
 
 /// Subgraph `DomainFilter`. Field names that are snake_case in the subgraph schema (`owner_in`,
 /// `name_contains`) are pinned explicitly; async-graphql would otherwise camelCase them. Only

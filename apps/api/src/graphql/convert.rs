@@ -1,9 +1,11 @@
 use bigname_storage::NameCurrentListRow;
 use serde_json::Value;
-use sqlx::types::time::OffsetDateTime;
 
-use super::objects::{AddressRecord, Domain, Resolver};
 use super::record_inventory_query::PhaseGraphqlRecordInventoryRow;
+use super::{
+    objects::{AddressRecord, Domain, Resolver},
+    scalars::BigInt,
+};
 
 /// Non-null `owner` fallback for ownerless names (all-zero address).
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -29,11 +31,20 @@ impl From<NameCurrentListRow> for Domain {
             name: Some(row.row.canonical_display_name),
             normalized_name: Some(row.row.normalized_name),
             token_id: non_empty(row.token_id),
-            // The GraphQL SDL pins `createdAt` non-null (`Int!`), while the phase projection has
+            // The GraphQL SDL pins `createdAt` non-null (`BigInt!`), while the phase projection has
             // no legacy surface-creation timestamp. Preserve the response shape with epoch zero
             // when neither declared registration nor history supplies a timestamp.
-            created_at: row.created_at.map(unix_seconds_i32).unwrap_or(0),
-            expiry_date: row.expiry_date.map(unix_seconds_i32),
+            created_at: BigInt::from_i64(
+                row.created_at
+                    .map(|value| value.unix_timestamp())
+                    .unwrap_or(0),
+            ),
+            // The projection already maps max or otherwise unrepresentable ENSv2 expiry values to
+            // null; keep that documented divergence while removing the former i32 saturation.
+            // (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L175-L176 @ ens_v2@a971bd64)
+            expiry_date: row
+                .expiry_date
+                .map(|value| BigInt::from_i64(value.unix_timestamp())),
             resolver_address: non_empty(row.resolver_address),
             owner_id,
             record_inventory_key,
@@ -128,11 +139,4 @@ fn json_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
 
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
-}
-
-/// Subgraph `createdAt`/`expiryDate` are `Int`. Saturating to `i32::MAX` keeps the compatibility
-/// surface stable for the Sepolia test scope; far-future (post-2038) expiries would need a wider
-/// scalar, which is outside this narrow endpoint.
-fn unix_seconds_i32(timestamp: OffsetDateTime) -> i32 {
-    i32::try_from(timestamp.unix_timestamp()).unwrap_or(i32::MAX)
 }

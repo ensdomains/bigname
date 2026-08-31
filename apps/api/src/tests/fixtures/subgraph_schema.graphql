@@ -17,13 +17,27 @@ type AddressRecord {
 	address: String!
 }
 
+scalar BigInt
+
+"""
+Subgraph block constraint. The endpoint currently accepts constraints satisfied by the indexed
+state eligible for reads; it does not execute queries against historical data.
+"""
+input Block_height {
+	hash: Bytes
+	number: Int
+	number_gte: Int
+}
+
+scalar Bytes
+
 type Domain {
 	id: String!
 	name: String
 	normalizedName: String
 	tokenId: String
-	createdAt: Int!
-	expiryDate: Int
+	createdAt: BigInt!
+	expiryDate: BigInt
 	"""
 	The page's `resolver` reads are coalesced through a DataLoader, so a list of N domains costs
 	one batched `record_inventory_current` query (plus a fallback only for rare exact-key misses)
@@ -81,17 +95,17 @@ enum OrderDirection {
 	desc
 }
 
-type QueryRoot {
+type Query {
 	"""
-	`domain(id: String!)` accepts either an ENS name string (for example `"alice.eth"`) or a
+	`domain(id: ID!)` accepts either an ENS name string (for example `"alice.eth"`) or a
 	namehash. Resolve by name first, then fall back to the namehash, so callers do not have to
 	signal which id form they are sending.
 	"""
-	domain(id: String!): Domain
+	domain(id: ID!, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): Domain
 	"""
 	`domains(where, first, skip, orderBy, orderDirection)` — offset-paged list.
 	"""
-	domains(where: DomainFilter, first: Int, skip: Int, orderBy: Domain_orderBy, orderDirection: OrderDirection): [Domain!]!
+	domains(where: DomainFilter, first: Int, skip: Int, orderBy: Domain_orderBy, orderDirection: OrderDirection, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): [Domain!]!
 	"""
 	`registrationConnection(first: 0, where) { totalCount }` — backs `OwnedNamesCount`.
 	"""
@@ -100,6 +114,10 @@ type QueryRoot {
 	`domainConnection(first: 0, where) { totalCount }` — backs `MigratedNamesCount`.
 	"""
 	domainConnection(first: Int, where: DomainFilter): DomainConnection!
+	"""
+	Access metadata for the same publication used by GraphQL entity reads.
+	"""
+	_meta(block: Block_height): _Meta_
 }
 
 """
@@ -132,6 +150,33 @@ type Resolver {
 }
 
 """
+Block metadata for the indexed state selected for this request.
+"""
+type _Block_ {
+	number: Int!
+	hash: Bytes
+	timestamp: Int
+	parentHash: Bytes
+}
+
+"""
+Metadata for the currently served GraphQL publication.
+"""
+type _Meta_ {
+	block: _Block_!
+	deployment: String!
+	hasIndexingErrors: Boolean!
+}
+
+"""
+Policy argument reserved for per-entity indexing-error behavior.
+"""
+enum _SubgraphErrorPolicy_ {
+	allow
+	deny
+}
+
+"""
 Directs the executor to include this field or fragment only when the `if` argument is true.
 """
 directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
@@ -140,5 +185,5 @@ Directs the executor to skip this field or fragment when the `if` argument is tr
 """
 directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
-	query: QueryRoot
+	query: Query
 }

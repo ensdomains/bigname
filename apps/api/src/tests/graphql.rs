@@ -90,7 +90,7 @@ async fn graphql_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> 
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) { domain(id: $id) { name normalizedName } }"#,
+        r#"query Domain($id: ID!) { domain(id: $id) { name normalizedName } }"#,
         json!({"id": original_namehash}),
     )
     .await?;
@@ -863,8 +863,11 @@ fn graphql_sdl_matches_subgraph_compatibility_contract() {
     // Documentation-level pins for load-bearing compatibility contract points (redundant with the
     // golden file; kept so a failure names the broken contract directly).
     assert!(sdl.contains("owner: Account!"), "Domain.owner must be non-null");
-    assert!(sdl.contains("createdAt: Int!"), "Domain.createdAt must be non-null");
+    assert!(sdl.contains("createdAt: BigInt!"), "Domain.createdAt must be non-null");
     assert!(sdl.contains("address: String!"), "Resolver.address must be non-null");
+    assert!(sdl.contains("type Query {"), "the query root must be Query");
+    assert!(sdl.contains("domain(id: ID!"), "domain.id must be ID!");
+    assert!(!sdl.contains("BigDecimal"), "unused BigDecimal must stay absent");
 }
 
 /// Bless helper for the golden SDL fixture — prints the live SDL so it can be copied into
@@ -876,13 +879,213 @@ fn print_subgraph_sdl_for_blessing() {
 }
 
 #[tokio::test]
+async fn graphql_meta_reports_the_served_head_and_real_readiness() -> Result<()> {
+    const PARENT_HASH: &str =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const HEAD_HASH: &str =
+        "0x2222222222222222222222222222222222222222222222222222222222222222";
+    const HEAD_NUMBER: i64 = 500;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES
+        (
+            'ethereum-mainnet', $1, NULL, $2, '2027-01-15T07:59:59Z', 'finalized'
+        ),
+        (
+            'ethereum-mainnet', $3, $1, $4, '2027-01-15T08:00:00Z', 'finalized'
+        )
+        "#,
+    )
+    .bind(PARENT_HASH)
+    .bind(HEAD_NUMBER - 1)
+    .bind(HEAD_HASH)
+    .bind(HEAD_NUMBER)
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_heads SET
+            latest_block_hash = $1,
+            latest_block_number = $2,
+            safe_block_hash = $1,
+            safe_block_number = $2,
+            finalized_block_hash = $1,
+            finalized_block_number = $2
+        WHERE chain_id = 'ethereum-mainnet'
+        "#,
+    )
+    .bind(HEAD_HASH)
+    .bind(HEAD_NUMBER)
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_phase_state SET
+            phase_status = 'completed',
+            current_block_number = $1,
+            current_block_hash = $2,
+            target_block_number = $1,
+            target_block_hash = $2,
+            input_content_hash = $3,
+            settled_while_unconfigured = NULL
+        WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'
+        "#,
+    )
+    .bind(HEAD_NUMBER)
+    .bind(HEAD_HASH)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query { _meta { block { number hash timestamp parentHash } deployment hasIndexingErrors } }"#,
+        json!({}),
+    )
+    .await?;
+    let meta = &payload["data"]["_meta"];
+    assert_eq!(meta["block"]["number"], json!(HEAD_NUMBER));
+    assert_eq!(meta["block"]["hash"], json!(HEAD_HASH));
+    assert_eq!(meta["block"]["parentHash"], json!(PARENT_HASH));
+    assert!(meta["block"]["timestamp"].is_number());
+    assert_eq!(
+        meta["deployment"],
+        json!(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    );
+    assert_eq!(meta["hasIndexingErrors"], json!(false));
+
+    let number_constrained = post_graphql(
+        database.app_state(),
+        r#"query {
+            _meta(block: { number: 500 }) { block { number hash } }
+            domain(id: "alice.eth", block: { number_gte: 500 }) { id }
+        }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(
+        number_constrained["data"]["_meta"]["block"],
+        json!({"number": HEAD_NUMBER, "hash": null})
+    );
+    assert_eq!(
+        number_constrained["data"]["domain"]["id"],
+        json!(GRAPHQL_ALICE_NAMEHASH)
+    );
+    let selector_precedence = post_graphql(
+        database.app_state(),
+        r#"query {
+            _meta(block: {
+                hash: "0x2222222222222222222222222222222222222222222222222222222222222222"
+                number: 499
+                number_gte: 501
+            }) { block { number hash } }
+        }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(
+        selector_precedence["data"]["_meta"]["block"],
+        json!({"number": HEAD_NUMBER, "hash": HEAD_HASH})
+    );
+    let number_precedence = post_graphql(
+        database.app_state(),
+        r#"query {
+            _meta(block: { number: 500, number_gte: 501 }) { block { number hash } }
+        }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(
+        number_precedence["data"]["_meta"]["block"],
+        json!({"number": HEAD_NUMBER, "hash": null})
+    );
+    let empty_block = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query { _meta(block: {}) { block { number } } }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(empty_block["data"]["_meta"], Value::Null);
+    assert!(empty_block["errors"].is_array());
+    let null_precedence = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query { _meta(block: { hash: null, number: 500 }) { block { number } } }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(null_precedence["data"]["_meta"], Value::Null);
+    assert!(null_precedence["errors"].is_array());
+    let null_number_precedence = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query { _meta(block: { number: null, number_gte: 500 }) { block { number } } }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(null_number_precedence["data"]["_meta"], Value::Null);
+    assert!(null_number_precedence["errors"].is_array());
+    let historical = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query { domain(id: "alice.eth", block: { number: 499 }) { id } }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(historical["data"]["domain"], Value::Null);
+    assert!(
+        historical["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty())
+    );
+
+    sqlx::query(
+        "UPDATE chain_phase_state SET settled_while_unconfigured = true \
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let degraded = post_graphql(
+        database.app_state(),
+        r#"query { _meta { hasIndexingErrors } domain(
+            id: "alice.eth",
+            block: { hash: "0x2222222222222222222222222222222222222222222222222222222222222222" },
+            subgraphError: allow
+        ) { id } }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(degraded["data"]["_meta"]["hasIndexingErrors"], json!(true));
+    assert_eq!(
+        degraded["data"]["domain"]["id"],
+        json!(GRAPHQL_ALICE_NAMEHASH)
+    );
+    // The policy is scaffold plumbing in T1: its default must not break this existing Manager
+    // selection while later entity slices define per-entity error behavior.
+    let default_policy = post_graphql(
+        database.app_state(),
+        r#"query { domain(id: "alice.eth") { id } }"#,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(
+        default_policy["data"]["domain"]["id"],
+        json!(GRAPHQL_ALICE_NAMEHASH)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn graphql_compatibility_reads_phase_projections() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     seed_alice_record_inventory(&database).await?;
     let payload = post_graphql(
         database.app_state(),
-        r#"query PhaseOnly($id: String!, $where: DomainFilter!) {
+        r#"query PhaseOnly($id: ID!, $where: DomainFilter!) {
             domain(id: $id) {
                 name
                 resolver { contentHash addresses { coinType address } }
@@ -931,14 +1134,43 @@ async fn graphql_phase_reads_accept_rfc3339_summary_timestamps() -> Result<()> {
     .await?;
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) {
+        r#"query Domain($id: ID!) {
             domain(id: $id) { createdAt expiryDate }
         }"#,
         json!({ "id": "alice.eth" }),
     )
     .await?;
-    assert_eq!(payload["data"]["domain"]["createdAt"], json!(1_700_000_000));
-    assert_eq!(payload["data"]["domain"]["expiryDate"], json!(1_900_000_000));
+    assert_eq!(payload["data"]["domain"]["createdAt"], json!("1700000000"));
+    assert_eq!(payload["data"]["domain"]["expiryDate"], json!("1900000000"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_bigint_timestamps_do_not_saturate_at_i32_max() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET declared_summary = jsonb_set(
+            jsonb_set(declared_summary, '{registration,created_at}', '2200000000'),
+            '{registration,expiry}', '2500000000'
+        )
+        WHERE logical_name_id = 'ens:' || $1
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query Domain($id: ID!) { domain(id: $id) { createdAt expiryDate } }"#,
+        json!({ "id": "alice.eth" }),
+    )
+    .await?;
+    assert_eq!(payload["data"]["domain"]["createdAt"], json!("2200000000"));
+    assert_eq!(payload["data"]["domain"]["expiryDate"], json!("2500000000"));
 
     database.cleanup().await
 }
@@ -1131,7 +1363,7 @@ async fn graphql_point_list_and_inventory_reject_targets_ahead_of_head() -> Resu
 
     for (query, variables, path) in [
         (
-            r#"query Domain($id: String!) { domain(id: $id) { name } }"#,
+            r#"query Domain($id: ID!) { domain(id: $id) { name } }"#,
             json!({ "id": "alice.eth" }),
             "domain",
         ),
@@ -1169,7 +1401,7 @@ async fn graphql_point_list_and_inventory_reject_targets_ahead_of_head() -> Resu
     .await?;
     let inventory = post_graphql_allow_errors(
         database.app_state(),
-        r#"query Domain($id: String!) {
+        r#"query Domain($id: ID!) {
             domain(id: $id) { resolver { contentHash } }
         }"#,
         json!({ "id": "alice.eth" }),
@@ -1357,6 +1589,42 @@ async fn graphql_rejects_project_republication_during_read() -> Result<()> {
 }
 
 #[tokio::test]
+async fn graphql_root_fields_share_one_served_head_selection() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let (_guard, control) =
+        crate::v2::lookup_served_head_initial_validation_test_hooks::install(
+            &database.lookup_pool,
+        )
+        .await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        post_graphql(
+            state,
+            r#"query {
+                registrationConnection(first: 0) { totalCount }
+                domain(id: "alice.eth") { name }
+            }"#,
+            json!({}),
+        )
+        .await
+    });
+
+    control.wait_until_reached().await;
+    control.resume().await;
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(1), request_task)
+        .await
+        .context("sibling GraphQL root fields selected the served head more than once")???;
+    assert_eq!(payload["data"]["domain"]["name"], json!("alice.eth"));
+    assert_eq!(
+        payload["data"]["registrationConnection"]["totalCount"],
+        json!(4)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn graphql_nested_resolver_rejects_publication_after_parent_read() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
@@ -1522,7 +1790,7 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) {
+        r#"query Domain($id: ID!) {
             domain(id: $id) {
                 id name normalizedName tokenId createdAt expiryDate
                 owner { id }
@@ -1538,10 +1806,10 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     assert_eq!(domain["name"], json!("alice.eth"));
     assert_eq!(domain["normalizedName"], json!("alice.eth"));
     assert_eq!(domain["owner"]["id"], json!(GRAPHQL_OWNER));
-    // createdAt/expiryDate are GraphQL Ints, so they must serialize as JSON numbers, not strings.
-    assert_eq!(domain["createdAt"], json!(1_700_000_000));
-    assert_eq!(domain["expiryDate"], json!(1_900_000_000));
-    assert!(domain["createdAt"].is_number());
+    // BigInt values serialize as arbitrary-width decimal strings.
+    assert_eq!(domain["createdAt"], json!("1700000000"));
+    assert_eq!(domain["expiryDate"], json!("1900000000"));
+    assert!(domain["createdAt"].is_string());
     // alice.eth has no record_inventory_current row seeded, so the resolver serves its empty
     // shapes: address present, texts/addresses empty, contentHash null. (Populated record fields
     // are covered by graphql_domain_resolver_serves_record_inventory_fields.)
@@ -1554,7 +1822,7 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     // fallback.
     let by_name = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) {
+        r#"query Domain($id: ID!) {
             domain(id: $id) { id name normalizedName owner { id } }
         }"#,
         json!({ "id": "alice.eth" }),
@@ -1569,7 +1837,7 @@ async fn graphql_domain_op_returns_subgraph_domain_shape() -> Result<()> {
     // Unknown id (neither a known name nor a known namehash) resolves to null without an error.
     let missing = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) { domain(id: $id) { id } }"#,
+        r#"query Domain($id: ID!) { domain(id: $id) { id } }"#,
         json!({ "id": "0xdeadbeef" }),
     )
     .await?;
@@ -1733,7 +2001,7 @@ async fn graphql_domain_owner_falls_back_to_registrant_then_zero_address() -> Re
     // Carol has no declared owner — `owner` resolves through the registrant leg of the fallback.
     let carol = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) { domain(id: $id) { owner { id } expiryDate } }"#,
+        r#"query Domain($id: ID!) { domain(id: $id) { owner { id } expiryDate } }"#,
         json!({ "id": "carol.eth" }),
     )
     .await?;
@@ -1741,20 +2009,20 @@ async fn graphql_domain_owner_falls_back_to_registrant_then_zero_address() -> Re
         carol["data"]["domain"]["owner"]["id"],
         json!(GRAPHQL_REGISTRANT_C)
     );
-    assert_eq!(carol["data"]["domain"]["expiryDate"], json!(1_950_000_000));
+    assert_eq!(carol["data"]["domain"]["expiryDate"], json!("1950000000"));
 
     // Dave has neither owner nor registrant — `owner` stays non-null via the zero-address
     // sentinel, the missing expiry serializes as null, and the missing created_at degenerates to
-    // epoch rather than breaking the non-null `createdAt: Int!`.
+    // epoch rather than breaking the non-null `createdAt: BigInt!`.
     let dave = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) { domain(id: $id) { owner { id } expiryDate createdAt } }"#,
+        r#"query Domain($id: ID!) { domain(id: $id) { owner { id } expiryDate createdAt } }"#,
         json!({ "id": "dave.eth" }),
     )
     .await?;
     assert_eq!(dave["data"]["domain"]["owner"]["id"], json!(ZERO_ADDRESS));
     assert_eq!(dave["data"]["domain"]["expiryDate"], Value::Null);
-    assert_eq!(dave["data"]["domain"]["createdAt"], json!(0));
+    assert_eq!(dave["data"]["domain"]["createdAt"], json!("0"));
 
     database.cleanup().await?;
     Ok(())
@@ -1768,7 +2036,7 @@ async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> 
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) {
+        r#"query Domain($id: ID!) {
             domain(id: $id) {
                 resolver { id address texts contentHash addresses { coinType address } }
             }
@@ -1797,7 +2065,7 @@ async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> 
     // Bob has no inventory row — the resolver still serves the empty record shapes.
     let bob = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) {
+        r#"query Domain($id: ID!) {
             domain(id: $id) { resolver { texts contentHash addresses { coinType address } } }
         }"#,
         json!({ "id": "bob.eth" }),
@@ -1818,7 +2086,7 @@ async fn graphql_domain_resolver_serves_sepolia_records_via_anchor_fallback() ->
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) {
+        r#"query Domain($id: ID!) {
             domain(id: $id) { resolver { texts addresses { coinType address } contentHash } }
         }"#,
         json!({ "id": "erin.eth" }),
@@ -1931,7 +2199,7 @@ async fn graphql_domain_serves_a_stored_name_that_no_longer_normalizes() -> Resu
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domain($id: String!) { domain(id: $id) { name normalizedName } }"#,
+        r#"query Domain($id: ID!) { domain(id: $id) { name normalizedName } }"#,
         json!({ "id": GRAPHQL_ALICE_NAMEHASH }),
     )
     .await?;

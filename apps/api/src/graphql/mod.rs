@@ -12,10 +12,12 @@ mod error;
 mod http;
 mod inputs;
 mod loader;
+mod meta;
 mod name_queries;
 mod objects;
 mod query;
 mod record_inventory_query;
+mod scalars;
 mod schema;
 mod snapshot;
 
