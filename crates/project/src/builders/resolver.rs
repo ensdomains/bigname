@@ -372,22 +372,24 @@ pub(super) async fn build(
                            SELECT declaration ->> 'role'
                            FROM jsonb_array_elements(COALESCE(
                                manifest.manifest_payload -> 'contracts', '[]'::jsonb
-                           )) declaration
+                           )) WITH ORDINALITY
+                              declarations(declaration, declaration_ordinality)
                            WHERE lower(declaration ->> 'address') = candidate.resolver_address
                              AND (
                                  declaration ->> 'start_block' IS NULL
                                  OR (declaration ->> 'start_block')::bigint <= $2
                              )
+                           ORDER BY COALESCE((declaration ->> 'start_block')::bigint, 0) DESC,
+                                    declaration_ordinality DESC
                            LIMIT 1
                        ),
                        (
                            SELECT implementation ->> 'role'
                            FROM jsonb_array_elements(COALESCE(
-                               manifest.manifest_payload -> 'resolver_implementations',
-                               '[]'::jsonb
-                           )) implementation
-                           WHERE lower(implementation ->> 'address') =
-                                 lower(upgrade.after_state ->> 'implementation')
+                               manifest.manifest_payload -> 'resolver_implementations', '[]'::jsonb
+                           )) WITH ORDINALITY implementations(implementation, implementation_ordinality)
+                           WHERE lower(implementation ->> 'address') = lower(upgrade.after_state ->> 'implementation')
+                           ORDER BY implementation_ordinality DESC
                            LIMIT 1
                        )
                    ) AS classification_role,

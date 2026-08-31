@@ -807,6 +807,40 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
 }
 
 #[tokio::test]
+async fn marker_only_permission_is_retained_without_a_grant_source() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_permission_marker").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v2_registry_l1",
+        json!({
+            "subject":OWNER, "scope":{"kind":"resource"},
+            "effective_powers":["was_reserved"], "grant_source":null,
+            "revocation_source":null, "inheritance_path":[], "transfer_behavior":"retain"
+        }),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let row: (Value, Option<Value>) = sqlx::query_as(
+        "SELECT effective_powers, grant_source FROM permissions_current
+         WHERE resource_id = $1 AND subject = lower($2)",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .bind(OWNER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(row, (json!(["was_reserved"]), Some(json!({}))));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn shadow_identity_labels_retain_bytes_and_decode_only_exact_text() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_shadow_labels").await?;
     seed_project_fixture(scratch.pool()).await?;
@@ -13735,6 +13769,131 @@ async fn record_only_resolver_with_permission_history_keeps_passthrough() -> Res
 }
 
 #[tokio::test]
+async fn empty_window_crossing_declaration_boundary_matches_fresh_projection() -> Result<()> {
+    assert_declaration_boundary_converges(false).await
+}
+
+#[tokio::test]
+async fn record_only_window_crossing_declaration_boundary_matches_fresh_projection() -> Result<()> {
+    assert_declaration_boundary_converges(true).await
+}
+
+async fn assert_declaration_boundary_converges(record_only: bool) -> Result<()> {
+    let suffix = if record_only { "record" } else { "empty" };
+    let incremental =
+        ScratchDatabase::create(&format!("production_project_declaration_boundary_{suffix}"))
+            .await?;
+    let fresh = ScratchDatabase::create(&format!(
+        "production_project_declaration_boundary_{suffix}_fresh"
+    ))
+    .await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_declaration_boundary_fixture(pool).await?;
+        if record_only {
+            insert_event(
+                pool,
+                CHAIN,
+                20,
+                Some("ens:0xalice"),
+                Some(RESOURCE),
+                "RecordChanged",
+                "ens_v1_resolver_l1",
+                json!({
+                    "resolver":RESOLVER,
+                    "record_key":"text:boundary",
+                    "record_family":"text",
+                    "selector_key":"boundary",
+                    "value_retained":true,
+                    "value":"changed"
+                }),
+                json!({"emitting_address":RESOLVER}),
+            )
+            .await?;
+        }
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 19).await?;
+    assert_eq!(
+        resolver_projection_row(incremental.pool(), RESOLVER)
+            .await?
+            .as_ref()
+            .and_then(|row| row.pointer("/declared_summary/classification/role")),
+        Some(&json!("old_resolver"))
+    );
+    if !record_only {
+        let boundary_events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM normalized_events
+             WHERE chain_id = $1 AND block_number = 20",
+        )
+        .bind(CHAIN)
+        .fetch_one(incremental.pool())
+        .await?;
+        assert_eq!(
+            boundary_events, 0,
+            "the empty boundary window gained an event"
+        );
+    }
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 19,
+            hash: block_hash(CHAIN, 19),
+        }),
+        RunMode::Normal,
+        20,
+        20,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 20).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    let incremental_row = resolver_projection_row(incremental.pool(), RESOLVER).await?;
+    let fresh_row = resolver_projection_row(fresh.pool(), RESOLVER).await?;
+    assert_eq!(
+        fresh_row
+            .as_ref()
+            .and_then(|row| row.pointer("/declared_summary/classification/role")),
+        Some(&json!("new_resolver"))
+    );
+    assert_eq!(
+        incremental_row, fresh_row,
+        "{suffix} window failed to reclassify at the declaration boundary"
+    );
+    if !record_only {
+        run_project(
+            incremental.pool(),
+            CHAIN,
+            Some(Marker {
+                number: 20,
+                hash: block_hash(CHAIN, 20),
+            }),
+            RunMode::Normal,
+            21,
+            21,
+        )
+        .await?;
+        let resolver_stayed_quiet: bool = sqlx::query_scalar(
+            "SELECT last_recomputed_at = to_timestamp(0)
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(RESOLVER)
+        .fetch_one(incremental.pool())
+        .await?;
+        assert!(
+            resolver_stayed_quiet,
+            "a batch without a declaration boundary rebuilt the resolver"
+        );
+    }
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn record_only_resource_keeps_unrelated_permission_resolver_passthrough() -> Result<()> {
     let scratch =
         ScratchDatabase::create("production_project_unrelated_permission_history_passthrough")
@@ -17664,6 +17823,49 @@ async fn seed_project_fixture(pool: &PgPool) -> Result<()> {
         json!({"raw_labels_hex":["ff00","657468"]}),
         json!({}),
     )
+    .await?;
+    Ok(())
+}
+
+async fn seed_declaration_boundary_fixture(pool: &PgPool) -> Result<()> {
+    seed_project_fixture(pool).await?;
+    for number in 4..=21 {
+        insert_lineage_block(pool, CHAIN, number).await?;
+    }
+    let contracts = json!([
+        {
+            "role":"old_resolver",
+            "address":RESOLVER,
+            "proxy_kind":"none",
+            "read_features":["ensip19_default_address"],
+            "start_block":10
+        },
+        {
+            "role":"new_resolver",
+            "address":RESOLVER,
+            "proxy_kind":"none",
+            "read_features":["ensip19_default_address"],
+            "start_block":20
+        }
+    ]);
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = jsonb_set(manifest_payload, '{contracts}', $1)
+         WHERE chain_id = $2 AND source_family = 'ens_v1_resolver_l1'",
+    )
+    .bind(&contracts)
+    .bind(CHAIN)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = jsonb_set(after_state, '{manifest_payload,contracts}', $1)
+         WHERE chain_id = $2 AND source_family = 'ens_v1_resolver_l1'
+           AND event_kind = 'SourceManifestUpdated'",
+    )
+    .bind(contracts)
+    .bind(CHAIN)
+    .execute(pool)
     .await?;
     Ok(())
 }

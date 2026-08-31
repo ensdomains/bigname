@@ -146,7 +146,11 @@ async fn write_surfaces(
         query.push(
             "
             ON CONFLICT (logical_name_id) DO UPDATE
-            SET block_hash = CASE
+            SET normalizer_version = EXCLUDED.normalizer_version,
+                visibility_state = EXCLUDED.visibility_state,
+                normalization_errors = EXCLUDED.normalization_errors,
+                deactivation_reason = EXCLUDED.deactivation_reason,
+                block_hash = CASE
                     WHEN name_surfaces.canonicality_state = 'orphaned'
                       OR EXCLUDED.block_number < name_surfaces.block_number
                         THEN EXCLUDED.block_hash
@@ -192,11 +196,16 @@ async fn write_surfaces(
               AND name_surfaces.dns_encoded_name = EXCLUDED.dns_encoded_name
               AND name_surfaces.namehash = EXCLUDED.namehash
               AND name_surfaces.labelhashes = EXCLUDED.labelhashes
-              AND name_surfaces.normalizer_version = EXCLUDED.normalizer_version
-              AND name_surfaces.visibility_state = EXCLUDED.visibility_state
-              AND name_surfaces.normalization_errors = EXCLUDED.normalization_errors
-              AND name_surfaces.deactivation_reason IS NOT DISTINCT FROM EXCLUDED.deactivation_reason
               AND name_surfaces.chain_id = EXCLUDED.chain_id
+              AND (
+                    name_surfaces.canonicality_state = 'orphaned'
+                OR (
+                    name_surfaces.normalizer_version = EXCLUDED.normalizer_version
+                AND name_surfaces.visibility_state = EXCLUDED.visibility_state
+                AND name_surfaces.normalization_errors = EXCLUDED.normalization_errors
+                AND name_surfaces.deactivation_reason IS NOT DISTINCT FROM EXCLUDED.deactivation_reason
+                  )
+              )
             RETURNING logical_name_id
             ",
         );

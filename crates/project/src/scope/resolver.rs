@@ -214,6 +214,13 @@ pub(super) async fn classify_unchanged(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {
+    // Carry-forward relies on three Interpret-side rules: `write_surfaces` in
+    // `interpret/src/write/identity_names.rs` rejects a second raw identity for an existing
+    // [name surface](../../../../docs/glossary.md#surface-name-surface); `normalized_events` has a
+    // foreign key to `name_surfaces`, so an event cannot link
+    // to a surface before that surface exists; and the v1 resolver adapter in
+    // `adapters/src/schema_v2/protocol/v1/resolver.rs` links a record event only when the surface
+    // is already materialized, with no later step that retroactively links an earlier event.
     // Record values and record-version boundaries do not contribute to resolver_current's
     // binding, alias, permission, role, event, or classification summaries. A resource rebuild
     // also needs only its pointer resolver's existing classification. In either case, republish
@@ -334,4 +341,19 @@ pub(super) async fn classify_unchanged(
             ProjectError::database("failed to classify record-only resolver scope", error)
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn passthrough_comment_pins_interpret_side_invariants() {
+        let source = include_str!("resolver.rs");
+        for invariant in [
+            "`write_surfaces`",
+            "foreign key to `name_surfaces`",
+            "links a record event only when the surface",
+        ] {
+            assert!(source.contains(invariant), "missing invariant {invariant}");
+        }
+    }
 }

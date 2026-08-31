@@ -135,9 +135,7 @@ pub(super) fn event_string_value(raw_value: &[u8]) -> Value {
 }
 
 pub(super) fn event_string_has_content(raw_value: &[u8]) -> bool {
-    decoded_label(raw_value)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| !raw_value.is_empty())
+    !raw_value.is_empty()
 }
 
 pub(super) struct EventStringSelector {
@@ -290,5 +288,21 @@ pub(super) fn derivation_kind(source_family: &str, event_kind: &str) -> &'static
         }
     } else {
         "ens_v1_unwrapped_authority"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whitespace_record_key_is_retained_as_opaque() {
+        // ENSv1 stores the supplied text key without validation.
+        // (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L20 @ ens_v1@91c966f)
+        assert!(event_string_has_content(b" "));
+        let selector = event_string_selector("text", b" ");
+        assert_eq!(selector.record_family, "text_opaque");
+        assert_eq!(selector.selector_key, Value::String("0x20".to_owned()));
+        assert!(selector.raw_selector_key.is_some());
     }
 }

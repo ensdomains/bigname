@@ -10,6 +10,5 @@ pub use schema_v2::{
     InterpreterStateRequest, ManifestInput as SchemaV2ManifestInput,
     NormalizedEvent as SchemaV2NormalizedEvent, PriorEventInput,
     RawLogInput as SchemaV2RawLogInput, StateCacheCapacity, begin_schema_v2_adapter_restore,
-    interpret_schema_v2_batch, interpret_schema_v2_batch_incremental,
-    prepare_schema_v2_batch_incremental,
+    interpret_schema_v2_batch, prepare_schema_v2_batch_incremental,
 };

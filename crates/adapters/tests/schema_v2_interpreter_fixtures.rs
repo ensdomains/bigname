@@ -10,7 +10,7 @@ use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, InterpreterStateRequest,
     InterpreterStateValue, ManifestInput, PriorEventInput, RawBlockInput, RawLogInput,
     StateCacheCapacity, begin_schema_v2_adapter_restore, interpret_schema_v2_batch,
-    interpret_schema_v2_batch_incremental, prepare_schema_v2_batch_incremental, seam,
+    prepare_schema_v2_batch_incremental, seam,
 };
 use bigname_manifests::{LoadedManifest, load_repository};
 use serde::Deserialize;
@@ -726,7 +726,9 @@ fn dense_log(
 
 fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> Result<BatchOutput> {
     let fresh = interpret_schema_v2_batch(input.clone())?;
-    let (incremental, live_session) = interpret_schema_v2_batch_incremental(input.clone(), None)?;
+    let (incremental, live_session) =
+        prepare_schema_v2_batch_incremental(input.clone(), None, StateCacheCapacity::Unlimited)?
+            .finish(Vec::new())?;
     assert_eq!(
         incremental, fresh,
         "{case_id}: incremental output differs from fresh interpretation"
@@ -821,8 +823,12 @@ fn interpret_physical_batches(
             },
             ..restored_input.clone()
         };
-        let (incremental, next_session) =
-            interpret_schema_v2_batch_incremental(incremental_input, live_session)?;
+        let (incremental, next_session) = prepare_schema_v2_batch_incremental(
+            incremental_input,
+            live_session,
+            StateCacheCapacity::Unlimited,
+        )?
+        .finish(Vec::new())?;
         assert_eq!(
             incremental, fresh,
             "{case_id}: physical-batch incremental output differs from retained-state restore"
