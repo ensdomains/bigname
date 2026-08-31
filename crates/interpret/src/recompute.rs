@@ -233,9 +233,16 @@ async fn load_surfaces(
          LEFT JOIN LATERAL (
              SELECT event.after_state
              FROM normalized_events event
+             JOIN chain_lineage event_lineage
+               ON event_lineage.chain_id = event.chain_id
+              AND event_lineage.block_hash = event.block_hash
+              AND event_lineage.block_number = event.block_number
              WHERE event.chain_id = surface.chain_id
                AND event.logical_name_id = surface.logical_name_id
                AND event.after_state ? 'raw_labels_hex'
+               AND event.block_number <= surface.block_number
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND event_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
              ORDER BY event.block_number DESC NULLS LAST,
                       event.transaction_index DESC NULLS LAST,
                       event.log_index DESC NULLS LAST,
@@ -244,6 +251,8 @@ async fn load_surfaces(
          ) fallback ON true
          WHERE surface.chain_id = $1
            AND surface.block_number BETWEEN $2 AND $3
+           AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
          ORDER BY surface.block_number, surface.logical_name_id
          FOR UPDATE OF surface",
     )
@@ -481,56 +490,5 @@ fn normalization_flag(raw_label: &[u8]) -> NormalizationFlag {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dns_labels_and_hex_fallback_round_trip_raw_bytes() {
-        assert_eq!(
-            decode_dns_labels(&[5, b'a', b'l', b'i', b'c', b'e', 3, b'e', b't', b'h', 0]),
-            Ok(vec![b"alice".to_vec(), b"eth".to_vec()])
-        );
-        assert_eq!(decode_hex("00ff41", "ens:test").unwrap(), [0, 255, 65]);
-    }
-
-    #[test]
-    fn label_flag_matches_the_interpreter_normalization_gate() {
-        assert!(normalization_flag(b"alice").normalized);
-        assert_eq!(
-            normalization_flag(b"Alice").error.as_deref(),
-            Some("raw label is not byte-identical to its normalized form")
-        );
-        assert!(normalization_flag(&[0xff]).error.is_some());
-    }
-
-    #[test]
-    fn missing_surface_position_precedes_real_log_zero() {
-        let timestamp = OffsetDateTime::from_unix_timestamp(1_000).unwrap();
-        let surface = SurfaceRow {
-            logical_name_id: "ens:test".to_owned(),
-            raw_labels: vec!["Alice".to_owned()],
-            dns_encoded_name: Vec::new(),
-            normalizer_version: "old".to_owned(),
-            visibility_state: "active".to_owned(),
-            normalization_errors: json!([]),
-            deactivation_reason: None,
-            deactivated_at: None,
-            block_number: 1,
-            block_timestamp: timestamp,
-            provenance: json!({}),
-            fallback_raw_labels_hex: None,
-        };
-        assert_eq!(surface_log_index(&surface.provenance), -1);
-        let desired = surface_normalization(&surface).unwrap();
-        assert_eq!(
-            desired.deactivated_at,
-            Some(bigname_adapters::schema_v2::seam::event_time(timestamp, -1))
-        );
-    }
-
-    #[test]
-    fn recompute_epoch_queries_include_both_block_boundaries() {
-        let source = include_str!("recompute.rs");
-        assert!(source.matches("BETWEEN $2 AND $3").count() >= 4);
-    }
-}
+#[path = "recompute_tests.rs"]
+mod tests;
