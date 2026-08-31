@@ -15486,14 +15486,19 @@ async fn expiry_release_redo_restores_deleted_name_like_fresh_rebuild() -> Resul
     publish_and_retract_expiry_fixture(incremental.pool()).await?;
     assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 0);
     for pool in [incremental.pool(), fresh.pool()] {
+        seed_later_expiry_fixture_event(pool).await?;
+    }
+    advance_expiry_fixture_beyond_redo(incremental.pool()).await?;
+    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.0, 0);
+    for pool in [incremental.pool(), fresh.pool()] {
         orphan_expiry_release_and_reopen_binding(pool).await?;
     }
     run_project(
         incremental.pool(),
         "project-expiry-release-redo",
         Some(Marker {
-            number: 2,
-            hash: block_hash("project-expiry-release-redo", 2),
+            number: 3,
+            hash: block_hash("project-expiry-release-redo", 3),
         }),
         RunMode::Redo,
         2,
@@ -15506,7 +15511,7 @@ async fn expiry_release_redo_restores_deleted_name_like_fresh_rebuild() -> Resul
         None,
         RunMode::Normal,
         0,
-        2,
+        3,
     )
     .await?;
     assert_eq!(expiry_fixture_counts(fresh.pool()).await?.0, 1);
@@ -15529,14 +15534,19 @@ async fn expiry_release_redo_restores_deleted_permissions_like_fresh_rebuild() -
     publish_and_retract_expiry_fixture(incremental.pool()).await?;
     assert_eq!(expiry_fixture_counts(incremental.pool()).await?.1, 0);
     for pool in [incremental.pool(), fresh.pool()] {
+        seed_later_expiry_fixture_event(pool).await?;
+    }
+    advance_expiry_fixture_beyond_redo(incremental.pool()).await?;
+    assert_eq!(expiry_fixture_counts(incremental.pool()).await?.1, 0);
+    for pool in [incremental.pool(), fresh.pool()] {
         orphan_expiry_release_and_reopen_binding(pool).await?;
     }
     run_project(
         incremental.pool(),
         "project-expiry-release-redo",
         Some(Marker {
-            number: 2,
-            hash: block_hash("project-expiry-release-redo", 2),
+            number: 3,
+            hash: block_hash("project-expiry-release-redo", 3),
         }),
         RunMode::Redo,
         2,
@@ -15549,7 +15559,7 @@ async fn expiry_release_redo_restores_deleted_permissions_like_fresh_rebuild() -
         None,
         RunMode::Normal,
         0,
-        2,
+        3,
     )
     .await?;
     assert_eq!(expiry_fixture_counts(fresh.pool()).await?.1, 1);
@@ -15594,7 +15604,7 @@ const EXPIRY_REDO_RESOURCE: &str = "00000000-0000-0000-0000-0000000008b1";
 const EXPIRY_REDO_BINDING: &str = "00000000-0000-0000-0000-0000000008b2";
 
 async fn seed_expiry_release_redo_fixture(pool: &PgPool) -> Result<()> {
-    seed_lineage(pool, EXPIRY_REDO_CHAIN, 2).await?;
+    seed_lineage(pool, EXPIRY_REDO_CHAIN, 3).await?;
     sqlx::query(
         "INSERT INTO name_surfaces (
              logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
@@ -15676,6 +15686,44 @@ async fn seed_expiry_release_redo_fixture(pool: &PgPool) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+async fn seed_later_expiry_fixture_event(pool: &PgPool) -> Result<()> {
+    insert_event(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        3,
+        Some(EXPIRY_REDO_NAME),
+        Some(EXPIRY_REDO_RESOURCE),
+        "PermissionChanged",
+        "ens_v2_registry_l1",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":["resource_control"],
+            "grant_source":{"kind":"fixture","refresh":true},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"retain"
+        }),
+        json!({"fixture":"expiry-redo-later-permission"}),
+    )
+    .await
+}
+
+async fn advance_expiry_fixture_beyond_redo(pool: &PgPool) -> Result<()> {
+    run_project(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(EXPIRY_REDO_CHAIN, 2),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await
 }
 
 async fn publish_and_retract_expiry_fixture(pool: &PgPool) -> Result<()> {
