@@ -378,7 +378,8 @@ async fn address_scoped_approvals_follow_raw_intake_and_transaction_context_boun
     cancellation.cancel();
     task.await??;
 
-    let logs: Vec<(i64, String, String, Vec<String>, Vec<u8>)> = sqlx::query_as(
+    type RawLogRow = (i64, String, String, Vec<String>, Vec<u8>);
+    let logs: Vec<RawLogRow> = sqlx::query_as(
         "SELECT log_index, emitting_address, transaction_hash, topics, data
          FROM raw_logs WHERE chain_id = $1 ORDER BY log_index",
     )
