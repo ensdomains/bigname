@@ -128,7 +128,10 @@ outcomes, or durable traces.
 - Every row carries stable identity, provenance, manifest version, support, and
   chain-position or target-publication context.
 - Review every projection-builder change for replacement-row inputs: each value
-  must come from the current batch's staged normalized events or from a field
+  must come from the current batch's staged normalized events, from
+  interpretation- and manifest-owned authority tables (identity rows, discovery
+  edges, contract instance addresses, migration associations, and staged
+  manifest state — inputs to projection, not projection rows), or from a field
   deliberately stored for later reuse. A live projection-table read is allowed
   only to obtain such a stored reuse field when the query proves the row is
   outside the affected scope and merges staged replacements for affected rows,
