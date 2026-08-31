@@ -12542,20 +12542,7 @@ async fn declared_resolver_last_discovery_close_matches_fresh_rebuild() -> Resul
 
     for pool in [incremental.pool(), fresh.pool()] {
         insert_lineage_block(pool, CHAIN, 4).await?;
-        sqlx::query(
-            "UPDATE discovery_edges edge
-             SET active_to_block_number = 4, active_to_block_hash = $3
-             FROM contract_instance_addresses address
-             WHERE edge.chain_id = $1
-               AND edge.to_contract_instance_id = address.contract_instance_id
-               AND address.chain_id = edge.chain_id
-               AND lower(address.address) = lower($2)",
-        )
-        .bind(CHAIN)
-        .bind(DECLARED_V1_SHARED_RESOLVER)
-        .bind(block_hash(CHAIN, 4))
-        .execute(pool)
-        .await?;
+        set_shared_resolver_discovery_end(pool, CHAIN, Some(4)).await?;
     }
     run_project(
         incremental.pool(),
@@ -12594,6 +12581,158 @@ async fn declared_resolver_last_discovery_close_matches_fresh_rebuild() -> Resul
     assert_eq!(
         incremental_count, fresh_count,
         "closing the last discovery admission left a stale declared resolver",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn root_origin_declared_resolver_noop_preserves_clocks_and_converges() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-root-origin";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_root_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_root_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        set_shared_resolver_discovery_origin(pool, CHAIN, "ens_v2_root_l1").await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let winner: (String, Option<String>) = sqlx::query_as(
+            "SELECT support_status,
+                    provenance ->> 'classification_admission_namespace'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(winner, ("supported".into(), Some("ens".into())));
+    }
+    let clocks_before = declared_v1_shared_clocks(incremental.pool(), CHAIN).await?;
+    insert_lineage_block(incremental.pool(), CHAIN, 4).await?;
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(incremental.pool())
+        .await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    assert_eq!(
+        declared_v1_shared_clocks(incremental.pool(), CHAIN).await?,
+        clocks_before,
+        "a root-origin declaration winner must not re-scope on a no-op batch",
+    );
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "root-origin declaration classification diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn observed_declared_resolver_close_and_reopen_converges() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-observed-reopen";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_reopen_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_reopen_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        deactivate_foreign_declared_v1_manifest(pool, CHAIN).await?;
+        sqlx::query(
+            "UPDATE normalized_events SET source_family = 'ens_v1_registry_l1'
+             WHERE chain_id = $1 AND event_kind = 'ResolverChanged'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        set_shared_resolver_discovery_end(pool, CHAIN, Some(4)).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        let closed: (String, Option<String>) = sqlx::query_as(
+            "SELECT support_status,
+                    provenance ->> 'classification_admission_namespace'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(closed, ("supported".into(), None));
+    }
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 5).await?;
+        set_shared_resolver_discovery_end(pool, CHAIN, None).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        let reopened_namespace: Option<String> = sqlx::query_scalar(
+            "SELECT provenance ->> 'classification_admission_namespace'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(reopened_namespace.as_deref(), Some("ens"));
+    }
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "resolver admission reopen diverged from a fresh rebuild",
     );
 
     incremental.cleanup().await?;
@@ -18371,6 +18510,72 @@ async fn declared_v1_shared_clocks(pool: &PgPool, chain: &str) -> Result<(String
     .bind(DECLARED_V1_BOB_RESOURCE)
     .fetch_one(pool)
     .await?)
+}
+
+async fn set_shared_resolver_discovery_origin(
+    pool: &PgPool,
+    chain: &str,
+    source_family: &str,
+) -> Result<()> {
+    let origin_manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = $1 AND namespace = 'ens' AND source_family = $2",
+    )
+    .bind(chain)
+    .bind(source_family)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE discovery_edges edge SET source_manifest_id = $3
+         FROM contract_instance_addresses address
+         WHERE edge.chain_id = $1
+           AND edge.to_contract_instance_id = address.contract_instance_id
+           AND address.chain_id = edge.chain_id
+           AND lower(address.address) = lower($2)",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(origin_manifest)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn set_shared_resolver_discovery_end(
+    pool: &PgPool,
+    chain: &str,
+    active_to: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE discovery_edges edge
+         SET active_to_block_number = $3, active_to_block_hash = $4
+         FROM contract_instance_addresses address
+         WHERE edge.chain_id = $1
+           AND edge.to_contract_instance_id = address.contract_instance_id
+           AND address.chain_id = edge.chain_id
+           AND lower(address.address) = lower($2)",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(active_to)
+    .bind(active_to.map(|block| block_hash(chain, block)))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn deactivate_foreign_declared_v1_manifest(pool: &PgPool, chain: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = jsonb_set(after_state, '{rollout_status}', '\"deprecated\"')
+         WHERE chain_id = $1 AND namespace = 'basenames'
+           AND event_kind = 'SourceManifestUpdated'
+           AND source_family = 'ens_v1_resolver_l1'",
+    )
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn add_shared_resolver_discovery_namespace(

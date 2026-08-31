@@ -7,10 +7,15 @@ pub(super) async fn include_changed_declaration_winners(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
+    // Keep this EXISTS aligned with builders/resolver/declaration_precedence.rs: a declaration
+    // applies when an active `resolver` edge reaches its address and the edge's manifest has the
+    // same namespace. The builder filters `active_discovery_admissions.source_family` only for
+    // its separate non-declaration row, so that column must not filter this check.
     sqlx::query(
         "WITH winning_declaration AS (
              SELECT DISTINCT ON (declaration.resolver_address)
                     declaration.resolver_address,
+                    declaration.namespace AS classification_admission_namespace,
                     declaration.manifest_id,
                     declaration.manifest_event_id
              FROM project_declared_resolver_addresses declaration
@@ -26,11 +31,6 @@ pub(super) async fn include_changed_declaration_winners(
                    AND edge.edge_kind = 'resolver'
                    AND lower(address.address) = declaration.resolver_address
                    AND origin.namespace = declaration.namespace
-                   AND origin.source_family IN (
-                       'ens_v1_registry_l1', 'ens_v1_resolver_l1',
-                       'ens_v2_registry_l1', 'ens_v2_resolver_l1',
-                       'basenames_base_registry', 'basenames_base_resolver'
-                   )
                    AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
                    AND (edge.active_from_block_number IS NULL
                         OR edge.active_from_block_number <= $2)
@@ -72,6 +72,8 @@ pub(super) async fn include_changed_declaration_winners(
                winner.manifest_id
             OR live.provenance ->> 'manifest_event_id' IS DISTINCT FROM
                winner.manifest_event_id::text
+            OR live.provenance ->> 'classification_admission_namespace' IS DISTINCT FROM
+               winner.classification_admission_namespace
          UNION
          SELECT lower(live.resolver_address)
          FROM resolver_current live
