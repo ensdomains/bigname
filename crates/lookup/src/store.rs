@@ -1,23 +1,22 @@
 use bigname_domain::{
-    resolution_topology::{
-        ResolutionRoute, ResolutionRoutePolicy, ResolutionTopology, ResolutionTransportContract,
-    },
-    vocabulary::{ChainId, EvmAddress, Namespace, SourceFamily},
+    resolution_topology::{ResolutionRoute, ResolutionTopology},
+    vocabulary::Namespace,
 };
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 
 use crate::{
-    BASENAMES_L1_RESOLVER_ROLE, ENS_EXECUTION_SOURCE_FAMILY, ENS_NAMESPACE,
-    ENS_UNIVERSAL_RESOLVER_ROLE, ENS_V1_REGISTRY_SOURCE_FAMILY, ETHEREUM_MAINNET_CHAIN_ID,
-    LookupError, LookupPosition, LookupRequest, RecordSelector, Result, abi::ResolutionResultAbi,
-    call::ExecutionBlock, error::database,
+    ENS_EXECUTION_SOURCE_FAMILY, ENS_NAMESPACE, ENS_UNIVERSAL_RESOLVER_ROLE,
+    ENS_V1_REGISTRY_SOURCE_FAMILY, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupPosition,
+    LookupRequest, RecordSelector, Result, abi::ResolutionResultAbi, call::ExecutionBlock,
+    error::database,
 };
 
 mod indexed;
 mod manifests;
 mod persistence;
 mod positions;
+mod routes;
 #[cfg(test)]
 pub(crate) fn indexed_answer(entries: &Value, selector: &RecordSelector) -> Value {
     indexed::answer(
@@ -30,6 +29,7 @@ pub(crate) fn indexed_answer(entries: &Value, selector: &RecordSelector) -> Valu
 #[cfg(test)]
 pub(crate) use persistence::divergence_write_error;
 pub(crate) use persistence::{persist_comparisons, revalidate_primary_name_position};
+pub(crate) use routes::LookupRoute;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LookupSnapshot {
@@ -49,6 +49,7 @@ pub(crate) struct LookupSnapshot {
     pub observed_positions: Value,
     pub revalidation_positions: Value,
     pub execution_authority: Value,
+    pub route: LookupRoute,
     comparison: Option<IndexedComparison>,
 }
 
@@ -130,35 +131,80 @@ pub(crate) async fn load_snapshot(
             "projected name has an unsupported namespace: {error}"
         ))
     })?;
-    let topology_value = name
+    let exact_resolver_is_null = name
         .declared_summary
-        .get("topology")
-        .filter(|value| value.is_object())
-        .ok_or_else(|| LookupError::unsupported("verified lookup requires projected topology"))?;
-    let topology =
-        serde_json::from_value::<ResolutionTopology>(topology_value.clone()).map_err(|error| {
-            LookupError::unsupported(format!(
-                "projected topology does not match ResolutionTopology: {error}"
-            ))
-        })?;
-    topology
-        .classify(
-            &name.logical_name_id,
-            preflight_route_policy(namespace, &topology)?,
-        )
-        .map_err(|error| LookupError::unsupported(error.to_string()))?;
-    let (resolver_chain_id, resolver_address) = selected_resolver(&topology)?;
+        .get("resolver")
+        .filter(|resolver| resolver.is_object())
+        .is_some_and(|resolver| {
+            resolver.get("chain_id").is_some_and(Value::is_null)
+                && resolver.get("address").is_some_and(Value::is_null)
+                && resolver.get("status").and_then(Value::as_str) != Some("unsupported")
+        });
+    let (topology, route) = match name.declared_summary.get("topology") {
+        Some(topology_value) if topology_value.is_object() => {
+            let topology = serde_json::from_value::<ResolutionTopology>(topology_value.clone())
+                .map_err(|error| {
+                    LookupError::unsupported(format!(
+                        "projected topology does not match ResolutionTopology: {error}"
+                    ))
+                })?;
+            let preflight_path = topology
+                .classify(
+                    &name.logical_name_id,
+                    routes::preflight_route_policy(namespace, &topology)?,
+                )
+                .map_err(|error| LookupError::unsupported(error.to_string()))?;
+            let route = routes::classify_lookup_route(routes::DiscoveryRouteCandidate {
+                namespace,
+                resource_chain_id: &name.resource_chain_id,
+                logical_name_id: &name.logical_name_id,
+                namehash: &name.namehash,
+                dns_name: &name.dns_encoded_name,
+                exact_resolver_is_null,
+                topology: &topology,
+                path: preflight_path,
+            });
+            (topology, route)
+        }
+        None => {
+            let topology = routes::classify_absent_topology_route(
+                namespace,
+                &name.resource_chain_id,
+                &name.logical_name_id,
+                &name.namehash,
+                &name.dns_encoded_name,
+                exact_resolver_is_null,
+            )
+            .ok_or_else(|| {
+                LookupError::unsupported("verified lookup requires projected topology")
+            })?;
+            (topology, LookupRoute::EnsUniversalResolverDiscovery)
+        }
+        Some(_) => {
+            return Err(LookupError::unsupported(
+                "verified lookup requires projected topology",
+            ));
+        }
+    };
+    let (resolver_chain_id, resolver_address) = routes::selected_resolver(route, &topology)?;
     if resolver_chain_id.as_str() != name.resource_chain_id {
         return Err(LookupError::unsupported(
             "projected resolver and indexed authority object are on different chains",
         ));
     }
-    let boundary = topology_value
-        .pointer("/version_boundaries/record_version_boundary")
-        .filter(|value| value.is_object())
-        .ok_or_else(|| {
-            LookupError::unsupported("verified lookup requires a projected record boundary")
-        })?;
+    let boundary = match route {
+        LookupRoute::EnsUniversalResolverDiscovery => None,
+        LookupRoute::Projected => Some(
+            name.declared_summary
+                .get("topology")
+                .expect("projected lookup route has topology")
+                .pointer("/version_boundaries/record_version_boundary")
+                .filter(|value| value.is_object())
+                .ok_or_else(|| {
+                    LookupError::unsupported("verified lookup requires a projected record boundary")
+                })?,
+        ),
+    };
     let resolver_head = load_head(&mut transaction, resolver_chain_id.as_str()).await?;
     let project_row_xmin =
         positions::ensure_project_at_head(&mut transaction, &resolver_head).await?;
@@ -166,7 +212,7 @@ pub(crate) async fn load_snapshot(
         positions::position_for_chain(&name.chain_positions, resolver_chain_id.as_str())?;
     positions::ensure_canonical(&mut transaction, &resolver_position).await?;
 
-    let entrypoint = entrypoint_authority(namespace, resolver_chain_id)?;
+    let entrypoint = routes::entrypoint_authority(namespace, resolver_chain_id)?;
     let authoritative_position = LookupPosition {
         chain_id: resolver_head.chain_id,
         block_number: resolver_head.block_number,
@@ -213,13 +259,27 @@ pub(crate) async fn load_snapshot(
         },
     )
     .await?;
-    let route_policy = route_policy(namespace, &entrypoint_manifest)?;
+    let route_policy = routes::route_policy(namespace, &entrypoint_manifest)?;
     let path_class = topology
         .classify(&name.logical_name_id, route_policy)
         .map_err(|error| LookupError::unsupported(error.to_string()))?;
-    let inventory = if path_class == ResolutionRoute::WildcardDerived {
+    if route == LookupRoute::EnsUniversalResolverDiscovery
+        && !routes::is_ens_universal_resolver_discovery_topology(
+            &topology,
+            path_class,
+            &name.logical_name_id,
+        )
+    {
+        return Err(LookupError::unsupported(
+            "projected topology is outside the ENS Universal Resolver discovery route",
+        ));
+    }
+    let inventory = if route == LookupRoute::EnsUniversalResolverDiscovery
+        || path_class == ResolutionRoute::WildcardDerived
+    {
         None
     } else {
+        let boundary = boundary.expect("projected lookup route has a record boundary");
         let boundary_resource_id = boundary
             .get("resource_id")
             .and_then(Value::as_str)
@@ -274,6 +334,7 @@ pub(crate) async fn load_snapshot(
         observed_positions,
         revalidation_positions,
         execution_authority,
+        route,
         comparison: inventory.map(|inventory| IndexedComparison {
             resource_id: inventory.resource_id,
             boundary_key: inventory.record_version_boundary_key,
@@ -486,110 +547,4 @@ async fn load_head(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) 
     .await
     .map_err(database("load lookup chain head"))?
     .ok_or_else(|| LookupError::stale(format!("chain {chain_id} has no readable latest head")))
-}
-
-struct EntrypointAuthority {
-    source_family: SourceFamily,
-    chain_id: ChainId,
-    role: &'static str,
-    follow_ccip: bool,
-    result_abi: ResolutionResultAbi,
-    allow_shadow: bool,
-    required_manifest_version: Option<i64>,
-}
-
-fn entrypoint_authority(
-    namespace: Namespace,
-    resolver_chain_id: ChainId,
-) -> Result<EntrypointAuthority> {
-    match (namespace, resolver_chain_id) {
-        (Namespace::Ens, ChainId::EthereumMainnet) => Ok(EntrypointAuthority {
-            source_family: SourceFamily::EnsExecution,
-            chain_id: ChainId::EthereumMainnet,
-            role: ENS_UNIVERSAL_RESOLVER_ROLE,
-            follow_ccip: false,
-            result_abi: ResolutionResultAbi::EnsUniversalResolver,
-            allow_shadow: true,
-            required_manifest_version: None,
-        }),
-        (Namespace::Basenames, ChainId::BaseMainnet) => Ok(EntrypointAuthority {
-            source_family: SourceFamily::BasenamesExecution,
-            chain_id: ChainId::EthereumMainnet,
-            role: BASENAMES_L1_RESOLVER_ROLE,
-            follow_ccip: true,
-            result_abi: ResolutionResultAbi::BasenamesL1Resolver,
-            allow_shadow: false,
-            required_manifest_version: Some(2),
-        }),
-        _ => Err(LookupError::unsupported(
-            "projected resolution topology is outside the supported lookup paths",
-        )),
-    }
-}
-
-fn route_policy(
-    namespace: Namespace,
-    entrypoint_manifest: &manifests::ManifestEntry,
-) -> Result<ResolutionRoutePolicy> {
-    match namespace {
-        Namespace::Ens => Ok(ResolutionRoutePolicy::Ens),
-        Namespace::Basenames => {
-            let contract_address = entrypoint_manifest
-                .declared_address
-                .parse::<EvmAddress>()
-                .map_err(|error| {
-                    LookupError::unsupported(format!(
-                        "execution manifest declares an invalid transport address: {error}"
-                    ))
-                })?;
-            Ok(ResolutionRoutePolicy::Basenames {
-                expected_transport: ResolutionTransportContract {
-                    source_chain_id: ChainId::BaseMainnet,
-                    target_chain_id: ChainId::EthereumMainnet,
-                    contract_address,
-                },
-            })
-        }
-    }
-}
-
-fn preflight_route_policy(
-    namespace: Namespace,
-    topology: &ResolutionTopology,
-) -> Result<ResolutionRoutePolicy> {
-    match namespace {
-        Namespace::Ens => Ok(ResolutionRoutePolicy::Ens),
-        Namespace::Basenames => {
-            let contract_address = topology
-                .transport
-                .as_ref()
-                .and_then(|transport| transport.contract_address)
-                .ok_or_else(|| {
-                    LookupError::unsupported(
-                        "projected Basenames topology must include a transport contract",
-                    )
-                })?;
-            Ok(ResolutionRoutePolicy::Basenames {
-                expected_transport: ResolutionTransportContract {
-                    source_chain_id: ChainId::BaseMainnet,
-                    target_chain_id: ChainId::EthereumMainnet,
-                    contract_address,
-                },
-            })
-        }
-    }
-}
-
-fn selected_resolver(topology: &ResolutionTopology) -> Result<(ChainId, EvmAddress)> {
-    let hop = topology
-        .resolver_path
-        .as_ref()
-        .and_then(|path| path.last())
-        .ok_or_else(|| LookupError::unsupported("projected topology has no selected resolver"))?;
-    match (hop.chain_id, hop.address) {
-        (Some(chain_id), Some(address)) => Ok((chain_id, address)),
-        _ => Err(LookupError::unsupported(
-            "projected topology has no concrete resolver",
-        )),
-    }
 }

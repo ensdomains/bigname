@@ -24,6 +24,10 @@ use super::super::{
 };
 use super::{NameRecords, RecordAnswer, RecordAnswerMeta, VerifiedRecordLookup};
 
+mod discovery;
+pub(crate) use discovery::ens_universal_resolver_discovery_candidate;
+use discovery::terminal_no_declared_resolver;
+
 const INDEXED_INVENTORY_UNAVAILABLE_REASON: &str = "inventory_not_available";
 pub(crate) const VERIFIED_NOT_SUPPORTED_REASON: &str = "verified_records_not_supported";
 
@@ -125,10 +129,18 @@ pub(crate) fn indexed_records_requiring_verified_fallback(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     requested_records: &[ResolutionRecordKey],
+    admit_null_resolver_discovery: bool,
 ) -> V2Result<Vec<ResolutionRecordKey>> {
     let mut fallback_records = Vec::new();
     for record in requested_records {
-        if indexed_satisfying_record_answer(row, record_inventory, record)?.is_none() {
+        if indexed_satisfying_record_answer(
+            row,
+            record_inventory,
+            record,
+            admit_null_resolver_discovery,
+        )?
+        .is_none()
+        {
             fallback_records.push(record.clone());
         }
     }
@@ -141,12 +153,18 @@ pub(crate) fn build_auto_name_records(
     requested_records: &[ResolutionRecordKey],
     verified_lookup: Option<VerifiedRecordLookup>,
     include_inventory: bool,
+    admit_null_resolver_discovery: bool,
 ) -> V2Result<(Source, NameRecords)> {
     let mut fallback_records = Vec::new();
     let mut answers = BTreeMap::new();
 
     for record in requested_records {
-        if let Some(answer) = indexed_satisfying_record_answer(row, record_inventory, record)? {
+        if let Some(answer) = indexed_satisfying_record_answer(
+            row,
+            record_inventory,
+            record,
+            admit_null_resolver_discovery,
+        )? {
             answers.insert(record.record_key.clone(), answer);
         } else {
             fallback_records.push(record.clone());
@@ -156,7 +174,12 @@ pub(crate) fn build_auto_name_records(
     let source = if fallback_records.is_empty() {
         Source::Indexed
     } else {
-        let verified_answers = verified_record_answers(row, &fallback_records, verified_lookup)?;
+        let verified_answers = verified_record_answers(
+            row,
+            &fallback_records,
+            verified_lookup,
+            admit_null_resolver_discovery,
+        )?;
         for record in &fallback_records {
             let answer = match verified_answers.get(&record.record_key).cloned() {
                 Some(answer) => answer,
@@ -191,7 +214,14 @@ pub(crate) fn build_verified_name_records(
     include_inventory: bool,
 ) -> V2Result<NameRecords> {
     let records = requested_records
-        .map(|records| verified_record_answers(row, records, verified_lookup))
+        .map(|records| {
+            verified_record_answers(
+                row,
+                records,
+                verified_lookup,
+                ens_universal_resolver_discovery_candidate(row),
+            )
+        })
         .transpose()?;
     let values = requested_records
         .zip(records.as_ref())
@@ -291,7 +321,11 @@ fn indexed_satisfying_record_answer(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     record: &ResolutionRecordKey,
+    admit_null_resolver_discovery: bool,
 ) -> V2Result<Option<RecordAnswer>> {
+    if admit_null_resolver_discovery && ens_universal_resolver_discovery_candidate(row) {
+        return Ok(None);
+    }
     if terminal_no_declared_resolver(row) {
         return Ok(Some(not_found_answer(None)?));
     }
@@ -332,6 +366,7 @@ fn verified_record_answers(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
     verified_lookup: Option<VerifiedRecordLookup>,
+    ens_universal_resolver_discovery: bool,
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {
     match verified_lookup {
         Some(VerifiedRecordLookup::Found { response }) => {
@@ -339,7 +374,8 @@ fn verified_record_answers(
             verified_queries_from_state(&state, records)
         }
         Some(VerifiedRecordLookup::Stale(reason)) => {
-            let supported = supported_verified_record_keys(row, records);
+            let supported =
+                supported_verified_record_keys(row, records, ens_universal_resolver_discovery);
             records
                 .iter()
                 .map(|record| {
@@ -429,27 +465,17 @@ fn verified_value_string(value: &Value) -> Option<String> {
 fn supported_verified_record_keys(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
+    ens_universal_resolver_discovery: bool,
 ) -> std::collections::BTreeSet<String> {
-    bigname_storage::supported_resolution_verified_readback_records(row, records)
+    let supported = if ens_universal_resolver_discovery {
+        records.to_vec()
+    } else {
+        bigname_storage::supported_resolution_verified_readback_records(row, records)
+    };
+    supported
         .into_iter()
         .map(|record| record.record_key)
         .collect()
-}
-
-fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
-    let Some(resolver) = row
-        .declared_summary
-        .get("resolver")
-        .filter(|value| value.is_object())
-    else {
-        return false;
-    };
-    if string_field(resolver.get("status")).as_deref() == Some("unsupported") {
-        return false;
-    }
-
-    string_field(resolver.get("chain_id")).is_none()
-        && string_field(resolver.get("address")).is_none()
 }
 
 fn indexed_inventory_is_authoritative(

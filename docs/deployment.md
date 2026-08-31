@@ -590,6 +590,11 @@ expected to contain no rows and nothing from it is copied. After cutover,
 ledger rows are not reconstructable from raw facts: once any row exists, a
 future schema upgrade must use a separately reviewed schema-migration or lossless
 export/import mechanism rather than this replacement procedure.
+Schema-migration `20260831120000_retire_direct_divergences_for_null_resolver.sql` is
+such an additive upgrade: it preserves the populated ledger, installs the
+trigger that runs when Project publishes a null exact resolver, and marks
+already-active observations stale where the current ENS Mainnet exact resolver
+is null.
 
 The project-at-head guard also binds the API's compiled interpreter content
 hash. `bigname-api` and `phase-runner` must therefore come from the same commit.

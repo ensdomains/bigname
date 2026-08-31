@@ -1453,8 +1453,12 @@ record only when a direct, hash-pinned resolution answer disagrees with the
 indexed exact-or-derived record answer used for comparison. It is not a result cache:
 agreement creates no divergence but may clear a matching active row, wildcard
 resolution without an exact comparison row writes nothing, and any answer that
-used CCIP-read never writes or clears a row. A mutation succeeds only while
-the compared projection row and its canonical block lineage remain unchanged.
+used CCIP-read never writes or clears a row. When Project publishes a null exact
+resolver, the publication trigger retires active observations from the former
+direct route without treating an
+ancestor-resolver answer as a comparison. A serving-path mutation succeeds only
+while the compared projection row and its canonical block lineage remain
+unchanged.
 
 **Resource** (backing resource, `resource_id`) — the authority object behind a
 name: a registry entry, registrar lease, wrapper position, or ENSv2 EAC
@@ -1567,6 +1571,17 @@ and reverting `OffchainLookup` for anything below it
 Do not confuse this with network transport failures: a provider's DNS, TLS, or
 connection error aborts a request before persistence. There is no `transport`
 discovery edge kind.
+
+**Universal Resolver ancestor discovery** — the request-scoped ENS Mainnet
+records path for a projected name whose exact registry resolver is null. When
+the name has no projected alias, linked-subregistry, wildcard, or cross-chain
+transport path, bigname calls the manifest-admitted Universal Resolver at the
+selected block and lets that contract find the nearest ENSIP-10 ancestor
+resolver
+(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f).
+This path does not turn the ancestor into the name's declared exact resolver
+and has no live/indexed comparison.
 
 **Verified lookup** — request-scoped resolution or primary-name verification
 that calls admitted contracts at the selected block identity. It creates no

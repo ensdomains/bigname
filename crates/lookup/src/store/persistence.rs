@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::{
     LedgerAction, LookupError, LookupPosition, LookupRecordResult, RecordSelector, Result,
     error::database,
-    store::{EnsPrimaryNameAuthority, IndexedComparison, LookupSnapshot},
+    store::{EnsPrimaryNameAuthority, IndexedComparison, LookupRoute, LookupSnapshot},
 };
 
 pub(crate) async fn persist_comparisons(
@@ -19,6 +19,21 @@ pub(crate) async fn persist_comparisons(
         .begin()
         .await
         .map_err(database("start divergence write"))?;
+    if snapshot.route == LookupRoute::EnsUniversalResolverDiscovery {
+        revalidate_lookup_state(
+            &mut transaction,
+            &snapshot.authoritative_position,
+            &snapshot.revalidation_positions,
+            &snapshot.execution_authority,
+            None,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(database("commit null-resolver lookup revalidation"))?;
+        return Ok(());
+    }
     let comparable = results
         .iter()
         .any(|result| !result.ccip_read && result.status.is_comparable());

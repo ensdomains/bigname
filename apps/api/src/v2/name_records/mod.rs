@@ -33,7 +33,7 @@ mod build;
 pub(crate) use build::{
     VERIFIED_NOT_SUPPORTED_REASON, build_authority_unsupported_name_records,
     build_auto_name_records, build_indexed_name_records, build_verified_name_records,
-    indexed_records_requiring_verified_fallback,
+    ens_universal_resolver_discovery_candidate, indexed_records_requiring_verified_fallback,
 };
 
 pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
@@ -250,10 +250,13 @@ pub(crate) async fn get_name_records(
                         )?,
                     )
                 } else {
+                    let admit_null_resolver_discovery =
+                        ens_universal_resolver_discovery_candidate(&row);
                     let mut fallback_records = indexed_records_requiring_verified_fallback(
                         &row,
                         record_inventory.as_ref(),
                         records,
+                        admit_null_resolver_discovery,
                     )?;
                     if namespace == BASENAMES_NAMESPACE && !fallback_records.is_empty() {
                         #[cfg(test)]
@@ -273,6 +276,7 @@ pub(crate) async fn get_name_records(
                                 &row,
                                 record_inventory.as_ref(),
                                 records,
+                                false,
                             )?;
                         if refreshed_fallback_records.is_empty()
                             || build_authority_unsupported_name_records(
@@ -303,6 +307,7 @@ pub(crate) async fn get_name_records(
                         records,
                         verified_lookup,
                         include_inventory,
+                        admit_null_resolver_discovery,
                     )?
                 }
             }

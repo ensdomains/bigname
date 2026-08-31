@@ -165,7 +165,7 @@ mandatory full Interpret and Project redos.
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen only a required Ingest redo recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker) while holding every phase writer lock | Phase progress, repair work, and runtime liveness. Manifest synchronization preserves the phase runner's lifecycle backup fields, clears resumable evidence when it changes the required range or [compiled watch plan](glossary.md#compiled-watch-plan), and never executes the redo. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
-| `resolution_divergences` | guarded lookup functions | Active live/indexed resolver disagreements; diagnostic only. |
+| `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
@@ -1025,13 +1025,22 @@ refresh, or clear one active divergence observation. The API role receives
 `EXECUTE` on those functions but no direct write access to
 `resolution_divergences`. Ledger rows are durable operational observations;
 they are not projection input or a response cache.
+When projection publishes an ENS Mainnet exact resolver as null, a projection
+lifecycle trigger retires active observations for the former direct resolver as
+stale evidence. [Universal Resolver ancestor
+discovery](glossary.md#universal-resolver-ancestor-discovery) only revalidates
+the exact projected name, Ethereum head, Project publication, canonical
+positions, and Universal Resolver manifest authority. It does not compare,
+persist, or clear by agreement with the request-scoped ancestor-served result.
 The guard derives the same exact-or-ENSIP-19 indexed comparison from the locked
 inventory `entries` and `provenance.read_rules` before mutation. This baseline
 comparison normalizes the legacy indexed status alias `failed` to
-`execution_failed`, matching the Rust evaluator. This baseline function change
-adds no table, column, or reusable provider state; the release
-uses the documented empty-namespace replacement and full Project walk rather
-than an in-place schema-migration.
+`execution_failed`, matching the Rust evaluator. The null-resolver retirement
+trigger adds no table, column, or reusable provider state. Fresh databases
+receive it from the baseline; schema-migration
+`20260831120000_retire_direct_divergences_for_null_resolver.sql` installs it on
+initialized databases, retains every ledger row, and retires already-stale
+active rows without replacing the phase namespace.
 
 ## Inspection
 
@@ -1070,7 +1079,9 @@ objects.
 - `crates/interpret` plus adapters own derived identity, discovery, and
   normalized events.
 - `crates/project` and the phase runner own current projection publication.
-- `crates/lookup` owns verified lookup behavior and guarded divergence writes.
+- `crates/lookup` owns verified lookup behavior and guarded divergence writes;
+  Project publication may only clear outdated direct observations when an ENS
+  Mainnet exact resolver becomes null.
 - `crates/storage` provides the typed persistence and read boundaries above.
 - `apps/api` reads phase projections and lookup output; it does not write raw
   facts, interpretation output, projection rows, or legacy execution artifacts.
