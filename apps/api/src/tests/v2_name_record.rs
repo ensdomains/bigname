@@ -1041,6 +1041,15 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
 
 #[tokio::test]
 async fn v2_null_resolver_auto_rejects_direct_route_selected_after_admission() -> Result<()> {
+    assert_null_resolver_route_flip_is_stale("auto").await
+}
+
+#[tokio::test]
+async fn v2_null_resolver_verified_rejects_direct_route_selected_after_admission() -> Result<()> {
+    assert_null_resolver_route_flip_is_stale("verified").await
+}
+
+async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
     let execution_block_hash =
@@ -1087,11 +1096,12 @@ async fn v2_null_resolver_auto_rejects_direct_route_selected_after_admission() -
         .await?;
     let (_guard, control) =
         crate::v2::name_records_auto_fallback_test_hooks::install(&database.pool).await?;
+    let uri = format!("/v2/names/Alice.eth/records?source={source}&keys=addr:60");
     let request_task = tokio::spawn(async move {
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/v2/names/Alice.eth/records?source=auto&keys=addr:60")
+                    .uri(uri)
                     .body(Body::empty())
                     .expect("request must build"),
             )

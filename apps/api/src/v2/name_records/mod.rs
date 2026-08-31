@@ -221,6 +221,8 @@ pub(crate) async fn get_name_records(
             RequestSource::Verified => {
                 let admit_null_resolver_discovery =
                     ens_universal_resolver_discovery_candidate(&row);
+                #[cfg(test)]
+                auto_fallback_test_hooks::run(&state.pool).await?;
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
