@@ -12520,6 +12520,114 @@ async fn cross_namespace_declared_resolver_collapse_is_deterministic_and_converg
 }
 
 #[tokio::test]
+async fn declaration_winner_requires_same_namespace_admission_after_close() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-same-namespace-close";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_same_ns_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_same_ns_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        deactivate_foreign_declared_v1_manifest(pool, CHAIN).await?;
+        add_shared_resolver_discovery_namespace(pool, CHAIN, "basenames").await?;
+        insert_namespaced_manifest(
+            pool,
+            "basenames",
+            CHAIN,
+            "ens_v2_resolver_l1",
+            1,
+            "fixture",
+            "tests/project-shared-cross-namespace-v2-resolver.toml",
+            json!({"resolver_implementations": []}),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_set(after_state, '{rollout_status}', '\"deprecated\"')
+             WHERE chain_id = $1 AND namespace = 'ens'
+               AND event_kind = 'SourceManifestUpdated'
+               AND source_family = 'ens_v2_resolver_l1'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        set_shared_resolver_discovery_namespace_end(pool, CHAIN, "ens", Some(4)).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let winner: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT declared_summary #>> '{classification,source_family}',
+                    support_status,
+                    provenance ->> 'classification_admission_namespace'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            winner,
+            ("ens_v2_resolver_l1".into(), "unsupported".into(), None),
+            "a foreign-namespace admission must not preserve the ENS declaration winner",
+        );
+    }
+
+    let clocks_before = declared_v1_shared_clocks(incremental.pool(), CHAIN).await?;
+    insert_lineage_block(incremental.pool(), CHAIN, 5).await?;
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(incremental.pool())
+        .await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    assert_eq!(
+        declared_v1_shared_clocks(incremental.pool(), CHAIN).await?,
+        clocks_before,
+        "a foreign-namespace admission must not re-scope an unchanged resolver",
+    );
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "same-namespace declaration eligibility diverged across incremental boundaries",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn declared_resolver_last_discovery_close_matches_fresh_rebuild() -> Result<()> {
     const CHAIN: &str = "project-declared-v1-discovery-close";
 
@@ -18557,6 +18665,33 @@ async fn set_shared_resolver_discovery_end(
     )
     .bind(chain)
     .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(active_to)
+    .bind(active_to.map(|block| block_hash(chain, block)))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn set_shared_resolver_discovery_namespace_end(
+    pool: &PgPool,
+    chain: &str,
+    namespace: &str,
+    active_to: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE discovery_edges edge
+         SET active_to_block_number = $4, active_to_block_hash = $5
+         FROM contract_instance_addresses address, manifest_versions origin
+         WHERE edge.chain_id = $1
+           AND edge.to_contract_instance_id = address.contract_instance_id
+           AND address.chain_id = edge.chain_id
+           AND lower(address.address) = lower($2)
+           AND origin.manifest_id = edge.source_manifest_id
+           AND origin.namespace = $3",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(namespace)
     .bind(active_to)
     .bind(active_to.map(|block| block_hash(chain, block)))
     .execute(pool)
