@@ -10079,6 +10079,84 @@ fn detached_formerly_named_reservation_renewal_restates_its_resource_lifecycle()
     Ok(())
 }
 
+#[test]
+#[rustfmt::skip]
+fn renewed_then_detached_v2_name_retires_equally_after_cold_restore() -> anyhow::Result<()> {
+    const CHILD77: &str = "0x0000000000000000000000000000000000000077";
+    const OTHER77: &str = "0x0000000000000000000000000000000000000078";
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let parent_token = versioned_token("sub", 1);
+    let child_token = versioned_token("leaf", 1);
+    let manifest = manifest_with_events(
+        77,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            ("LabelRegistered", "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)", &["registry"], &["RegistrationGranted"]),
+            ("TokenResource", "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)", &["registry"], &["TokenResourceLinked"]),
+            ("SubregistryUpdated", "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)", &["registry"], &["SubregistryChanged"]),
+            ("ParentUpdated", "event ParentUpdated(address indexed parent, string label, address indexed sender)", &["registry"], &["ParentChanged"]),
+            ("ExpiryUpdated", "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)", &["registry"], &["ExpiryChanged", "RegistrationRenewed"]),
+        ],
+    );
+    let mut child_admission = admission(77, "registry");
+    child_admission.address = CHILD77.to_owned();
+    child_admission.contract_instance_id = super::common::contract_id(CHAIN, CHILD77);
+    child_admission.role = None;
+    child_admission.discovery_edge_kind = Some("registry_announcement".to_owned());
+    child_admission.discovery_from_contract_instance_id =
+        Some(super::common::contract_id(CHAIN, CHILD77));
+    child_admission.discovery_observation_key = Some("registry-announcement:child77".to_owned());
+    let input = |logs, prior, blocks| BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: vec![DiscoveryRuleInput {
+            manifest_id: 77,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }],
+        admissions: vec![admission(77, "registry"), child_admission.clone()],
+        prior_events: prior,
+        blocks,
+        raw_logs: logs,
+    };
+    let setup = vec![
+        raw_at(v2_registry::LabelRegistered { tokenId: parent_token, labelHash: keccak256(b"sub"), label: "sub".to_owned(), owner, expiry: 1_000, sender }.encode_log_data(), 1, 0, CONTRACT),
+        raw_at(v2_registry::SubregistryUpdated { tokenId: parent_token, subregistry: CHILD77.parse()?, sender }.encode_log_data(), 1, 1, CONTRACT),
+        raw_at(v2_registry::LabelRegistered { tokenId: child_token, labelHash: keccak256(b"leaf"), label: "leaf".to_owned(), owner, expiry: 10, sender }.encode_log_data(), 2, 0, CHILD77),
+        raw_at(v2_registry::TokenResource { tokenId: child_token, resource: U256::from(71) }.encode_log_data(), 2, 1, CHILD77),
+        raw_at(v2_registry::ParentUpdated { parent: CONTRACT.parse()?, label: "sub".to_owned(), sender }.encode_log_data(), 2, 2, CHILD77),
+    ];
+    let renew = vec![
+        raw_at(v2_registry::ExpiryUpdated { tokenId: child_token, newExpiry: 500, sender }.encode_log_data(), 11, 0, CHILD77),
+    ];
+    let repoint = vec![
+        raw_at(v2_registry::SubregistryUpdated { tokenId: parent_token, subregistry: OTHER77.parse()?, sender }.encode_log_data(), 12, 0, CONTRACT),
+    ];
+    let (out_setup, sess1) = interpret_test_batch_incremental(input(setup, Vec::new(), Vec::new()), None)?;
+    let leaf = out_setup.name_surfaces.iter().find(|s| s.raw_name == "leaf.sub.eth").expect("leaf.sub.eth binds").logical_name_id.clone();
+    let (out_10, sess2) = interpret_test_batch_incremental(input(Vec::new(), Vec::new(), vec![test_block(10)]), Some(sess1))?;
+    assert_eq!(out_10.normalized_events.iter().filter(|event| event.event_kind == "RegistrationReleased" && event.logical_name_id.as_deref() == Some(leaf.as_str())).count(), 1);
+    let (out_11, sess3) = interpret_test_batch_incremental(input(renew, Vec::new(), Vec::new()), Some(sess2))?;
+    let (out_12, sess_live) = interpret_test_batch_incremental(input(repoint, Vec::new(), Vec::new()), Some(sess3))?;
+    let all_events = [out_setup.normalized_events.clone(), out_10.normalized_events.clone(), out_11.normalized_events.clone(), out_12.normalized_events.clone()].concat();
+    let blocks = [test_block(1), test_block(2), test_block(10), test_block(11), test_block(12)];
+    let prior = seam::fold_prior_events(Vec::new(), &all_events, &blocks)?;
+    let (_, sess_restored) = interpret_test_batch_incremental(input(Vec::new(), prior, Vec::new()), None)?;
+    assert_eq!(sess_live, sess_restored);
+    let (live_500, _) = interpret_test_batch_incremental(input(Vec::new(), Vec::new(), vec![test_block(500)]), Some(sess_live))?;
+    let (restored_500, _) = interpret_test_batch_incremental(input(Vec::new(), Vec::new(), vec![test_block(500)]), Some(sess_restored))?;
+    assert_eq!(live_500, restored_500);
+    let releases = live_500.normalized_events.iter().filter(|event| event.event_kind == "RegistrationReleased").collect::<Vec<_>>();
+    assert_eq!(releases.len(), 1);
+    assert!(releases[0].logical_name_id.is_none());
+    assert!(releases[0].resource_id.is_some());
+    assert_eq!(releases[0].after_state["source_event"], "RegistryPathExpired");
+    Ok(())
+}
+
 fn contested_claim_path_survivor(output: &BatchOutput, boundary_block: i64) -> Uuid {
     let replacement = output
         .surface_bindings
