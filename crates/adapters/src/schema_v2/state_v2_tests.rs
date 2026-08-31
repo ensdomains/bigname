@@ -153,7 +153,6 @@ fn v2_changed_away_winner_hands_the_surface_to_the_surviving_holder() {
     );
     assert_v2_indexes_are_derived(&state);
 }
-
 #[test]
 fn v2_contested_surface_expiry_reasserts_the_surviving_holder() {
     let mut state = claim_path_contested_state();
@@ -163,9 +162,7 @@ fn v2_contested_surface_expiry_reasserts_the_surviving_holder() {
         .v2_token(ROOT, "0x01")
         .and_then(|token| token.name)
         .expect("surviving holder names the contested surface");
-
     let transitions = state.refresh_dirty_v2_names(2);
-
     assert!(transitions.iter().any(|transition| {
         transition.registry == ROOT
             && transition.previous == transition.current
