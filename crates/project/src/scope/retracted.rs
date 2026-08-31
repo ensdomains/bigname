@@ -13,7 +13,7 @@ pub(super) async fn seed(
 ) -> Result<()> {
     seed_names(transaction, chain_id).await?;
     seed_children(transaction, chain_id).await?;
-    seed_resources(transaction, chain_id, from_block, to_block).await?;
+    seed_resources(transaction, chain_id).await?;
     seed_resolvers(transaction, chain_id, from_block, to_block).await?;
     seed_primary(transaction, chain_id).await?;
     Ok(())
@@ -108,23 +108,18 @@ async fn seed_children(transaction: &mut Transaction<'_, Postgres>, chain_id: &s
     Ok(())
 }
 
-async fn seed_resources(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    from_block: i64,
-    to_block: i64,
-) -> Result<()> {
+async fn seed_resources(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) -> Result<()> {
     sqlx::query(
         r#"
         WITH citations AS (
-            SELECT row.resource_id, citation.event_id, false AS force_scope
+            SELECT row.resource_id, citation.event_id
             FROM permissions_current row
             CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(
                 row.provenance -> 'normalized_event_ids', '[]'::jsonb
             )) citation(event_id)
             WHERE row.provenance ->> 'chain_id' = $1
             UNION ALL
-            SELECT row.resource_id, citation.event_id, false
+            SELECT row.resource_id, citation.event_id
             FROM record_inventory_current row
             CROSS JOIN LATERAL jsonb_array_elements_text(
                 COALESCE(row.provenance -> 'record_event_ids', '[]'::jsonb)
@@ -136,33 +131,25 @@ async fn seed_resources(
             ) citation(event_id)
             WHERE row.provenance ->> 'chain_id' = $1
             UNION ALL
-            SELECT row.resource_id, row.provenance ->> 'normalized_event_id', false
+            SELECT row.resource_id, row.provenance ->> 'normalized_event_id'
             FROM address_names_current row
             WHERE row.provenance ->> 'chain_id' = $1 AND row.resource_id IS NOT NULL
             UNION ALL
-            SELECT row.resource_id, citation.event_id, false
+            SELECT row.resource_id, citation.event_id
             FROM permissions_current_resource_summary row
             CROSS JOIN LATERAL (VALUES
                 (row.provenance -> 'wrapper_expiry_boundary' ->> 'fuses_event_id'),
-                (row.provenance -> 'wrapper_expiry_boundary' ->> 'expiry_event_id')
+                (row.provenance -> 'wrapper_expiry_boundary' ->> 'expiry_event_id'),
+                (row.provenance ->> 'expiry_retirement_event_id')
             ) citation(event_id)
             WHERE row.provenance ->> 'chain_id' = $1
-            UNION ALL
-            SELECT row.resource_id, NULL, true
-            FROM permissions_current_resource_summary row
-            WHERE row.provenance ->> 'chain_id' = $1
-              AND NULLIF(
-                  row.chain_positions ->> 'target_block_number', ''
-              )::bigint
-                  BETWEEN $2 AND $3
         )
         INSERT INTO project_scope_resources
         SELECT DISTINCT citation.resource_id
         FROM citations citation
-        WHERE citation.force_scope OR (
-            citation.event_id IS NOT NULL
-            AND citation.event_id NOT IN ('', 'null')
-            AND NOT EXISTS (
+        WHERE citation.event_id IS NOT NULL
+          AND citation.event_id NOT IN ('', 'null')
+          AND NOT EXISTS (
                 SELECT 1 FROM normalized_events event
                 LEFT JOIN chain_lineage lineage
                   ON lineage.chain_id = event.chain_id
@@ -175,13 +162,10 @@ async fn seed_resources(
                       OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
                   )
             )
-        )
         ON CONFLICT DO NOTHING
         "#,
     )
     .bind(chain_id)
-    .bind(from_block)
-    .bind(to_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to retain retracted resource scope", error))?;

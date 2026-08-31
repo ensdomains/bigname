@@ -459,33 +459,25 @@ pub(super) async fn build(
             GROUP BY resource_id
         ),
         wrapper_modifiers AS (
-            SELECT DISTINCT ON (event.resource_id)
-                   event.resource_id, event.normalized_event_id,
+            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.normalized_event_id,
                    event.block_number, event.block_hash,
                    CASE WHEN jsonb_typeof(event.after_state -> 'fuses') = 'number'
                         AND (event.after_state ->> 'fuses')::numeric BETWEEN 0 AND 9223372036854775807
-                           THEN (event.after_state ->> 'fuses')::bigint
-                   END AS fuses
+                           THEN (event.after_state ->> 'fuses')::bigint END AS fuses
             FROM project_events event
-            WHERE event.event_kind = 'PermissionScopeChanged'
-              AND event.source_family = 'ens_v1_wrapper_l1'
+            WHERE event.event_kind = 'PermissionScopeChanged' AND event.source_family = 'ens_v1_wrapper_l1'
               AND event.resource_id IS NOT NULL
             ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST, event.normalized_event_id DESC
         ),
         wrapper_expiries AS (
-            SELECT DISTINCT ON (event.resource_id)
-                   event.resource_id, event.normalized_event_id,
+            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.normalized_event_id,
                    event.block_number, event.block_hash,
                    CASE WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
-                        AND (event.after_state ->> 'expiry')::numeric
-                            BETWEEN 0 AND 18446744073709551615
-                           THEN (event.after_state ->> 'expiry')::numeric
-                   END AS expiry_seconds
+                        AND (event.after_state ->> 'expiry')::numeric BETWEEN 0 AND 18446744073709551615
+                           THEN (event.after_state ->> 'expiry')::numeric END AS expiry_seconds
             FROM project_events event
-            WHERE event.event_kind = 'ExpiryChanged'
-              AND event.resource_id IS NOT NULL
+            WHERE event.event_kind = 'ExpiryChanged' AND event.resource_id IS NOT NULL
               AND (
                     event.source_family = 'ens_v1_wrapper_l1'
                  OR (
@@ -497,6 +489,11 @@ pub(super) async fn build(
             ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
+        ),
+        expiry_retirements AS (
+            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.normalized_event_id FROM project_events event
+            WHERE event.resource_id IS NOT NULL AND event.event_kind = 'RegistrationReleased' AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+              AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' ORDER BY event.resource_id, event.block_number DESC NULLS LAST, event.normalized_event_id DESC
         ),
         resource_authority AS (
             SELECT resource.*,
@@ -535,11 +532,13 @@ pub(super) async fn build(
                    expiry.expiry_seconds AS wrapper_expiry_seconds,
                    expiry.normalized_event_id AS wrapper_expiry_event_id,
                    expiry.block_number AS wrapper_expiry_block_number,
-                   expiry.block_hash AS wrapper_expiry_block_hash
+                   expiry.block_hash AS wrapper_expiry_block_hash,
+                   retirement.normalized_event_id AS expiry_retirement_event_id
             FROM project_resources resource
             LEFT JOIN resource_event_summaries summary USING (resource_id)
             LEFT JOIN wrapper_modifiers modifier USING (resource_id)
             LEFT JOIN wrapper_expiries expiry USING (resource_id)
+            LEFT JOIN expiry_retirements retirement USING (resource_id)
         )
         INSERT INTO project_stage_permissions_current_resource_summary (
             resource_id, authority_kind, root_resource_id, support_status,
@@ -560,13 +559,14 @@ pub(super) async fn build(
                    ) THEN 'operator_approval_surfaces_not_ingested'
                    ELSE 'resource_permission_authority_not_projected'
                END,
-               COALESCE(resource.raw_fact_ref, resource.provenance) || jsonb_build_object(
+               COALESCE(resource.raw_fact_ref, resource.provenance) || jsonb_strip_nulls(jsonb_build_object(
                    'chain_id', $1,
+                   'expiry_retirement_event_id', resource.expiry_retirement_event_id,
                    'coverage', jsonb_build_object(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'
                    )
-               ) || CASE
+               )) || CASE
                    WHEN resource.wrapper_fuses IS NOT NULL
                     AND resource.wrapper_expiry_seconds IS NOT NULL
                        THEN jsonb_build_object(
