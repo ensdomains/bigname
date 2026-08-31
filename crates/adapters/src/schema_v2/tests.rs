@@ -12854,6 +12854,55 @@ fn nul_text_key_hashes_raw_bytes_and_uses_a_lossless_selector() -> anyhow::Resul
 }
 
 #[test]
+fn whitespace_text_key_is_retained_as_an_opaque_record_across_families() -> anyhow::Result<()> {
+    let raw_key = b" ";
+    let encoded = with_topic0(
+        raw_resolver_strings::RawTextChanged {
+            node: B256::repeat_byte(0x33),
+            indexedKey: keccak256(raw_key),
+            key: raw_key.to_vec().into(),
+            value: b"hello".to_vec().into(),
+        }
+        .encode_log_data(),
+        resolver_strings::TextChanged::SIGNATURE_HASH,
+    );
+    for (manifest_id, namespace, source_family) in [
+        (81, "ens", "ens_v1_resolver_l1"),
+        (82, "basenames", "basenames_base_resolver"),
+    ] {
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest_with_events(
+                manifest_id,
+                namespace,
+                source_family,
+                &[(
+                    "TextChanged",
+                    "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+                    &[],
+                    &["RecordChanged"],
+                )],
+            )],
+            discovery_rules: Vec::new(),
+            admissions: Vec::new(),
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw(encoded.clone())],
+        })?;
+
+        let event = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RecordChanged")
+            .expect("whitespace text key observation");
+        assert_eq!(event.after_state["record_key"], "text_opaque:0x20");
+        assert_eq!(event.after_state["selector_key"], "0x20");
+        assert_eq!(event.after_state["value"], "hello");
+    }
+    Ok(())
+}
+
+#[test]
 fn leading_tilde_text_key_remains_a_plain_projection_selector() -> anyhow::Result<()> {
     let raw_key = b"~url";
     let encoded = with_topic0(
