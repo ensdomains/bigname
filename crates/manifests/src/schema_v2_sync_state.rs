@@ -5,9 +5,6 @@ use alloy_primitives::{hex, keccak256};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
-const REQUIRED_REDO_PREFIX: &str = "required downstream redo: ";
-const MANIFEST_WIDENING_REASON: &str = "manifest watch plan widened over an already-ingested range";
-type IngestRedoRow = (Option<i64>, bool, Option<i64>, Option<i64>);
 #[derive(Default)]
 pub(super) struct AuthoritySnapshot {
     manifests_by_chain: BTreeMap<String, Vec<String>>,
@@ -211,7 +208,14 @@ pub(super) async fn invalidate_changed_derived_epochs(
             let widened_from =
                 earliest_retained_registry_announcement(transaction, &chain_id, widened_from)
                     .await?;
-            stamp_required_ingest(transaction, &chain_id, widened_from).await?;
+            crate::install_required_ingest(
+                transaction,
+                &chain_id,
+                i64::try_from(widened_from)
+                    .context("registry announcement watch start does not fit into BIGINT")?,
+                crate::RequiredIngestCause::ManifestWatchWidening,
+            )
+            .await?;
         }
         if let Some(widened_from) = super::watch::widening_start(
             &previous.watch,
@@ -220,7 +224,14 @@ pub(super) async fn invalidate_changed_derived_epochs(
             &persisted_watch_coverage,
             super::watch_floors::required_ingest_redo_pending(transaction, &chain_id).await?,
         )? {
-            stamp_required_ingest(transaction, &chain_id, widened_from).await?;
+            crate::install_required_ingest(
+                transaction,
+                &chain_id,
+                i64::try_from(widened_from)
+                    .context("manifest watch start does not fit into BIGINT")?,
+                crate::RequiredIngestCause::ManifestWatchWidening,
+            )
+            .await?;
         }
         let encoded = serde_json::to_vec(&(chain_id.as_str(), desired_manifests))
             .context("failed to fingerprint manifest authority")?;
@@ -443,104 +454,6 @@ async fn reject_covered_discovery_widening(
              transition is unsupported in place and needs a fresh rebuild or a dedicated \
              discovery backfill mechanism before historical Ingest can be certified"
         );
-    }
-    Ok(())
-}
-pub(super) async fn stamp_required_ingest(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    widened_from: u64,
-) -> Result<()> {
-    let row: Option<IngestRedoRow> = sqlx::query_as(
-        "SELECT current_block_number, redo_in_progress,
-                redo_from_block_number, redo_to_block_number
-         FROM chain_phase_state
-         WHERE chain_id = $1 AND phase_name = 'ingest'
-         FOR UPDATE",
-    )
-    .bind(chain_id)
-    .fetch_optional(&mut **transaction)
-    .await
-    .with_context(|| format!("failed to inspect Ingest coverage for chain {chain_id}"))?;
-    let Some((Some(current), active, active_from, active_to)) = row else {
-        return Ok(());
-    };
-    let bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
-        "SELECT min(start_block_number),
-                (SELECT latest_block_number FROM chain_heads WHERE chain_id = $1)
-         FROM ingest_cursors WHERE chain_id = $1",
-    )
-    .bind(chain_id)
-    .fetch_one(&mut **transaction)
-    .await
-    .with_context(|| format!("failed to load ingested watch bounds for chain {chain_id}"))?;
-    let Some(cursor_start) = bounds.0 else {
-        return Ok(());
-    };
-    let widened_from = i64::try_from(widened_from)
-        .context("manifest watch start does not fit into BIGINT")?
-        .max(cursor_start);
-    // The published head is the readable coverage boundary. After a rewind, the finite Ingest
-    // current position may remain ahead on orphaned lineage; taking max(latest, current) here
-    // would stamp an unreadable suffix that the required redo cannot discharge.
-    let through = bounds.1.unwrap_or(current);
-    if widened_from > through {
-        return Ok(());
-    }
-    let reason = format!("{REQUIRED_REDO_PREFIX}{MANIFEST_WIDENING_REASON}");
-    if active {
-        let (Some(active_from), Some(active_to)) = (active_from, active_to) else {
-            bail!("active Ingest redo for chain {chain_id} is missing its persisted range");
-        };
-        let from = active_from.min(widened_from);
-        let to = active_to.max(through);
-        let result = sqlx::query(
-            "UPDATE chain_phase_state
-             SET redo_from_block_number = $2, redo_to_block_number = $3,
-                 redo_current_block_number = NULL, redo_current_block_hash = NULL,
-                 redo_target_block_number = NULL, redo_target_block_hash = NULL,
-                 redo_source_boundary_markers = NULL,
-                 redo_manifest_authority_fingerprint = NULL,
-                 last_error = $4, updated_at = now()
-             WHERE chain_id = $1 AND phase_name = 'ingest' AND redo_in_progress",
-        )
-        .bind(chain_id)
-        .bind(from)
-        .bind(to)
-        .bind(reason)
-        .execute(&mut **transaction)
-        .await
-        .with_context(|| format!("failed to widen required Ingest redo for chain {chain_id}"))?;
-        if result.rows_affected() != 1 {
-            bail!("active Ingest redo disappeared while widening chain {chain_id}");
-        }
-        return Ok(());
-    }
-    let result = sqlx::query(
-        "UPDATE chain_phase_state
-         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
-             redo_previous_phase_status = phase_status,
-             redo_previous_last_error = last_error,
-             redo_previous_started_at = started_at,
-             redo_previous_finished_at = finished_at,
-             redo_from_block_number = $2, redo_to_block_number = $3,
-             redo_current_block_number = NULL, redo_current_block_hash = NULL,
-             redo_target_block_number = NULL, redo_target_block_hash = NULL,
-             redo_source_boundary_markers = NULL,
-             redo_manifest_authority_fingerprint = NULL,
-             last_error = $4, started_at = now(), finished_at = NULL, updated_at = now()
-         WHERE chain_id = $1 AND phase_name = 'ingest'
-           AND current_block_number IS NOT NULL AND NOT redo_in_progress",
-    )
-    .bind(chain_id)
-    .bind(widened_from)
-    .bind(through)
-    .bind(reason)
-    .execute(&mut **transaction)
-    .await
-    .with_context(|| format!("failed to stamp required Ingest redo for chain {chain_id}"))?;
-    if result.rows_affected() != 1 {
-        bail!("Ingest coverage changed while stamping manifest widening for chain {chain_id}");
     }
     Ok(())
 }

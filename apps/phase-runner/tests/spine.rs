@@ -490,6 +490,266 @@ async fn runner_loop_heartbeat_refreshes_across_completed_live_follow_passes() -
 }
 
 #[tokio::test]
+async fn post_live_discovery_repair_precedes_project() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_post_live_discovery_repair").await?;
+    let chain_id = "post-live-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 1, target_block_number = 0,
+             last_processed_block_number = 0,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-0"))
+    .execute(scratch.pool())
+    .await?;
+    let initial_heads = HeadMarkers {
+        latest: BlockMarker::new(0, format!("{chain_id}-block-0"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &initial_heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let repaired_project = Arc::new(Notify::new());
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(initial_heads),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(DiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(PendingGuardProjectPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            repaired: Arc::clone(&repaired_project),
+            sequence: Arc::clone(&sequence),
+        }),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(live_heads),
+            Arc::clone(&sequence),
+        )),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "post-live-discovery-repair-runner",
+        test_timing(),
+    )?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = true;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let mut task =
+        tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
+    let wait = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            () = repaired_project.notified() => Ok(()),
+            result = &mut task => result.map_err(anyhow::Error::from)?.map_err(anyhow::Error::from),
+        }
+    })
+    .await;
+    if let Err(error) = wait {
+        panic!(
+            "post-Live repair did not reach Project: {error}; sequence={:?}",
+            sequence.lock().expect("phase sequence lock")
+        );
+    }
+    wait??;
+    cancellation.cancel();
+    if !task.is_finished() {
+        task.await??;
+    }
+
+    let sequence = sequence.lock().expect("phase sequence lock").clone();
+    let live = sequence
+        .iter()
+        .position(|event| event == "live:normal")
+        .expect("Live must run before its downstream repair");
+    let suffix = &sequence[live..];
+    assert_subsequence(
+        suffix,
+        &[
+            "live:normal",
+            "interpret:normal",
+            "ingest:redo",
+            "interpret:redo",
+            "project:redo",
+        ],
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn combined_verify_waits_for_post_live_discovery_repair_and_redoes_verify() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_combined_verify_discovery_repair").await?;
+    let chain_id = "combined-verify-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 1, target_block_number = 0,
+             last_processed_block_number = 0,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-0"))
+    .execute(scratch.pool())
+    .await?;
+    let initial_heads = HeadMarkers {
+        latest: BlockMarker::new(0, format!("{chain_id}-block-0"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &initial_heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let verify_started = Arc::new(Notify::new());
+    let release_verify = Arc::new(Notify::new());
+    let repaired_project = Arc::new(Notify::new());
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(initial_heads),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(DiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(PendingGuardProjectPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            repaired: Arc::clone(&repaired_project),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(GatedVerifyPhase {
+            calls: AtomicUsize::new(0),
+            started: Arc::clone(&verify_started),
+            release: Arc::clone(&release_verify),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(live_heads),
+            Arc::clone(&sequence),
+        )),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "combined-verify-discovery-repair-runner",
+        test_timing(),
+    )?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = false;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let mut task =
+        tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
+
+    tokio::time::timeout(Duration::from_secs(10), verify_started.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            result = &mut task => {
+                panic!("combined Verify/Live stopped before Live ran: {result:?}; sequence={:?}",
+                    sequence.lock().expect("phase sequence lock"));
+            }
+            () = async {
+                loop {
+                    if sequence
+                        .lock()
+                        .expect("phase sequence lock")
+                        .iter()
+                        .any(|event| event == "live:normal")
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+    })
+    .await?;
+    assert_eq!(
+        sequence
+            .lock()
+            .expect("phase sequence lock")
+            .iter()
+            .filter(|event| event.as_str() == "interpret:normal")
+            .count(),
+        1,
+        "post-Live Interpret must wait until paired normal Verify releases its lock"
+    );
+
+    release_verify.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let complete = {
+                let sequence = sequence.lock().expect("phase sequence lock");
+                sequence.iter().any(|event| event == "project:redo")
+                    && sequence.iter().any(|event| event == "verify:redo")
+            };
+            if complete {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    cancellation.cancel();
+    task.await??;
+
+    let sequence = sequence.lock().expect("phase sequence lock").clone();
+    let verify_normal = sequence
+        .iter()
+        .position(|event| event == "verify:normal")
+        .expect("paired normal Verify must run");
+    let post_live_interpret = sequence
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.as_str() == "interpret:normal")
+        .nth(1)
+        .map(|(position, _)| position)
+        .expect("post-Live Interpret must run");
+    assert!(
+        verify_normal < post_live_interpret,
+        "post-Live Interpret must wait for paired normal Verify"
+    );
+    assert_subsequence(
+        &sequence,
+        &[
+            "live:normal",
+            "interpret:normal",
+            "ingest:redo",
+            "interpret:redo",
+            "project:redo",
+            "verify:redo",
+        ],
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn repeated_batches_with_a_pinned_durable_cursor_are_observable_for_every_phase() -> Result<()>
 {
     let scratch = ScratchDatabase::create("phase_runner_pinned_interpret").await?;
@@ -4126,6 +4386,236 @@ impl CapacityProbe for GatedCapacityProbe {
 struct FunctionPhase {
     name: PhaseName,
     handler: Arc<dyn Fn(PhaseContext) -> RunnerResult<PhaseBatchOutcome> + Send + Sync>,
+}
+
+struct RecordedCompletePhase {
+    name: PhaseName,
+    heads: Option<HeadMarkers>,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordedCompletePhase {
+    fn new(name: PhaseName, heads: Option<HeadMarkers>, sequence: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            name,
+            heads,
+            sequence,
+        }
+    }
+}
+
+impl Phase for RecordedCompletePhase {
+    fn name(&self) -> PhaseName {
+        self.name
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "{}:{}",
+                self.name,
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let heads = if context.mode.is_redo() {
+            context.available_heads.clone().or(self.heads.clone())
+        } else {
+            self.heads.clone().or(context.available_heads.clone())
+        };
+        let marker = heads.as_ref().map(|heads| heads.latest.clone());
+        let progress = if matches!(self.name, PhaseName::Ingest | PhaseName::Live) {
+            PhaseProgress {
+                current: marker.clone(),
+                target: marker.clone(),
+                live_handoff: (self.name == PhaseName::Ingest)
+                    .then_some(marker.clone())
+                    .flatten(),
+                heads,
+                source_progress: (self.name == PhaseName::Ingest && context.mode.is_redo())
+                    .then(|| SourceProgress {
+                        source_key: "source".to_owned(),
+                        current: marker.clone(),
+                        target: marker.clone(),
+                        redo_loaded_boundary: marker,
+                    })
+                    .into_iter()
+                    .collect(),
+                ..PhaseProgress::default()
+            }
+        } else {
+            PhaseProgress::default()
+        };
+        Box::pin(async move { Ok(PhaseBatchOutcome::Complete(progress)) })
+    }
+}
+
+struct DiscoveryStampInterpretPhase {
+    pool: sqlx::PgPool,
+    calls: AtomicUsize,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+impl Phase for DiscoveryStampInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "interpret:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            if call == 1 {
+                let mut transaction = pool.begin().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to begin discovery stamp fixture: {error}"
+                    ))
+                })?;
+                bigname_manifests::install_required_ingest(
+                    &mut transaction,
+                    &context.chain_id,
+                    0,
+                    bigname_manifests::RequiredIngestCause::DiscoveryWatchAdmission,
+                )
+                .await
+                .map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to install discovery stamp fixture: {error:#}"
+                    ))
+                })?;
+                transaction.commit().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to commit discovery stamp fixture: {error}"
+                    ))
+                })?;
+            }
+            LoopbackPhase::new(PhaseName::Interpret)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+struct PendingGuardProjectPhase {
+    pool: sqlx::PgPool,
+    calls: AtomicUsize,
+    repaired: Arc<Notify>,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+struct GatedVerifyPhase {
+    calls: AtomicUsize,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+impl Phase for GatedVerifyPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "verify:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let started = Arc::clone(&self.started);
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            if call == 0 && !context.mode.is_redo() {
+                started.notify_one();
+                release.notified().await;
+            }
+            LoopbackPhase::new(PhaseName::Verify)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+impl Phase for PendingGuardProjectPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "project:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let pending: bool = sqlx::query_scalar(
+                "SELECT redo_in_progress FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'ingest'",
+            )
+            .bind(&context.chain_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| {
+                RunnerError::data_integrity(format!(
+                    "failed to inspect Project prerequisite fixture: {error}"
+                ))
+            })?;
+            if pending {
+                return Err(RunnerError::data_integrity(
+                    "Project ran before discovery-owned Ingest repair",
+                ));
+            }
+            if call > 0 {
+                self.repaired.notify_one();
+            }
+            LoopbackPhase::new(PhaseName::Project)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+fn assert_subsequence(actual: &[String], expected: &[&str]) {
+    let mut next = 0;
+    for event in actual {
+        if expected.get(next).is_some_and(|expected| event == expected) {
+            next += 1;
+        }
+    }
+    assert_eq!(
+        next,
+        expected.len(),
+        "missing phase subsequence in {actual:?}"
+    );
 }
 
 impl Phase for FunctionPhase {

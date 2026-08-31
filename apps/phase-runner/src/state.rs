@@ -237,6 +237,7 @@ impl PhaseStore {
         sources: &[SourceConfig],
         supplied_manifest_authority_generation: Option<&str>,
         attested_by: &str,
+        automatic_discovery_ingest: bool,
     ) -> RunnerResult<RedoSession> {
         redo_state::begin(
             &self.pool,
@@ -246,6 +247,7 @@ impl PhaseStore {
             sources,
             supplied_manifest_authority_generation,
             attested_by,
+            automatic_discovery_ingest,
         )
         .await
     }

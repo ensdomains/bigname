@@ -90,6 +90,13 @@ impl Engine {
             .as_ref()
             .map_or(request.from_block, |marker| marker.number.saturating_add(1));
         if next_block > target.number {
+            if !matches!(request.mode, RunMode::RecomputeFlags) {
+                write::discovery_admission::finalize_empty_completion(
+                    &self.pool,
+                    &request.chain_id,
+                )
+                .await?;
+            }
             return Ok(BatchOutcome {
                 current: target.clone(),
                 target,

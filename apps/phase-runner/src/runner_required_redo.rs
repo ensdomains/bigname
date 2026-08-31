@@ -11,6 +11,34 @@ use crate::{
 use super::PhaseRunner;
 
 impl PhaseRunner {
+    pub(super) async fn run_phase_with_restart(
+        &self,
+        chain: &ChainConfig,
+        phase_name: PhaseName,
+        mode: RunMode,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        self.run_phase_with_restart_inner(chain, phase_name, mode, cancellation, None, false)
+            .await
+    }
+
+    async fn run_automatic_discovery_ingest_redo_with_restart(
+        &self,
+        chain: &ChainConfig,
+        range: BlockRange,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        self.run_phase_with_restart_inner(
+            chain,
+            PhaseName::Ingest,
+            RunMode::Redo(range),
+            cancellation,
+            None,
+            true,
+        )
+        .await
+    }
+
     pub(super) async fn reject_pending_required_ingest(&self, chain_id: &str) -> RunnerResult<()> {
         if let Some(range) = self
             .store
@@ -116,22 +144,111 @@ impl PhaseRunner {
                             .await;
                     };
                     if updated == current {
-                        return Err(crate::transitions::required_ingest_redo_error(
+                        if !bigname_manifests::discovery_required_ingest_pending(
+                            self.store.pool(),
                             &chain.chain_id,
+                        )
+                        .await
+                        .map_err(|error| {
+                            RunnerError::data_integrity(format!(
+                                "failed to classify required Ingest work for chain {}: {error:#}",
+                                chain.chain_id
+                            ))
+                        })? {
+                            return Err(crate::transitions::required_ingest_redo_error(
+                                &chain.chain_id,
+                                current,
+                            ));
+                        }
+                        self.run_automatic_discovery_ingest_redo_with_restart(
+                            chain,
                             current,
-                        ));
+                            cancellation.clone(),
+                        )
+                        .await?;
+                        break;
                     }
                     current = updated;
                 }
             }
             if phase == PhaseName::Interpret {
                 self.recover_stopped_live(chain).await?;
-            }
-            self.run_phase_with_restart(chain, phase, RunMode::Redo(range), cancellation.clone())
+                self.run_phase_with_restart(
+                    chain,
+                    phase,
+                    RunMode::Redo(range),
+                    cancellation.clone(),
+                )
                 .await?;
+                // Interpret finalization may install upstream discovery repair. Release the
+                // Interpret lock and let the outer fixed-point loop drain Ingest before Normal
+                // Interpret checks its prerequisite again.
+                if bigname_manifests::discovery_required_ingest_pending(
+                    self.store.pool(),
+                    &chain.chain_id,
+                )
+                .await
+                .map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to classify post-Interpret Ingest work for chain {}: {error:#}",
+                        chain.chain_id
+                    ))
+                })? {
+                    return Ok(());
+                }
+            } else if phase != PhaseName::Ingest {
+                self.run_phase_with_restart(
+                    chain,
+                    phase,
+                    RunMode::Redo(range),
+                    cancellation.clone(),
+                )
+                .await?;
+            }
         }
         self.run_phase_with_restart(chain, phase, RunMode::Normal, cancellation)
             .await
+    }
+
+    pub(super) async fn repair_discovery_coverage(
+        &self,
+        chain: &ChainConfig,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        loop {
+            self.catch_up_for_required_redo(chain, cancellation.clone())
+                .await?;
+            self.run_spine_phase(chain, PhaseName::Interpret, cancellation.clone())
+                .await?;
+            if cancellation.is_cancelled() {
+                return Ok(());
+            }
+            if bigname_manifests::discovery_required_ingest_pending(
+                self.store.pool(),
+                &chain.chain_id,
+            )
+            .await
+            .map_err(|error| {
+                RunnerError::data_integrity(format!(
+                    "failed to classify discovery repair for chain {}: {error:#}",
+                    chain.chain_id
+                ))
+            })? {
+                self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
+                    .await?;
+                continue;
+            }
+            self.reject_pending_required_ingest(&chain.chain_id).await?;
+            if self
+                .store
+                .required_redo_range(&chain.chain_id, PhaseName::Interpret)
+                .await?
+                .is_some()
+            {
+                continue;
+            }
+            return Ok(());
+        }
     }
 
     pub(super) async fn recover_stopped_live(&self, chain: &ChainConfig) -> RunnerResult<()> {

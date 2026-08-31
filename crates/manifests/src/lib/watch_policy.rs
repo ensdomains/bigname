@@ -96,3 +96,38 @@ fn topic0s(signatures: &[&str]) -> Vec<String> {
 fn topic0(signature: &str) -> String {
     format!("{}", alloy_primitives::keccak256(signature.as_bytes()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_and_basenames_select_all_fourteen_generic_topics() {
+        let generic = generic_resolver_topic0s();
+        assert_eq!(generic.len(), 14);
+        assert_eq!(
+            all_emitter_topic0s(ENS_V1_RESOLVER_SOURCE_FAMILY, &generic),
+            generic
+        );
+        let generic = generic_resolver_topic0s();
+        assert_eq!(
+            all_emitter_topic0s(BASENAMES_BASE_RESOLVER_SOURCE_FAMILY, &generic),
+            generic
+        );
+    }
+
+    #[test]
+    fn v2_selects_only_its_four_unique_topics() {
+        let generic_text = topic0("TextChanged(bytes32,string,string,string)");
+        let mut manifest = ens_v2_unique_resolver_topic0s();
+        assert_eq!(manifest.len(), 4);
+        manifest.push(generic_text.clone());
+        assert_eq!(
+            all_emitter_topic0s(ENS_V2_RESOLVER_SOURCE_FAMILY, &manifest),
+            ens_v2_unique_resolver_topic0s()
+        );
+        assert!(
+            !all_emitter_topic0s(ENS_V2_RESOLVER_SOURCE_FAMILY, &manifest).contains(&generic_text)
+        );
+    }
+}
