@@ -486,7 +486,7 @@ pub(super) async fn build(
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind = 'ResolverChanged'
-              AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+              AND (NOT selected_registration.is_v2_lifecycle OR (binding.resource_id IS NULL AND event.resource_id IS NULL) OR (selected_registration.resource_id IS NULL AND binding.resource_id IS NOT NULL AND event.resource_id = binding.resource_id) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,

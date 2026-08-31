@@ -20,7 +20,7 @@ pub(super) async fn seed(
     )
     .await?;
     seed_children(transaction, chain_id).await?;
-    seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
+    seed_resources(transaction, chain_id).await?;
     seed_resolvers(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_primary(transaction, chain_id).await?;
     Ok(())
@@ -200,12 +200,7 @@ async fn seed_children(transaction: &mut Transaction<'_, Postgres>, chain_id: &s
     Ok(())
 }
 
-async fn seed_resources(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    from_block: i64,
-    to_block: i64,
-) -> Result<()> {
+async fn seed_resources(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) -> Result<()> {
     sqlx::query(
         r#"
         WITH citations AS (
@@ -266,8 +261,6 @@ async fn seed_resources(
         "#,
     )
     .bind(chain_id)
-    .bind(from_block)
-    .bind(to_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to retain retracted resource scope", error))?;
