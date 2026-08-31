@@ -273,13 +273,30 @@ const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
 mod tests {
     use super::*;
 
+    fn pinned_source(relative_path: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative_path);
+        std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read pinned upstream source {}: {error}; run scripts/sync-refs",
+                path.display()
+            )
+        })
+    }
+
+    #[test]
+    #[should_panic(expected = "run scripts/sync-refs")]
+    fn missing_pinned_source_names_the_sync_command() {
+        pinned_source(".refs/intentionally-missing-role-vocabulary.sol");
+    }
+
     #[test]
     fn role_tables_cover_each_pinned_upstream_constant() {
-        let registry = include_str!(
-            "../../../../../.refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol"
-        );
-        let resolver = include_str!(
-            "../../../../../.refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol"
+        let registry =
+            pinned_source(".refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol");
+        let resolver = pinned_source(
+            ".refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol",
         );
         let role_count = |source: &str| {
             source
@@ -287,8 +304,8 @@ mod tests {
                 .filter(|line| line.contains("uint256 internal constant ROLE_"))
                 .count()
         };
-        assert_eq!(REGISTRY_ROLE_BITS.len(), role_count(registry));
-        assert_eq!(RESOLVER_ROLE_BITS.len(), role_count(resolver));
+        assert_eq!(REGISTRY_ROLE_BITS.len(), role_count(&registry));
+        assert_eq!(RESOLVER_ROLE_BITS.len(), role_count(&resolver));
         assert_eq!(
             powers(U256::from(1_u8) << 32, V2Vocabulary::Registry),
             ["was_reserved"]
