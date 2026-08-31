@@ -1205,6 +1205,109 @@ async fn null_exact_resolver_requires_one_effective_resolver_for_the_batch() -> 
 }
 
 #[tokio::test]
+async fn discovery_rejects_success_and_malformed_inner_from_different_resolvers() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_text_result_with_resolver(
+            LIVE_VALUE,
+            "0x3000000000000000000000000000000000000003",
+        )?),
+        RpcResponse::Result(encoded_malformed_text_result_with_resolver(
+            "0x4000000000000000000000000000000000000004",
+        )?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let error = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await
+        .expect_err("malformed inner data from another resolver must fail closed");
+    assert_eq!(error.kind(), ErrorKind::Execution);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_rejects_resolver_not_found_and_malformed_inner_resolver() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(resolver_not_found_revert(b"\x05alice\x03eth\0")),
+        },
+        RpcResponse::Result(encoded_malformed_text_result_with_resolver(
+            "0x4000000000000000000000000000000000000004",
+        )?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let error = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await
+        .expect_err("resolver-not-found and a decoded resolver must fail closed");
+    assert_eq!(error.kind(), ErrorKind::Execution);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_keeps_malformed_inner_per_key_for_consistent_resolver() -> AnyResult<()> {
+    let effective = "0x3000000000000000000000000000000000000003";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_text_result_with_resolver(LIVE_VALUE, effective)?),
+        RpcResponse::Result(encoded_malformed_text_result_with_resolver(effective)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let response = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await?;
+    assert!(
+        response
+            .records
+            .iter()
+            .any(|record| record.status == crate::LookupRecordStatus::Success)
+    );
+    assert!(
+        response
+            .records
+            .iter()
+            .any(|record| record.status == crate::LookupRecordStatus::ExecutionFailed)
+    );
+    assert!(
+        response
+            .records
+            .iter()
+            .all(|record| record.ledger_action == LedgerAction::None)
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn resolver_not_found_envelopes_are_live_not_found_without_ledger_mutation() -> AnyResult<()>
 {
     let revert = resolver_not_found_revert(b"\x05alice\x03eth\0");
@@ -3492,6 +3595,12 @@ fn encoded_text_result_with_resolver(value: &str, resolver: &str) -> AnyResult<V
     let record_result = (value.to_owned(),).abi_encode_params();
     let universal_result =
         (Bytes::from(record_result), Address::from_str(resolver)?).abi_encode_params();
+    Ok(Value::String(hex_string(&universal_result)))
+}
+
+fn encoded_malformed_text_result_with_resolver(resolver: &str) -> AnyResult<Value> {
+    let universal_result =
+        (Bytes::from(vec![0x12, 0x34]), Address::from_str(resolver)?).abi_encode_params();
     Ok(Value::String(hex_string(&universal_result)))
 }
 

@@ -151,23 +151,26 @@ fn decode_call_result(
 ) -> Result<RecordCallOutcome> {
     match result.result {
         Ok(Value::String(hex)) => {
-            let decoded = hex_to_bytes(&hex)
-                .and_then(|bytes| decode_resolution_output(result_abi, &bytes))
-                .and_then(|(bytes, resolver)| {
-                    decode_record_result(record, &bytes).map(|value| (value, resolver))
-                });
-            match decoded {
-                Ok((Some(value), resolver)) => Ok(outcome(
+            let Ok((bytes, resolver)) =
+                hex_to_bytes(&hex).and_then(|bytes| decode_resolution_output(result_abi, &bytes))
+            else {
+                return Ok(outcome(
+                    failed(record, "resolver_return_data_malformed", ccip_read),
+                    None,
+                ));
+            };
+            match decode_record_result(record, &bytes) {
+                Ok(Some(value)) => Ok(outcome(
                     success(record, canonical_value(record, value), ccip_read),
                     resolver,
                 )),
-                Ok((None, resolver)) => Ok(outcome(
+                Ok(None) => Ok(outcome(
                     not_found(record, not_found_reason(record), ccip_read),
                     resolver,
                 )),
                 Err(_) => Ok(outcome(
                     failed(record, "resolver_return_data_malformed", ccip_read),
-                    None,
+                    resolver,
                 )),
             }
         }
