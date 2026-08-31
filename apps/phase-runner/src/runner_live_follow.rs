@@ -183,6 +183,9 @@ impl PhaseRunner {
                 PostLiveDownstream::RepairDiscovery => {
                     self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
                         .await?;
+                    if cancellation.is_cancelled() {
+                        return Ok(());
+                    }
                 }
             }
         }

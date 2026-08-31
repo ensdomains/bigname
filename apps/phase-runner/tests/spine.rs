@@ -972,6 +972,7 @@ async fn post_live_discovery_repair_runaway_stops_at_operator_bound() -> Result<
             pool: scratch.pool().clone(),
             calls: Arc::clone(&interpret_calls),
             sequence: Arc::clone(&sequence),
+            cancel_on_call: None,
         }),
         Arc::new(RecordedCompletePhase::new(
             PhaseName::Project,
@@ -1028,6 +1029,119 @@ async fn post_live_discovery_repair_runaway_stops_at_operator_bound() -> Result<
     assert!(
         project_positions[0] < live_position,
         "Project must remain fenced after Live when repair does not converge: {sequence:?}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn post_live_cancelled_discovery_repair_keeps_pending_work_without_exhaustion_error()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_post_live_cancelled_repair").await?;
+    let chain_id = "post-live-cancelled-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "WITH manifest AS (
+             INSERT INTO manifest_versions (
+                 manifest_version, namespace, source_family, chain_id,
+                 deployment_label, rollout_status, normalizer_version,
+                 file_path, manifest_payload
+             ) VALUES (1, 'fixture', 'cancelled_repair_source', $1,
+                       'fixture', 'active', 'fixture', $2, '{}'::jsonb)
+             RETURNING manifest_id
+         )
+         INSERT INTO manifest_discovery_rules (
+             manifest_id, edge_kind, admission, rule_payload
+         )
+         SELECT manifest_id, 'resolver', 'fixture', '{}'::jsonb FROM manifest",
+    )
+    .bind(chain_id)
+    .bind(format!("fixtures/{chain_id}.toml"))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 1, target_block_number = 0,
+             last_processed_block_number = 0,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-0"))
+    .execute(scratch.pool())
+    .await?;
+    let initial_heads = HeadMarkers {
+        latest: BlockMarker::new(0, format!("{chain_id}-block-0"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &initial_heads).await?;
+    let cancellation = CancellationToken::new();
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(initial_heads),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(PostLiveRunawayDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::clone(&interpret_calls),
+            sequence: Arc::clone(&sequence),
+            cancel_on_call: Some((9, cancellation.clone())),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Project,
+            None,
+            Arc::clone(&sequence),
+        )),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(live_heads),
+            Arc::clone(&sequence),
+        )),
+    )?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = true;
+
+    runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "post-live-cancelled-discovery-repair-runner",
+    )?
+    .run_chain(&configured_chain, cancellation.clone())
+    .await?;
+
+    assert!(cancellation.is_cancelled());
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 10);
+    let pending_ingest: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        pending_ingest,
+        "cancellation must preserve required Ingest work"
+    );
+    let sequence = sequence.lock().expect("phase sequence lock").clone();
+    let live_position = sequence
+        .iter()
+        .position(|event| event == "live:normal")
+        .expect("the cancelled repair must begin only after Live");
+    assert!(
+        sequence[live_position + 1..]
+            .iter()
+            .all(|event| !event.starts_with("project:")),
+        "Project must remain fenced after post-Live repair cancellation: {sequence:?}"
     );
     scratch.cleanup().await
 }
@@ -5014,6 +5128,7 @@ struct PostLiveRunawayDiscoveryStampInterpretPhase {
     pool: sqlx::PgPool,
     calls: Arc<AtomicUsize>,
     sequence: Arc<Mutex<Vec<String>>>,
+    cancel_on_call: Option<(usize, CancellationToken)>,
 }
 
 impl Phase for PostLiveRunawayDiscoveryStampInterpretPhase {
@@ -5035,6 +5150,7 @@ impl Phase for PostLiveRunawayDiscoveryStampInterpretPhase {
                 }
             ));
         let pool = self.pool.clone();
+        let cancel_on_call = self.cancel_on_call.clone();
         Box::pin(async move {
             if call > 0 {
                 let mut transaction = pool.begin().await.map_err(|error| {
@@ -5059,6 +5175,11 @@ impl Phase for PostLiveRunawayDiscoveryStampInterpretPhase {
                         "failed to commit post-Live runaway stamp fixture: {error}"
                     ))
                 })?;
+            }
+            if let Some((cancel_call, cancellation)) = cancel_on_call
+                && call == cancel_call
+            {
+                cancellation.cancel();
             }
             LoopbackPhase::new(PhaseName::Interpret)
                 .run_batch(context)
