@@ -3,11 +3,12 @@ COALESCE((
     SELECT declaration -> 'read_features'
     FROM jsonb_array_elements(COALESCE(
         manifest.manifest_payload -> 'contracts', '[]'::jsonb
-    )) declaration
+    )) WITH ORDINALITY declarations(declaration, declaration_ordinality)
     WHERE lower(declaration ->> 'address') = candidate.resolver_address
       AND (declaration ->> 'start_block' IS NULL
            OR (declaration ->> 'start_block')::bigint <= $2)
-    ORDER BY declaration ->> 'role', declaration::text
+    ORDER BY COALESCE((declaration ->> 'start_block')::bigint, 0) DESC,
+             declaration_ordinality DESC
     LIMIT 1
 ), '[]'::jsonb)
 "#;
@@ -17,10 +18,13 @@ COALESCE((
     SELECT admitted -> 'read_features'
     FROM jsonb_array_elements(COALESCE(
         manifest.manifest_payload -> 'resolver_implementations', '[]'::jsonb
-    )) admitted
+    )) WITH ORDINALITY implementations(admitted, admitted_ordinality)
     WHERE lower(admitted ->> 'address') =
           lower(upgrade.after_state ->> 'implementation')
-    ORDER BY admitted ->> 'role', admitted::text
+      AND (admitted ->> 'start_block' IS NULL
+           OR (admitted ->> 'start_block')::bigint <= $2)
+    ORDER BY COALESCE((admitted ->> 'start_block')::bigint, 0) DESC,
+             admitted_ordinality DESC
     LIMIT 1
 ), '[]'::jsonb)
 "#;

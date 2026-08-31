@@ -388,9 +388,16 @@ pub(super) async fn build(
                            FROM jsonb_array_elements(COALESCE(
                                manifest.manifest_payload -> 'resolver_implementations',
                                '[]'::jsonb
-                           )) implementation
+                           )) WITH ORDINALITY
+                              implementations(implementation, implementation_ordinality)
                            WHERE lower(implementation ->> 'address') =
                                  lower(upgrade.after_state ->> 'implementation')
+                             AND (
+                                 implementation ->> 'start_block' IS NULL
+                                 OR (implementation ->> 'start_block')::bigint <= $2
+                             )
+                           ORDER BY COALESCE((implementation ->> 'start_block')::bigint, 0) DESC,
+                                    implementation_ordinality DESC
                            LIMIT 1
                        )
                    ) AS classification_role,
