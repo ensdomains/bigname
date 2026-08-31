@@ -212,6 +212,12 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Sync pinned upstream checkouts
+        if: matrix.name == 'core'
+        run: |
+          scripts/sync-refs
+          scripts/sync-refs --check
+
       - name: cargo test
         run: cargo test ${{ matrix.packages }} --all-features
 
