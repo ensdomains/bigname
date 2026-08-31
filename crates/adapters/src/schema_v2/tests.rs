@@ -4414,6 +4414,152 @@ fn foreign_announcement_does_not_make_declared_admission_tie_match_all() -> anyh
 }
 
 #[test]
+fn declared_resolver_out_ranks_same_namespace_resolver_discovery() -> anyhow::Result<()> {
+    const DECLARED_ID: i64 = 70;
+    const DISCOVERY_ID: i64 = 71;
+    const RESOLVER_ID: i64 = 72;
+    let text_event = (
+        "TextChanged",
+        "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+        &[][..],
+        &["RecordChanged"][..],
+    );
+    let target = super::common::contract_id(CHAIN, CONTRACT);
+    let mut declared = admission(DECLARED_ID, "public_resolver");
+    declared.contract_instance_id = target;
+    let discovered = |source_manifest_id, from, key: &str| AddressAdmissionInput {
+        address: CONTRACT.to_owned(),
+        contract_instance_id: target,
+        source_manifest_id: Some(source_manifest_id),
+        role: None,
+        discovery_edge_kind: Some("resolver".to_owned()),
+        discovery_from_contract_instance_id: Some(from),
+        discovery_observation_key: Some(key.to_owned()),
+        active_from_block: Some(0),
+        active_to_block: None,
+    };
+    let raw = raw(resolver_strings::TextChanged {
+        node: B256::repeat_byte(0x70),
+        indexedKey: keccak256(b"url"),
+        key: "url".to_owned(),
+        value: "https://example.test".to_owned(),
+    }
+    .encode_log_data());
+
+    for discovery_family in ["ens_v2_registry_l1", "ens_v2_root_l1"] {
+        let manifests = vec![
+            manifest_with_events(DECLARED_ID, "ens", "ens_v1_resolver_l1", &[text_event]),
+            manifest_with_events(DISCOVERY_ID, "ens", discovery_family, &[]),
+            manifest_with_events(RESOLVER_ID, "ens", "ens_v2_resolver_l1", &[text_event]),
+            manifest_with_events(77, "foreign", "ens_v2_registry_l1", &[]),
+        ];
+        let edge = discovered(DISCOVERY_ID, Uuid::from_u128(700), "resolver:first");
+        let mut foreign = discovered(77, Uuid::from_u128(705), "announcement:foreign");
+        foreign.discovery_edge_kind = Some("registry_announcement".to_owned());
+        for admissions in [
+            vec![declared.clone(), edge.clone()],
+            vec![edge.clone(), declared.clone()],
+            vec![declared.clone(), edge.clone(), foreign],
+        ] {
+            let selected = super::catalog::Catalog::new(manifests.clone(), Vec::new(), admissions)?
+                .select(&raw)?
+                .context("resolver log must be selected")?;
+            assert_eq!(selected.source.source_family, "ens_v1_resolver_l1");
+        }
+    }
+
+    let mut foreign = manifest_with_events(73, "foreign", "ens_v1_resolver_l1", &[text_event]);
+    foreign.deployment_label = "fixture".to_owned();
+    let selected = super::catalog::Catalog::new(
+        vec![
+            foreign,
+            manifest_with_events(DISCOVERY_ID, "ens", "ens_v2_registry_l1", &[]),
+            manifest_with_events(RESOLVER_ID, "ens", "ens_v2_resolver_l1", &[text_event]),
+        ],
+        Vec::new(),
+        vec![
+            AddressAdmissionInput {
+                source_manifest_id: Some(73),
+                ..declared.clone()
+            },
+            discovered(DISCOVERY_ID, Uuid::from_u128(701), "resolver:foreign"),
+        ],
+    )?
+    .select(&raw)?
+    .context("foreign declaration must not suppress resolver discovery")?;
+    assert_eq!(selected.source.source_family, "ens_v2_resolver_l1");
+
+    let selected = super::catalog::Catalog::new(
+        vec![
+            manifest_with_events(DISCOVERY_ID, "ens", "ens_v2_registry_l1", &[]),
+            manifest_with_events(RESOLVER_ID, "ens", "ens_v2_resolver_l1", &[text_event]),
+        ],
+        Vec::new(),
+        vec![
+            discovered(DISCOVERY_ID, Uuid::from_u128(702), "resolver:first"),
+            discovered(DISCOVERY_ID, Uuid::from_u128(703), "resolver:second"),
+        ],
+    )?
+    .select(&raw)?
+    .context("equivalent resolver discoveries must collapse to one adapter")?;
+    assert_eq!(selected.source.source_family, "ens_v2_resolver_l1");
+    let run = |admissions| {
+        interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![
+                manifest_with_events(DECLARED_ID, "ens", "ens_v1_resolver_l1", &[text_event]),
+                manifest_with_events(DISCOVERY_ID, "ens", "ens_v2_registry_l1", &[]),
+                manifest_with_events(RESOLVER_ID, "ens", "ens_v2_resolver_l1", &[text_event]),
+            ],
+            discovery_rules: Vec::new(),
+            admissions,
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw.clone()],
+        })
+    };
+    let direct = run(vec![declared.clone()])?;
+    let overlapping = run(vec![
+        declared,
+        discovered(DISCOVERY_ID, Uuid::from_u128(704), "resolver:stable"),
+    ])?;
+    let stable = |output: &BatchOutput| {
+        let event = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RecordChanged")
+            .expect("resolver record event");
+        json!({
+            "event_identity": event.event_identity,
+            "namespace": event.namespace,
+            "logical_name_id": event.logical_name_id,
+            "resource_id": event.resource_id,
+            "event_kind": event.event_kind,
+            "source_family": event.source_family,
+            "manifest_version": event.manifest_version,
+            "source_manifest_id": event.source_manifest_id,
+            "chain_id": event.chain_id,
+            "block_number": event.block_number,
+            "block_hash": event.block_hash,
+            "transaction_hash": event.transaction_hash,
+            "transaction_index": event.transaction_index,
+            "log_index": event.log_index,
+            "raw_fact_ref": event.raw_fact_ref,
+            "derivation_kind": event.derivation_kind,
+            "canonicality_state": event.canonicality_state,
+            "before_state": event.before_state,
+            "after_state": event.after_state,
+            "consumer_visibility": event.consumer_visibility,
+        })
+    };
+    assert_eq!(
+        serde_json::to_vec(&stable(&direct))?,
+        serde_json::to_vec(&stable(&overlapping))?
+    );
+    Ok(())
+}
+
+#[test]
 fn registry_permission_adapter_selects_one_root_event() -> anyhow::Result<()> {
     let encoded = EACRolesChanged {
         resource: U256::ZERO,

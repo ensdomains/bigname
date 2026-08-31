@@ -16,6 +16,7 @@ use bigname_ingest::load_watch_filter;
 use bigname_interpret::{
     BatchRequest, Engine, ErrorKind as InterpretErrorKind, Marker, RunMode as InterpretRunMode,
 };
+use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_project::{
     BatchRequest as ProjectBatchRequest, Engine as ProjectEngine, RunMode as ProjectRunMode,
 };
@@ -3489,6 +3490,186 @@ async fn discovery_admission_applies_to_later_logs_in_the_same_batch() -> Result
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(resolver_event, ("ens_v2_resolver_l1".into(), 1));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> Result<()> {
+    const CHAIN: &str = "ethereum-sepolia";
+    const REGISTRY: &str = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    const RESOLVER: &str = "0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5";
+    const FIRST_BLOCK: i64 = 11_163_391;
+
+    let scratch = ScratchDatabase::create("production_interpret_declared_v1_resolver").await?;
+    let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(scratch.pool(), &load_repository(profile)?).await?;
+    for block in FIRST_BLOCK..=FIRST_BLOCK + 2 {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, block))
+        .bind((block > FIRST_BLOCK).then(|| block_hash(CHAIN, block - 1)))
+        .bind(block)
+        .execute(scratch.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO raw_transactions (
+                 chain_id, block_hash, block_number, transaction_hash,
+                 transaction_index, from_address, to_address
+             ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, block))
+        .bind(block)
+        .bind(format!("{CHAIN}-transaction-{block}"))
+        .bind(SENDER)
+        .bind(if block == FIRST_BLOCK + 2 {
+            RESOLVER
+        } else {
+            REGISTRY
+        })
+        .execute(scratch.pool())
+        .await?;
+    }
+
+    let token_id = versioned_token("alice", 1);
+    let owner: Address = SENDER.parse()?;
+    for (log_index, fact) in [
+        v2_registry_events::LabelRegistered {
+            tokenId: token_id,
+            labelHash: keccak256(b"alice"),
+            label: "alice".to_owned(),
+            owner,
+            expiry: 4_000_000_000,
+            sender: owner,
+        }
+        .encode_log_data(),
+        v2_registry_events::TokenResource {
+            tokenId: token_id,
+            resource: U256::from(5_031),
+        }
+        .encode_log_data(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_log_at(
+            scratch.pool(),
+            CHAIN,
+            FIRST_BLOCK,
+            &format!("{CHAIN}-transaction-{FIRST_BLOCK}"),
+            i64::try_from(log_index)?,
+            REGISTRY,
+            fact.topics(),
+            fact.data.as_ref(),
+        )
+        .await?;
+    }
+    let pointer = ResolverUpdated {
+        tokenId: token_id,
+        resolver: RESOLVER.parse()?,
+        sender: owner,
+    }
+    .encode_log_data();
+    insert_log_at(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 1,
+        &format!("{CHAIN}-transaction-{}", FIRST_BLOCK + 1),
+        0,
+        REGISTRY,
+        pointer.topics(),
+        pointer.data.as_ref(),
+    )
+    .await?;
+    let record = TextChanged {
+        node: raw_namehash(&[b"alice", b"eth"]),
+        indexedKey: keccak256(b"url"),
+        key: "url".into(),
+        value: "https://declared-v1.example.test".into(),
+    }
+    .encode_log_data();
+    insert_log_at(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 2,
+        &format!("{CHAIN}-transaction-{}", FIRST_BLOCK + 2),
+        0,
+        RESOLVER,
+        record.topics(),
+        record.data.as_ref(),
+    )
+    .await?;
+
+    run_engine(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK,
+        FIRST_BLOCK + 2,
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    let record_event: (String, String, String) = sqlx::query_as(
+        "SELECT source_family, after_state ->> 'record_key', after_state ->> 'value'
+         FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2 AND event_kind = 'RecordChanged'",
+    )
+    .bind(CHAIN)
+    .bind(FIRST_BLOCK + 2)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        record_event,
+        (
+            "ens_v1_resolver_l1".into(),
+            "text:url".into(),
+            "https://declared-v1.example.test".into(),
+        )
+    );
+    let topology: (String, String, i64) = sqlx::query_as(
+        "SELECT manifest.source_family, lower(address.address), edge.active_from_block_number
+         FROM discovery_edges edge
+         JOIN manifest_versions manifest ON manifest.manifest_id = edge.source_manifest_id
+         JOIN contract_instance_addresses address
+           ON address.contract_instance_id = edge.to_contract_instance_id
+         WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        topology,
+        (
+            "ens_v2_registry_l1".into(),
+            RESOLVER.to_ascii_lowercase(),
+            FIRST_BLOCK + 1,
+        )
+    );
+    let pointer_events: (i64, Option<String>) = sqlx::query_as(
+        "SELECT count(*), min(logical_name_id) FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2
+           AND source_family = 'ens_v2_registry_l1'
+           AND event_kind = 'ResolverChanged'
+           AND lower(after_state ->> 'resolver') = lower($3)",
+    )
+    .bind(CHAIN)
+    .bind(FIRST_BLOCK + 1)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        pointer_events,
+        (
+            1,
+            Some(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"]))),
+        )
+    );
     scratch.cleanup().await
 }
 

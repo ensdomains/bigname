@@ -681,6 +681,38 @@ fn checked_in_resolver_read_features_are_generation_scoped() -> Result<()> {
         basenames.manifest.contracts[0].read_features.is_empty(),
         "the admitted legacy Basenames resolver must not authorize ENSIP-19 fallback"
     );
+
+    let sepolia = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let resolver = sepolia
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
+        .expect("Sepolia ENSv1 resolver manifest");
+    let flagged = resolver
+        .manifest
+        .contracts
+        .iter()
+        .filter(|contract| !contract.read_features.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0].role, "public_resolver");
+    assert_eq!(
+        normalize_address(&flagged[0].address),
+        "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5"
+    );
+    assert_eq!(
+        flagged[0].read_features,
+        vec![ResolverReadFeature::Ensip19DefaultAddress]
+    );
+    assert!(
+        resolver
+            .manifest
+            .contracts
+            .iter()
+            .filter(|contract| contract.role != "public_resolver")
+            .all(|contract| contract.read_features.is_empty()),
+        "only the latest Sepolia resolver generation supports ENSIP-19 fallback"
+    );
     Ok(())
 }
 
@@ -841,12 +873,12 @@ fn mainnet_registrar_family_pins_the_base_registrar_event_surface() -> Result<()
     Ok(())
 }
 
-/// Sepolia admits the ENSv1 registry, registrar, and wrapper manifests consumed by
-/// `ens_v2_migration_l1` ENSv1→ENSv2 migration correlation. BaseRegistrar raw logs belong only to
-/// `ens_v1_registrar_l1`; the `ens_v2_migration_l1` manifest keeps the address as correlation
-/// metadata.
+/// Sepolia admits the ENSv1 registry, registrar, wrapper, and resolver manifests. The migration
+/// family consumes only its declared cross-family correlation inputs; resolver events remain
+/// owned by `ens_v1_resolver_l1`. BaseRegistrar raw logs belong only to `ens_v1_registrar_l1`, and
+/// the `ens_v2_migration_l1` manifest keeps that address as correlation metadata.
 #[test]
-fn sepolia_manifests_admit_the_ens_v1_registry_registrar_and_wrapper_families() -> Result<()> {
+fn sepolia_manifests_admit_all_four_ens_v1_families() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
     let family = |name: &str| {
         repository
@@ -932,6 +964,66 @@ fn sepolia_manifests_admit_the_ens_v1_registry_registrar_and_wrapper_families() 
         normalize_address(&registrar.contracts[0].address),
     );
 
+    let resolver = family("ens_v1_resolver_l1").expect("Sepolia ENSv1 resolver family");
+    assert_eq!(resolver.chain, "ethereum-sepolia");
+    assert!(resolver.rollout_status.is_active());
+    assert_eq!(resolver.deployment_epoch, "ens_v1");
+    assert_eq!(resolver.normalizer_version, "ensip15@ens-normalize-0.1.1");
+    assert!(resolver.roots.is_empty());
+    assert!(resolver.discovery_rules.is_empty());
+    assert!(resolver.capability_flags.is_empty());
+    let resolver_contracts = resolver
+        .contracts
+        .iter()
+        .map(|contract| {
+            (
+                contract.role.as_str(),
+                (
+                    normalize_address(&contract.address),
+                    contract.proxy_kind.as_str(),
+                    contract.start_block,
+                ),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        resolver_contracts,
+        std::collections::BTreeMap::from([
+            (
+                "public_resolver",
+                (
+                    "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5".to_owned(),
+                    "none",
+                    Some(8_580_001),
+                ),
+            ),
+            (
+                "public_resolver_0ceec52",
+                (
+                    "0x0ceec524b2807841739d3b5e161f5bf1430ffa48".to_owned(),
+                    "none",
+                    Some(3_790_166),
+                ),
+            ),
+            (
+                "public_resolver_8948458",
+                (
+                    "0x8948458626811dd0c23eb25cc74291247077cc51".to_owned(),
+                    "none",
+                    Some(0),
+                ),
+            ),
+            (
+                "public_resolver_8fade66",
+                (
+                    "0x8fade66b79cc9f707ab26799354482eb93a5b7dd".to_owned(),
+                    "none",
+                    Some(0),
+                ),
+            ),
+        ])
+    );
+
     // Both cleanup branches a migrated child can take must be ingestible: the wrapper token parked
     // in the Graveyard, and the node unwrapped into it.
     let wrapper_events = wrapper
@@ -950,7 +1042,7 @@ fn sepolia_manifests_admit_the_ens_v1_registry_registrar_and_wrapper_families() 
     Ok(())
 }
 
-/// The declared surface of the three Sepolia ENSv1 manifests, pinned across the fields that
+/// The declared surface of the four Sepolia ENSv1 manifests, pinned across the fields that
 /// decide what gets ingested. The admission test above covers contracts, addresses, chain, and
 /// rollout status; this one covers the event surface, capability flags, deployment epoch, and
 /// roots, so that deleting an event block, widening a fragment type, dropping a normalized event,
@@ -1137,6 +1229,64 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
             "Transfer|event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)|registrar|TokenControlTransferred,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
         ]
     );
+
+    let resolver = family("ens_v1_resolver_l1");
+    let mainnet_repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let mainnet_resolver = mainnet_repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
+        .map(|loaded| &loaded.manifest)
+        .expect("Mainnet ENSv1 resolver family");
+    assert_eq!(event_surface(resolver), event_surface(mainnet_resolver));
+    assert!(
+        resolver
+            .abi
+            .events
+            .iter()
+            .all(|event| { event.emitter_roles.is_empty() && event.status.is_none() })
+    );
+
+    let v1_addresses = resolver
+        .contracts
+        .iter()
+        .map(|contract| normalize_address(&contract.address))
+        .collect::<std::collections::BTreeSet<_>>();
+    let v2 = repository
+        .manifests()
+        .iter()
+        .filter(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
+        .max_by_key(|loaded| loaded.manifest.manifest_version)
+        .map(|loaded| &loaded.manifest)
+        .expect("selected Sepolia ENSv2 resolver family");
+    let v2_addresses = v2
+        .contracts
+        .iter()
+        .map(|contract| normalize_address(&contract.address))
+        .chain(v2.roots.iter().map(|root| normalize_address(&root.address)))
+        .chain(
+            v2.resolver_implementations
+                .iter()
+                .map(|implementation| normalize_address(&implementation.address)),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(v1_addresses.is_disjoint(&v2_addresses));
+    assert_eq!(
+        v2.resolver_implementations
+            .iter()
+            .map(|implementation| {
+                (
+                    implementation.role.as_str(),
+                    normalize_address(&implementation.address),
+                )
+            })
+            .collect::<Vec<_>>(),
+        [(
+            "permissioned_resolver",
+            "0x7e4b2d59938930168024201752ee5503df402303".to_owned(),
+        )]
+    );
+    assert!(v2.contracts.is_empty());
     Ok(())
 }
 

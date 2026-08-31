@@ -2,7 +2,7 @@ use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolEvent;
 
 use super::{
-    events::{V1RegistrarToken, V1Registry, V1Wrapper},
+    events::{V1RegistrarToken, V1Registry, V1Resolver, V1Wrapper},
     names::{dns_encode, labelhash, namehash},
     scenario::{Action, Dimensions, action, emission, stage},
     world::Wiring,
@@ -12,20 +12,22 @@ const LABELS: [&str; 3] = ["alpha", "bravo", "charlie"];
 const REGISTRY: &str = "ens_v1_registry_l1";
 const REGISTRAR: &str = "ens_v1_registrar_l1";
 const WRAPPER: &str = "ens_v1_wrapper_l1";
+const RESOLVER: &str = "ens_v1_resolver_l1";
 const GRACE_PERIOD: i64 = 90 * 24 * 60 * 60;
 
 /// Generates the ordinary ENSv1 authority path declared by the checked-in Sepolia manifests.
 /// Dedicated tests cover correlation-dependent BaseRegistrar events; this generated event world
-/// exercises the registry, wrapper, and the registrar Transfer that restores authority on unwrap.
+/// exercises the registry, resolver, wrapper, and registrar Transfer that restores unwrap authority.
 pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) -> Vec<Action> {
     let registry = wiring.address(REGISTRY, "registry");
     let registrar = wiring.address(REGISTRAR, "registrar");
     let wrapper = wiring.address(WRAPPER, "name_wrapper");
+    let resolver = wiring.address(RESOLVER, "public_resolver");
     let wrapper_address = address(wrapper);
+    let resolver_address = address(resolver);
     let eth_node = namehash(&["eth"]);
     let expiry = u64::try_from(settle_timestamp + GRACE_PERIOD + 31_536_000)
         .expect("Sepolia fixture expiry fits u64");
-    let resolver = actor(0x100);
     let mut actions = Vec::new();
 
     for (index, label) in LABELS.iter().take(dimensions.name_count).enumerate() {
@@ -78,10 +80,34 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         actions.push(action(
             format!("{label}:resolver"),
             stage::LINK,
-            vec![emission(
-                registry,
-                V1Registry::NewResolver { node, resolver }.encode_log_data(),
-            )],
+            vec![
+                emission(
+                    registry,
+                    V1Registry::NewResolver {
+                        node,
+                        resolver: resolver_address,
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
+                    resolver,
+                    V1Resolver::TextChanged {
+                        node,
+                        indexedKey: labelhash("url"),
+                        key: "url".to_owned(),
+                        value: "https://example.test".to_owned(),
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
+                    resolver,
+                    V1Resolver::VersionChanged {
+                        node,
+                        newVersion: 1,
+                    }
+                    .encode_log_data(),
+                ),
+            ],
         ));
         actions.push(action(
             format!("{label}:wrapper-lifecycle"),

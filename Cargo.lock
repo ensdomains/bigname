@@ -5721,6 +5721,7 @@ dependencies = [
  "axum",
  "bigname-adapters",
  "bigname-content-hash",
+ "bigname-domain",
  "bigname-ingest",
  "bigname-interpret",
  "bigname-lookup",

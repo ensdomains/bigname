@@ -69,12 +69,14 @@ The admitted archived-Sepolia implementation exposes the same two getter shapes
 | Default source unavailable or inventory non-authoritative | Explicit `unsupported` | Request-scoped verified fallback | Chain result |
 | Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |
 
-The flagged deployments are the current ENS PublicResolver on mainnet and the
-admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation. The
+The flagged deployments are the current ENS PublicResolver on mainnet, the
+current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`,
+and the admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation. The
 admitted Basenames address is the legacy resolver and remains unflagged; its
 vendored coin-type getter reads exact storage, while the fallback-bearing
 upgradeable resolver proxy is not admitted in this change.
 `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L151-L166 @ ens_app_v3@7175858)`
 `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)`
 `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2398 @ ens_v2@a971bd64)`
 `(upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)`
