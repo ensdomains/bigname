@@ -152,6 +152,23 @@ fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, 
 emitter_roles = ["legacy_registrar_controller", "wrapped_registrar_controller"]
 normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
+# BaseRegistrar authorization checks both ERC-721 token approvals and
+# owner-wide operators; controller contracts are not emitters for this surface.
+# (upstream: .refs/ens_v1/deployments/mainnet/BaseRegistrarImplementation.json:L21-L69 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L35-L50 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+[[abi.events]]
+name = "Approval"
+fragment = "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)"
+emitter_roles = ["registrar"]
+normalized_events = []
+
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["registrar"]
+normalized_events = []
+
 # NameRenewed unwrapped-controller admission follows the pinned ENSv1
 # controller event declaration:
 # (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L246 @ ens_v1@91c966f)

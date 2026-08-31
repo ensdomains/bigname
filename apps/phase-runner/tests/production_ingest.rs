@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use alloy_primitives::{Address, U256, keccak256};
+use alloy_primitives::{Address, U256, hex, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, routing::post};
@@ -69,6 +69,12 @@ const ANNOUNCEMENT_TRANSACTION: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000008";
 const REGISTRATION_TRANSACTION: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000009";
+const DECLARED_APPROVAL_TRANSACTION: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000061";
+const FOREIGN_APPROVAL_TRANSACTION: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000062";
+const CONTEXT_APPROVAL_TRANSACTION: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000063";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000004";
 const SENDER: &str = "0x0000000000000000000000000000000000000005";
 const SIBLING_CONTRACT: &str = "0x0000000000000000000000000000000000000006";
@@ -89,6 +95,7 @@ sol! {
         uint64 expiry,
         address indexed sender
     );
+    event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
 }
 
 #[tokio::test]
@@ -300,6 +307,160 @@ async fn verification_only_source_never_reaches_finite_ingest_or_cursors() -> Re
     );
     assert_eq!(finalized_lineage_count, 2);
     assert_eq!(verify_requests.load(Ordering::SeqCst), 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn address_scoped_approvals_follow_raw_intake_and_transaction_context_boundaries()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_address_scoped_approval").await?;
+    let chain_id = "rpc-address-scoped-approval";
+    let manifests = ApprovalManifestFixture::new(chain_id)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let (endpoint, server) = spawn_approval_rpc().await?;
+    let source = SourceDescriptor {
+        key: "rpc".to_owned(),
+        kind: "rpc".to_owned(),
+        start_block: 0,
+        endpoint: endpoint.clone(),
+    };
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let database = scratch.runner();
+    let phases = PhaseSet::new([
+        Arc::new(IngestPhase::new(database.pool().clone())) as Arc<dyn Phase>,
+        Arc::new(InterpretPhase::new(database.pool().clone())),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    ])?;
+    let runner = PhaseRunner::new(
+        database,
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "address-scoped-approval-intake",
+        test_timing(),
+    )?;
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task =
+        tokio::spawn(async move { runner.run_chain(&configured_chain, task_cancellation).await });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status: Option<String> = sqlx::query_scalar(
+                "SELECT phase_status FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'interpret'",
+            )
+            .bind(chain_id)
+            .fetch_optional(scratch.pool())
+            .await?;
+            if status.as_deref() == Some("completed") {
+                return Ok::<_, anyhow::Error>(());
+            }
+            if task.is_finished() {
+                anyhow::bail!("phase runner exited before approval interpretation completed");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("approval raw-intake fixture did not complete")??;
+    cancellation.cancel();
+    task.await??;
+
+    type RawLogRow = (i64, String, String, Vec<String>, Vec<u8>);
+    let logs: Vec<RawLogRow> = sqlx::query_as(
+        "SELECT log_index, emitting_address, transaction_hash, topics, data
+         FROM raw_logs WHERE chain_id = $1 ORDER BY log_index",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        logs.iter().map(|row| row.0).collect::<Vec<_>>(),
+        [0, 2, 3],
+        "the unrelated foreign transaction must be absent while same-transaction context remains"
+    );
+    assert_eq!(logs[0].1, CONTRACT);
+    assert_eq!(logs[0].2, DECLARED_APPROVAL_TRANSACTION);
+    assert_eq!(logs[1].1, CONTRACT);
+    assert_eq!(logs[1].2, CONTEXT_APPROVAL_TRANSACTION);
+    assert_eq!(logs[2].1, SIBLING_CONTRACT);
+    assert_eq!(logs[2].2, CONTEXT_APPROVAL_TRANSACTION);
+    assert_eq!(logs[0].3, approval_topics());
+    assert_eq!(logs[1].3, approval_topics());
+    assert_eq!(logs[2].3, approval_topics());
+    assert_eq!(logs[0].4, approval_data(true));
+    assert_eq!(logs[1].4, approval_data(false));
+    assert_eq!(logs[2].4, approval_data(true));
+
+    let transactions: Vec<String> = sqlx::query_scalar(
+        "SELECT transaction_hash FROM raw_transactions
+         WHERE chain_id = $1 ORDER BY transaction_index",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        transactions,
+        [
+            DECLARED_APPROVAL_TRANSACTION.to_owned(),
+            CONTEXT_APPROVAL_TRANSACTION.to_owned()
+        ]
+    );
+    let receipt_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM raw_receipts WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(receipt_count, 2);
+    let approval_derived_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND raw_fact_ref ->> 'kind' = 'raw_log'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        approval_derived_count, 0,
+        "approval logs must not produce normalized output; manifest sync may still emit its independent boundary event"
+    );
+
+    Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain_id.to_owned(),
+            sources: vec![source],
+            cursors: Vec::new(),
+            redo_range: Some((0, 1)),
+            resume_current: None,
+        })
+        .await?;
+    let repeated_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM raw_logs WHERE chain_id = $1),
+             (SELECT count(*) FROM raw_transactions WHERE chain_id = $1),
+             (SELECT count(*) FROM raw_receipts WHERE chain_id = $1)",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        repeated_counts,
+        (3, 2, 2),
+        "raw-fact writes must deduplicate"
+    );
+
+    server.abort();
     scratch.cleanup().await
 }
 
@@ -2059,6 +2220,58 @@ status = "supported"
 }
 
 impl Drop for IngestWatchManifestFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+struct ApprovalManifestFixture {
+    root: PathBuf,
+}
+
+impl ApprovalManifestFixture {
+    fn new(chain: &str) -> Result<Self> {
+        let root = std::env::temp_dir().join(format!(
+            "bigname-approval-intake-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join("ens/ens_v1_registry_l1"))?;
+        fs::write(
+            root.join("ens/ens_v1_registry_l1/v1.toml"),
+            format!(
+                r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "{chain}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "{NORMALIZER}"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "registry"
+address = "{CONTRACT}"
+proxy_kind = "none"
+start_block = 0
+
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["registry"]
+normalized_events = []
+"#
+            ),
+        )?;
+        Ok(Self { root })
+    }
+}
+
+impl Drop for ApprovalManifestFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
@@ -4789,6 +5002,160 @@ async fn spawn_rpc(
         .expect("test RPC server");
     });
     Ok((format!("http://{address}/"), server))
+}
+
+async fn spawn_approval_rpc() -> Result<(String, tokio::task::JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/", post(approval_rpc)))
+            .await
+            .expect("approval test RPC server");
+    });
+    Ok((format!("http://{address}/"), server))
+}
+
+async fn approval_rpc(Json(request): Json<Value>) -> Json<Value> {
+    if let Some(requests) = request.as_array() {
+        return Json(Value::Array(
+            requests.iter().map(approval_rpc_response).collect(),
+        ));
+    }
+    Json(approval_rpc_response(&request))
+}
+
+fn approval_rpc_response(request: &Value) -> Value {
+    let id = request.get("id").cloned().unwrap_or(json!(1));
+    let method = request["method"].as_str().unwrap_or_default();
+    let params = request["params"].as_array().cloned().unwrap_or_default();
+    let result = match method {
+        "eth_getBlockByNumber" => {
+            let selection = params.first().and_then(Value::as_str).unwrap_or_default();
+            match selection {
+                "latest" | "safe" | "finalized" | "0x1" => {
+                    Some(approval_block(1, params.get(1) == Some(&Value::Bool(true))))
+                }
+                "0x0" => Some(approval_block(0, params.get(1) == Some(&Value::Bool(true)))),
+                _ => None,
+            }
+        }
+        "eth_getBlockByHash" => {
+            let hash = params.first().and_then(Value::as_str).unwrap_or_default();
+            match hash {
+                BLOCK_0 => Some(approval_block(0, params.get(1) == Some(&Value::Bool(true)))),
+                BLOCK_1 => Some(approval_block(1, params.get(1) == Some(&Value::Bool(true)))),
+                _ => None,
+            }
+        }
+        "eth_getLogs" => {
+            let filter = params.first().cloned().unwrap_or_default();
+            if filter.get("address").is_some() && filter.get("fromBlock").is_some() {
+                Some(json!([approval_log(0), approval_log(2)]))
+            } else {
+                match filter.get("blockHash").and_then(Value::as_str) {
+                    Some(BLOCK_0) => Some(json!([])),
+                    Some(BLOCK_1) => Some(json!([
+                        approval_log(0),
+                        approval_log(1),
+                        approval_log(2),
+                        approval_log(3)
+                    ])),
+                    _ => Some(json!([])),
+                }
+            }
+        }
+        "eth_getBlockReceipts" => Some(json!([
+            approval_receipt(DECLARED_APPROVAL_TRANSACTION, 0),
+            approval_receipt(FOREIGN_APPROVAL_TRANSACTION, 1),
+            approval_receipt(CONTEXT_APPROVAL_TRANSACTION, 2)
+        ])),
+        _ => None,
+    };
+    json!({"jsonrpc":"2.0", "id":id, "result":result})
+}
+
+fn approval_block(number: i64, full_transactions: bool) -> Value {
+    let mut value = block(number, false);
+    if number == 1 {
+        value["transactions"] = if full_transactions {
+            Value::Array(
+                [
+                    DECLARED_APPROVAL_TRANSACTION,
+                    FOREIGN_APPROVAL_TRANSACTION,
+                    CONTEXT_APPROVAL_TRANSACTION,
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, hash)| {
+                    json!({
+                        "hash":hash,
+                        "blockHash":BLOCK_1,
+                        "blockNumber":"0x1",
+                        "transactionIndex":format!("0x{index:x}"),
+                        "from":SENDER,
+                        "to":CONTRACT,
+                        "input":"0x",
+                        "value":"0x0"
+                    })
+                })
+                .collect(),
+            )
+        } else {
+            json!([
+                DECLARED_APPROVAL_TRANSACTION,
+                FOREIGN_APPROVAL_TRANSACTION,
+                CONTEXT_APPROVAL_TRANSACTION
+            ])
+        };
+    }
+    value
+}
+
+fn approval_topics() -> Vec<String> {
+    vec![
+        format!("{}", ApprovalForAll::SIGNATURE_HASH),
+        format!("0x{}", "00".repeat(12)) + &CONTRACT[2..],
+        format!("0x{}", "00".repeat(12)) + &SENDER[2..],
+    ]
+}
+
+fn approval_data(approved: bool) -> Vec<u8> {
+    let mut data = vec![0; 32];
+    data[31] = u8::from(approved);
+    data
+}
+
+fn approval_log(index: i64) -> Value {
+    let (transaction_hash, transaction_index, address, approved) = match index {
+        0 => (DECLARED_APPROVAL_TRANSACTION, 0, CONTRACT, true),
+        1 => (FOREIGN_APPROVAL_TRANSACTION, 1, SIBLING_CONTRACT, false),
+        2 => (CONTEXT_APPROVAL_TRANSACTION, 2, CONTRACT, false),
+        3 => (CONTEXT_APPROVAL_TRANSACTION, 2, SIBLING_CONTRACT, true),
+        _ => unreachable!("approval fixture log index"),
+    };
+    json!({
+        "blockHash":BLOCK_1,
+        "blockNumber":"0x1",
+        "transactionHash":transaction_hash,
+        "transactionIndex":format!("0x{transaction_index:x}"),
+        "logIndex":format!("0x{index:x}"),
+        "address":address,
+        "topics":approval_topics(),
+        "data":format!("0x{}", hex::encode(approval_data(approved)))
+    })
+}
+
+fn approval_receipt(transaction_hash: &str, transaction_index: i64) -> Value {
+    json!({
+        "transactionHash":transaction_hash,
+        "blockHash":BLOCK_1,
+        "blockNumber":"0x1",
+        "transactionIndex":format!("0x{transaction_index:x}"),
+        "status":"0x1",
+        "cumulativeGasUsed":"0x5208",
+        "gasUsed":"0x5208",
+        "logsBloom":"0x"
+    })
 }
 
 #[derive(Clone)]

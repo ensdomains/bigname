@@ -58,3 +58,12 @@ name = "NewTTL"
 fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
 emitter_roles = ["registry"]
 normalized_events = []
+
+# Basenames Registry emits owner-wide operator approval changes.
+# (upstream: .refs/basenames/src/L2/Registry.sol:L49-L53 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc).
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["registry"]
+normalized_events = []

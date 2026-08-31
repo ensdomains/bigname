@@ -71,3 +71,20 @@ name = "Upgraded"
 fragment = "event Upgraded(address indexed implementation)"
 emitter_roles = ["upgradeable_registrar_controller"]
 normalized_events = ["Upgraded"]
+
+# Basenames BaseRegistrar delegates token and owner-wide approval behavior to
+# ERC-721; controller declarations do not emit these registrar events.
+# (upstream: .refs/basenames/lib/solady/src/tokens/ERC721.sol:L69-L73 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L329 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L448-L465 @ basenames@1809bbc).
+[[abi.events]]
+name = "Approval"
+fragment = "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)"
+emitter_roles = ["registrar"]
+normalized_events = []
+
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["registrar"]
+normalized_events = []

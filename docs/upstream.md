@@ -7,6 +7,9 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | Key | Repo | Commit | Purpose |
 |-----|------|--------|---------|
 | `ens_v1` | `ensdomains/ens-contracts` | `91c966fe` | Canonical ENSv1 Solidity |
+| `ens_v1_mainnet_1a2ac5c` | `ensdomains/ens-contracts` | `1a2ac5cb` | Historical deployment ABI for the admitted `0x231b0Ee…` Mainnet PublicResolver only |
+| `ens_v1_sepolia_8209157` | `ensdomains/ens-contracts` | `82091575` | Historical deployment ABI for the admitted `0x8948458…` Sepolia PublicResolver only |
+| `ens_v1_sepolia_ac32490` | `ensdomains/ens-contracts` | `ac324904` | Historical deployment ABI for the admitted `0x8FADE66…` Sepolia PublicResolver only |
 | `ens_v1_lll` | `ensdomains/ens` | `7e377df8` | Historical evidence for the 2017 LLL registry only |
 | `ens_v2` | `ensdomains/contracts-v2` | `a971bd64` | Post-audit ENSv2 contracts and pinned Sepolia deployment evidence |
 | `ens_v2_sepolia_20260629` | `ensdomains/contracts-v2` | `ccaeb58b` | Historical implementation evidence for the admitted 2026-06-29 old-model Sepolia deployment only |
@@ -31,8 +34,12 @@ keep their embedded ABI, behavior, address, and range evidence verifiable after
 upstream removed the `sepolia-dev` artifact directory; it must not support new
 behavior claims or active admission.
 
-`ens_v1` is the sole current ENSv1 semantic authority. The `ens_v1_lll`
-checkout is retained only so the 2017 LLL registry's unmasked-word rules in
+`ens_v1` is the sole current ENSv1 semantic authority. The
+`ens_v1_mainnet_1a2ac5c`, `ens_v1_sepolia_8209157`, and
+`ens_v1_sepolia_ac32490` checkouts retain only the deployment ABI evidence for
+their named admitted PublicResolver generations; they are not authority for
+current ENSv1 semantics or any other deployment. The `ens_v1_lll` checkout is
+retained only so the 2017 LLL registry's unmasked-word rules in
 `docs/architecture.md` and the divergence entry below keep a pinned source
 citation; it must not support any other behavior claim. The pin is upstream's
 `mainnet` tag (2017-04-30): its `contracts/ENS.lll` is identical to the file's
@@ -142,7 +149,7 @@ Intentional differences between our docs/manifests and upstream. Every divergenc
 > **Why**: keep declared Basenames primary-name values aligned with the ENSv1 Base L2 primary-name path while preserving the Basenames Base registry/registrar/resolver families as the declared exact-name, address-name, children, and record authority.
 > **Since**: `2026-06-04`
 
-> **Permission enumeration with unindexed approval paths** — bigname serves known permission rows that apply to a resource but does not yet index the standard registry operator, registrar token/operator, resolver operator/delegate, or ENSv2 registry operator approval paths. Non-wrapper permission summaries therefore remain request-relative partial rather than full or authoritative, including when a request returns zero rows. NameWrapper holder enumeration remains a separate unsupported class.
+> **Permission enumeration with unindexed approval paths** — bigname serves known permission rows that apply to a resource and retains the manifest-scoped ENSv1 and Basenames registry operator, registrar token/operator, resolver operator/delegate, and NameWrapper approval logs as [raw facts](glossary.md#raw-fact). Those grants and delegations are not normalized or projected into permissions, and ENSv2 registry operator approvals remain outside intake. Non-wrapper permission summaries therefore remain request-relative partial rather than full or authoritative, including when a request returns zero rows; the existing `operator_approval_surfaces_not_ingested` pipeline reason and `approval_and_delegation_permissions_not_supported` product reason remain the typed unsupported vocabulary until a permission-interpretation slice replaces them. NameWrapper holder enumeration remains a separate unsupported class.
 > **Upstream**: ENSv1 registry ownership checks include approved operators and `setApprovalForAll` persists that authority `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)`. BaseRegistrar accepts both per-token approvees and owner-wide operators for `reclaim` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)`. PublicResolver accepts owner-wide operators and node delegates `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114-L129 @ ens_v1@91c966f)`. Basenames has equivalent registry operator and resolver operator/delegate paths, while its registrar delegates authorization to ERC-721 approval checks `(upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L329 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L448-L465 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L141-L166 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L180-L198 @ basenames@1809bbc)`. ENSv2's ERC-1155 base exposes owner-wide approval and `PermissionedRegistry` inherits approved-owner roles for non-root resources `(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)`. NameWrapper separately exposes token approval and owner/operator mutation paths `(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L124-L135 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L210-L221 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/api-v2.md` § Naming Dictionary, `docs/api-v2-routes.md` § `GET /v2/permissions`, `docs/consumer-capabilities.md` § Capability mapping, `docs/projections.md` § Permissions, and `docs/storage.md` § Projection publication.
 > **Why**: the existing projection contains useful owner-derived rows but has no representation of the approval paths above. Marking the current result partial avoids claiming that returned rows, including zero rows, enumerate every account that can mutate a registration. Separate family slices can add each approval path without changing the current resource-anchored response identity.

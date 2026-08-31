@@ -74,3 +74,13 @@ name = "NewTTL"
 fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
 emitter_roles = ["registry", "registry_old"]
 normalized_events = []
+
+# ENSRegistry emits owner-wide operator approval changes. The LLL-era registry
+# does not declare this event, so intake is limited to the current registry role.
+# (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L17-L22 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f).
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["registry"]
+normalized_events = []

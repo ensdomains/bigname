@@ -701,18 +701,149 @@ async fn checked_in_sepolia_resolvers_sync_fresh_with_exact_addresses_and_family
         .iter()
         .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
         .expect("checked-in Sepolia resolver family");
-    let filter = load_persisted_watch_filter(scratch.pool(), "ethereum-sepolia", 0, 0).await?;
+    let filter =
+        load_persisted_watch_filter(scratch.pool(), "ethereum-sepolia", 0, 9_000_000).await?;
     for event in &resolver.manifest.abi.events {
-        let topic = format!(
-            "{:#x}",
-            keccak256(event.parsed_event_view()?.canonical_signature().as_bytes())
-        );
-        assert!(filter.includes("0x1111111111111111111111111111111111111111", &topic, 0));
+        let signature = event.parsed_event_view()?.canonical_signature();
+        let topic = format!("{:#x}", keccak256(signature.as_bytes()));
+        if bigname_manifests::is_address_scoped_approval(
+            &resolver.manifest.source_family,
+            &signature,
+        ) {
+            assert!(!filter.includes("0x1111111111111111111111111111111111111111", &topic, 0));
+            for contract in &resolver.manifest.contracts {
+                let block = i64::try_from(contract.start_block.unwrap_or(0))?;
+                assert_eq!(
+                    filter.includes(&contract.address, &topic, block),
+                    event.emitter_roles.contains(&contract.role),
+                    "{} approval scope must follow declared roles",
+                    contract.role
+                );
+            }
+        } else {
+            assert!(filter.includes("0x1111111111111111111111111111111111111111", &topic, 0));
+        }
     }
     assert_eq!(
         required_ingest_redo(scratch.pool(), "ethereum-sepolia").await?,
         None
     );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn approval_event_widening_stamps_retained_history_and_is_fresh_sync_safe() -> Result<()> {
+    let chain_id = "manifest-approval-event-widening";
+    let fixture = WatchManifestFixture::with_source_family(chain_id, "ens_v1_registry_l1")?;
+    let path = fixture.root.join("test/ens_v1_registry_l1/v1.toml");
+    let write_manifest = |include_approval: bool| -> Result<()> {
+        let approval = include_approval.then_some(
+            r#"
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["registry"]
+normalized_events = []
+"#,
+        );
+        fs::write(
+            &path,
+            format!(
+                r#"manifest_version = 1
+namespace = "test"
+source_family = "ens_v1_registry_l1"
+chain = "{chain_id}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "registry"
+address = "0x0000000000000000000000000000000000000004"
+proxy_kind = "none"
+start_block = 7
+
+[[abi.events]]
+name = "NewTTL"
+fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
+emitter_roles = ["registry"]
+normalized_events = []
+{}
+"#,
+                approval.unwrap_or_default()
+            ),
+        )?;
+        Ok(())
+    };
+
+    let scratch = ScratchDatabase::create("production_manifest_approval_event_widening").await?;
+    write_manifest(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    seed_completed_ingest_range_through(&scratch, chain_id, 20).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+             redo_previous_phase_status = 'completed',
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 10, redo_to_block_number = 20,
+             redo_current_block_number = 15,
+             redo_current_block_hash = 'interrupted-approval-redo',
+             redo_manifest_authority_fingerprint = repeat('a', 64),
+             last_error = 'interrupted prior redo',
+             started_at = now(), finished_at = NULL
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    write_manifest(true)?;
+    let desired = load_repository(&fixture.root)?;
+    sync_schema_v2_repository(scratch.pool(), &desired).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((7, 20))
+    );
+    let state: (Option<i64>, Option<String>, String) = sqlx::query_as(
+        "SELECT redo_current_block_number, redo_manifest_authority_fingerprint, last_error
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(state.0, None, "widening must reset interrupted progress");
+    assert_eq!(
+        state.1, None,
+        "widening must discard the old watch fingerprint"
+    );
+    assert_eq!(
+        state.2,
+        "required downstream redo: manifest watch plan widened over an already-ingested range"
+    );
+    sync_schema_v2_repository(scratch.pool(), &desired).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((7, 20)),
+        "an unchanged second sync must be idempotent"
+    );
+
+    let fresh = ScratchDatabase::create("production_manifest_approval_event_fresh").await?;
+    write_manifest(false)?;
+    sync_schema_v2_repository(fresh.pool(), &load_repository(&fixture.root)?).await?;
+    write_manifest(true)?;
+    sync_schema_v2_repository(fresh.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(fresh.pool(), chain_id).await?,
+        None,
+        "a fresh database has no retained history to redo"
+    );
+
+    fresh.cleanup().await?;
     scratch.cleanup().await
 }
 

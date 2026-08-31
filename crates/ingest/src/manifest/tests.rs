@@ -138,6 +138,42 @@ fn generic_resolver_topics_scan_all_emitters() {
 }
 
 #[test]
+fn aliased_root_and_contract_ranges_form_one_provider_query() {
+    let address = "0x00000000000000000000000000000000000000aa".to_owned();
+    let generic = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let approval = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let filter = WatchFilter {
+        address_ranges: vec![
+            AddressRange {
+                address: address.clone(),
+                from_block: 10,
+                to_block: 20,
+                topic0s: vec![generic.to_owned()],
+            },
+            AddressRange {
+                address: address.clone(),
+                from_block: 10,
+                to_block: 20,
+                topic0s: vec![generic.to_owned(), approval.to_owned()],
+            },
+        ],
+        all_emitter_ranges: Vec::new(),
+        registry_announcements: None,
+    };
+
+    assert_eq!(
+        filter.queries(),
+        [WatchQuery {
+            from_block: 10,
+            to_block: 20,
+            addresses: vec![address],
+            topic0s: vec![generic.to_owned(), approval.to_owned()],
+        }],
+        "a root alias must not duplicate generic-topic provider traffic from its contract declaration"
+    );
+}
+
+#[test]
 fn only_existing_generic_resolver_topics_are_selected_without_addresses() {
     let generic = generic_resolver_topic0s()[0].clone();
     let shared = format!(
@@ -160,6 +196,158 @@ fn only_existing_generic_resolver_topics_are_selected_without_addresses() {
         ),
         vec![generic]
     );
+}
+
+#[tokio::test]
+async fn runtime_filter_keeps_approvals_role_and_interval_scoped() -> AnyResult<()> {
+    let database = range_database("ingest_address_scoped_approvals").await?;
+    let chain_id = "approval-watch-chain";
+    let allowed = "0x00000000000000000000000000000000000000aa";
+    let old_generation = "0x00000000000000000000000000000000000000bb";
+    let foreign = "0x00000000000000000000000000000000000000cc";
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": ENS_V1_RESOLVER_SOURCE_FAMILY,
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
+        "resolver_implementations": [],
+        "capability_flags": {},
+        "roots": [{"name":"ResolverRootAlias", "address":allowed, "start_block":0}],
+        "contracts": [
+            {"role":"public_resolver", "address":allowed, "proxy_kind":"none", "start_block":10},
+            {"role":"public_resolver_old", "address":old_generation, "proxy_kind":"none", "start_block":0}
+        ],
+        "discovery_rules": [],
+        "abi": {"events": [
+            {
+                "name":"NameChanged",
+                "fragment":"event NameChanged(bytes32 indexed node, string name)",
+                "emitter_roles":[],
+                "normalized_events":["RecordChanged"]
+            },
+            {
+                "name":"ApprovalForAll",
+                "fragment":"event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
+                "emitter_roles":["public_resolver"],
+                "normalized_events":[]
+            },
+            {
+                "name":"Approved",
+                "fragment":"event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)",
+                "emitter_roles":["public_resolver"],
+                "normalized_events":[]
+            }
+        ], "calls":[]}
+    });
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version,
+             file_path, manifest_payload
+         ) VALUES (
+             1, 'ens', $1, $2, 'fixture', 'active',
+             'ensip15@ens-normalize-0.1.1', 'tests/approval-watch.toml', $3
+         ) RETURNING manifest_id",
+    )
+    .bind(ENS_V1_RESOLVER_SOURCE_FAMILY)
+    .bind(chain_id)
+    .bind(payload)
+    .fetch_one(database.pool())
+    .await?;
+    let allowed_instance = insert_contract_instance(database.pool(), chain_id).await?;
+    let old_instance = insert_contract_instance(database.pool(), chain_id).await?;
+    for (instance, address) in [(allowed_instance, allowed), (old_instance, old_generation)] {
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address, active_from_block_number,
+                 source_manifest_id, provenance
+             ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+        )
+        .bind(instance)
+        .bind(chain_id)
+        .bind(address)
+        .bind(manifest_id)
+        .execute(database.pool())
+        .await?;
+    }
+    for (kind, name, instance, address, role, start) in [
+        (
+            "root",
+            "ResolverRootAlias",
+            allowed_instance,
+            allowed,
+            None,
+            0_i64,
+        ),
+        (
+            "contract",
+            "public_resolver",
+            allowed_instance,
+            allowed,
+            Some("public_resolver"),
+            10_i64,
+        ),
+        (
+            "contract",
+            "public_resolver_old",
+            old_instance,
+            old_generation,
+            Some("public_resolver_old"),
+            0_i64,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO manifest_contract_instances (
+                 manifest_id, chain_id, declaration_kind, declaration_name,
+                 contract_instance_id, declared_address, role, proxy_kind,
+                 start_block_number
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'none', $8)",
+        )
+        .bind(manifest_id)
+        .bind(chain_id)
+        .bind(kind)
+        .bind(name)
+        .bind(instance)
+        .bind(address)
+        .bind(role)
+        .bind(start)
+        .execute(database.pool())
+        .await?;
+    }
+
+    let filter = load_persisted_watch_filter(database.pool(), chain_id, 0, 20).await?;
+    let approval_for_all = format!(
+        "{}",
+        alloy_primitives::keccak256("ApprovalForAll(address,address,bool)".as_bytes())
+    );
+    let approved = format!(
+        "{}",
+        alloy_primitives::keccak256("Approved(address,bytes32,address,bool)".as_bytes())
+    );
+    let name_changed = format!(
+        "{}",
+        alloy_primitives::keccak256("NameChanged(bytes32,string)".as_bytes())
+    );
+    assert!(!filter.includes(allowed, &approval_for_all, 9));
+    assert!(filter.includes(allowed, &approval_for_all, 10));
+    assert!(filter.includes(allowed, &approved, 10));
+    assert!(!filter.includes(old_generation, &approval_for_all, 10));
+    assert!(!filter.includes(foreign, &approved, 10));
+    assert!(filter.includes(foreign, &name_changed, 10));
+    for query in filter.queries().iter().filter(|query| {
+        query.topic0s.contains(&approval_for_all) || query.topic0s.contains(&approved)
+    }) {
+        assert_eq!(query.addresses, [allowed]);
+        assert_eq!(query.from_block, 10);
+    }
+    assert!(filter.queries().iter().all(|query| {
+        !query.addresses.is_empty()
+            || (!query.topic0s.contains(&approval_for_all) && !query.topic0s.contains(&approved))
+    }));
+    database.cleanup().await
 }
 
 #[tokio::test]

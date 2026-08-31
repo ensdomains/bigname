@@ -66,9 +66,9 @@ proxy_kind = "none"
 # (upstream: .refs/ens_v1/deployments/sepolia/LegacyPublicResolver.json:L868-L880 @ ens_v1@91c966f).
 start_block = 3790166
 
-# Match the mainnet family-wide resolver signature surface. These events have
-# no emitter_roles: direct contract declarations provide the watched address
-# set, while every admitted resolver uses the complete signature set.
+# Match the mainnet generic resolver signature surface. These events have no
+# emitter_roles and are watched across every emitter. The approvals declared
+# below are instead limited to three named resolver generations.
 [[abi.events]]
 name = "ABIChanged"
 fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
@@ -138,3 +138,25 @@ normalized_events = ["RecordChanged"]
 name = "VersionChanged"
 fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
 normalized_events = ["RecordVersionChanged"]
+
+# The 0CeEC legacy resolver exposes AuthorisationChanged rather than these
+# approval events and is deliberately excluded.
+# (upstream: .refs/ens_v1_sepolia_8209157/deployments/sepolia/PublicResolver.json:L2 @ ens_v1_sepolia_8209157@8209157)
+# (upstream: .refs/ens_v1_sepolia_8209157/deployments/sepolia/PublicResolver.json:L93-L147 @ ens_v1_sepolia_8209157@8209157)
+# (upstream: .refs/ens_v1_sepolia_ac32490/deployments/sepolia/PublicResolver.json:L2 @ ens_v1_sepolia_ac32490@ac32490)
+# (upstream: .refs/ens_v1_sepolia_ac32490/deployments/sepolia/PublicResolver.json:L93-L147 @ ens_v1_sepolia_ac32490@ac32490)
+# (upstream: .refs/ens_v1/deployments/sepolia/LegacyPublicResolver.json:L80-L109 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/PublicResolver.json:L111-L177 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L51-L63 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f).
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["public_resolver", "public_resolver_8948458", "public_resolver_8fade66"]
+normalized_events = []
+
+[[abi.events]]
+name = "Approved"
+fragment = "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)"
+emitter_roles = ["public_resolver", "public_resolver_8948458", "public_resolver_8fade66"]
+normalized_events = []

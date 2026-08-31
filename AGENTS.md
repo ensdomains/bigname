@@ -42,6 +42,9 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. Agents read from the pinned checkouts; they do not guess or paraphrase upstream behavior from memory.
 
 - `.refs/ens_v1/` — canonical ENSv1 Solidity
+- `.refs/ens_v1_mainnet_1a2ac5c/` — historical deployment ABI evidence for the admitted `0x231b0Ee…` Mainnet PublicResolver generation only
+- `.refs/ens_v1_sepolia_8209157/` — historical deployment ABI evidence for the admitted `0x8948458…` Sepolia PublicResolver generation only
+- `.refs/ens_v1_sepolia_ac32490/` — historical deployment ABI evidence for the admitted `0x8FADE66…` Sepolia PublicResolver generation only
 - `.refs/ens_v1_lll/` — historical evidence for the 2017 LLL registry only
 - `.refs/ens_v2/` — canonical post-audit ENSv2 contracts; admitted Sepolia deployment evidence is the archived 2026-06-29 artifacts under `contracts/deployments/sepolia-20260629-r1/` (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/.deployment.json:L4 @ ens_v2@a971bd64); the live `contracts/deployments/sepolia/` tree is upstream's unadmitted 2026-07-30 redeploy (upstream: .refs/ens_v2/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2@a971bd64)
 - `.refs/ens_v2_sepolia_20260629/` — historical Solidity evidence for the admitted 2026-06-29 old-model Sepolia deployment only; it is not authority for future deployments or current-model admission

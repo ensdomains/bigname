@@ -194,6 +194,17 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
 - `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
 - `notes` — optional reviewer-facing context.
 
+An [intake-only event](glossary.md#intake-only-event) may be declared for raw
+intake without promising normalized-event production by declaring an empty
+`normalized_events` list. This is not an
+unrestricted adapter-admission bypass. Supported intake-only events retain
+their declared ABI validation and produce no normalized events. Standard
+approval events are watched only at explicitly declared, role-eligible
+contract addresses and their declared historical intervals; they are not added
+to generic resolver [all-emitter watches](glossary.md#watch-plan--watched-tuple).
+Raw capture does not imply permission
+interpretation or complete permission coverage.
+
 ABI fragments should cite upstream in nearby manifest comments or in the public doc section that admits the source family. If an adapter still has an in-code selector or `sol!` definition for a manifest-declared fragment, that code is a compatibility bridge until the adapter consumes the manifest ABI directly.
 
 `normalizer_version` is currently `ensip15@ens-normalize-0.1.1` for all admitted
@@ -774,9 +785,12 @@ Every product row and DTO remains unchanged. A same-transaction initializer
 fixture cannot satisfy this gate because it does not prove the proxy remains
 watched after restart.
 
-The current watch planner uses each active manifest's complete ABI topic set
-for every address declared by that manifest; `emitter_roles` constrains
-interpretation selection, not ingest planning. The active ENSv1→ENSv2 migration family
+The current watch planner uses the ENSv1→ENSv2 migration manifest's complete
+ABI topic set for every address declared by that manifest; its
+`emitter_roles` constrain interpretation selection, not ingest planning. The
+address-scoped [intake-only approval events](glossary.md#intake-only-event) in
+other source families are the explicit exception: their declared roles also
+constrain ingest planning. The active ENSv1→ENSv2 migration family
 therefore widens the watch plan across all eight declared addresses,
 including marker-only contracts, with each address bounded by its own pinned
 start block. The
