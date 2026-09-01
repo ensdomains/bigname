@@ -365,7 +365,8 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
         let rows = payload["data"].as_array().expect("product history rows");
         assert_eq!(rows.len(), 2, "{route}: {rows:?}");
         assert!(
-            rows.iter().all(|row| row.get("registration_id").is_none()),
+            rows.iter()
+                .all(|row| row.get("registration_id") == Some(&Value::Null)),
             "{route} exposed the read-only registry resource as a registration: {rows:?}"
         );
     }
