@@ -17122,6 +17122,8 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
     const CHAIN: &str = "project-ancestor-expiry-reorg";
     const PARENT: &str = "ens:0x8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f";
     const CHILD: &str = "ens:0x8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c";
+    const CHILD_REGISTRY: &str = "0x0000000000000000000000000000000000008f01";
+    const CHILD_REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000008f01";
     const REPLACEMENT_TWO: &str =
         "0x8f02000000000000000000000000000000000000000000000000000000000000";
     const REPLACEMENT_THREE: &str =
@@ -17178,6 +17180,27 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
             .execute(pool)
             .await?;
         }
+        sqlx::query(
+            "INSERT INTO contract_instances (
+                 contract_instance_id, chain_id, contract_kind, provenance
+             ) VALUES ($1, $2, 'contract', '{\"fixture\":true}'::jsonb)",
+        )
+        .bind(Uuid::parse_str(CHILD_REGISTRY_INSTANCE)?)
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address,
+                 active_from_block_number, active_from_block_hash, provenance
+             ) VALUES ($1, $2, $3, 1, $4, '{\"fixture\":true}'::jsonb)",
+        )
+        .bind(Uuid::parse_str(CHILD_REGISTRY_INSTANCE)?)
+        .bind(CHAIN)
+        .bind(CHILD_REGISTRY)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
         insert_event(
             pool,
             CHAIN,
@@ -17199,6 +17222,21 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
             pool,
             CHAIN,
             1,
+            Some(PARENT),
+            None,
+            "SubregistryChanged",
+            "ens_v2_root_l1",
+            json!({
+                "source_event":"SubregistryUpdated",
+                "subregistry":CHILD_REGISTRY
+            }),
+            json!({"fixture":"ancestor-expiry-parent-subregistry"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
             Some(CHILD),
             None,
             "RegistrationGranted",
@@ -17208,6 +17246,7 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
                 "expiry":100,
                 "token_id":"0xchild",
                 "registry":"0xchildregistry",
+                "registry_contract_instance_id":CHILD_REGISTRY_INSTANCE,
                 "parent_logical_name_id":PARENT
             }),
             json!({"fixture":"ancestor-expiry-child-registration"}),
@@ -17232,12 +17271,35 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
                     "status":"released",
                     "expiry":expiry,
                     "token_id":token_id,
-                    "registry":registry
+                    "registry":registry,
+                    "registry_contract_instance_id":if logical_name_id == CHILD {
+                        Value::String(CHILD_REGISTRY_INSTANCE.into())
+                    } else {
+                        Value::Null
+                    }
                 }),
                 json!({"fixture":"ancestor-expiry-release"}),
             )
             .await?;
         }
+        insert_event(
+            pool,
+            CHAIN,
+            2,
+            Some(PARENT),
+            None,
+            "SubregistryChanged",
+            "ens_v2_root_l1",
+            json!({
+                "source_event":"RegistryPathExpired",
+                "derived_from":"interpreter_state",
+                "terminal_reason":"registry_name_binding_expired",
+                "expiry":20,
+                "subregistry":null
+            }),
+            json!({"fixture":"ancestor-expiry-subregistry-release"}),
+        )
+        .await?;
     }
 
     run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 1).await?;
@@ -17280,14 +17342,10 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
         .bind(CHAIN)
         .execute(pool)
         .await?;
-        sqlx::query(
-            "UPDATE normalized_events SET canonicality_state = 'orphaned'
-             WHERE chain_id = $1 AND block_number = 2
-               AND event_kind = 'RegistrationReleased'",
-        )
-        .bind(CHAIN)
-        .execute(pool)
-        .await?;
+        sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1 AND block_number = 2")
+            .bind(CHAIN)
+            .execute(pool)
+            .await?;
         sqlx::query(
             "INSERT INTO chain_lineage (
                  chain_id, block_hash, parent_hash, block_number,
