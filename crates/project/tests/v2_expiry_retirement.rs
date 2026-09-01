@@ -438,6 +438,63 @@ async fn rebound_permission_provenance_includes_the_registration_event() -> Resu
 }
 
 #[tokio::test]
+async fn expiry_retirement_provenance_carries_release_manifest_and_position() -> Result<()> {
+    let (database, pool) = database("v2_expiry_retirement_provenance").await?;
+    seed_formerly_named_flag_only_renewal(&pool).await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET source_family = 'ens_v2_root_l1', manifest_version = 7
+         WHERE resource_id = $1::uuid
+           AND event_kind = 'RegistrationReleased'
+           AND after_state ->> 'source_event' = 'RegistryPathExpired'",
+    )
+    .bind(RESOURCE)
+    .execute(&pool)
+    .await?;
+    run(&pool, 101, None).await?;
+
+    let release: (i64, String, i64, i64, String, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT normalized_event_id, source_family, manifest_version,
+                block_number, block_hash, transaction_index, log_index
+         FROM normalized_events
+         WHERE resource_id = $1::uuid
+           AND event_kind = 'RegistrationReleased'
+           AND after_state ->> 'source_event' = 'RegistryPathExpired'",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    let summary: (Value, i64) = sqlx::query_as(
+        "SELECT provenance, manifest_version
+         FROM permissions_current_resource_summary
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(summary.0["expiry_retirement_event_id"], release.0);
+    assert_eq!(summary.0["expiry_retirement_source_family"], release.1);
+    assert_eq!(summary.0["expiry_retirement_manifest_version"], release.2);
+    assert_eq!(
+        summary.0["expiry_retirement_chain_position"],
+        json!({
+            "block_number":release.3,
+            "block_hash":release.4,
+            "transaction_index":release.5,
+            "log_index":release.6,
+        })
+    );
+    assert_ne!(summary.0["authority_event_id"], release.0);
+    assert_eq!(
+        summary.1, 1,
+        "retirement evidence must not replace authority evidence"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 #[rustfmt::skip]
 #[allow(clippy::type_complexity)]
 async fn expiry_permissions_and_names_converge_through_revival_and_version_bump() -> Result<()> {
