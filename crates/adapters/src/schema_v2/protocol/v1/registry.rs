@@ -401,12 +401,6 @@ pub(super) fn interpret(
             event.logical_name_id = logical_name_id.clone();
             event.resource_id = Some(resource_id);
         }
-        if ownerless_read_context {
-            output.resources.push(ResourceDraft {
-                resource_id,
-                token_lineage_id: None,
-            });
-        }
     }
     if matches!(owner_view, Some(RegistryOwnerView::ZeroEquivalent { .. }))
         && let Some(anchor) = read_anchor.as_ref()
