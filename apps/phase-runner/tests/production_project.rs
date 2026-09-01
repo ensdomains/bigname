@@ -17119,6 +17119,24 @@ async fn expiry_release_redo_uses_displaced_branch_timestamps_for_name_scope() -
 
 #[tokio::test]
 async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expiry() -> Result<()> {
+    assert_ancestor_expiry_release_redo_restores_descendant("project_ancestor_expiry_reorg", None)
+        .await
+}
+
+#[tokio::test]
+async fn ancestor_expiry_release_redo_restores_descendant_after_replacement_renewal() -> Result<()>
+{
+    assert_ancestor_expiry_release_redo_restores_descendant(
+        "project_ancestor_expiry_reorg_renewed",
+        Some(200),
+    )
+    .await
+}
+
+async fn assert_ancestor_expiry_release_redo_restores_descendant(
+    fixture_name: &str,
+    replacement_parent_expiry: Option<i64>,
+) -> Result<()> {
     const CHAIN: &str = "project-ancestor-expiry-reorg";
     const PARENT: &str = "ens:0x8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f";
     const CHILD: &str = "ens:0x8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c";
@@ -17128,8 +17146,8 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
         "0x8f02000000000000000000000000000000000000000000000000000000000000";
     const REPLACEMENT_THREE: &str =
         "0x8f03000000000000000000000000000000000000000000000000000000000000";
-    let incremental = ScratchDatabase::create("project_ancestor_expiry_reorg").await?;
-    let fresh = ScratchDatabase::create("project_ancestor_expiry_reorg_fresh").await?;
+    let incremental = ScratchDatabase::create(fixture_name).await?;
+    let fresh = ScratchDatabase::create(&format!("{fixture_name}_fresh")).await?;
 
     for pool in [incremental.pool(), fresh.pool()] {
         for (number, timestamp) in [(0_i64, 0_i64), (1, 10), (2, 30), (3, 40)] {
@@ -17359,6 +17377,35 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
         .bind(block_hash(CHAIN, 1))
         .execute(pool)
         .await?;
+        if let Some(expiry) = replacement_parent_expiry {
+            insert_event(
+                pool,
+                CHAIN,
+                2,
+                Some(PARENT),
+                None,
+                "RegistrationRenewed",
+                "ens_v2_root_l1",
+                json!({
+                    "status":"registered",
+                    "expiry":expiry,
+                    "token_id":"0xparent",
+                    "registry":"0xrootregistry"
+                }),
+                json!({"fixture":"replacement-parent-renewal"}),
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE normalized_events SET block_hash = $1
+                 WHERE chain_id = $2
+                   AND block_number = 2
+                   AND raw_fact_ref ->> 'fixture' = 'replacement-parent-renewal'",
+            )
+            .bind(REPLACEMENT_TWO)
+            .bind(CHAIN)
+            .execute(pool)
+            .await?;
+        }
     }
 
     run_project(
