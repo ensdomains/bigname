@@ -17118,6 +17118,121 @@ async fn expiry_release_redo_uses_displaced_branch_timestamps_for_name_scope() -
 }
 
 #[tokio::test]
+async fn expiry_redo_does_not_rebuild_a_released_resource_linked_lifecycle() -> Result<()> {
+    const CHAIN: &str = "project-expiry-linked-lifecycle";
+    const NAME: &str = "ens:0x8989898989898989898989898989898989898989898989898989898989898989";
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000008f05";
+    const REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000008f06";
+    let scratch = ScratchDatabase::create("project_expiry_linked_lifecycle").await?;
+    for (number, timestamp) in [(0_i64, 0_i64), (1, 10), (2, 15), (3, 25)] {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($5), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, number))
+        .bind((number > 0).then(|| block_hash(CHAIN, number - 1)))
+        .bind(number)
+        .bind(timestamp)
+        .execute(scratch.pool())
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, 'ens', 'linked-release.eth', ARRAY['linked-release','eth'],
+             decode('00','hex'), $2, ARRAY['0xlinked-release','0xeth'], $3,
+             'active', $4, $5, 1, 'canonical')",
+    )
+    .bind(NAME)
+    .bind(NAME.trim_start_matches("ens:"))
+    .bind(NORMALIZER)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 1, 'canonical')",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    for resource_id in [None, Some(RESOURCE)] {
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            1,
+            Some(NAME),
+            resource_id,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            json!({
+                "status":"registered",
+                "expiry":20,
+                "token_id":"0xlinked",
+                "registry":"0xregistry",
+                "registry_contract_instance_id":REGISTRY_INSTANCE
+            }),
+            json!({"fixture":"expiry-linked-registration"}),
+        )
+        .await?;
+    }
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some(NAME),
+        Some(RESOURCE),
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({
+            "source_event":"LabelUnregistered",
+            "status":"released",
+            "expiry":20,
+            "token_id":"0xlinked",
+            "registry":"0xregistry",
+            "registry_contract_instance_id":REGISTRY_INSTANCE
+        }),
+        json!({"fixture":"expiry-linked-release"}),
+    )
+    .await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    sqlx::query("UPDATE name_current SET raw_name = 'linked-release-unchanged.eth' WHERE logical_name_id = $1")
+        .bind(NAME)
+        .execute(scratch.pool())
+        .await?;
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        3,
+        3,
+    )
+    .await?;
+    let raw_name: String =
+        sqlx::query_scalar("SELECT raw_name FROM name_current WHERE logical_name_id = $1")
+            .bind(NAME)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(raw_name, "linked-release-unchanged.eth");
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expiry() -> Result<()> {
     assert_ancestor_expiry_release_redo_restores_descendant(
         "project_ancestor_expiry_reorg",
