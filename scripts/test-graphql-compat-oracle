@@ -48,6 +48,7 @@ class Handler(BaseHTTPRequestHandler):
   if mode=="invalid": self.send_response(200); self.end_headers(); self.wfile.write(b"{"); return
   body=json.loads(raw); op=body.get("operationName"); block=body.get("variables",{}).get("block",{}).get("number",414)
   meta={"block":{"number":block+(1 if mode=="wrong-block" else 0),"hash":None},"deployment":"secret" if mode=="leak" else "QmStubEnsDeployment","hasIndexingErrors":False}
+  if mode=={"OracleMeta":"meta-indexing-errors","OracleDomain":"point-indexing-errors","OracleDomainName":"filter-indexing-errors"}.get(op): meta["hasIndexingErrors"]=True
   if mode=="missing-deployment": meta["deployment"]=None
   domain={"id":domain_id,"name":"dave.eth","createdAt":"0","expiryDate":None,"owner":{"id":"0x0000000000000000000000000000000000000000"}}
   case_meta={key:value for key,value in meta.items() if key!="deployment"}
@@ -101,7 +102,7 @@ with tempfile.TemporaryDirectory() as temporary:
  wrong_head=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/wrong-block"],env=stub_env,text=True,capture_output=True); assert wrong_head.returncode!=0 and "requested block" in wrong_head.stderr
  schema_drift=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/schema-drift"],env=stub_env,text=True,capture_output=True); assert schema_drift.returncode!=0 and "schema" in schema_drift.stderr
  changed=temp/"changed"; seed(changed); run_capture(changed,block=415); assert json.loads((changed/"upstream/provenance.json").read_text())["block_number"]==415; assert json.loads((changed/"entities/domain/entity-by-id/variables.json").read_text())["block"]["number"]==415
- for mode in ("wrong-block","filter-mismatch","null-point","missing-meta","missing-introspection","missing-deployment","errors","invalid","status"):
+ for mode in ("wrong-block","filter-mismatch","null-point","missing-meta","missing-introspection","missing-deployment","meta-indexing-errors","point-indexing-errors","filter-indexing-errors","errors","invalid","status"):
   target=temp/mode; seed(target); (target/"marker").write_text("preserve"); run_capture(target,mode=mode,ok=False); assert (target/"marker").read_text()=="preserve"
  leak=temp/"leak"; seed(leak); run_capture(leak,mode="leak",extra={"THE_GRAPH_API_KEY":"secret"},ok=False)
  inline=temp/"inline"; seed(inline); (inline/"marker").write_text("preserve"); result=subprocess.run([tool,"capture","--upstream-endpoint-template",f"{base}/ok?key=inline","--block-number","414","--domain-id",domain_id,"--output",inline],text=True,capture_output=True); assert result.returncode!=0 and (inline/"marker").read_text()=="preserve"
@@ -124,6 +125,6 @@ with tempfile.TemporaryDirectory() as temporary:
   os.environ["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"; module.verify(first)
  finally:
   os.environ.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None); socket.socket=original
- print("graphql compatibility oracle tool tests: 34 passed")
+ print("graphql compatibility oracle tool tests: 37 passed")
 server.shutdown()
 PY

@@ -137,6 +137,8 @@ def observed_meta(payload, block):
         raise ValueError("upstream response missing _meta")
     if meta["block"].get("number") != block:
         raise ValueError(f"requested block {block}, observed {meta['block'].get('number')}")
+    if meta.get("hasIndexingErrors") is not False:
+        raise ValueError("upstream _meta.hasIndexingErrors must be false")
     return meta
 
 
