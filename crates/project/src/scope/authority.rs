@@ -159,6 +159,47 @@ pub(super) async fn include_topology_dependents(
                         SELECT event.*,
                                COALESCE(
                                    event.resource_id::text,
+                                   (
+                                       SELECT linked.resource_id::text
+                                       FROM normalized_events linked
+                                       JOIN chain_lineage linked_lineage
+                                         ON linked_lineage.chain_id = linked.chain_id
+                                        AND linked_lineage.block_number = linked.block_number
+                                        AND linked_lineage.block_hash = linked.block_hash
+                                       WHERE linked.chain_id = event.chain_id
+                                         AND linked.logical_name_id = event.logical_name_id
+                                         AND linked.block_number <= $2
+                                         AND linked.resource_id IS NOT NULL
+                                         AND linked.event_kind IN (
+                                             'RegistrationGranted',
+                                             'RegistrationReserved'
+                                         )
+                                         AND linked.source_family IN (
+                                             'ens_v2_root_l1',
+                                             'ens_v2_registry_l1'
+                                         )
+                                         AND linked.consumer_visibility = 'activated'
+                                         AND linked.canonicality_state IN (
+                                             'canonical', 'safe', 'finalized'
+                                         )
+                                         AND linked_lineage.canonicality_state IN (
+                                             'canonical', 'safe', 'finalized'
+                                         )
+                                         AND COALESCE(
+                                             linked.after_state ->> 'registry_contract_instance_id',
+                                             linked.raw_fact_ref ->> 'emitting_address',
+                                             linked.after_state ->> 'registry'
+                                         ) = COALESCE(
+                                             event.after_state ->> 'registry_contract_instance_id',
+                                             event.raw_fact_ref ->> 'emitting_address',
+                                             event.after_state ->> 'registry'
+                                         )
+                                         AND linked.after_state ->> 'token_id' =
+                                             event.after_state ->> 'token_id'
+                                       ORDER BY linked.block_number DESC NULLS LAST,
+                                                linked.normalized_event_id DESC
+                                       LIMIT 1
+                                   ),
                                    NULLIF(CONCAT(
                                        event.after_state ->> 'registry_contract_instance_id',
                                        ':', event.after_state ->> 'token_id'
