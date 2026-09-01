@@ -17279,6 +17279,7 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     const GRANDCHILD_REGISTRY: &str = "0x0000000000000000000000000000000000008f02";
     const GRANDCHILD_REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000008f02";
     const CHILD_RESERVED_RESOURCE: &str = "00000000-0000-0000-0000-000000008f03";
+    const RELEASED_CHILD_RESOURCE: &str = "00000000-0000-0000-0000-000000008f07";
     const FORMER_CHILD: &str =
         "ens:0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a";
     const RELEASED_CHILD: &str =
@@ -17404,6 +17405,16 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             .execute(pool)
             .await?;
         }
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 1, 'canonical')",
+        )
+        .bind(Uuid::parse_str(RELEASED_CHILD_RESOURCE)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
         insert_event(
             pool,
             CHAIN,
@@ -17533,7 +17544,26 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             CHAIN,
             1,
             Some(RELEASED_CHILD),
-            None,
+            Some(RELEASED_CHILD_RESOURCE),
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            json!({
+                "status":"registered",
+                "expiry":500,
+                "token_id":"0xreleased",
+                "registry":"0xchildregistry",
+                "registry_contract_instance_id":CHILD_REGISTRY_INSTANCE,
+                "parent_logical_name_id":PARENT
+            }),
+            json!({"fixture":"ancestor-expiry-current-registry-linked-registration"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(RELEASED_CHILD),
+            Some(RELEASED_CHILD_RESOURCE),
             "RegistrationReleased",
             "ens_v2_registry_l1",
             json!({
