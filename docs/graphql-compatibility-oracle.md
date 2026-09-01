@@ -54,6 +54,10 @@ Capture rejects a mismatched metadata block and preserves its hash, including nu
 .refs/graph_node/graph/src/schema/meta.graphql:L36-L73 @ graph_node@aefe1737). Bigname's durable [served
 head](glossary.md#served-head) equals the fixture block; no historical read is claimed.
 
+The captured point response supplies the isolated test name, creation time, and owner, while provenance supplies the
+served block. Neither response case can supply a nonmatching row, so `capture` also writes a manifest-digested
+`seed.json` descriptor for that distractor instead of leaving it hardcoded in the Rust harness.
+
 ## Compatibility-break policy
 
 > A compatibility break is an un-dispositioned schema change on the claimed surface, or an exact response change

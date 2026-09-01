@@ -60,6 +60,79 @@ fn graphql_oracle_rejects_provisional_fixture_without_local_escape() -> Result<(
     Ok(())
 }
 
+struct OracleDomainSeed {
+    id: String,
+    name: String,
+    created_at: i64,
+    owner: String,
+}
+
+struct OracleSeed {
+    block: i64,
+    domain: OracleDomainSeed,
+    distractor: OracleDomainSeed,
+}
+
+fn oracle_domain_seed(value: &Value, derive_id: bool) -> Result<OracleDomainSeed> {
+    let name = value["name"].as_str().context("oracle seed name")?.to_owned();
+    let id = if derive_id {
+        bigname_lookup::ens_namehash_hex(&name)?
+    } else {
+        value["id"].as_str().context("oracle seed id")?.to_owned()
+    };
+    anyhow::ensure!(
+        id == bigname_lookup::ens_namehash_hex(&name)?,
+        "oracle Domain id is not the namehash of {name}"
+    );
+    Ok(OracleDomainSeed {
+        id,
+        name,
+        created_at: value["createdAt"]
+            .as_str()
+            .context("oracle seed createdAt")?
+            .parse()?,
+        owner: value["owner"]["id"]
+            .as_str()
+            .context("oracle seed owner")?
+            .to_owned(),
+    })
+}
+
+fn oracle_seed_from_values(response: &Value, provenance: &Value, descriptor: &Value) -> Result<OracleSeed> {
+    Ok(OracleSeed {
+        block: provenance["block_number"].as_i64().context("oracle seed block")?,
+        domain: oracle_domain_seed(&response["data"]["domain"], false)?,
+        distractor: oracle_domain_seed(&descriptor["distractor"], true)?,
+    })
+}
+
+fn load_oracle_seed(root: &OraclePath, manifest: &Value) -> Result<OracleSeed> {
+    let point = manifest["cases"].as_array().context("manifest cases")?.iter().find(|case| case["id"] == "domain.entity-by-id").context("point case")?;
+    oracle_seed_from_values(
+        &read_oracle_json(root.join(point["response"].as_str().context("point response path")?))?,
+        &read_oracle_json(root.join("upstream/provenance.json"))?,
+        &read_oracle_json(root.join(manifest["seed"].as_str().context("seed descriptor path")?))?,
+    )
+}
+
+async fn seed_oracle_fixture(database: &TestDatabase, seed: &OracleSeed) -> Result<()> {
+    for (index, domain) in [&seed.domain, &seed.distractor].into_iter().enumerate() {
+        let token_lineage_id = Uuid::from_u128(0x670_1001 + index as u128 * 3);
+        let resource_id = Uuid::from_u128(0x670_1002 + index as u128 * 3);
+        let surface_binding_id = Uuid::from_u128(0x670_1003 + index as u128 * 3);
+        let logical_name_id = format!("ens:{}", domain.name);
+        upsert_test_token_lineages(&database.pool, &[address_name_token_lineage(token_lineage_id, &format!("0xoracle-tl-{index}"), seed.block)]).await?;
+        upsert_test_resources(&database.pool, &[address_name_resource(resource_id, Some(token_lineage_id), &format!("0xoracle-res-{index}"), seed.block)]).await?;
+        upsert_test_name_surfaces(&database.pool, &[collection_name_surface(&logical_name_id, &domain.name, &domain.id, seed.block)]).await?;
+        upsert_test_surface_bindings(&database.pool, &[address_name_surface_binding(surface_binding_id, &logical_name_id, resource_id, &format!("0xoracle-bind-{index}"), seed.block, 1_700_000_000 + index as i64)]).await?;
+        database.insert_name_current_row(address_name_name_current_row(&logical_name_id, &domain.name, &domain.name, &domain.id, surface_binding_id, resource_id, Some(token_lineage_id), seed.block, json!({
+            "registration": {"status": "active", "authority_kind": "registrar", "created_at": domain.created_at},
+            "control": {"registry_owner": domain.owner},
+        }))).await?;
+    }
+    Ok(())
+}
+
 fn oracle_type_ref(value: &Value) -> Result<String> {
     match value["kind"].as_str().context("type reference kind")? {
         "NON_NULL" => Ok(format!("{}!", oracle_type_ref(&value["ofType"])?)),
@@ -320,7 +393,7 @@ async fn run_oracle_cases(kind: &str) -> Result<()> {
     let upstream: OracleMap<String, Value> =
         serde_json::from_value(read_oracle_json(root.join("upstream/schema-surface.json"))?)?;
     let database = TestDatabase::new_migrated().await?;
-    seed_graphql_compat_fixture(&database).await?;
+    seed_oracle_fixture(&database, &load_oracle_seed(&root, &manifest)?).await?;
     let introspection = post_graphql(database.app_state(), ORACLE_INTROSPECTION, json!({})).await?;
     let local = oracle_schema_surface(&introspection)?;
     let summary = apply_oracle_coverage(&upstream, &local, &coverage)?;
@@ -362,6 +435,48 @@ async fn graphql_oracle_domain_entity_by_id_matches_pinned_upstream() -> Result<
 #[tokio::test]
 async fn graphql_oracle_domain_filter_name_eq_matches_pinned_upstream() -> Result<()> {
     run_oracle_cases("filter").await
+}
+
+#[tokio::test]
+async fn graphql_oracle_seed_accepts_a_refreshed_fixture_without_test_edits() -> Result<()> {
+    let fixture = read_oracle_json(
+        oracle_root()
+            .parent()
+            .context("oracle fixture parent")?
+            .join("alternate-seed.json"),
+    )?;
+    let database = TestDatabase::new_migrated().await?;
+    let seed = oracle_seed_from_values(
+        &fixture["point_response"],
+        &fixture["provenance"],
+        &fixture["seed"],
+    )?;
+    seed_oracle_fixture(&database, &seed).await?;
+    let domain = &fixture["point_response"]["data"]["domain"];
+    let query = oracle_fs::read_to_string(
+        oracle_root().join("entities/domain/entity-by-id/query.graphql"),
+    )?;
+    let actual = post_graphql_allow_errors(
+        database.app_state(),
+        &query,
+        json!({"id": domain["id"], "block": {"number": fixture["provenance"]["block_number"]}}),
+    )
+    .await?;
+    assert_eq!(actual, fixture["point_response"]);
+    let filter_query = oracle_fs::read_to_string(
+        oracle_root().join("entities/domain/filters/name-eq/query.graphql"),
+    )?;
+    let filtered = post_graphql_allow_errors(
+        database.app_state(),
+        &filter_query,
+        json!({"name": domain["name"], "block": {"number": seed.block}}),
+    )
+    .await?;
+    assert_eq!(
+        filtered,
+        json!({"data": {"_meta": fixture["point_response"]["data"]["_meta"], "domains": [domain]}})
+    );
+    database.cleanup().await
 }
 
 #[test]
