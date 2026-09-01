@@ -512,6 +512,8 @@ async fn pre_surface_zero_owner_projects_as_supported_unregistered() -> Result<(
         json!({"emitting_address": REGISTRY_ADDRESS}),
     )
     .await?;
+    run_project(&pool, 8, 8, None).await?;
+
     sqlx::query(
         "INSERT INTO name_surfaces (
              logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
@@ -533,7 +535,7 @@ async fn pre_surface_zero_owner_projects_as_supported_unregistered() -> Result<(
     .execute(&pool)
     .await?;
 
-    run_project(&pool, 9, 8, None).await?;
+    run_project(&pool, 9, 9, Some(8)).await?;
 
     let owner_event_name: Option<String> = sqlx::query_scalar(
         "SELECT logical_name_id
