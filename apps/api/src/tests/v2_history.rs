@@ -195,6 +195,87 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 }
 
 #[tokio::test]
+async fn v2_registry_history_registration_identity_uses_event_position() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007122";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:event-position-history.eth";
+    let resource_id = Uuid::from_u128(0x7122);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "event-position-history.eth",
+        "event-position-history.eth",
+        "node:event-position-history.eth",
+        resource_id,
+        Uuid::from_u128(0x8122),
+        Uuid::from_u128(0x9122),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=121).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000121) + interval '1 microsecond',
+             active_to = to_timestamp(1700000121) + interval '3 microseconds'
+         WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::from_u128(0x9122))
+    .execute(&database.pool)
+    .await?;
+
+    let mut before = v2_history_event(
+        "registry-resolver-before-binding",
+        Some(logical_name_id),
+        Some(resource_id),
+        "ResolverChanged",
+        121,
+    );
+    before.source_family = "ens_v1_registry_l1".to_owned();
+    before.log_index = Some(0);
+    let mut during = v2_history_event(
+        "registry-resolver-during-binding",
+        Some(logical_name_id),
+        Some(resource_id),
+        "ResolverChanged",
+        121,
+    );
+    during.source_family = "ens_v1_registry_l1".to_owned();
+    during.log_index = Some(2);
+    let mut after = v2_history_event(
+        "registry-resolver-after-binding",
+        Some(logical_name_id),
+        Some(resource_id),
+        "ResolverChanged",
+        121,
+    );
+    after.source_family = "ens_v1_registry_l1".to_owned();
+    after.log_index = Some(4);
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[before, during, after],
+    )
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v2/events?name=event-position-history.eth&page_size=20",
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("product history rows");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[0]["log_index"], json!(4));
+    assert_eq!(rows[0]["registration_id"], Value::Null);
+    assert_eq!(rows[1]["log_index"], json!(2));
+    assert_eq!(rows[1]["registration_id"], json!(resource_id.to_string()));
+    assert_eq!(rows[2]["log_index"], json!(0));
+    assert_eq!(rows[2]["registration_id"], Value::Null);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<()> {
     const ADDRESS: &str = "0x0000000000000000000000000000000000007130";
     let database = TestDatabase::new_migrated().await?;
