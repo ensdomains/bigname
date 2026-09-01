@@ -4331,12 +4331,13 @@ fn later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope() -> an
 }
 
 #[test]
-fn same_transaction_noise_leaves_the_renewal_correlation_id_unchanged() -> anyhow::Result<()> {
+fn same_name_same_expiry_other_token_stays_out_of_renewal_evidence() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["R-01"];
     let addresses = &fixture["addresses"];
     let label = scenario["label"].as_str().unwrap();
     let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let interloper_token = v2_token + U256::from(1);
     let base_token = decimal_u256(&scenario["base_token_id"])?;
     let renewal_block = scenario["renewal_block"].as_i64().unwrap();
     let expiry = scenario["decoded_v2_expiry"].as_u64().unwrap();
@@ -4368,7 +4369,8 @@ fn same_transaction_noise_leaves_the_renewal_correlation_id_unchanged() -> anyho
     real_legs(&mut plain_logs);
     let mut noisy_logs = vec![
         reserved_at(addresses, v2_token, label, 1_822_787_383, 226, 1),
-        expiry_updated_at(addresses, v2_token, 111_222_333, renewal_block, 0),
+        reserved_at(addresses, interloper_token, label, 1_822_787_383, 226, 2),
+        expiry_updated_at(addresses, interloper_token, expiry, renewal_block, 0),
         reserved_at(addresses, v2_token, label, expiry, renewal_block, 1),
     ];
     real_legs(&mut noisy_logs);
@@ -4378,7 +4380,7 @@ fn same_transaction_noise_leaves_the_renewal_correlation_id_unchanged() -> anyho
     let noisy_id = assert_synchronized_pair(&noisy);
     assert_eq!(
         noisy_id, plain_id,
-        "same-transaction noise must not enter the correlation evidence"
+        "a same-name, same-expiry event for another token must not enter the evidence"
     );
     Ok(())
 }

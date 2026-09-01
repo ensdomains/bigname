@@ -27,6 +27,9 @@ pub(in crate::schema_v2) struct V2TokenState {
     pub expiry: Option<u64>,
     pub name: Option<V2NameState>,
     pub shadow_name: Option<V2RawNameState>,
+    pub last_logical_name_id: Option<String>,
+    pub expiry_retirement_emitted: bool,
+    pub resource_expiry_retirement_emitted: bool,
     pub registration: Option<Value>,
     pub upstream_resource: Option<String>,
     pub resource_id: Option<Uuid>,
@@ -41,6 +44,7 @@ pub(in crate::schema_v2) struct V2NameTransition {
     pub registry: String,
     pub registry_contract_instance_id: Option<Uuid>,
     pub token_id: String,
+    pub expiry: Option<u64>,
     pub previous: Option<V2NameState>,
     pub previous_shadow: Option<V2RawNameState>,
     pub current: Option<V2NameState>,
@@ -253,7 +257,6 @@ impl State {
         let namehash = crate::schema_v2::common::namehash_raw(labels.iter().map(Vec::as_slice));
         Some((labels, namehash))
     }
-
     pub(in crate::schema_v2) fn set_v2_parent_claim(
         &mut self,
         registry: &str,
@@ -274,8 +277,7 @@ impl State {
         }
         self.mark_v2_registry_dirty(&registry);
     }
-
-    pub(in crate::schema_v2) fn set_v2_expiry(
+    #[rustfmt::skip]    pub(in crate::schema_v2) fn set_v2_expiry(
         &mut self,
         emitter: &str,
         token_id: &str,
@@ -286,6 +288,8 @@ impl State {
         if let Some(entry) = self.v2_tokens.get_mut(&key) {
             previous_expiry = entry.expiry;
             entry.expiry = Some(expiry);
+            entry.expiry_retirement_emitted &= !(entry.resource_expiry_retirement_emitted && super::v2_expiry_is_live(Some(expiry), self.latest_v2_timestamp.unwrap_or(i64::MAX)));
+            entry.resource_expiry_retirement_emitted &= !super::v2_expiry_is_live(Some(expiry), self.latest_v2_timestamp.unwrap_or(i64::MAX));
             if let Some(registration) = entry.registration.as_mut()
                 && let Some(registration) = registration.as_object_mut()
             {
@@ -297,7 +301,7 @@ impl State {
         self.replace_v2_expiry_index(&key, previous_expiry, Some(expiry));
         self.mark_v2_token_component_dirty(&key);
     }
-
+    #[rustfmt::skip]    pub(in crate::schema_v2) fn clear_v2_expiry_retirement(&mut self, emitter: &str, token_id: &str, preserve_ancestor_expiry: bool) { if let Some(entry) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) && (!preserve_ancestor_expiry || entry.resource_expiry_retirement_emitted) { entry.expiry_retirement_emitted = false; entry.resource_expiry_retirement_emitted = false; } }
     pub(in crate::schema_v2) fn transfer_v2_registrant(
         &mut self,
         emitter: &str,

@@ -17,6 +17,7 @@ pub(super) async fn build(
             SELECT DISTINCT ON (event.resource_id)
                    event.resource_id,
                    event.logical_name_id,
+                   event.namespace AS pointer_namespace,
                    event.source_family AS pointer_source_family,
                    lower(surface.namehash) AS namehash,
                    lower(event.after_state ->> 'resolver') AS resolver_address,
@@ -41,6 +42,40 @@ pub(super) async fn build(
               AND resolver_address NOT IN (
                   '0x0000000000000000000000000000000000000000', ''
               )
+        ),
+        pointer_eligibility AS (
+            SELECT pointer.resource_id,
+                   COALESCE(
+                       resolver.support_status = 'supported'
+                       AND NOT (
+                           resolver.declared_summary #>> '{classification,basis}' =
+                               'manifest_declared_address'
+                           AND declaration_manifest.manifest_id IS NULL
+                       ),
+                       false
+                   ) AS supported,
+                   CASE
+                       WHEN resolver.resolver_address IS NULL
+                           THEN 'resolver_classification_missing'
+                       WHEN resolver.support_status IS DISTINCT FROM 'supported'
+                           THEN COALESCE(
+                               resolver.unsupported_reason,
+                               'resolver_classification_missing'
+                           )
+                       WHEN resolver.declared_summary #>> '{classification,basis}' =
+                            'manifest_declared_address'
+                        AND declaration_manifest.manifest_id IS NULL
+                           THEN 'resolver_classification_missing'
+                       ELSE NULL
+                   END AS unsupported_reason
+            FROM pointers pointer
+            LEFT JOIN project_stage_resolver_current resolver
+              ON resolver.chain_id = $1
+             AND resolver.resolver_address = pointer.resolver_address
+            LEFT JOIN project_manifests declaration_manifest
+              ON declaration_manifest.manifest_id =
+                 (resolver.provenance ->> 'manifest_id')::bigint
+             AND declaration_manifest.namespace = pointer.pointer_namespace
         ),
         attributed_events AS (
             SELECT pointer.resource_id AS attributed_resource_id, event.*
@@ -74,6 +109,36 @@ pub(super) async fn build(
                   'ens_v1_registrar_l1',
                   'ens_v1_wrapper_l1'
               )
+            UNION ALL
+            -- The guarded ENSv2-origin exception uses the exact declaration already selected by
+            -- resolver classification and applies only to pointers in that declaration's namespace.
+            SELECT pointer.resource_id AS attributed_resource_id, event.*
+            FROM pointers pointer
+            JOIN project_stage_resolver_current resolver
+              ON resolver.chain_id = $1
+             AND resolver.resolver_address = pointer.resolver_address
+             AND resolver.support_status = 'supported'
+             AND resolver.declared_summary #>> '{classification,source_family}' =
+                 'ens_v1_resolver_l1'
+             AND resolver.declared_summary #>> '{classification,basis}' =
+                 'manifest_declared_address'
+            JOIN project_manifests declaration_manifest
+              ON declaration_manifest.manifest_id =
+                 (resolver.provenance ->> 'manifest_id')::bigint
+             AND declaration_manifest.namespace = pointer.pointer_namespace
+            JOIN project_events event
+              ON event.chain_id = $1
+             AND event.logical_name_id IS NULL
+             AND event.source_family = 'ens_v1_resolver_l1'
+             AND lower(event.after_state ->> 'node') = pointer.namehash
+             AND lower(COALESCE(
+                    NULLIF(event.after_state ->> 'resolver', ''),
+                    NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
+                 )) = pointer.resolver_address
+            WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+              AND pointer.pointer_source_family IN (
+                  'ens_v2_registry_l1', 'ens_v2_root_l1'
+              )
         ),
         ranked_versions AS (
             SELECT event.*,
@@ -90,16 +155,25 @@ pub(super) async fn build(
         versions AS (
             SELECT * FROM ranked_versions WHERE version_rank = 1
         ),
-        ranked_records AS (
+        eligible_records AS (
             SELECT event.*,
-                   row_number() OVER (
-                       PARTITION BY event.attributed_resource_id,
-                                    event.after_state ->> 'record_key'
-                       ORDER BY event.block_number DESC NULLS LAST,
-                                event.transaction_index DESC NULLS LAST,
-                                event.log_index DESC NULLS LAST,
-                                event.normalized_event_id DESC
-                   ) AS record_rank
+                   event.after_state ->> 'record_family' = 'addr'
+                   AND event.after_state ->> 'selector_key' = '60'
+                   AND event.after_state ->> 'source_event' = 'AddressChanged'
+                   AND event.log_index IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1
+                       FROM attributed_events sibling
+                       WHERE sibling.attributed_resource_id = event.attributed_resource_id
+                         AND sibling.chain_id = event.chain_id
+                         AND sibling.block_number = event.block_number
+                         AND sibling.transaction_hash IS NOT DISTINCT FROM event.transaction_hash
+                         AND sibling.transaction_index IS NOT DISTINCT FROM event.transaction_index
+                         AND sibling.log_index = event.log_index + 1
+                         AND sibling.event_kind = 'RecordChanged'
+                         AND sibling.after_state ->> 'record_key' = 'addr:60'
+                         AND sibling.after_state ->> 'source_event' = 'AddrChanged'
+                   ) AS coin60_compatibility_source
             FROM attributed_events event
             LEFT JOIN versions version USING (attributed_resource_id)
             WHERE event.event_kind = 'RecordChanged'
@@ -117,6 +191,26 @@ pub(super) async fn build(
                       version.normalized_event_id
                   )
               )
+        ),
+        ranked_records AS (
+            SELECT event.*,
+                   row_number() OVER (
+                       PARTITION BY event.attributed_resource_id,
+                                    event.after_state ->> 'record_key'
+                       ORDER BY event.block_number DESC NULLS LAST,
+                                event.transaction_index DESC NULLS LAST,
+                                -- setAddr(node, 60, bytes) emits AddressChanged before its
+                                -- compatibility AddrChanged sibling. Prefer the storage-faithful
+                                -- bytes payload only for that adjacent log pair, including empty
+                                -- clears, without outranking a later write in the transaction.
+                                -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1@91c966f)
+                                CASE WHEN event.coin60_compatibility_source
+                                    THEN event.log_index + 1
+                                    ELSE event.log_index END DESC NULLS LAST,
+                                event.coin60_compatibility_source DESC,
+                                event.normalized_event_id DESC
+                   ) AS record_rank
+            FROM eligible_records event
         ),
         current_records AS (
             SELECT * FROM ranked_records WHERE record_rank = 1
@@ -158,6 +252,14 @@ pub(super) async fn build(
                                WHEN event.after_state ->> 'record_family' = 'contenthash'
                                 AND event.after_state ->> 'value' IN ('', '0x')
                                    THEN 'not_found'
+                               WHEN event.after_state ->> 'record_family' = 'addr'
+                                AND (
+                                    event.after_state ->> 'value' IN ('', '0x')
+                                    OR COALESCE(
+                                        event.after_state #>> '{value,bytes}' IN ('', '0x'),
+                                        false
+                                    )
+                                ) THEN 'not_found'
                                ELSE 'success'
                            END
                            WHEN event.after_state ? 'contenthash_hex' THEN CASE
@@ -175,8 +277,19 @@ pub(super) async fn build(
                        'value', CASE
                            WHEN event.after_state ? 'value'
                             AND NOT (
-                                event.after_state ->> 'record_family' = 'contenthash'
-                                AND event.after_state ->> 'value' IN ('', '0x')
+                                (
+                                    event.after_state ->> 'record_family' = 'contenthash'
+                                    AND event.after_state ->> 'value' IN ('', '0x')
+                                ) OR (
+                                    event.after_state ->> 'record_family' = 'addr'
+                                    AND (
+                                        event.after_state ->> 'value' IN ('', '0x')
+                                        OR COALESCE(
+                                            event.after_state #>> '{value,bytes}' IN ('', '0x'),
+                                            false
+                                        )
+                                    )
+                                )
                             ) THEN event.after_state -> 'value'
                            WHEN event.after_state ? 'contenthash_hex'
                             AND event.after_state ->> 'contenthash_hex' NOT IN ('', '0x')
@@ -291,13 +404,10 @@ pub(super) async fn build(
                ),
                COALESCE(records.selectors, '[]'::jsonb),
                COALESCE(records.unsupported_families, '[]'::jsonb) || CASE
-                   WHEN resolver.support_status = 'supported' THEN '[]'::jsonb
+                   WHEN eligibility.supported THEN '[]'::jsonb
                    ELSE jsonb_build_array(jsonb_build_object(
                        'record_family', 'resolver_classification',
-                       'unsupported_reason', COALESCE(
-                           resolver.unsupported_reason,
-                           'resolver_classification_missing'
-                       )
+                       'unsupported_reason', eligibility.unsupported_reason
                    ))
                END,
                COALESCE(records.last_change, jsonb_build_object(
@@ -318,21 +428,24 @@ pub(super) async fn build(
                    ))
                )),
                COALESCE(records.entries, '[]'::jsonb),
-               CASE WHEN resolver.support_status = 'supported'
+               CASE WHEN eligibility.supported
                    THEN 'supported' ELSE 'unsupported' END,
-               CASE
-                   WHEN resolver.resolver_address IS NULL
-                       THEN 'resolver_classification_missing'
-                   WHEN resolver.support_status <> 'supported'
-                       THEN resolver.unsupported_reason
-                   ELSE NULL
-               END,
+               eligibility.unsupported_reason,
                jsonb_build_object(
                    'chain_id', $1,
                    'logical_name_id', pointer.logical_name_id,
                    'resolver_address', pointer.resolver_address,
                    'resolver_pointer_event_id', pointer.pointer_event_id,
                    'record_event_ids', COALESCE(records.event_ids, '[]'::jsonb),
+                   'read_rules', CASE WHEN COALESCE(
+                       resolver.declared_summary -> 'classification' -> 'read_features',
+                       '[]'::jsonb
+                   ) ? 'ensip19_default_address' THEN jsonb_build_array(
+                       jsonb_build_object(
+                           'kind', 'ensip19_default_address',
+                           'source_record_key', 'addr:2147483648'
+                       )
+                   ) ELSE '[]'::jsonb END,
                    'coverage', jsonb_build_object(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'
@@ -356,6 +469,7 @@ pub(super) async fn build(
                    COALESCE(resolver.manifest_version, 1)
                )
         FROM pointers pointer
+        JOIN pointer_eligibility eligibility USING (resource_id)
         LEFT JOIN project_stage_resolver_current resolver
           ON resolver.chain_id = $1
          AND lower(resolver.resolver_address) = pointer.resolver_address

@@ -139,9 +139,13 @@ outcomes, or durable traces.
   event whose `logical_name_id` is null, attribution instead requires the
   selected pointer's source family to be `ens_v1_registry_l1`,
   `ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`, then joins chain, surface
-  namehash to event node, and current resolver to emitting address. Incremental
-  Project staging uses the same three-family pointer restriction when adding
-  those null-name events. Serving still
+  namehash to event node, and current resolver to emitting address. A selected
+  `ens_v2_registry_l1` or `ens_v2_root_l1` pointer may also attribute the event
+  when its target resolver's final classification is supported
+  `ens_v1_resolver_l1` from an applicable exact declaration and the classifying
+  manifest's namespace matches the pointer's namespace. Incremental Project
+  staging applies the same declaration and namespace guard when adding those
+  null-name events. Serving still
   attaches that inventory to a name only through the name's current readable
   resource.
 - Project stages only ordinary or `consumer_visibility=activated` interpreted
@@ -303,7 +307,18 @@ chains retain independent publication decisions.
 `permissions_current` is resource-anchored and preserves subject, scope,
 effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
-partial permission support.
+partial permission support. Current non-wrapper summaries are partial because
+standard registry operators, registrar token and account approvals, resolver
+operators and delegates, and ENSv2 registry operators are not indexed.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L70-L84 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) Known
+owner-derived rows remain available, but neither those rows nor a zero-row
+summary is an authoritative permission enumeration. API contract tests inject
+an independently proven full summary to verify that resource-bound public
+requests are not globally forced to partial.
 
 For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
 holder grant. A separately observed compatible holder grant is masked by the
@@ -314,8 +329,9 @@ not change the companion resource summary's unsupported wrapper-holder
 enumeration status. For ENSv2, permissions remain keyed by the
 upstream resource linked to bigname `resource_id`, not by token ID.[^v2-iperm-l57][^v2-pr-l261][^v2-pr-l351]
 
-Unknown or inconsistent summary vocabulary is a storage error. Product routes
-fail closed rather than converting it into broader support.
+Unknown or inconsistent typed summary combinations are a storage error. A
+persisted unsupported reason that a reader does not recognize maps to partial
+unknown support rather than wrapper support or an internal server error.
 
 ## Resolver and records
 
@@ -338,17 +354,19 @@ unsupported families, and any retained indexed values. The record event need
 not carry that resource: Project normally joins its `logical_name_id` and
 emitting resolver to the pointer without restricting either event's source
 family. An `ens_v1_resolver_l1` event whose `logical_name_id` is null may join
-only when the selected pointer's source family is `ens_v1_registry_l1`,
+when the selected pointer's source family is `ens_v1_registry_l1`,
 `ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`, and only through the same chain,
 the surface namehash equal to its retained node, and the pointer address equal
-to its emitting resolver. Incremental staging applies the same pointer-family
-restriction. Whether an ENSv2-family pointer should serve node-keyed
-pre-surface ENSv1 records is deliberately unresolved and tracked in
-[#621](https://github.com/ensdomains/bigname/issues/621); that issue's comment
-records the sibling question for `basenames_base_resolver` records with no
-logical-name attribution and a Basenames pointer. Pointer position is not a
-write-time lower bound: selecting a resolver exposes its retained pre-pointer
-writes, switching away hides them,
+to its emitting resolver. A selected `ens_v2_registry_l1` or `ens_v2_root_l1`
+pointer may also join when its target resolver's final classification is
+supported `ens_v1_resolver_l1` from an applicable exact declaration and the
+classifying manifest's namespace matches the pointer's namespace. Incremental
+staging applies the same guarded exception. The sibling question for
+`basenames_base_resolver` records with no logical-name attribution and a
+Basenames pointer remains unresolved in
+[#621](https://github.com/ensdomains/bigname/issues/621). Pointer position is
+not a write-time lower bound: selecting a resolver exposes its retained
+pre-pointer writes, switching away hides them,
 and switching back restores them. The latest `RecordVersionChanged` from that
 resolver remains the boundary, and records must be strictly later than it. This
 follows the registry resolver lookup
@@ -364,6 +382,25 @@ expose the inventory only when the name's current readable `resource_id` selects
 it. Resolver-local events are accepted only under the manifest and
 current-resolver rules documented in
 [`manifests.md`](manifests.md).
+
+The resolver classification also carries effective manifest-declared
+[`read_features`](manifests.md#required-fields). A supported inventory copies
+`ensip19_default_address` into `provenance.read_rules` with source key
+`addr:2147483648`. `selectors` and `entries` remain exact `RecordChanged`
+observations: Project does not fabricate target coin types or rewrite the
+default entry. Empty address bytes in either the ENSv1 `value` shape or ENSv2
+`address_bytes_hex` shape are normalized to an exact `not_found` entry. For
+coin type 60, the multicoin `AddressChanged` payload takes precedence over its
+immediately adjacent compatibility `AddrChanged` sibling in the same
+transaction, so an empty multicoin clear remains empty instead of becoming a
+retained zero-address value. The paired logs share one effective ordering
+position; any later independent write in that transaction still wins.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L65 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+Removing the feature, changing to an unflagged resolver, or
+rotating a proxy to an unflagged implementation removes the rule on the same
+scoped rebuild. Full and incremental rebuilds select the feature from the same
+current resolver classification.
 
 For ENSv1, an admitted current resolver may contribute supported address, text,
 and contenthash inventory. An unlisted or unsupported resolver family stays
@@ -476,11 +513,11 @@ new truth family.
 [^v1-wrapper-grace-expiry]: (upstream: .refs/ens_v1/contracts/wrapper/README.md:L69 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L806 @ ens_v1@91c966f)
 [^v1-wrapper-grace-authority]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L218 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L828 @ ens_v1@91c966f)
 [^v1-wrapper-expired]: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
-[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@ccaeb58)
-[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58)
-[^v2-iperm-l57]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L71 @ ens_v2@ccaeb58)
-[^v2-pr-l261]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L301 @ ens_v2@ccaeb58)
-[^v2-pr-l351]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L360 @ ens_v2@ccaeb58)
+[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@a971bd64)
+[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@a971bd64)
+[^v2-iperm-l57]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L83 @ ens_v2@a971bd64)
+[^v2-pr-l261]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L304 @ ens_v2@a971bd64)
+[^v2-pr-l351]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L363 @ ens_v2@a971bd64)
 [^ensnode-legacy-text-l356]: (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L356 @ ensnode@2017ae6) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L364 @ ensnode@2017ae6)
 [^ensnode-legacy-revresolver-l311]: (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6)
 [^ensnode-legacy-revresolver-l316]: (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6)

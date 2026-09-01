@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use phase_runner::{
     RunnerPhaseProgress,
     capacity::{CapacityFuture, CapacityGuard, CapacityMeasurement, CapacityProbe},
@@ -486,6 +486,923 @@ async fn runner_loop_heartbeat_refreshes_across_completed_live_follow_passes() -
 
     cancellation.cancel();
     task.await??;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn discovery_repair_converges_after_reinterpret_adds_further_coverage() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_second_level_discovery_repair").await?;
+    let chain_id = "second-level-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 2, target_block_number = 1,
+             last_processed_block_number = 1,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-1"))
+    .execute(scratch.pool())
+    .await?;
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::new([
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(heads.clone()),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(SecondLevelDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::clone(&interpret_calls),
+            stamp_limit: 2,
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Project,
+            None,
+            Arc::clone(&sequence),
+        )),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(heads),
+            Arc::clone(&sequence),
+        )),
+    ])?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = true;
+    runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "second-level-discovery-repair-runner",
+    )?
+    .run_chain(&configured_chain, CancellationToken::new())
+    .await?;
+
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 3);
+    assert_subsequence(
+        &sequence.lock().expect("phase sequence lock"),
+        &[
+            "ingest:normal",
+            "interpret:normal",
+            "ingest:redo",
+            "interpret:redo",
+            "ingest:redo",
+            "interpret:redo",
+            "project:normal",
+        ],
+    );
+    let ingest: (bool, i64) = sqlx::query_as(
+        "SELECT redo_in_progress, redo_attempt_generation
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(ingest, (false, 4));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn attested_operator_interpret_redo_repairs_discovery_before_project() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_operator_discovery_repair").await?;
+    let chain_id = "operator-discovery-repair-chain";
+    let authority_generation = "operator-discovery-repair-generation";
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    for (phase, content_hash) in [
+        (PhaseName::Ingest, None),
+        (
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+    ] {
+        mark_completed(scratch.pool(), chain_id, phase, content_hash).await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
+    }
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &heads).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET live_handoff_block_number = 1,
+             live_handoff_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-1"))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .bind(format!(
+        "manifest-authority:{}:{authority_generation}",
+        "a".repeat(64)
+    ))
+    .execute(scratch.pool())
+    .await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseSet::new([
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(heads.clone()),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(SecondLevelDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            stamp_limit: 1,
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(PendingGuardProjectPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            repaired: Arc::new(Notify::new()),
+            sequence: Arc::clone(&sequence),
+        }),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(heads),
+            Arc::clone(&sequence),
+        )),
+    ])?;
+
+    runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "operator-discovery-repair-runner",
+    )?
+    .with_watch_set_coverage_attestation(chain_id, authority_generation)
+    .redo(
+        &chain(chain_id)?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    assert_subsequence(
+        &sequence.lock().expect("phase sequence lock"),
+        &[
+            "interpret:redo",
+            "ingest:redo",
+            "interpret:redo",
+            "project:redo",
+        ],
+    );
+    let pending_ingest: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!pending_ingest);
+    let attestation_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM manifest_authority_attestations
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(attestation_rows, 1);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn all_phase_redo_repairs_discovery_before_project() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_all_discovery_repair").await?;
+    let chain_id = "all-discovery-repair-chain";
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    for (phase, content_hash) in [
+        (PhaseName::Ingest, None),
+        (
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        ),
+        (PhaseName::Verify, None),
+    ] {
+        mark_completed(scratch.pool(), chain_id, phase, content_hash).await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
+    }
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let phases = PhaseSet::new([
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(heads.clone()),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(SecondLevelDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            stamp_limit: 1,
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(PendingGuardProjectPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            repaired: Arc::new(Notify::new()),
+            sequence: Arc::clone(&sequence),
+        }),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(heads),
+            Arc::clone(&sequence),
+        )),
+    ])?;
+
+    runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "all-discovery-repair-runner",
+    )?
+    .redo(
+        &chain(chain_id)?,
+        RedoPhase::All,
+        BlockRange::new(0, 0)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    assert_subsequence(
+        &sequence.lock().expect("phase sequence lock"),
+        &[
+            "interpret:redo",
+            "ingest:redo",
+            "interpret:redo",
+            "project:redo",
+        ],
+    );
+    let pending_ingest: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!pending_ingest);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn cancelled_discovery_repair_keeps_pending_work_without_exhaustion_error() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_cancelled_discovery_repair").await?;
+    let chain_id = "cancelled-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    PhaseStore::new(scratch.pool().clone())
+        .initialize_chain(chain_id)
+        .await?;
+    mark_completed(scratch.pool(), chain_id, PhaseName::Ingest, None).await?;
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Ingest, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 2,
+             target_block_number = 1,
+             last_processed_block_number = 1,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-1"))
+    .execute(scratch.pool())
+    .await?;
+    let mut transaction = scratch.pool().begin().await?;
+    bigname_manifests::install_required_ingest(
+        &mut transaction,
+        chain_id,
+        0,
+        bigname_manifests::RequiredIngestCause::DiscoveryWatchAdmission,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "cancelled-discovery-repair-runner",
+    )?
+    .run_chain(&chain(chain_id)?, cancellation)
+    .await?;
+
+    let pending_ingest: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(pending_ingest);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn discovery_repair_runaway_stops_at_operator_bound() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_discovery_repair_bound").await?;
+    let chain_id = "discovery-repair-bound-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 2, target_block_number = 1,
+             last_processed_block_number = 1,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-1"))
+    .execute(scratch.pool())
+    .await?;
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::new([
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(heads.clone()),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(SecondLevelDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::clone(&interpret_calls),
+            stamp_limit: usize::MAX,
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Project,
+            None,
+            Arc::clone(&sequence),
+        )),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(heads),
+            Arc::clone(&sequence),
+        )),
+    ])?;
+    let error = runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "discovery-repair-bound-runner",
+    )?
+    .run_chain(&chain(chain_id)?, CancellationToken::new())
+    .await
+    .expect_err("non-monotonic discovery work must stop at the operator bound");
+
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("did not converge after 8 passes")
+    );
+    assert!(error.to_string().contains("keep serving disabled"));
+    assert!(error.to_string().contains("discovery_watch_admissions"));
+    assert!(error.to_string().contains("chain_phase_state"));
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 8);
+    assert!(
+        !sequence
+            .lock()
+            .expect("phase sequence lock")
+            .iter()
+            .any(|event| event.starts_with("project:")),
+        "Project must remain fenced when repair does not converge"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn post_live_discovery_repair_runaway_stops_at_operator_bound() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_post_live_discovery_repair_bound").await?;
+    let chain_id = "post-live-discovery-repair-bound-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "WITH manifest AS (
+             INSERT INTO manifest_versions (
+                 manifest_version, namespace, source_family, chain_id,
+                 deployment_label, rollout_status, normalizer_version,
+                 file_path, manifest_payload
+             ) VALUES (1, 'fixture', 'repair_bound_source', $1,
+                       'fixture', 'active', 'fixture', $2, '{}'::jsonb)
+             RETURNING manifest_id
+         )
+         INSERT INTO manifest_discovery_rules (
+             manifest_id, edge_kind, admission, rule_payload
+         )
+         SELECT manifest_id, 'resolver', 'fixture', '{}'::jsonb FROM manifest",
+    )
+    .bind(chain_id)
+    .bind(format!("fixtures/{chain_id}.toml"))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 1, target_block_number = 0,
+             last_processed_block_number = 0,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-0"))
+    .execute(scratch.pool())
+    .await?;
+    let initial_heads = HeadMarkers {
+        latest: BlockMarker::new(0, format!("{chain_id}-block-0"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &initial_heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(initial_heads),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(PostLiveRunawayDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::clone(&interpret_calls),
+            sequence: Arc::clone(&sequence),
+            cancel_on_call: None,
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Project,
+            None,
+            Arc::clone(&sequence),
+        )),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(live_heads),
+            Arc::clone(&sequence),
+        )),
+    )?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = true;
+    let phase_runner = runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "post-live-discovery-repair-bound-runner",
+    )?;
+    let task = tokio::spawn(async move {
+        phase_runner
+            .run_chain(&configured_chain, CancellationToken::new())
+            .await
+    });
+    let result = tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .context("post-Live discovery repair did not stop at its operator bound")?;
+    let error = result?.expect_err("non-monotonic post-Live repair must fail loudly");
+
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("did not converge after 9 passes")
+    );
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 10);
+    let sequence = sequence.lock().expect("phase sequence lock").clone();
+    let live_position = sequence
+        .iter()
+        .position(|event| event == "live:normal")
+        .expect("the runaway must begin only after Live");
+    let project_positions = sequence
+        .iter()
+        .enumerate()
+        .filter_map(|(position, event)| event.starts_with("project:").then_some(position))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        project_positions.len(),
+        1,
+        "only the startup Project pass may run when post-Live repair does not converge: {sequence:?}"
+    );
+    assert!(
+        project_positions[0] < live_position,
+        "Project must remain fenced after Live when repair does not converge: {sequence:?}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn post_live_cancelled_discovery_repair_keeps_pending_work_without_exhaustion_error()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_post_live_cancelled_repair").await?;
+    let chain_id = "post-live-cancelled-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "WITH manifest AS (
+             INSERT INTO manifest_versions (
+                 manifest_version, namespace, source_family, chain_id,
+                 deployment_label, rollout_status, normalizer_version,
+                 file_path, manifest_payload
+             ) VALUES (1, 'fixture', 'cancelled_repair_source', $1,
+                       'fixture', 'active', 'fixture', $2, '{}'::jsonb)
+             RETURNING manifest_id
+         )
+         INSERT INTO manifest_discovery_rules (
+             manifest_id, edge_kind, admission, rule_payload
+         )
+         SELECT manifest_id, 'resolver', 'fixture', '{}'::jsonb FROM manifest",
+    )
+    .bind(chain_id)
+    .bind(format!("fixtures/{chain_id}.toml"))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 1, target_block_number = 0,
+             last_processed_block_number = 0,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-0"))
+    .execute(scratch.pool())
+    .await?;
+    let initial_heads = HeadMarkers {
+        latest: BlockMarker::new(0, format!("{chain_id}-block-0"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &initial_heads).await?;
+    let cancellation = CancellationToken::new();
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(initial_heads),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(PostLiveRunawayDiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: Arc::clone(&interpret_calls),
+            sequence: Arc::clone(&sequence),
+            cancel_on_call: Some((9, cancellation.clone())),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Project,
+            None,
+            Arc::clone(&sequence),
+        )),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(live_heads),
+            Arc::clone(&sequence),
+        )),
+    )?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = true;
+
+    runner(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "post-live-cancelled-discovery-repair-runner",
+    )?
+    .run_chain(&configured_chain, cancellation.clone())
+    .await?;
+
+    assert!(cancellation.is_cancelled());
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 10);
+    let pending_ingest: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        pending_ingest,
+        "cancellation must preserve required Ingest work"
+    );
+    let sequence = sequence.lock().expect("phase sequence lock").clone();
+    let live_position = sequence
+        .iter()
+        .position(|event| event == "live:normal")
+        .expect("the cancelled repair must begin only after Live");
+    assert!(
+        sequence[live_position + 1..]
+            .iter()
+            .all(|event| !event.starts_with("project:")),
+        "Project must remain fenced after post-Live repair cancellation: {sequence:?}"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn post_live_discovery_repair_precedes_project() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_post_live_discovery_repair").await?;
+    let chain_id = "post-live-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 1, target_block_number = 0,
+             last_processed_block_number = 0,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-0"))
+    .execute(scratch.pool())
+    .await?;
+    let initial_heads = HeadMarkers {
+        latest: BlockMarker::new(0, format!("{chain_id}-block-0"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &initial_heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let repaired_project = Arc::new(Notify::new());
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(initial_heads),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(DiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(PendingGuardProjectPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            repaired: Arc::clone(&repaired_project),
+            sequence: Arc::clone(&sequence),
+        }),
+        complete_phase(PhaseName::Verify, None),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(live_heads),
+            Arc::clone(&sequence),
+        )),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "post-live-discovery-repair-runner",
+        test_timing(),
+    )?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = true;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let mut task =
+        tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
+    let wait = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            () = repaired_project.notified() => Ok(()),
+            result = &mut task => result.map_err(anyhow::Error::from)?.map_err(anyhow::Error::from),
+        }
+    })
+    .await;
+    if let Err(error) = wait {
+        panic!(
+            "post-Live repair did not reach Project: {error}; sequence={:?}",
+            sequence.lock().expect("phase sequence lock")
+        );
+    }
+    wait??;
+    cancellation.cancel();
+    if !task.is_finished() {
+        task.await??;
+    }
+
+    let sequence = sequence.lock().expect("phase sequence lock").clone();
+    let live = sequence
+        .iter()
+        .position(|event| event == "live:normal")
+        .expect("Live must run before its downstream repair");
+    let suffix = &sequence[live..];
+    assert_subsequence(
+        suffix,
+        &[
+            "live:normal",
+            "interpret:normal",
+            "ingest:redo",
+            "interpret:redo",
+            "project:redo",
+        ],
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn combined_verify_waits_for_post_live_discovery_repair_and_redoes_verify() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_combined_verify_discovery_repair").await?;
+    let chain_id = "combined-verify-discovery-repair-chain";
+    seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 1, target_block_number = 0,
+             last_processed_block_number = 0,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-0"))
+    .execute(scratch.pool())
+    .await?;
+    let initial_heads = HeadMarkers {
+        latest: BlockMarker::new(0, format!("{chain_id}-block-0"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    publish_heads(scratch.pool(), chain_id, &initial_heads).await?;
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let verify_started = Arc::new(Notify::new());
+    let release_verify = Arc::new(Notify::new());
+    let repaired_project = Arc::new(Notify::new());
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Ingest,
+            Some(initial_heads),
+            Arc::clone(&sequence),
+        )),
+        Arc::new(DiscoveryStampInterpretPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(PendingGuardProjectPhase {
+            pool: scratch.pool().clone(),
+            calls: AtomicUsize::new(0),
+            repaired: Arc::clone(&repaired_project),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(GatedVerifyPhase {
+            calls: AtomicUsize::new(0),
+            started: Arc::clone(&verify_started),
+            release: Arc::clone(&release_verify),
+            sequence: Arc::clone(&sequence),
+        }),
+        Arc::new(RecordedCompletePhase::new(
+            PhaseName::Live,
+            Some(live_heads),
+            Arc::clone(&sequence),
+        )),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "combined-verify-discovery-repair-runner",
+        test_timing(),
+    )?;
+    let mut configured_chain = chain(chain_id)?;
+    configured_chain.verify_before_live = false;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let mut task =
+        tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
+
+    tokio::time::timeout(Duration::from_secs(10), verify_started.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            result = &mut task => {
+                panic!("combined Verify/Live stopped before Live ran: {result:?}; sequence={:?}",
+                    sequence.lock().expect("phase sequence lock"));
+            }
+            () = async {
+                loop {
+                    if sequence
+                        .lock()
+                        .expect("phase sequence lock")
+                        .iter()
+                        .any(|event| event == "live:normal")
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+    })
+    .await?;
+    assert_eq!(
+        sequence
+            .lock()
+            .expect("phase sequence lock")
+            .iter()
+            .filter(|event| event.as_str() == "interpret:normal")
+            .count(),
+        1,
+        "post-Live Interpret must wait until paired normal Verify releases its lock"
+    );
+
+    release_verify.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let complete = {
+                let sequence = sequence.lock().expect("phase sequence lock");
+                sequence.iter().any(|event| event == "project:redo")
+                    && sequence.iter().any(|event| event == "verify:redo")
+            };
+            if complete {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    cancellation.cancel();
+    task.await??;
+
+    let sequence = sequence.lock().expect("phase sequence lock").clone();
+    let verify_normal = sequence
+        .iter()
+        .position(|event| event == "verify:normal")
+        .expect("paired normal Verify must run");
+    let post_live_interpret = sequence
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.as_str() == "interpret:normal")
+        .nth(1)
+        .map(|(position, _)| position)
+        .expect("post-Live Interpret must run");
+    assert!(
+        verify_normal < post_live_interpret,
+        "post-Live Interpret must wait for paired normal Verify"
+    );
+    assert_subsequence(
+        &sequence,
+        &[
+            "live:normal",
+            "interpret:normal",
+            "ingest:redo",
+            "interpret:redo",
+            "project:redo",
+            "verify:redo",
+        ],
+    );
     scratch.cleanup().await
 }
 
@@ -4126,6 +5043,359 @@ impl CapacityProbe for GatedCapacityProbe {
 struct FunctionPhase {
     name: PhaseName,
     handler: Arc<dyn Fn(PhaseContext) -> RunnerResult<PhaseBatchOutcome> + Send + Sync>,
+}
+
+struct RecordedCompletePhase {
+    name: PhaseName,
+    heads: Option<HeadMarkers>,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordedCompletePhase {
+    fn new(name: PhaseName, heads: Option<HeadMarkers>, sequence: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            name,
+            heads,
+            sequence,
+        }
+    }
+}
+
+impl Phase for RecordedCompletePhase {
+    fn name(&self) -> PhaseName {
+        self.name
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "{}:{}",
+                self.name,
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let heads = if context.mode.is_redo() {
+            context.available_heads.clone().or(self.heads.clone())
+        } else {
+            self.heads.clone().or(context.available_heads.clone())
+        };
+        let marker = heads.as_ref().map(|heads| heads.latest.clone());
+        let progress = if matches!(self.name, PhaseName::Ingest | PhaseName::Live) {
+            PhaseProgress {
+                current: marker.clone(),
+                target: marker.clone(),
+                live_handoff: (self.name == PhaseName::Ingest)
+                    .then_some(marker.clone())
+                    .flatten(),
+                heads,
+                source_progress: (self.name == PhaseName::Ingest && context.mode.is_redo())
+                    .then(|| SourceProgress {
+                        source_key: "source".to_owned(),
+                        current: marker.clone(),
+                        target: marker.clone(),
+                        redo_loaded_boundary: marker,
+                    })
+                    .into_iter()
+                    .collect(),
+                ..PhaseProgress::default()
+            }
+        } else {
+            PhaseProgress::default()
+        };
+        Box::pin(async move { Ok(PhaseBatchOutcome::Complete(progress)) })
+    }
+}
+
+struct DiscoveryStampInterpretPhase {
+    pool: sqlx::PgPool,
+    calls: AtomicUsize,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+struct SecondLevelDiscoveryStampInterpretPhase {
+    pool: sqlx::PgPool,
+    calls: Arc<AtomicUsize>,
+    stamp_limit: usize,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+struct PostLiveRunawayDiscoveryStampInterpretPhase {
+    pool: sqlx::PgPool,
+    calls: Arc<AtomicUsize>,
+    sequence: Arc<Mutex<Vec<String>>>,
+    cancel_on_call: Option<(usize, CancellationToken)>,
+}
+
+impl Phase for PostLiveRunawayDiscoveryStampInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "interpret:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let pool = self.pool.clone();
+        let cancel_on_call = self.cancel_on_call.clone();
+        Box::pin(async move {
+            if call > 0 {
+                let mut transaction = pool.begin().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to begin post-Live runaway stamp fixture: {error}"
+                    ))
+                })?;
+                bigname_manifests::install_required_ingest(
+                    &mut transaction,
+                    &context.chain_id,
+                    0,
+                    bigname_manifests::RequiredIngestCause::DiscoveryWatchAdmission,
+                )
+                .await
+                .map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to install post-Live runaway stamp fixture: {error:#}"
+                    ))
+                })?;
+                transaction.commit().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to commit post-Live runaway stamp fixture: {error}"
+                    ))
+                })?;
+            }
+            if let Some((cancel_call, cancellation)) = cancel_on_call
+                && call == cancel_call
+            {
+                cancellation.cancel();
+            }
+            LoopbackPhase::new(PhaseName::Interpret)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+impl Phase for SecondLevelDiscoveryStampInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "interpret:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let pool = self.pool.clone();
+        let stamp_limit = self.stamp_limit;
+        Box::pin(async move {
+            if call < stamp_limit {
+                let mut transaction = pool.begin().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to begin second-level discovery stamp fixture: {error}"
+                    ))
+                })?;
+                bigname_manifests::install_required_ingest(
+                    &mut transaction,
+                    &context.chain_id,
+                    if call == 0 { 1 } else { 0 },
+                    bigname_manifests::RequiredIngestCause::DiscoveryWatchAdmission,
+                )
+                .await
+                .map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to install second-level discovery stamp fixture: {error:#}"
+                    ))
+                })?;
+                transaction.commit().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to commit second-level discovery stamp fixture: {error}"
+                    ))
+                })?;
+            }
+            LoopbackPhase::new(PhaseName::Interpret)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+impl Phase for DiscoveryStampInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "interpret:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            if call == 1 {
+                let mut transaction = pool.begin().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to begin discovery stamp fixture: {error}"
+                    ))
+                })?;
+                bigname_manifests::install_required_ingest(
+                    &mut transaction,
+                    &context.chain_id,
+                    0,
+                    bigname_manifests::RequiredIngestCause::DiscoveryWatchAdmission,
+                )
+                .await
+                .map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to install discovery stamp fixture: {error:#}"
+                    ))
+                })?;
+                transaction.commit().await.map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "failed to commit discovery stamp fixture: {error}"
+                    ))
+                })?;
+            }
+            LoopbackPhase::new(PhaseName::Interpret)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+struct PendingGuardProjectPhase {
+    pool: sqlx::PgPool,
+    calls: AtomicUsize,
+    repaired: Arc<Notify>,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+struct GatedVerifyPhase {
+    calls: AtomicUsize,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    sequence: Arc<Mutex<Vec<String>>>,
+}
+
+impl Phase for GatedVerifyPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "verify:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let started = Arc::clone(&self.started);
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            if call == 0 && !context.mode.is_redo() {
+                started.notify_one();
+                release.notified().await;
+            }
+            LoopbackPhase::new(PhaseName::Verify)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+impl Phase for PendingGuardProjectPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sequence
+            .lock()
+            .expect("phase sequence lock")
+            .push(format!(
+                "project:{}",
+                if context.mode.is_redo() {
+                    "redo"
+                } else {
+                    "normal"
+                }
+            ));
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let pending: bool = sqlx::query_scalar(
+                "SELECT redo_in_progress FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'ingest'",
+            )
+            .bind(&context.chain_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| {
+                RunnerError::data_integrity(format!(
+                    "failed to inspect Project prerequisite fixture: {error}"
+                ))
+            })?;
+            if pending {
+                return Err(RunnerError::data_integrity(
+                    "Project ran before discovery-owned Ingest repair",
+                ));
+            }
+            if call > 0 {
+                self.repaired.notify_one();
+            }
+            LoopbackPhase::new(PhaseName::Project)
+                .run_batch(context)
+                .await
+        })
+    }
+}
+
+fn assert_subsequence(actual: &[String], expected: &[&str]) {
+    let mut next = 0;
+    for event in actual {
+        if expected.get(next).is_some_and(|expected| event == expected) {
+            next += 1;
+        }
+    }
+    assert_eq!(
+        next,
+        expected.len(),
+        "missing phase subsequence in {actual:?}"
+    );
 }
 
 impl Phase for FunctionPhase {

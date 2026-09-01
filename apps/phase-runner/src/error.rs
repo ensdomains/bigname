@@ -46,15 +46,15 @@ impl RunnerError {
 
     pub(crate) fn database(message: impl Into<String>, error: sqlx::Error) -> Self {
         let message = format!("{}: {error}", message.into());
-        if matches!(
-            &error,
-            sqlx::Error::Database(database)
-                if database.code().is_some_and(|code| code.starts_with("23"))
-        ) {
-            Self::data_integrity(message)
-        } else {
-            Self::transient(message)
-        }
+        Self::new(database_error_kind(&error), message)
+    }
+
+    pub(crate) fn database_anyhow(message: impl Into<String>, error: anyhow::Error) -> Self {
+        let kind = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<sqlx::Error>())
+            .map_or(ErrorKind::DataIntegrity, database_error_kind);
+        Self::new(kind, format!("{}: {error:#}", message.into()))
     }
 
     pub(crate) fn with_secondary(self, action: &str, secondary: Self) -> Self {
@@ -100,6 +100,18 @@ impl RunnerError {
     }
 }
 
+fn database_error_kind(error: &sqlx::Error) -> ErrorKind {
+    if matches!(
+        error,
+        sqlx::Error::Database(database)
+            if database.code().is_some_and(|code| code.starts_with("23"))
+    ) {
+        ErrorKind::DataIntegrity
+    } else {
+        ErrorKind::Transient
+    }
+}
+
 impl fmt::Display for RunnerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
@@ -109,3 +121,21 @@ impl fmt::Display for RunnerError {
 impl Error for RunnerError {}
 
 pub type RunnerResult<T> = Result<T, RunnerError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anyhow_wrapped_transient_database_error_stays_retryable() {
+        let error = anyhow::Error::new(sqlx::Error::PoolTimedOut)
+            .context("injected discovery repair database timeout");
+        let classified = RunnerError::database_anyhow(
+            "failed to classify discovery-owned required Ingest work",
+            error,
+        );
+
+        assert_eq!(classified.kind(), ErrorKind::Transient);
+        assert!(classified.is_retryable());
+    }
+}

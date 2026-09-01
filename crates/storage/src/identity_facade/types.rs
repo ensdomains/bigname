@@ -34,6 +34,7 @@ pub struct IdentityRecordInventoryRow {
     pub support_status: String,
     pub unsupported_reason: Option<String>,
     pub entries: Value,
+    pub provenance: Value,
     pub unsupported_families: Value,
     pub chain_positions: Value,
     pub last_recomputed_at: OffsetDateTime,

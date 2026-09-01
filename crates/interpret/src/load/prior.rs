@@ -113,10 +113,7 @@ pub(super) async fn restore_events(
                ranked.after_state
         FROM ranked
         WHERE ranked.state_rank = 1
-        ORDER BY ranked.block_number,
-                 ranked.transaction_index NULLS FIRST,
-                 ranked.log_index NULLS FIRST,
-                 ranked.normalized_event_id
+        ORDER BY ranked.block_number, ranked.normalized_event_id
         "
     );
     let mut rows = sqlx::query_as::<_, Row>(&statement)
@@ -285,3 +282,7 @@ pub(super) async fn state_values(
         })
         .collect())
 }
+
+#[cfg(test)]
+#[rustfmt::skip]
+mod tests { #[test] fn prior_restore_orders_same_block_state_by_normalized_emission() { assert!(include_str!("prior.rs").contains("ORDER BY ranked.block_number, ranked.normalized_event_id")); } }

@@ -1,14 +1,27 @@
+use alloy_primitives::{Address, Bytes};
+use alloy_sol_types::{SolError, SolValue, sol};
+use anyhow::Context;
 use serde_json::{Value, json};
 
 use crate::{
     LookupError, LookupRecordResult, LookupRecordStatus, RecordSelector, Result,
     abi::{
-        ResolutionResultAbi, decode_record_result, decode_resolution_result, hex_to_bytes,
-        resolver_record_call, universal_resolver_call,
+        ResolutionResultAbi, decode_record_result, decode_resolution_result, hex_string,
+        hex_to_bytes, resolver_record_call, universal_resolver_call,
     },
     ccip::{follow_ccip_read, rpc_error_contains_offchain_lookup},
     rpc::{JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient},
 };
+
+sol! {
+    error ResolverNotFound(bytes name);
+}
+
+pub(crate) struct RecordCallOutcome {
+    pub result: LookupRecordResult,
+    pub effective_resolver: Option<String>,
+    pub resolver_not_found: bool,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExecutionBlock {
@@ -24,6 +37,7 @@ pub(crate) struct RecordCallContext<'a> {
     pub block: &'a ExecutionBlock,
     pub follow_ccip: bool,
     pub result_abi: ResolutionResultAbi,
+    pub resolver_not_found_is_not_found: bool,
     pub rpc: &'a JsonRpcHttpClient,
 }
 
@@ -31,6 +45,15 @@ pub(crate) async fn execute_record_call(
     context: &RecordCallContext<'_>,
     record: &RecordSelector,
 ) -> Result<LookupRecordResult> {
+    execute_record_call_with_resolver(context, record)
+        .await
+        .map(|outcome| outcome.result)
+}
+
+pub(crate) async fn execute_record_call_with_resolver(
+    context: &RecordCallContext<'_>,
+    record: &RecordSelector,
+) -> Result<RecordCallOutcome> {
     let resolver_call = resolver_record_call(record, context.node).map_err(|error| {
         LookupError::unsupported(format!(
             "failed to build {} resolver call: {error:#}",
@@ -53,7 +76,7 @@ pub(crate) async fn execute_record_call(
     {
         Ok(result) => result,
         Err(error) if context.rpc.is_configured_timeout(&error) => {
-            return Ok(failed(record, "resolver_call_failed", false));
+            return Ok(outcome(failed(record, "resolver_call_failed", false), None));
         }
         Err(error) => {
             return Err(LookupError::transport(format!(
@@ -64,7 +87,14 @@ pub(crate) async fn execute_record_call(
     };
     let (result, ccip_read) =
         resolve_ccip_if_supported(context, initial, &block_selector, record).await?;
-    decode_call_result(record, context.result_abi, result, ccip_read)
+    decode_call_result(
+        record,
+        context.result_abi,
+        result,
+        ccip_read,
+        context.resolver_not_found_is_not_found,
+        context.dns_name,
+    )
 }
 
 async fn resolve_ccip_if_supported(
@@ -116,30 +146,126 @@ fn decode_call_result(
     result_abi: ResolutionResultAbi,
     result: JsonRpcCallResult,
     ccip_read: bool,
-) -> Result<LookupRecordResult> {
+    resolver_not_found_is_not_found: bool,
+    dns_name: &[u8],
+) -> Result<RecordCallOutcome> {
     match result.result {
         Ok(Value::String(hex)) => {
-            let decoded = hex_to_bytes(&hex)
-                .and_then(|bytes| decode_resolution_result(result_abi, &bytes))
-                .and_then(|bytes| decode_record_result(record, &bytes));
-            match decoded {
-                Ok(Some(value)) => Ok(success(record, canonical_value(record, value), ccip_read)),
-                Ok(None) => Ok(not_found(record, not_found_reason(record), ccip_read)),
-                Err(_) => Ok(failed(record, "resolver_return_data_malformed", ccip_read)),
+            let Ok((bytes, resolver)) =
+                hex_to_bytes(&hex).and_then(|bytes| decode_resolution_output(result_abi, &bytes))
+            else {
+                return Ok(outcome(
+                    failed(record, "resolver_return_data_malformed", ccip_read),
+                    None,
+                ));
+            };
+            match decode_record_result(record, &bytes) {
+                Ok(Some(value)) => Ok(outcome(
+                    success(record, canonical_value(record, value), ccip_read),
+                    resolver,
+                )),
+                Ok(None) => Ok(outcome(
+                    not_found(record, not_found_reason(record), ccip_read),
+                    resolver,
+                )),
+                Err(_) => Ok(outcome(
+                    failed(record, "resolver_return_data_malformed", ccip_read),
+                    resolver,
+                )),
             }
         }
-        Ok(_) => Ok(failed(record, "resolver_return_data_malformed", ccip_read)),
+        Ok(_) => Ok(outcome(
+            failed(record, "resolver_return_data_malformed", ccip_read),
+            None,
+        )),
         Err(error) if error.code == Some(i64::MIN) => match error.message.as_str() {
-            "offchain_lookup_required" => Ok(unsupported(record, &error.message, ccip_read)),
-            reason => Ok(failed(record, reason, ccip_read)),
+            "offchain_lookup_required" => Ok(outcome(
+                unsupported(record, &error.message, ccip_read),
+                None,
+            )),
+            reason => Ok(outcome(failed(record, reason, ccip_read), None)),
         },
+        Err(error)
+            if resolver_not_found_is_not_found
+                && result_abi == ResolutionResultAbi::EnsUniversalResolver
+                && rpc_error_is_resolver_not_found(&error, dns_name) =>
+        {
+            Ok(resolver_not_found_outcome(not_found(
+                record,
+                "resolver_not_found",
+                ccip_read,
+            )))
+        }
         Err(error) if provider_unavailable_for_selected_block(&error) => {
             Err(LookupError::stale(format!(
                 "verified lookup RPC provider could not serve selected block: {}",
                 error.message
             )))
         }
-        Err(error) => Ok(failed(record, rpc_failure_reason(&error), ccip_read)),
+        Err(error) => Ok(outcome(
+            failed(record, rpc_failure_reason(&error), ccip_read),
+            None,
+        )),
+    }
+}
+
+fn decode_resolution_output(
+    result_abi: ResolutionResultAbi,
+    return_data: &[u8],
+) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+    match result_abi {
+        ResolutionResultAbi::EnsUniversalResolver => {
+            let (result, resolver) = <(Bytes, Address)>::abi_decode_params_validate(return_data)
+                .context("Universal Resolver return data is malformed")?;
+            Ok((
+                result.to_vec(),
+                Some(hex_string(resolver.as_slice()).to_ascii_lowercase()),
+            ))
+        }
+        ResolutionResultAbi::BasenamesL1Resolver => {
+            decode_resolution_result(result_abi, return_data).map(|result| (result, None))
+        }
+    }
+}
+
+fn rpc_error_is_resolver_not_found(error: &JsonRpcCallError, dns_name: &[u8]) -> bool {
+    let Some(data) = error.data.as_ref().and_then(rpc_error_hex_data) else {
+        return false;
+    };
+    let Ok(bytes) = hex_to_bytes(data) else {
+        return false;
+    };
+    let Ok(error) = ResolverNotFound::abi_decode_validate(&bytes) else {
+        return false;
+    };
+    error.name.as_ref() == dns_name
+}
+
+fn rpc_error_hex_data(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(text) if text.starts_with("0x") => Some(text),
+        Value::Object(object) => object
+            .get("data")
+            .and_then(rpc_error_hex_data)
+            .or_else(|| object.get("originalError").and_then(rpc_error_hex_data))
+            .or_else(|| object.get("error").and_then(rpc_error_hex_data)),
+        _ => None,
+    }
+}
+
+fn outcome(result: LookupRecordResult, effective_resolver: Option<String>) -> RecordCallOutcome {
+    RecordCallOutcome {
+        result,
+        effective_resolver,
+        resolver_not_found: false,
+    }
+}
+
+fn resolver_not_found_outcome(result: LookupRecordResult) -> RecordCallOutcome {
+    RecordCallOutcome {
+        result,
+        effective_resolver: None,
+        resolver_not_found: true,
     }
 }
 

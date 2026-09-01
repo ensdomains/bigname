@@ -594,24 +594,28 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
         |_, _, inventory| {
             inventory.selectors = json!([
                 {
-                    "record_key": "addr:60",
+                    "record_key": "addr:2147483648",
                     "record_family": "addr",
-                    "selector_key": "60",
+                    "selector_key": "2147483648",
                     "cacheable": true
                 }
             ]);
             inventory.entries = json!([
                 {
-                    "record_key": "addr:60",
+                    "record_key": "addr:2147483648",
                     "record_family": "addr",
-                    "selector_key": "60",
+                    "selector_key": "2147483648",
                     "status": "success",
                     "value": {
-                        "coin_type": "60",
+                        "coin_type": "2147483648",
                         "value": "0x0000000000000000000000000000000000000def"
                     }
                 }
             ]);
+            inventory.provenance["read_rules"] = json!([{
+                "kind": "ensip19_default_address",
+                "source_record_key": "addr:2147483648"
+            }]);
             inventory.record_version_boundary["chain_position"]["block_hash"] =
                 json!(execution_block_hash);
             inventory.chain_positions = json!({
@@ -627,7 +631,9 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     .await?;
     let executed_address = "0x0000000000000000000000000000000000000e0e";
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_universal_resolver_multicoin_response(executed_address),
         resolution_universal_resolver_addr60_response(executed_address),
+        resolution_universal_resolver_multicoin_response(executed_address),
         resolution_universal_resolver_addr60_response(executed_address),
     ])
     .await?;
@@ -655,6 +661,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     assert_eq!(
         payload["data"]["addresses"],
         json!({
+            "2147483648": executed_address,
             "60": executed_address
         })
     );
@@ -710,7 +717,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     );
 
     let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
-    assert_eq!(rpc_requests.len(), 2, "v2 must not reuse a verified cache outcome");
+    assert_eq!(rpc_requests.len(), 4, "v2 must not reuse a verified cache outcome");
     for request in &rpc_requests {
         assert_eq!(request["method"], json!("eth_call"));
         assert_eq!(
@@ -730,7 +737,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     )
     .fetch_one(&lookup_pool)
     .await?;
-    assert_eq!(ledger_count, 1);
+    assert_eq!(ledger_count, 2);
 
     lookup_pool.close().await;
     database.cleanup().await?;
@@ -845,6 +852,290 @@ async fn v2_verified_records_return_conflict_when_project_generation_changes_dur
 
     let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
     assert_eq!(rpc_requests.len(), 1);
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    let execution_block_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let lookup_pool = database.lookup_pool().await?;
+    let namehash = seed_schema_v2_ens_record_lookup(
+        &lookup_pool,
+        21_000_003,
+        execution_block_hash,
+        "2026-04-17T00:00:03Z",
+        "0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+    let logical_name_id = format!("ens:{namehash}");
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |row| {
+            row.namehash = namehash.clone();
+            row.declared_summary["resolver"] = json!({"chain_id":null,"address":null});
+            row.declared_summary["topology"]["resolver_path"][0]["address"] = Value::Null;
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+        |_, _, _| {},
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             declared_summary #- '{topology}', '{resolver}',
+             '{\"chain_id\":null,\"address\":null}'::jsonb
+         )
+         WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .execute(&lookup_pool)
+    .await?;
+    sqlx::query("DELETE FROM record_inventory_current")
+        .execute(&lookup_pool)
+        .await?;
+
+    let executed_address = "0x0000000000000000000000000000000000000e0e";
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_universal_resolver_text_response("https://alice.example"),
+        resolution_universal_resolver_text_response(""),
+        resolution_universal_resolver_addr60_response(executed_address),
+        resolution_resolver_not_found_error(b"\x05alice\x03eth\0"),
+    ])
+    .await?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={rpc_url}"),
+        ])?)
+        .await?;
+
+    let auto_response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=auto&keys=text:url,avatar")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 null-resolver auto records request failed")?;
+    assert_eq!(auto_response.status(), StatusCode::OK);
+    let auto_payload: Value = read_json(auto_response).await?;
+    assert_eq!(auto_payload["meta"]["source"], json!("verified"));
+    assert_eq!(auto_payload["data"]["resolver"], Value::Null);
+    let mut mixed_statuses = [
+        auto_payload["data"]["records"]["text:url"]["status"]
+            .as_str()
+            .expect("text:url status"),
+        auto_payload["data"]["records"]["avatar"]["status"]
+            .as_str()
+            .expect("avatar status"),
+    ];
+    mixed_statuses.sort_unstable();
+    assert_eq!(mixed_statuses, ["not_found", "ok"]);
+
+    let verified_response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=verified&keys=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 null-resolver verified records request failed")?;
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    let verified_payload: Value = read_json(verified_response).await?;
+    assert_eq!(verified_payload["meta"]["source"], json!("verified"));
+    assert_eq!(verified_payload["data"]["resolver"], Value::Null);
+    assert_eq!(
+        verified_payload["data"]["addresses"]["60"],
+        json!(executed_address)
+    );
+    assert_eq!(
+        verified_payload["data"]["records"]["addr:60"]["status"],
+        json!("ok")
+    );
+    let missing_response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=verified&keys=text:url")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 null-resolver missing-resolver request failed")?;
+    assert_eq!(missing_response.status(), StatusCode::OK);
+    let missing_payload: Value = read_json(missing_response).await?;
+    assert_eq!(missing_payload["meta"]["source"], json!("verified"));
+    assert_eq!(missing_payload["data"]["resolver"], Value::Null);
+    assert_eq!(
+        missing_payload["data"]["records"]["text:url"]["status"],
+        json!("not_found")
+    );
+    assert_eq!(
+        missing_payload["data"]["records"]["text:url"]["failure_reason"],
+        json!("resolver_not_found")
+    );
+    let summary_response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=auto")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 null-resolver summary request failed")?;
+    assert_eq!(summary_response.status(), StatusCode::OK);
+    let summary_payload: Value = read_json(summary_response).await?;
+    assert_eq!(summary_payload["meta"]["source"], json!("indexed"));
+    assert!(summary_payload["data"].get("records").is_none());
+
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET rollout_status = 'deprecated'
+         WHERE namespace = 'ens' AND source_family = 'ens_execution'",
+    )
+    .execute(&lookup_pool)
+    .await?;
+    let no_entrypoint_response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth/records?source=auto&keys=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 null-resolver request without an admitted entrypoint failed")?;
+    assert_eq!(no_entrypoint_response.status(), StatusCode::OK);
+    let no_entrypoint_payload: Value = read_json(no_entrypoint_response).await?;
+    assert_eq!(no_entrypoint_payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        no_entrypoint_payload["data"]["records"]["addr:60"]["status"],
+        json!("unsupported")
+    );
+    assert_eq!(
+        no_entrypoint_payload["data"]["records"]["addr:60"]["unsupported_reason"],
+        json!("verified_records_not_supported")
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 4);
+    let ledger_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
+            .fetch_one(&lookup_pool)
+            .await?;
+    assert_eq!(ledger_count, 0);
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_null_resolver_auto_rejects_direct_route_selected_after_admission() -> Result<()> {
+    assert_null_resolver_route_flip_is_stale("auto").await
+}
+
+#[tokio::test]
+async fn v2_null_resolver_verified_rejects_direct_route_selected_after_admission() -> Result<()> {
+    assert_null_resolver_route_flip_is_stale("verified").await
+}
+
+async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    let execution_block_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let lookup_pool = database.lookup_pool().await?;
+    let namehash = seed_schema_v2_ens_record_lookup(
+        &lookup_pool,
+        21_000_003,
+        execution_block_hash,
+        "2026-04-17T00:00:03Z",
+        "0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+    let logical_name_id = format!("ens:{namehash}");
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |row| {
+            row.namehash = namehash;
+            row.declared_summary["resolver"] = json!({"chain_id":null,"address":null});
+            row.declared_summary["topology"]["resolver_path"][0]["address"] = Value::Null;
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+        |_, _, _| {},
+    )
+    .await?;
+
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_basenames_l1_addr60_response(
+            "0x0000000000000000000000000000000000000e0e",
+        ),
+    ])
+    .await?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={rpc_url}"),
+        ])?)
+        .await?;
+    let (_guard, control) =
+        crate::v2::name_records_auto_fallback_test_hooks::install(&database.pool).await?;
+    let uri = format!("/v2/names/Alice.eth/records?source={source}&keys=addr:60");
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    let direct_resolver = "0x1000000000000000000000000000000000000001";
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             jsonb_set(declared_summary, '{resolver}', $2),
+             '{topology,resolver_path,0,address}', $3
+         )
+         WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .bind(json!({"chain_id":"ethereum-mainnet","address":direct_resolver}))
+    .bind(json!(direct_resolver))
+    .execute(&lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("v2 discovery-route mismatch request task panicked")?
+        .context("v2 discovery-route mismatch request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert!(payload.get("data").is_none());
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 1);
+
     lookup_pool.close().await;
     database.cleanup().await?;
     Ok(())
@@ -1427,6 +1718,255 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
         })
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
+        inventory.selectors = json!([
+            {
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "cacheable": true
+            },
+            {
+                "record_key": "addr:2147483649",
+                "record_family": "addr",
+                "selector_key": "2147483649",
+                "cacheable": true
+            }
+        ]);
+        inventory.entries = json!([
+            {
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "status": "success",
+                "value": "0x0000000000000000000000000000000000000DeF"
+            },
+            {
+                "record_key": "addr:2147483649",
+                "record_family": "addr",
+                "selector_key": "2147483649",
+                "status": "not_found"
+            }
+        ]);
+        inventory.provenance["read_rules"] = json!([{
+            "kind": "ensip19_default_address",
+            "source_record_key": "addr:2147483648"
+        }]);
+        inventory.explicit_gaps = json!([]);
+        inventory.unsupported_families = json!([]);
+    })
+    .await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={unavailable_rpc_url}"),
+        ])?)
+        .await?;
+
+    for uri in [
+        "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
+        "/v2/names/Alice.eth/records?source=auto&keys=addr:2147483649",
+    ] {
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["meta"]["source"], "indexed");
+        assert_eq!(
+            payload["data"]["records"]["addr:2147483649"],
+            json!({
+                "status": "ok",
+                "value": "0x0000000000000000000000000000000000000def",
+                "meta": {
+                    "basis": "derived",
+                    "rule": "ensip19_default_address",
+                    "source_record_key": "addr:2147483648"
+                }
+            })
+        );
+    }
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=indexed")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"]["addresses"]["60"],
+        "0x0000000000000000000000000000000000000def"
+    );
+    assert_eq!(
+        payload["data"]["primary_address"],
+        "0x0000000000000000000000000000000000000def"
+    );
+
+    let lookup = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"id": "alice", "name": "Alice.eth"}]}),
+    )
+    .await?;
+    assert_eq!(
+        lookup["data"][0]["record"]["addresses"]["60"],
+        "0x0000000000000000000000000000000000000def"
+    );
+    assert_eq!(
+        lookup["data"][0]["record"]["primary_address"],
+        "0x0000000000000000000000000000000000000def"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
+        inventory.selectors = json!([{
+            "record_key": "addr:2147483648",
+            "record_family": "addr",
+            "selector_key": "2147483648",
+            "cacheable": true
+        }]);
+        inventory.entries = json!([{
+            "record_key": "addr:2147483648",
+            "record_family": "addr",
+            "selector_key": "2147483648",
+            "status": "success",
+            "value": "0x0000000000000000000000000000000000000000"
+        }]);
+        inventory.provenance["read_rules"] = json!([{
+            "kind": "ensip19_default_address",
+            "source_record_key": "addr:2147483648"
+        }]);
+        inventory.explicit_gaps = json!([]);
+        inventory.unsupported_families = json!([]);
+    })
+    .await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
+            format!("ethereum-mainnet={unavailable_rpc_url}"),
+        ])?)
+        .await?;
+
+    let expected_records = json!({
+        "addr:60": {
+            "status": "not_found",
+            "meta": {
+                "basis": "derived",
+                "rule": "ensip19_default_address",
+                "source_record_key": "addr:2147483648"
+            }
+        },
+        "addr:2147483649": {
+            "status": "ok",
+            "value": "0x0000000000000000000000000000000000000000",
+            "meta": {
+                "basis": "derived",
+                "rule": "ensip19_default_address",
+                "source_record_key": "addr:2147483648"
+            }
+        }
+    });
+    for source in ["indexed", "auto"] {
+        let response = app_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v2/names/Alice.eth/records?source={source}&keys=addr:60,addr:2147483649"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["meta"]["source"], "indexed");
+        assert_eq!(payload["data"]["records"], expected_records);
+        assert!(payload["data"]["addresses"].get("60").is_none());
+        assert_eq!(
+            payload["data"]["addresses"]["2147483649"],
+            "0x0000000000000000000000000000000000000000"
+        );
+    }
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=indexed")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    let payload: Value = read_json(response).await?;
+    assert!(payload["data"]["addresses"].get("60").is_none());
+    assert!(payload["data"].get("primary_address").is_none());
+
+    let lookup = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"id": "alice", "name": "Alice.eth"}]}),
+    )
+    .await?;
+    assert!(lookup["data"][0]["record"]["addresses"]
+        .get("60")
+        .is_none());
+    assert!(lookup["data"][0]["record"]
+        .get("primary_address")
+        .is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_indexed_records_do_not_derive_for_unflagged_resolvers() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
+        |_, _, inventory| {
+            inventory.selectors = json!([{
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "cacheable": true
+            }]);
+            inventory.entries = json!([{
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "status": "success",
+                "value": "0x0000000000000000000000000000000000000def"
+            }]);
+            inventory.provenance["read_rules"] = json!([]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]["records"]["addr:2147483649"],
+        json!({"status":"not_found"})
+    );
     Ok(())
 }
 
@@ -4824,6 +5364,63 @@ fn resolution_universal_resolver_addr60_response(address: &str) -> Value {
         resolution_padded_address_hex("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"),
         resolution_left_pad_hex("20", 64),
         resolution_padded_address_hex(address),
+    ))
+}
+
+fn resolution_universal_resolver_text_response(text: &str) -> Value {
+    let text_hex = hex::encode(text);
+    let padded_text_len = text_hex.len().div_ceil(64) * 64;
+    let inner_length = 64 + padded_text_len / 2;
+    json!(format!(
+        "0x{}{}{}{}{}{:0<padded_text_len$}",
+        resolution_left_pad_hex("40", 64),
+        resolution_padded_address_hex("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"),
+        resolution_left_pad_hex(&format!("{inner_length:x}"), 64),
+        resolution_left_pad_hex("20", 64),
+        resolution_left_pad_hex(&format!("{:x}", text.len()), 64),
+        text_hex,
+    ))
+}
+
+fn resolution_resolver_not_found_error(name: &[u8]) -> Value {
+    let selector = format!(
+        "{:#x}",
+        alloy_primitives::keccak256("ResolverNotFound(bytes)")
+    );
+    let name_hex = hex::encode(name);
+    let padded_name_len = name_hex.len().div_ceil(64) * 64;
+    json!({
+        "__rpc_error": {
+            "code": -32000,
+            "message": "execution reverted",
+            "data": {
+                "originalError": {
+                    "data": format!(
+                        "0x{}{}{}{:0<padded_name_len$}",
+                        &selector[2..10],
+                        resolution_left_pad_hex("20", 64),
+                        resolution_left_pad_hex(&format!("{:x}", name.len()), 64),
+                        name_hex,
+                    )
+                }
+            }
+        }
+    })
+}
+
+fn resolution_universal_resolver_multicoin_response(address: &str) -> Value {
+    let stripped = address
+        .strip_prefix("0x")
+        .expect("test address must be 0x-prefixed");
+    assert_eq!(stripped.len(), 40, "test address must be 20 bytes");
+    json!(format!(
+        "0x{}{}{}{}{}{}",
+        resolution_left_pad_hex("40", 64),
+        resolution_padded_address_hex("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"),
+        resolution_left_pad_hex("60", 64),
+        resolution_left_pad_hex("20", 64),
+        resolution_left_pad_hex("14", 64),
+        format!("{stripped:0<64}"),
     ))
 }
 

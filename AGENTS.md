@@ -26,6 +26,13 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
   that keep older observations from reopening retired authority. Those
   resolver references, retired address ranges, and decode-failure diagnostics
   are coordination or diagnostic state, not projection or serving data.
+  At a completed pass boundary, Interpret also owns the
+  [`discovery_watch_admissions` coordination snapshot](docs/glossary.md#discovery-watch-admission-snapshot)
+  and may atomically install
+  required Ingest work through the shared `chain_phase_state` installer when
+  newly discovered physical watch coverage overlaps retained intake history.
+  The snapshot is not a work queue: `chain_phase_state` remains the sole
+  work/redo authority.
   Adapters provide interpretation behavior and do not write projection rows.
 - API code reads phase projections, normalized events, and request-scoped lookup
   output only, except explicit audit endpoints and the schema-v2 lookup engine's
@@ -42,14 +49,19 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. Agents read from the pinned checkouts; they do not guess or paraphrase upstream behavior from memory.
 
 - `.refs/ens_v1/` — canonical ENSv1 Solidity
+- `.refs/ens_v1_mainnet_1a2ac5c/` — historical deployment ABI evidence for the admitted `0x231b0Ee…` Mainnet PublicResolver generation only
+- `.refs/ens_v1_sepolia_8209157/` — historical deployment ABI evidence for the admitted `0x8948458…` Sepolia PublicResolver generation only
+- `.refs/ens_v1_sepolia_ac32490/` — historical deployment ABI evidence for the admitted `0x8FADE66…` Sepolia PublicResolver generation only
 - `.refs/ens_v1_lll/` — historical evidence for the 2017 LLL registry only
 - `.refs/ens_v2/` — canonical post-audit ENSv2 contracts; admitted Sepolia deployment evidence is the archived 2026-06-29 artifacts under `contracts/deployments/sepolia-20260629-r1/` (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/.deployment.json:L4 @ ens_v2@a971bd64); the live `contracts/deployments/sepolia/` tree is upstream's unadmitted 2026-07-30 redeploy (upstream: .refs/ens_v2/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2@a971bd64)
+- `.refs/ens_v2_sepolia_20260629/` — historical Solidity evidence for the admitted 2026-06-29 old-model Sepolia deployment only; it is not authority for future deployments or current-model admission
 - `.refs/ens_v2_sepolia_dev/` — historical evidence for deprecated pre-audit `sepolia-dev` manifest versions only
 - `.refs/basenames/` — canonical Basenames Solidity
 - `.refs/ens_rainbow/` — Graph Protocol ENS rainbow-table tooling, labelhash preimage import table-shape evidence only
 - `.refs/ens_subgraph/`, `.refs/ensnode/` — reference indexers for cross-check only
 - `.refs/ens_app_v3/` — ENS app known-resolver metadata for first-party app admission rows only
-- `.refs/ponder/`, `.refs/graph_node/` — reference indexers for chain-intake cross-check only
+- `.refs/ponder/` — reference indexer for chain-intake cross-check only
+- `.refs/graph_node/` — reference indexer for chain-intake and subgraph GraphQL convention cross-check only
 - `.refs/reth/` — reference Ethereum execution client for node-level chain-intake cross-check only
 
 Pins live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`; verify with `scripts/sync-refs --check`. Rotation policy and known divergences live in `docs/upstream.md`.

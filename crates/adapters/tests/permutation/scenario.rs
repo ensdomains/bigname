@@ -50,8 +50,7 @@ pub struct Emission {
 /// something an earlier stage had to create, so the repair orders them. Nothing is ordered *between*
 /// subjects: names are independent on chain, and that interleaving is the permutation value.
 pub mod stage {
-    /// A registry announcing itself, emitted from its constructor (upstream:
-    /// .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58).
+    /// A registry announcing itself, emitted from its constructor (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64).
     pub const ANNOUNCE: u8 = 0;
     /// A label registration — the root's own `.eth`, or a name's.
     pub const REGISTER: u8 = 1;
@@ -60,13 +59,11 @@ pub mod stage {
     /// Control handoffs over that identity: registrar and registry ownership transfers.
     pub const CONTROL: u8 = 3;
     /// Pointers hung off the token: subregistry, resolver, parent claims, wrapping. `setSubregistry`
-    /// needs the token to exist (upstream:
-    /// .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L147 @ ens_v2@ccaeb58).
+    /// needs the token to exist (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L147 @ ens_v2@a971bd64).
     pub const LINK: u8 = 4;
     /// The registrar's own `NameRegistered`, which upstream emits after the registry call returns —
     /// so after that call's `LabelRegistered`, `TokenResource`, `SubregistryUpdated` and
-    /// `ResolverUpdated` (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151-L170
-    /// and .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L476 @ ens_v2@ccaeb58).
+    /// `ResolverUpdated` (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467-L479 @ ens_v2@a971bd64).
     pub const REGISTRAR: u8 = 5;
     /// Writes that need the pointer: records, permissions, expiry and renewal, wrapper mutation.
     pub const WRITE: u8 = 6;

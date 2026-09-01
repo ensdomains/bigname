@@ -652,6 +652,363 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
 }
 
 #[test]
+fn checked_in_approval_intake_inventory_is_exact_and_raw_only() -> Result<()> {
+    let approval =
+        "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)";
+    let approval_for_all =
+        "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)";
+    let approved = "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)";
+    let expected = [
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_registry_l1/v3.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['a'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_registry_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['b'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_registrar_l1/v1.toml",
+            "Approval",
+            approval,
+            &['c'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_registrar_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['c'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_registrar_l1/v1.toml",
+            "Approval",
+            approval,
+            &['c'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_registrar_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['c'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_resolver_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['d'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_resolver_l1/v1.toml",
+            "Approved",
+            approved,
+            &['d'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_resolver_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['e'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_resolver_l1/v1.toml",
+            "Approved",
+            approved,
+            &['e'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['f'][..],
+        ),
+        (
+            "mainnet",
+            "ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+            "Approval",
+            approval,
+            &['f'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['f'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+            "Approval",
+            approval,
+            &['f'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_registry/v2.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['g'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_registrar/v1.toml",
+            "Approval",
+            approval,
+            &['c'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_registrar/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['c'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_resolver/v1.toml",
+            "ApprovalForAll",
+            approval_for_all,
+            &['h'][..],
+        ),
+        (
+            "mainnet",
+            "base/basenames/basenames_base_resolver/v1.toml",
+            "Approved",
+            approved,
+            &['h'][..],
+        ),
+    ];
+    let role_sets = std::collections::BTreeMap::from([
+        ('a', &["registry"][..]),
+        ('b', &["registry", "registry_old"][..]),
+        ('c', &["registrar"][..]),
+        ('d', &["public_resolver", "public_resolver_231b0ee"][..]),
+        (
+            'e',
+            &[
+                "public_resolver",
+                "public_resolver_8948458",
+                "public_resolver_8fade66",
+            ][..],
+        ),
+        ('f', &["name_wrapper"][..]),
+        ('g', &["registry"][..]),
+        ('h', &["resolver"][..]),
+    ]);
+    let repositories = std::collections::BTreeMap::from([
+        (
+            "mainnet",
+            load_repository(checked_in_manifest_root("manifests/mainnet"))?,
+        ),
+        (
+            "sepolia",
+            load_repository(checked_in_manifest_root("manifests/sepolia"))?,
+        ),
+    ]);
+
+    for (profile, path, name, fragment, role_key) in expected {
+        let manifest = repositories[profile]
+            .manifests()
+            .iter()
+            .find(|loaded| loaded.relative_path == std::path::Path::new(path))
+            .unwrap_or_else(|| panic!("missing {profile} manifest {path}"));
+        assert_eq!(
+            manifest.manifest.normalizer_version,
+            "ensip15@ens-normalize-0.1.1"
+        );
+        let event = manifest
+            .manifest
+            .abi
+            .events
+            .iter()
+            .find(|event| event.name == name)
+            .unwrap_or_else(|| panic!("missing {name} in {path}"));
+        assert_eq!(event.fragment, fragment, "wrong ABI shape in {path}");
+        assert_eq!(
+            event.emitter_roles, role_sets[&role_key[0]],
+            "wrong approval emitter roles in {path}"
+        );
+        assert!(
+            event.normalized_events.is_empty(),
+            "{path} {name} must remain raw-only"
+        );
+    }
+
+    let declared = repositories
+        .values()
+        .flat_map(|repository| repository.manifests())
+        .flat_map(|loaded| &loaded.manifest.abi.events)
+        .filter(|event| {
+            matches!(
+                event.name.as_str(),
+                "Approval" | "ApprovalForAll" | "Approved"
+            )
+        })
+        .count();
+    assert_eq!(
+        declared, 19,
+        "approval declaration inventory must stay exact"
+    );
+    Ok(())
+}
+
+#[test]
+fn checked_in_resolver_read_features_are_generation_scoped() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let ens = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
+        .expect("ENSv1 resolver manifest");
+    let flagged = ens
+        .manifest
+        .contracts
+        .iter()
+        .filter(|contract| !contract.read_features.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0].role, "public_resolver");
+    assert_eq!(
+        flagged[0].read_features,
+        vec![ResolverReadFeature::Ensip19DefaultAddress]
+    );
+
+    let basenames = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "basenames_base_resolver")
+        .expect("Basenames resolver manifest");
+    assert!(
+        basenames.manifest.contracts[0].read_features.is_empty(),
+        "the admitted legacy Basenames resolver must not authorize ENSIP-19 fallback"
+    );
+
+    let sepolia = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let resolver = sepolia
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
+        .expect("Sepolia ENSv1 resolver manifest");
+    let flagged = resolver
+        .manifest
+        .contracts
+        .iter()
+        .filter(|contract| !contract.read_features.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0].role, "public_resolver");
+    assert_eq!(
+        normalize_address(&flagged[0].address),
+        "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5"
+    );
+    assert_eq!(
+        flagged[0].read_features,
+        vec![ResolverReadFeature::Ensip19DefaultAddress]
+    );
+    assert!(
+        resolver
+            .manifest
+            .contracts
+            .iter()
+            .filter(|contract| contract.role != "public_resolver")
+            .all(|contract| contract.read_features.is_empty()),
+        "only the latest Sepolia resolver generation supports ENSIP-19 fallback"
+    );
+    Ok(())
+}
+
+#[test]
+fn checked_in_archived_sepolia_permissioned_resolver_has_ensip19_fallback() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let resolver = repository
+        .manifests()
+        .iter()
+        .find(|loaded| {
+            loaded.manifest.source_family == "ens_v2_resolver_l1"
+                && loaded.manifest.deployment_epoch == "ens_v2_sepolia_post_audit"
+        })
+        .expect("active archived-Sepolia ENSv2 resolver manifest");
+    assert_eq!(
+        resolver.manifest.resolver_implementations[0].read_features,
+        vec![ResolverReadFeature::Ensip19DefaultAddress]
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_rejects_invalid_resolver_read_feature_declarations() -> Result<()> {
+    let direct_resolver = manifest_contents()
+        .replace("role = \"registry\"", "role = \"resolver\"")
+        .replace("proxy_kind = \"erc1967\"", "proxy_kind = \"none\"")
+        .replace(
+            "start_block = 23456",
+            "read_features = [\"ensip19_default_address\", \"ensip19_default_address\"]\nstart_block = 23456",
+        );
+    let error = load_one(&direct_resolver).expect_err("duplicate read features must fail");
+    assert!(format!("{error:#}").contains("duplicates read feature"));
+
+    let proxy = direct_resolver
+        .replace("proxy_kind = \"none\"", "proxy_kind = \"erc1967\"")
+        .replace(
+            "[\"ensip19_default_address\", \"ensip19_default_address\"]",
+            "[\"ensip19_default_address\"]",
+        );
+    let error = load_one(&proxy).expect_err("proxy-level read features must fail");
+    assert!(format!("{error:#}").contains("resolver_implementations"));
+
+    let unknown = direct_resolver.replace(
+        "[\"ensip19_default_address\", \"ensip19_default_address\"]",
+        "[\"unknown_read_feature\"]",
+    );
+    let error = load_one(&unknown).expect_err("unknown read features must fail");
+    assert!(format!("{error:#}").contains("unknown variant"));
+
+    let mixed_implementation_family = direct_resolver.replace(
+        "[\"ensip19_default_address\", \"ensip19_default_address\"]",
+        "[\"ensip19_default_address\"]",
+    );
+    let error = load_one(&mixed_implementation_family)
+        .expect_err("implementation families must reject contract-level read features");
+    assert!(format!("{error:#}").contains("implementation family"));
+
+    let conflicting_same_address = manifest_contents()
+        .replace(
+            "resolver_implementations = [\n  { role = \"permissioned_resolver\", address = \"0x00000000000000000000000000000000000000CC\" },\n]\n",
+            "",
+        )
+        .replace("role = \"registry\"", "role = \"resolver\"")
+        .replace("emitter_roles = [\"registry\"]", "emitter_roles = [\"resolver\"]")
+        .replace("from_role = \"registry\"", "from_role = \"resolver\"")
+        .replace("proxy_kind = \"erc1967\"", "proxy_kind = \"none\"")
+        .replace(
+            "start_block = 23456",
+            "read_features = [\"ensip19_default_address\"]\nstart_block = 23456\n\n[[contracts]]\nrole = \"a_registry\"\naddress = \"0x00000000000000000000000000000000000000aa\"\nproxy_kind = \"none\"\nstart_block = 23456",
+        );
+    let error = load_one(&conflicting_same_address)
+        .expect_err("same-address direct resolver declarations must agree on read features");
+    assert!(
+        format!("{error:#}").contains("same address"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn sepolia_ensv1_to_ensv2_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
     let migration = repository
@@ -732,12 +1089,12 @@ fn mainnet_registrar_family_pins_the_base_registrar_event_surface() -> Result<()
     Ok(())
 }
 
-/// Sepolia admits the ENSv1 registry, registrar, and wrapper manifests consumed by
-/// `ens_v2_migration_l1` ENSv1→ENSv2 migration correlation. BaseRegistrar raw logs belong only to
-/// `ens_v1_registrar_l1`; the `ens_v2_migration_l1` manifest keeps the address as correlation
-/// metadata.
+/// Sepolia admits the ENSv1 registry, registrar, wrapper, and resolver manifests. The migration
+/// family consumes only its declared cross-family correlation inputs; resolver events remain
+/// owned by `ens_v1_resolver_l1`. BaseRegistrar raw logs belong only to `ens_v1_registrar_l1`, and
+/// the `ens_v2_migration_l1` manifest keeps that address as correlation metadata.
 #[test]
-fn sepolia_manifests_admit_the_ens_v1_registry_registrar_and_wrapper_families() -> Result<()> {
+fn sepolia_manifests_admit_all_four_ens_v1_families() -> Result<()> {
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
     let family = |name: &str| {
         repository
@@ -823,6 +1180,66 @@ fn sepolia_manifests_admit_the_ens_v1_registry_registrar_and_wrapper_families() 
         normalize_address(&registrar.contracts[0].address),
     );
 
+    let resolver = family("ens_v1_resolver_l1").expect("Sepolia ENSv1 resolver family");
+    assert_eq!(resolver.chain, "ethereum-sepolia");
+    assert!(resolver.rollout_status.is_active());
+    assert_eq!(resolver.deployment_epoch, "ens_v1");
+    assert_eq!(resolver.normalizer_version, "ensip15@ens-normalize-0.1.1");
+    assert!(resolver.roots.is_empty());
+    assert!(resolver.discovery_rules.is_empty());
+    assert!(resolver.capability_flags.is_empty());
+    let resolver_contracts = resolver
+        .contracts
+        .iter()
+        .map(|contract| {
+            (
+                contract.role.as_str(),
+                (
+                    normalize_address(&contract.address),
+                    contract.proxy_kind.as_str(),
+                    contract.start_block,
+                ),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        resolver_contracts,
+        std::collections::BTreeMap::from([
+            (
+                "public_resolver",
+                (
+                    "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5".to_owned(),
+                    "none",
+                    Some(8_580_001),
+                ),
+            ),
+            (
+                "public_resolver_0ceec52",
+                (
+                    "0x0ceec524b2807841739d3b5e161f5bf1430ffa48".to_owned(),
+                    "none",
+                    Some(3_790_166),
+                ),
+            ),
+            (
+                "public_resolver_8948458",
+                (
+                    "0x8948458626811dd0c23eb25cc74291247077cc51".to_owned(),
+                    "none",
+                    Some(0),
+                ),
+            ),
+            (
+                "public_resolver_8fade66",
+                (
+                    "0x8fade66b79cc9f707ab26799354482eb93a5b7dd".to_owned(),
+                    "none",
+                    Some(0),
+                ),
+            ),
+        ])
+    );
+
     // Both cleanup branches a migrated child can take must be ingestible: the wrapper token parked
     // in the Graveyard, and the node unwrapped into it.
     let wrapper_events = wrapper
@@ -841,7 +1258,7 @@ fn sepolia_manifests_admit_the_ens_v1_registry_registrar_and_wrapper_families() 
     Ok(())
 }
 
-/// The declared surface of the three Sepolia ENSv1 manifests, pinned across the fields that
+/// The declared surface of the four Sepolia ENSv1 manifests, pinned across the fields that
 /// decide what gets ingested. The admission test above covers contracts, addresses, chain, and
 /// rollout status; this one covers the event surface, capability flags, deployment epoch, and
 /// roots, so that deleting an event block, widening a fragment type, dropping a normalized event,
@@ -913,6 +1330,13 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
         event_surface(registry),
         vec![
             (
+                "ApprovalForAll".to_owned(),
+                "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+                    .to_owned(),
+                registry_emitters.to_owned(),
+                String::new(),
+            ),
+            (
                 "NewOwner".to_owned(),
                 "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
                     .to_owned(),
@@ -953,6 +1377,20 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
     assert_eq!(
         event_surface(wrapper),
         vec![
+            (
+                "Approval".to_owned(),
+                "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                String::new(),
+            ),
+            (
+                "ApprovalForAll".to_owned(),
+                "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+                    .to_owned(),
+                "name_wrapper".to_owned(),
+                String::new(),
+            ),
             (
                 "ExpiryExtended".to_owned(),
                 "event ExpiryExtended(bytes32 indexed node, uint64 expiry)".to_owned(),
@@ -1021,6 +1459,8 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
     assert_eq!(
         registrar_surface,
         [
+            "Approval|event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)|registrar|",
+            "ApprovalForAll|event ApprovalForAll(address indexed owner, address indexed operator, bool approved)|registrar|",
             "ControllerAdded|event ControllerAdded(address indexed controller)|registrar|PermissionChanged",
             "ControllerRemoved|event ControllerRemoved(address indexed controller)|registrar|PermissionChanged",
             "NameRegistered|event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)|registrar|RegistrationReleased",
@@ -1028,6 +1468,74 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
             "Transfer|event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)|registrar|TokenControlTransferred,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
         ]
     );
+
+    let resolver = family("ens_v1_resolver_l1");
+    let mainnet_repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let mainnet_resolver = mainnet_repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v1_resolver_l1")
+        .map(|loaded| &loaded.manifest)
+        .expect("Mainnet ENSv1 resolver family");
+    let generic_resolver_surface = |manifest: &SourceManifest| {
+        event_surface(manifest)
+            .into_iter()
+            .filter(|(name, _, _, _)| name != "ApprovalForAll" && name != "Approved")
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        generic_resolver_surface(resolver),
+        generic_resolver_surface(mainnet_resolver)
+    );
+    assert!(
+        resolver
+            .abi
+            .events
+            .iter()
+            .filter(|event| event.name != "ApprovalForAll" && event.name != "Approved")
+            .all(|event| event.emitter_roles.is_empty() && event.status.is_none())
+    );
+
+    let v1_addresses = resolver
+        .contracts
+        .iter()
+        .map(|contract| normalize_address(&contract.address))
+        .collect::<std::collections::BTreeSet<_>>();
+    let v2 = repository
+        .manifests()
+        .iter()
+        .filter(|loaded| loaded.manifest.source_family == "ens_v2_resolver_l1")
+        .max_by_key(|loaded| loaded.manifest.manifest_version)
+        .map(|loaded| &loaded.manifest)
+        .expect("selected Sepolia ENSv2 resolver family");
+    let v2_addresses = v2
+        .contracts
+        .iter()
+        .map(|contract| normalize_address(&contract.address))
+        .chain(v2.roots.iter().map(|root| normalize_address(&root.address)))
+        .chain(
+            v2.resolver_implementations
+                .iter()
+                .map(|implementation| normalize_address(&implementation.address)),
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(v1_addresses.is_disjoint(&v2_addresses));
+    assert_eq!(
+        v2.resolver_implementations
+            .iter()
+            .map(|implementation| {
+                (
+                    implementation.role.as_str(),
+                    normalize_address(&implementation.address),
+                )
+            })
+            .collect::<Vec<_>>(),
+        [(
+            "permissioned_resolver",
+            "0x7e4b2d59938930168024201752ee5503df402303".to_owned(),
+        )]
+    );
+    assert!(v2.contracts.is_empty());
     Ok(())
 }
 

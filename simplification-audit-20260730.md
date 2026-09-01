@@ -198,8 +198,7 @@ semantics). No per-address discovery backfill exists as a concept.
 - v1 resolvers: match-all on the ENS-unique resolver event signatures
   (any address may be a resolver; no announcement exists).
 - v2 registries: match-all on `RegistryCreated` (first event in the
-  constructor — upstream: .refs/ens_v2/contracts/src/registry/
-  PermissionedRegistry.sol:L112 @ ens_v2@ccaeb58b); after announcement the
+  constructor — (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L112 @ ens_v2@a971bd64); after announcement the
   address is indexed address-scoped from its creation block. Linkage to a
   parent decides *authority*, never *indexability*.
 - v2 resolvers: announced via registries' `ResolverUpdated`; unique

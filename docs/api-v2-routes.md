@@ -434,7 +434,13 @@ Field ownership:
   record-key allowlist using the existing app key grammar: `addr:<coin_type>`,
   `text:<key>`, `avatar`, and `contenthash`. Requested-key outcomes are also
   returned in route-local `records`, keyed by the requested key; each value is
-  `{status, value?, unsupported_reason?, failure_reason?}`. `source=verified`
+  `{status, value?, unsupported_reason?, failure_reason?, meta?}`. Exact indexed
+  and verified answers omit `meta`. An indexed ENSIP-19 answer derived from the
+  projected default-address rule includes
+  `meta={basis:"derived", rule:"ensip19_default_address",
+  source_record_key:"addr:2147483648"}` for both `ok` and authoritative
+  `not_found`. Values-only convenience maps continue to contain only values.
+  `source=verified`
   and verified fallback from `source=auto` execute a fresh schema-v2 lookup on
   every request. They do not read or write the legacy execution cache. A direct
   live/indexed disagreement may update the guarded resolution divergence
@@ -457,9 +463,67 @@ Field ownership:
   `record_family_not_supported`.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
-  lookup. An indexed answer — including an indexed `not_found` — is admitted
-  only from a record inventory whose coverage carries no unsupported reason and
-  whose coverage `status` is `full` or `projected`. `projected` is admitted
+  lookup. [Universal Resolver ancestor
+  discovery](glossary.md#universal-resolver-ancestor-discovery) applies when a
+  readable ENS name on Ethereum Mainnet has a null projected exact resolver, a
+  projected name identity and DNS wire name, no alias, linked-subregistry,
+  projected wildcard, or cross-chain transport path, and an admitted Universal
+  Resolver manifest entrypoint. This makes the indexed null-resolver miss
+  unsatisfying. `source=auto` therefore executes the requested
+  keys through verified lookup, and `source=verified` uses the same route. The
+  Universal Resolver walks to the nearest nonzero ancestor resolver and accepts
+  an ancestor only when it implements ENSIP-10
+  `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
+  `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f)`.
+  These responses use `meta.source=verified`; `data.resolver` remains null
+  because it reports the exact registry resolver, not the ancestor used during
+  live execution. `ResolverNotFound(bytes)` is a chain-proven per-key
+  `not_found` with `failure_reason=resolver_not_found` only when its embedded
+  DNS name equals the request name; it covers both no resolver and a nearest
+  non-extended ancestor. Other reverts remain failed. Every successfully
+  decoded call for one name and block must return the same effective resolver.
+  A `ResolverNotFound` outcome cannot coexist with a successfully decoded
+  effective resolver; either inconsistency fails the request closed. Ordinary
+  selector-local failed or unsupported results remain mixed per key. This route
+  has no indexed comparison: success and
+  live `not_found` write and clear no divergence rows, while CCIP-required
+  answers remain `unsupported` with `offchain_lookup_required` and likewise
+  write nothing. ENS continues not to follow CCIP-Read. Basenames and other
+  chains and namespaces do not enter this route. Outside this
+  null-exact-resolver class, exact indexed `ok` answers and authoritative
+  ENSIP-19 derived answers satisfy auto without a provider request. Within this
+  class, all requested keys execute through verified lookup because retained
+  exact inventory predates the resolver-clear boundary. If no admitted
+  Universal Resolver entrypoint is available at execution time, the requested
+  keys are explicitly `unsupported`; auto never turns that inability to execute
+  into an indexed null-resolver `not_found`. For
+  `addr:<coin_type>`, exact `ok`
+  wins. An exact entry normalized to `not_found`, including empty address
+  bytes, or a missing exact entry may read projected
+  `addr:2147483648` only when the selected resolver's manifest-authorized
+  [resolver read feature](glossary.md#resolver-read-feature) is present and
+  `chainFromCoinType(coin_type) > 0`; coin type `2147483648` itself never
+  recurses. A derived answer is normalized through the requested getter's
+  verified decode: for coin type `60`, a 20-byte zero default becomes derived
+  `not_found`; for EVM-range multicoin selectors, the same non-empty bytes remain
+  an `ok` value. Exact stored records keep their existing behavior. Other
+  default-source `ok` values yield the requested-key value, while authoritative
+  absence yields derived `not_found`. An unsupported or
+  non-authoritative source leaves auto unsatisfied and triggers ordinary
+  verified lookup. Explicit `source=indexed` reports that case as
+  `unsupported`.
+  (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
+  The admitted legacy Basenames resolver is unflagged because its exact-storage
+  getter does not implement that fallback. The fallback-bearing upgradeable
+  Basenames resolver proxy is not yet admitted.
+  (upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)
+  (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)
+  A non-derived indexed `not_found` is admitted only from a record inventory
+  whose coverage carries no unsupported reason and whose coverage `status` is
+  `full` or `projected`. `projected` is admitted
   because a supported schema-v2 inventory is complete for its current resolver
   over retained supported facts: the project phase includes both record events
   already linked to the name and ENSv1 resolver events whose `logical_name_id`
@@ -484,12 +548,14 @@ Field ownership:
   Node-keyed `ens_v1_resolver_l1` records written before the name surface
   existed enter that attributable history only when the selected pointer's
   source family is `ens_v1_registry_l1`, `ens_v1_registrar_l1`, or
-  `ens_v1_wrapper_l1`. For a name reached through an ENSv2-family or Basenames
-  pointer, those records are not attributed and currently read as authoritative
-  `not_found` with `coverage.status=projected`; whether cross-family history
-  should instead be attributed or receive a distinct coverage signal is
-  deliberately unresolved in
-  [#621](https://github.com/ensdomains/bigname/issues/621).
+  `ens_v1_wrapper_l1`. A selected `ens_v2_registry_l1` or `ens_v2_root_l1`
+  pointer may also admit them when its target resolver's final classification
+  is supported `ens_v1_resolver_l1` from an applicable exact declaration and
+  the classifying manifest's namespace matches the pointer's namespace. Under
+  that guard, absence from the projected inventory is authoritative
+  `not_found`. Other ENSv2-family pointers and Basenames pointers do not
+  attribute this node-keyed history; the Basenames question remains unresolved
+  in [#621](https://github.com/ensdomains/bigname/issues/621).
   An inventory in any other coverage state is not authoritative, and the
   request falls through to verified lookup or an explicit unsupported answer
   rather than reporting absence from the index as absence on chain.
@@ -501,9 +567,11 @@ Field ownership:
   Explicit `keys` and the inventory-derived default verified selector set are
   both limited to 200 record keys. When omitted `keys` would derive more than
   200 keys, `source=verified` returns `422 unsupported` before any provider call;
-  callers can supply `keys` to select a smaller set. The verified flat
-  name-profile has the same 200-key server-derived limit and returns `422
-  unsupported` because that route has no key selector.
+  callers can supply `keys` to select a smaller set. For the verified flat
+  name-profile, the limit applies to inventory-derived selectors before the
+  route adds its synthetic primary-address request. A 200-selector inventory
+  may therefore produce 201 provider keys when `addr:60` was absent; an
+  inventory with more than 200 selectors still returns `422 unsupported`.
   `include=inventory` adds route-local
   `inventory: {known_keys, unset_keys, unsupported_keys}`. Deep inventory
   internals stay on diagnostics.
@@ -535,6 +603,14 @@ Field ownership:
   `status=unsupported` with `inventory_not_available`. `source=auto` follows
   its ordinary verified-lookup fallback rules when that execution path is
   available.
+  Direct verified lookup compares against the same exact-or-derived indexed
+  evaluator before the guarded resolution-divergence-ledger write. Agreement
+  can therefore clear an older exact-key false miss; provider output remains
+  request-scoped and is never copied into inventory or another projection.
+  When projection changes a formerly direct resolver to null, projection
+  publication retires active observations for that old direct resolver as stale
+  evidence. This cleanup does not compare a live ancestor-served answer with the
+  former indexed miss and is not a wildcard divergence write.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 
@@ -699,17 +775,29 @@ Field ownership:
   request-wide immutable projection generation; current-state generation changes
   do not produce `409 stale`. When `name` or `registration_id` binds the read to a
   registration, the projection-owned
-  per-registration permission summary classifies the result: full support adds
-  no completeness metadata, missing or partial support returns
-  `meta.completeness=partial` with
-  `unsupported_reason=permission_support_unknown`, and an ENSv1 wrapper returns
-  `meta.completeness=unsupported` with
-  `unsupported_reason=wrapper_holder_permissions_not_supported`. An
-  address-only read is always at least `partial` with the wrapper reason because
-  zero-row wrapper registrations are absent from the permission-row fan-out; a
-  missing or partial summary for a returned registration changes the reason to
-  `permission_support_unknown`. Projected rows are not suppressed by these
-  classifications. A `name` filter
+  per-registration permission summary classifies the result. Independently
+  proven full support adds no completeness metadata. A non-wrapper resource
+  whose standard operator, token-approval, or resolver-delegation paths are not
+  indexed returns `meta.completeness=partial` with
+  `unsupported_reason=approval_and_delegation_permissions_not_supported`.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) A
+  wrapper-only resource returns `meta.completeness=unsupported` with
+  `unsupported_reason=wrapper_holder_permissions_not_supported`. Missing or
+  unrecognized summary metadata returns `meta.completeness=partial` with
+  `unsupported_reason=permission_support_unknown` and takes precedence. A mixed
+  wrapper/non-wrapper request uses the approval/delegation partial reason. An
+  address-only read is always at least `partial` with the approval/delegation
+  reason, including for zero rows, unless missing or unrecognized summary
+  metadata wins. Returned rows do not define the request denominator: zero rows
+  do not prove that no account can mutate the selected name or registration.
+  Projected rows are not suppressed by these classifications and remain useful,
+  but neither the page nor a role summary is an authoritative permission
+  enumeration while the partial marker is present. NameWrapper holder
+  enumeration remains separately unsupported, and ENSv2 registry operator
+  approval remains separately narrowed until indexed.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
   retained historical ENSv1 registration for audit. Every
@@ -798,15 +886,19 @@ Field ownership:
   does not claim a request-wide immutable projection generation, and current-state
   generation changes do not produce `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
-  registration on the served page. If all are full, no completeness metadata is
-  added. A missing or partial summary returns `meta.completeness=partial`,
+  registration on the served page. If all are independently proven full, no
+  completeness metadata is added. A non-wrapper approval/delegation limitation
+  returns `meta.completeness=partial`,
   `meta.unsupported_fields=["role_summary"]`, and
-  `unsupported_reason=permission_support_unknown`. An ENSv1 wrapper summary
-  uses the same `partial` response classification and unsupported field with
+  `unsupported_reason=approval_and_delegation_permissions_not_supported`. An
+  ENSv1 wrapper-only summary uses the same `partial` response classification and
+  unsupported field with
   `unsupported_reason=wrapper_holder_permissions_not_supported`. Projected
   grants remain in `role_summary`, but the expansion is non-authoritative;
-  therefore an empty wrapper summary is not a proven empty permission set.
-  Missing summary metadata takes precedence when a page contains both cases.
+  therefore an empty summary is not a proven empty permission set. A mixed
+  wrapper/non-wrapper page uses the approval/delegation reason. Missing or
+  unrecognized summary metadata takes precedence and uses
+  `permission_support_unknown`.
   Current address relations and
   `role_summary` are built only from the selected registration. A migrated
   name therefore stops relating its superseded ENSv1 holder or controller to
@@ -905,15 +997,15 @@ Field ownership:
   entrypoint; the Sepolia evidence below explains its projected authority and
   the expected ENSv1-path behavior, not an active Sepolia verified route. An
   unwrapped ENSv1→ENSv2 migration clears the migrated node's ENSv1 resolver
-  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@ccaeb58)`,
+  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@a971bd64)`,
   an unlocked wrapped ENSv1→ENSv2 migration does the same
-  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2@ccaeb58)`,
+  `(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2@a971bd64)`,
   and the locked path clears it when the name permits that change
-  `(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L135-L144 @ ens_v2@ccaeb58)`.
+  `(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L135-L144 @ ens_v2_sepolia_20260629@ccaeb58)`.
   The deployment script installs the ENSv2-backed wildcard resolver at the
   ENSv1 `eth` node
-  `(upstream: .refs/ens_v2/contracts/deploy/00_ENSV2Resolver.ts:L60-L81 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L14 @ ens_v2@ccaeb58)`.
+  `(upstream: .refs/ens_v2_sepolia_20260629/contracts/deploy/00_ENSV2Resolver.ts:L60-L81 @ ens_v2_sepolia_20260629@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L14 @ ens_v2@a971bd64)`.
   The ENSv1 Universal Resolver walks up to an ancestor resolver
   `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
   and accepts that resolver through ENSIP-10
@@ -922,14 +1014,14 @@ Field ownership:
   prove that path directly; the end-to-end suite defines the shared ENSv1 and
   ENSv2 resolution check and invokes it before and after ENSv1→ENSv2 migration
   of unwrapped, unlocked wrapped, and locked names
-  `(upstream: .refs/ens_v2/contracts/test/integration/ENSV2Resolver.test.ts:L94-L124 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L133-L147 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L451-L455 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L543-L550 @ ens_v2@ccaeb58)`
-  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L603-L610 @ ens_v2@ccaeb58)`.
+  `(upstream: .refs/ens_v2_sepolia_20260629/contracts/test/integration/ENSV2Resolver.test.ts:L94-L124 @ ens_v2_sepolia_20260629@ccaeb58)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L133-L147 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L454-L458 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L546-L553 @ ens_v2@a971bd64)`
+  `(upstream: .refs/ens_v2/contracts/test/e2e/migration.test.ts:L606-L613 @ ens_v2@a971bd64)`.
   The `eth`-node redirect is scripted intent plus a deployed Sepolia resolver in
   the pinned checkout
-  `(upstream: .refs/ens_v2/contracts/deployments/sepolia/ENSV2Resolver.json:L2 @ ens_v2@ccaeb58)`;
+  `(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ENSV2Resolver.json:L2 @ ens_v2@a971bd64)`;
   the [`ens_v2` pin](../.refs/MANIFEST.toml) is scoped to the admitted
   2026-06-29 Sepolia deployment's archived evidence (upstream's 2026-07-30
   redeploy is not admitted) and does not establish a Mainnet redirect
@@ -941,7 +1033,7 @@ Field ownership:
   ENSv1→ENSv2 migration cannot clear it. When that entry names a listed
   PublicResolver, the ENSv1 side continues to serve its retained records while
   ENSv2 selects the replacement resolver
-  `(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L137-L175 @ ens_v2@ccaeb58)`.
+  `(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L137-L175 @ ens_v2_sepolia_20260629@ccaeb58)`.
   The ENSv1 PublicResolver derives ordinary write authority from the registry or
   wrapped token owner and their approvals, while separately authorizing its
   trusted ETH controller and reverse registrar
@@ -1148,7 +1240,7 @@ Field ownership:
   `/v2/events` or product-history response; only slice 2 changes visibility.
   The shared visibility predicate runs before keyset pagination, page-size
   limiting, cursor construction, and product-type mapping.
-  (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L228 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L229 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L161 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L163 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L28 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L226 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L160 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L162 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L169 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64)
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: event rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot

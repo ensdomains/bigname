@@ -31,6 +31,7 @@ pub(crate) async fn prepare(
             })?;
     }
     create_manifests(transaction, chain_id, target.number).await?;
+    create_declared_resolver_addresses(transaction, target.number).await?;
     Ok(())
 }
 
@@ -99,6 +100,54 @@ async fn create_manifests(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to stage admitted manifest events", error))?;
+    Ok(())
+}
+
+async fn create_declared_resolver_addresses(
+    transaction: &mut Transaction<'_, Postgres>,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        "CREATE TEMP TABLE project_declared_resolver_addresses ON COMMIT DROP AS
+         SELECT manifest.namespace,
+                manifest.source_family,
+                lower(declaration ->> 'address') AS resolver_address,
+                declaration ->> 'role' AS classification_role,
+                (declaration ->> 'start_block')::bigint AS declaration_start_block,
+                declaration_ordinality AS classification_declaration_ordinality,
+                manifest.manifest_id,
+                manifest.manifest_version,
+                manifest.manifest_event_id
+         FROM project_manifests manifest
+         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
+             manifest.manifest_payload -> 'contracts', '[]'::jsonb
+         )) WITH ORDINALITY declarations(declaration, declaration_ordinality)
+         WHERE manifest.source_family = 'ens_v1_resolver_l1'
+           AND declaration ->> 'address' IS NOT NULL
+           AND btrim(declaration ->> 'address') <> ''
+           AND lower(declaration ->> 'address') <>
+               '0x0000000000000000000000000000000000000000'
+           AND (
+               declaration ->> 'start_block' IS NULL
+               OR (declaration ->> 'start_block')::bigint <= $1
+           )",
+    )
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to stage declared resolver addresses", error)
+    })?;
+    sqlx::query(
+        "CREATE INDEX ON project_declared_resolver_addresses (
+             namespace, resolver_address, manifest_id
+         )",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to index declared resolver addresses", error)
+    })?;
     Ok(())
 }
 
@@ -192,8 +241,8 @@ async fn create_scoped_event_ids(
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
         -- ENSv2 registration stores the entry's subregistry and emits the label registration
-        -- separately. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L459 @ ens_v2@ccaeb58)
-        -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58)
+        -- separately. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@a971bd64)
+        -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64)
         -- The child-edge projection combines those inputs, so rebuilding a scoped parent's row
         -- family stages each current sibling's registrations without widening projection scope.
         SELECT event.normalized_event_id
@@ -233,10 +282,23 @@ async fn create_scoped_event_ids(
             WHERE event.chain_id = $1 AND event.block_number <= $2
               AND event.resource_id IS NOT NULL AND event.logical_name_id IS NOT NULL
               AND event.event_kind = 'ResolverChanged' AND event.consumer_visibility = 'activated'
-              AND event.source_family IN (
-                  'ens_v1_registry_l1',
-                  'ens_v1_registrar_l1',
-                  'ens_v1_wrapper_l1'
+              AND (
+                  event.source_family IN (
+                      'ens_v1_registry_l1',
+                      'ens_v1_registrar_l1',
+                      'ens_v1_wrapper_l1'
+                  ) OR (
+                      event.source_family IN (
+                          'ens_v2_registry_l1', 'ens_v2_root_l1'
+                      )
+                      AND EXISTS (
+                          SELECT 1
+                          FROM project_declared_resolver_addresses declaration
+                          WHERE declaration.namespace = event.namespace
+                            AND declaration.resolver_address =
+                                lower(event.after_state ->> 'resolver')
+                      )
+                  )
               )
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized') AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         ) pointer USING (logical_name_id)

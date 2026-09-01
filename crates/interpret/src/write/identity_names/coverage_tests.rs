@@ -161,6 +161,56 @@ async fn conflicting_surface_identifies_row_and_rolls_back_prefix() -> TestResul
 }
 
 #[tokio::test]
+async fn canonical_reobservation_refreshes_stale_orphaned_normalization_state() -> TestResult {
+    let database = database("interpret_surface_orphan_replacement").await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES ('batch-test', '0x00', 1, to_timestamp(1), 'orphaned')",
+    )
+    .execute(database.pool())
+    .await?;
+    let mut orphaned = surface("ens:reobserved", "same.eth");
+    orphaned.block_hash = "0x00".to_owned();
+    orphaned.normalizer_version = "old".to_owned();
+    orphaned.canonicality_state = "orphaned".to_owned();
+    write_output(
+        &database,
+        &BatchOutput {
+            name_surfaces: vec![orphaned],
+            ..BatchOutput::default()
+        },
+    )
+    .await?;
+
+    write_output(
+        &database,
+        &BatchOutput {
+            name_surfaces: vec![surface("ens:reobserved", "same.eth")],
+            ..BatchOutput::default()
+        },
+    )
+    .await?;
+    let row: (String, String, String, String) = sqlx::query_as(
+        "SELECT raw_name, normalizer_version, visibility_state, canonicality_state::text
+         FROM name_surfaces WHERE logical_name_id = 'ens:reobserved'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        row,
+        (
+            "same.eth".into(),
+            "test".into(),
+            "active".into(),
+            "canonical".into()
+        )
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn tied_preimage_priority_preserves_last_occurrence() -> TestResult {
     let database = database("interpret_preimage_occurrence_order").await?;
     write_output(

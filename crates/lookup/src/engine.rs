@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use crate::{
     ChainRpcUrls, EnsPrimaryNameLookup, LookupError, LookupPosition, LookupRequest, LookupResponse,
     Result,
-    call::{RecordCallContext, execute_record_call},
+    call::{RecordCallContext, execute_record_call_with_resolver},
     primary_name::{EnsPrimaryNameRequest, lookup_ens_primary_name},
     rpc::JsonRpcHttpClient,
     store::{
@@ -139,20 +139,40 @@ impl LookupEngine {
             block: &snapshot.execution_block,
             follow_ccip: snapshot.follow_ccip,
             result_abi: snapshot.result_abi,
+            resolver_not_found_is_not_found: snapshot.route
+                == crate::store::LookupRoute::EnsUniversalResolverDiscovery,
             rpc: &rpc,
         };
         let mut records = Vec::with_capacity(request.records.len());
         for chunk in request.records.chunks(MAX_CONCURRENT_RECORD_CALLS) {
             let calls = chunk
                 .iter()
-                .map(|record| execute_record_call(&context, record));
-            records.extend(
-                join_all(calls)
-                    .await
-                    .into_iter()
-                    .collect::<Result<Vec<_>>>()?,
-            );
+                .map(|record| execute_record_call_with_resolver(&context, record));
+            let outcomes = join_all(calls)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            records.extend(outcomes);
         }
+
+        if snapshot.route == crate::store::LookupRoute::EnsUniversalResolverDiscovery {
+            let resolver_not_found = records.iter().any(|outcome| outcome.resolver_not_found);
+            let mut effective_resolvers = records
+                .iter()
+                .filter_map(|outcome| outcome.effective_resolver.as_deref());
+            if let Some(first) = effective_resolvers.next()
+                && (resolver_not_found
+                    || effective_resolvers.any(|resolver| !resolver.eq_ignore_ascii_case(first)))
+            {
+                return Err(LookupError::execution(
+                    "Universal Resolver returned inconsistent effective resolvers for one lookup",
+                ));
+            }
+        }
+        let mut records = records
+            .into_iter()
+            .map(|outcome| outcome.result)
+            .collect::<Vec<_>>();
 
         before_persist().await;
         persist_comparisons(&self.pool, &snapshot, &mut records).await?;

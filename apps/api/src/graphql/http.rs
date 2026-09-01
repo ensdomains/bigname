@@ -6,12 +6,16 @@ use axum::{
 };
 
 use super::schema::SubgraphSchema;
+use super::snapshot::GraphqlRequestHead;
 
 pub(super) async fn graphql_handler(
     State(schema): State<SubgraphSchema>,
     request: GraphQLRequest,
 ) -> GraphQLResponse {
-    schema.execute(request.into_inner()).await.into()
+    schema
+        .execute(request.into_inner().data(GraphqlRequestHead::default()))
+        .await
+        .into()
 }
 
 pub(super) async fn graphiql() -> impl IntoResponse {

@@ -46,6 +46,12 @@ discovery_rules = []
 role = "public_resolver"
 address = "0xF29100983E058B709F3D539b0c765937B804AC15"
 proxy_kind = "none"
+# This generation composes AddrResolver and first-party app metadata marks its
+# default coin-type support.
+# (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)
+# (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L32-L40 @ ens_app_v3@7175858)
+read_features = ["ensip19_default_address"]
 # Start block follows the mainnet deployment transaction.
 # (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L1104 @ ens_v1@91c966f).
 start_block = 22764828
@@ -148,11 +154,12 @@ proxy_kind = "none"
 # (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L346 @ ensnode@2017ae6).
 start_block = 3648359
 
-# Resolver event ABI fragments consumed by manifest-derived authority topic
-# lookup. These events have no emitter_roles because the complete signature set
-# is matched across every Ethereum emitter; NewResolver does not provide the
-# resolver event address set. Profile events are declared in the pinned ENSv1
-# resolver interfaces:
+# Generic resolver event ABI fragments consumed by manifest-derived authority
+# topic lookup. These events have no emitter_roles because this generic
+# signature set is matched across every Ethereum emitter; NewResolver does not
+# provide the resolver event address set. The approvals declared below are a
+# separate address-scoped surface. Resolver-interface events are declared in
+# the pinned ENSv1 resolver interfaces:
 # (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L5 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f)
@@ -251,3 +258,22 @@ normalized_events = ["RecordChanged"]
 name = "VersionChanged"
 fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
 normalized_events = ["RecordVersionChanged"]
+
+# Approval intake is intentionally limited to the two newest admitted mainnet
+# PublicResolver generations.
+# (upstream: .refs/ens_v1_mainnet_1a2ac5c/deployments/mainnet/PublicResolver.json:L2 @ ens_v1_mainnet_1a2ac5c@1a2ac5c)
+# (upstream: .refs/ens_v1_mainnet_1a2ac5c/deployments/mainnet/PublicResolver.json:L93-L147 @ ens_v1_mainnet_1a2ac5c@1a2ac5c)
+# (upstream: .refs/ens_v1/deployments/mainnet/PublicResolver.json:L111-L177 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L51-L63 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f).
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["public_resolver", "public_resolver_231b0ee"]
+normalized_events = []
+
+[[abi.events]]
+name = "Approved"
+fragment = "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)"
+emitter_roles = ["public_resolver", "public_resolver_231b0ee"]
+normalized_events = []

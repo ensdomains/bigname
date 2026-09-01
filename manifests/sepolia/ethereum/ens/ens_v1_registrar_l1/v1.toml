@@ -64,3 +64,20 @@ name = "NameRenewed"
 fragment = "event NameRenewed(uint256 indexed id, uint256 expires)"
 emitter_roles = ["registrar"]
 normalized_events = ["RegistrationRenewed", "ExpiryChanged"]
+
+# BaseRegistrar authorization checks both ERC-721 token approvals and
+# owner-wide operators; only the registrar is declared on Sepolia.
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L20-L68 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L35-L50 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+[[abi.events]]
+name = "Approval"
+fragment = "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)"
+emitter_roles = ["registrar"]
+normalized_events = []
+
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["registrar"]
+normalized_events = []

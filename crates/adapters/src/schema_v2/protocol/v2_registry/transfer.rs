@@ -210,8 +210,8 @@ pub(super) fn label_unregistered(
     let protected_resolver_keys = resolver_discovery_keys(raw, None, &protected_tokens)?;
     // Registration events are emitter-partitioned. PermissionedRegistry emits this event from the
     // registry's public unregister path.
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L199 @ ens_v2@a971bd64)
     let mut output = token_state_event(
         selected,
         "RegistrationReleased",

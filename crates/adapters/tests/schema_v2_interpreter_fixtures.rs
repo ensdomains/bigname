@@ -10,7 +10,7 @@ use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, InterpreterStateRequest,
     InterpreterStateValue, ManifestInput, PriorEventInput, RawBlockInput, RawLogInput,
     StateCacheCapacity, begin_schema_v2_adapter_restore, interpret_schema_v2_batch,
-    interpret_schema_v2_batch_incremental, prepare_schema_v2_batch_incremental, seam,
+    prepare_schema_v2_batch_incremental, seam,
 };
 use bigname_manifests::{LoadedManifest, load_repository};
 use serde::Deserialize;
@@ -23,6 +23,7 @@ const EXPECTED_OUTPUTS: &str = include_str!("fixtures/interpreters/expected-outp
 const DENSE_SAME_TRANSACTION: &str =
     include_str!("fixtures/interpreters/dense-same-transaction.json");
 const BINDING_FK_RELEASE: &str = include_str!("fixtures/interpreters/binding-fk-release.json");
+const V2_EXPIRY_RETIREMENT: &str = include_str!("fixtures/interpreters/v2-expiry-retirement.json");
 
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
@@ -72,6 +73,10 @@ struct FixtureManifest {
     role: String,
     address: String,
     contract_instance_id: Uuid,
+    #[serde(default)]
+    discovery_edge_kind: Option<String>,
+    #[serde(default)]
+    discovery_from_contract_instance_id: Option<Uuid>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -120,6 +125,13 @@ struct BindingFkFixture {
     case: Case,
     batches: Vec<BlockRange>,
     expected: BindingFkExpected,
+}
+
+#[derive(Deserialize)]
+struct V2ExpiryFixture {
+    case: Case,
+    batches: Vec<BlockRange>,
+    expected_project: Value,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -404,6 +416,116 @@ fn production_lease_release_corpus_materializes_its_registry_fallback() -> Resul
     Ok(())
 }
 
+#[test]
+#[rustfmt::skip]
+fn v2_expiry_retirement_is_an_empty_block_restore_and_redo_stable_delta() -> Result<()> {
+    let fixture: V2ExpiryFixture = serde_json::from_str(V2_EXPIRY_RETIREMENT)?;
+    let expected_gate = ExpectedCase {
+        id: fixture.case.id.clone(),
+        normalized_events: fixture.case.blocks.iter().map(|block| serde_json::json!({"block_hash":block.hash})).collect(),
+        name_surfaces: Vec::new(),
+        surface_bindings: Vec::new(),
+        resources: Vec::new(),
+        token_lineages: Vec::new(),
+    };
+    let input = batch_input(&fixture.case, &expected_gate, &checked_in_manifests()?)?;
+    let expected = &fixture.expected_project;
+    let outputs = interpret_physical_batches(&fixture.case.id, input.clone(), &fixture.batches)?;
+    let exact = expected["interpret_events"].as_array().context("expiry fixture must pin exact Interpret events")?;
+    let actual = exact
+        .iter()
+        .map(|pinned| {
+            let identity = pinned["event_identity"].as_str().expect("pinned identity");
+            let event = outputs
+                .iter()
+                .flat_map(|output| &output.normalized_events)
+                .find(|event| event.event_identity == identity)
+                .unwrap_or_else(|| panic!("missing pinned Interpret event {identity}; actual={:?}", outputs.iter().flat_map(|output| &output.normalized_events).map(|event| &event.event_identity).collect::<Vec<_>>()));
+            serde_json::json!({"event_identity":event.event_identity,"logical_name_id":event.logical_name_id,"resource_id":event.resource_id.map(|id|id.to_string()),"event_kind":event.event_kind,"source_family":event.source_family,"manifest_version":event.manifest_version,"chain_id":event.chain_id,"block_number":event.block_number,"block_hash":event.block_hash,"transaction_hash":event.transaction_hash,"transaction_index":event.transaction_index,"log_index":event.log_index,"derivation_kind":event.derivation_kind,"before_state":event.before_state,"after_state":event.after_state})
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual.as_slice(), exact.as_slice(), "committed exact Interpret rows changed");
+    assert_eq!(outputs.len(), 3, "expiry fixture must include revival");
+    let expiry = &outputs[1];
+    let events = &expiry.normalized_events[..4];
+    for token in [201_u64, 202] { assert!(expiry.normalized_events.iter().any(|event| event.event_kind == "RegistrationReleased" && event.after_state["token_id"] == format!("0x{token:064x}")), "missing {token}: expiry={:?} initial={:?}", expiry.normalized_events.iter().map(|event| (&event.event_kind, &event.after_state["token_id"])).collect::<Vec<_>>(), outputs[0].normalized_events.iter().filter(|event| event.after_state["token_id"] == format!("0x{token:064x}") || event.event_kind == "ParentChanged").map(|event| (&event.event_kind, &event.logical_name_id, &event.after_state)).collect::<Vec<_>>()); }
+    let stale = &expected["already_expired_reservation"];
+    let stale_events = outputs[0].normalized_events.iter().filter(|event| event.after_state["token_id"] == stale["token_id"]).collect::<Vec<_>>();
+    assert_eq!(stale_events.iter().map(|event| event.event_kind.as_str()).collect::<Vec<_>>(), ["RegistrationReserved", "RegistrationReleased"]);
+    assert!(outputs[0].name_surfaces.iter().any(|surface| {
+        Some(surface.logical_name_id.as_str()) == stale["logical_name_id"].as_str()
+    }));
+    assert!(outputs[0].resources.iter().any(|resource| {
+        Some(resource.resource_id.to_string().as_str()) == stale["resource_id"].as_str()
+    }));
+    assert!(outputs[0].token_lineages.iter().any(|lineage| {
+        Some(lineage.token_lineage_id.to_string().as_str()) == stale["token_lineage_id"].as_str()
+    }));
+    assert!(outputs[0].binding_closures.iter().all(|closure| {
+        Some(closure.logical_name_id.as_str()) != stale["logical_name_id"].as_str()
+    }));
+    assert_eq!(events.iter().map(|event| event.event_kind.as_str()).collect::<Vec<_>>(), ["SurfaceUnbound", "RegistrationReleased", "ResolverChanged", "SubregistryChanged"]);
+    assert_eq!(expiry.binding_closures.len(), 3);
+    assert!(events.iter().all(|event| {
+        event.logical_name_id.as_deref() == expected["logical_name_id"].as_str()
+            && event.resource_id.map(|id| id.to_string()).as_deref()
+                == expected["resource_id"].as_str()
+    }));
+    assert_eq!(expiry.binding_closures[0].active_to.unix_timestamp(), 1_800_000_000);
+    let token_id = "0x0000000000000000000000000000000000000000000000000000000000000065";
+    for event in events {
+        assert_eq!(event.raw_fact_ref["state_scope"], format!("0x00000000000000000000000000000000000020aa:-:{token_id}:-:RegistryPathExpired"));
+    }
+    let revival = &outputs[2].normalized_events;
+    for token in [201_u64, 202] { assert!(revival.iter().any(|event| event.event_kind == "RegistrationGranted" && event.after_state["token_id"] == format!("0x{token:064x}"))); }
+    assert!(revival.iter().any(|event| {
+        event.event_kind == "RegistrationGranted"
+            && event.resource_id.is_none()
+            && event.after_state["token_id"] == format!("0x{:064x}", 102)
+    }));
+    assert!(revival.iter().any(|event| {
+        event.event_kind == "ExpiryChanged" && event.after_state["expiry"] == 1_900_000_000_u64
+    }));
+    assert!(revival.iter().any(|event| {
+        event.after_state["source_event"] == "LabelUnregistered"
+            && event.logical_name_id.as_deref() == stale["logical_name_id"].as_str()
+    }));
+    let uninterrupted = interpret_schema_v2_batch(input.clone())?;
+    assert!(uninterrupted.normalized_events.iter().any(|event| {
+        event.after_state["source_event"] == "LabelUnregistered"
+            && event.logical_name_id.as_deref() == stale["logical_name_id"].as_str()
+    }));
+
+    let repeated = interpret_physical_batches(&fixture.case.id, input.clone(), &fixture.batches)?;
+    assert_eq!(outputs, repeated, "redo from the same predecessor drifted");
+
+    let mut replacement_input = input;
+    replacement_input.blocks[1].block_hash = "0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4".to_owned();
+    let replacement = interpret_physical_batches("v2_expiry_retirement_replacement", replacement_input, &fixture.batches)?;
+    let replacement_events = &replacement[1].normalized_events[..4];
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| (&event.event_kind, &event.after_state))
+            .collect::<Vec<_>>(),
+        replacement_events
+            .iter()
+            .map(|event| (&event.event_kind, &event.after_state))
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(
+        events
+            .iter()
+            .map(|event| &event.event_identity)
+            .collect::<Vec<_>>(),
+        replacement_events
+            .iter()
+            .map(|event| &event.event_identity)
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
 struct MaterializedDenseCase {
     expected_raw_log_count: usize,
     expected_registration_count: usize,
@@ -604,7 +726,9 @@ fn dense_log(
 
 fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> Result<BatchOutput> {
     let fresh = interpret_schema_v2_batch(input.clone())?;
-    let (incremental, live_session) = interpret_schema_v2_batch_incremental(input.clone(), None)?;
+    let (incremental, live_session) =
+        prepare_schema_v2_batch_incremental(input.clone(), None, StateCacheCapacity::Unlimited)?
+            .finish(Vec::new())?;
     assert_eq!(
         incremental, fresh,
         "{case_id}: incremental output differs from fresh interpretation"
@@ -699,8 +823,12 @@ fn interpret_physical_batches(
             },
             ..restored_input.clone()
         };
-        let (incremental, next_session) =
-            interpret_schema_v2_batch_incremental(incremental_input, live_session)?;
+        let (incremental, next_session) = prepare_schema_v2_batch_incremental(
+            incremental_input,
+            live_session,
+            StateCacheCapacity::Unlimited,
+        )?
+        .finish(Vec::new())?;
         assert_eq!(
             incremental, fresh,
             "{case_id}: physical-batch incremental output differs from retained-state restore"
@@ -741,7 +869,8 @@ fn interpret_physical_batches(
         let restored_session = restore.finish(blocks.last().map(|block| block.block_timestamp));
         assert_eq!(
             next_session, restored_session,
-            "{case_id}: live state differs from retained-state restore after a physical batch"
+            "{case_id}: live state differs from retained-state restore after physical range {}-{}",
+            range.from_block, range.to_block
         );
         live_session = Some(next_session);
         outputs.push(incremental);
@@ -1554,9 +1683,12 @@ fn batch_input(
             contract_instance_id: fixture.contract_instance_id,
             source_manifest_id: Some(manifest_id),
             role: admission_role(case, fixture, source)?,
-            discovery_edge_kind: None,
-            discovery_from_contract_instance_id: None,
-            discovery_observation_key: None,
+            discovery_edge_kind: fixture.discovery_edge_kind.clone(),
+            discovery_from_contract_instance_id: fixture.discovery_from_contract_instance_id,
+            discovery_observation_key: fixture
+                .discovery_edge_kind
+                .as_ref()
+                .map(|kind| format!("fixture:{kind}:{}", fixture.address)),
             active_from_block: Some(0),
             active_to_block: None,
         });

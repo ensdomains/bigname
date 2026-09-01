@@ -94,12 +94,15 @@ impl PhaseRunner {
         self.recover_stopped_phases(chain).await?;
         self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
             .await?;
-        self.catch_up_for_required_redo(chain, cancellation.clone())
+        self.repair_discovery_coverage(chain, cancellation.clone())
             .await?;
-        for phase in [PhaseName::Interpret, PhaseName::Project] {
-            self.run_spine_phase(chain, phase, cancellation.clone())
-                .await?;
+        if cancellation.is_cancelled() {
+            return Ok(());
         }
+        self.run_spine_phase(chain, PhaseName::Project, cancellation.clone())
+            .await?;
+        // This barrier applies to both serial Verify and the Verify/live combined path.
+        self.reject_pending_required_ingest(&chain.chain_id).await?;
         self.run_required_verify_redo(chain, cancellation.clone())
             .await?;
 

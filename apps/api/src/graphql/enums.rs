@@ -29,3 +29,14 @@ pub(crate) enum OrderDirection {
     #[graphql(name = "desc")]
     Desc,
 }
+
+/// Policy argument reserved for per-entity indexing-error behavior.
+#[derive(Enum, Copy, Clone, Default, Eq, PartialEq)]
+#[graphql(name = "_SubgraphErrorPolicy_")]
+pub(crate) enum SubgraphErrorPolicy {
+    #[graphql(name = "allow")]
+    Allow,
+    #[graphql(name = "deny")]
+    #[default]
+    Deny,
+}

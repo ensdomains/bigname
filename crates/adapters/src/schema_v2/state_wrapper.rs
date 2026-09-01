@@ -66,7 +66,7 @@ impl State {
 
     // Candidate ENSv1→ENSv2 migration evidence may describe the wrapper expiry derived during
     // syncWrapper, but it must not advance the independently admitted NameWrapper state.
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2_sepolia_20260629@ccaeb58)
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
     pub(in crate::schema_v2) fn correlated_v1_wrapper_expiry(
         &mut self,
@@ -133,7 +133,7 @@ impl State {
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L270-L277 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297-L303 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318-L337 @ ens_v1@91c966f)
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L104-L111 @ ens_v2_sepolia_20260629@ccaeb58)
     pub(in crate::schema_v2) fn v1_registrar_expiry_from_wrapper(
         &self,
         namespace: &str,

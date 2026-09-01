@@ -34,20 +34,34 @@ impl InterpretError {
     }
 
     pub fn database(context: impl Into<String>, error: sqlx::Error) -> Self {
-        let kind = if matches!(
-            &error,
-            sqlx::Error::Database(database)
-                if database.code().is_some_and(|code| code.starts_with("23"))
-        ) {
-            ErrorKind::DataIntegrity
-        } else {
-            ErrorKind::Transient
-        };
-        Self::new(kind, format!("{}: {error}", context.into()))
+        Self::new(
+            database_error_kind(&error),
+            format!("{}: {error}", context.into()),
+        )
+    }
+
+    pub fn database_anyhow(context: impl Into<String>, error: anyhow::Error) -> Self {
+        let kind = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<sqlx::Error>())
+            .map_or(ErrorKind::DataIntegrity, database_error_kind);
+        Self::new(kind, format!("{}: {error:#}", context.into()))
     }
 
     pub fn kind(&self) -> ErrorKind {
         self.kind
+    }
+}
+
+fn database_error_kind(error: &sqlx::Error) -> ErrorKind {
+    if matches!(
+        error,
+        sqlx::Error::Database(database)
+            if database.code().is_some_and(|code| code.starts_with("23"))
+    ) {
+        ErrorKind::DataIntegrity
+    } else {
+        ErrorKind::Transient
     }
 }
 
@@ -60,3 +74,20 @@ impl fmt::Display for InterpretError {
 impl Error for InterpretError {}
 
 pub type Result<T> = std::result::Result<T, InterpretError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anyhow_wrapped_transient_database_error_stays_retryable() {
+        let error = anyhow::Error::new(sqlx::Error::PoolTimedOut)
+            .context("injected discovery admission database timeout");
+        let classified = InterpretError::database_anyhow(
+            "failed to derive final discovery watch admissions",
+            error,
+        );
+
+        assert_eq!(classified.kind(), ErrorKind::Transient);
+    }
+}

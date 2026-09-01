@@ -102,6 +102,14 @@ impl Catalog {
             .admissions
             .iter()
             .any(|admission| admission.discovery_edge_kind.is_none() && applies(admission, raw));
+        let declared_namespaces = self
+            .admissions
+            .iter()
+            .filter(|admission| admission.discovery_edge_kind.is_none() && applies(admission, raw))
+            .filter_map(|admission| admission.source_manifest_id)
+            .filter_map(|manifest_id| self.source(manifest_id))
+            .map(|source| source.namespace.as_str())
+            .collect::<BTreeSet<_>>();
         let announcement_namespaces = self
             .admissions
             .iter()
@@ -110,6 +118,17 @@ impl Catalog {
                     != Some(MIGRATION_REGISTRY_ASSOCIATION_KIND)
                     && applies(admission, raw)
                     && admission.discovery_edge_kind.as_deref() == Some("registry_announcement")
+            })
+            .filter_map(|admission| admission.source_manifest_id)
+            .filter_map(|manifest_id| self.source(manifest_id))
+            .map(|source| source.namespace.as_str())
+            .collect::<BTreeSet<_>>();
+        let resolver_namespaces = self
+            .admissions
+            .iter()
+            .filter(|admission| {
+                applies(admission, raw)
+                    && admission.discovery_edge_kind.as_deref() == Some("resolver")
             })
             .filter_map(|admission| admission.source_manifest_id)
             .filter_map(|manifest_id| self.source(manifest_id))
@@ -129,7 +148,10 @@ impl Catalog {
             let rank = match admission.discovery_edge_kind.as_deref() {
                 Some("registry_announcement") => 1,
                 None if announcement_namespaces.contains(source.namespace.as_str()) => 0,
+                None if resolver_namespaces.contains(source.namespace.as_str()) => 0,
                 None if !announcement_namespaces.is_empty() => 2,
+                None if !resolver_namespaces.is_empty() => 2,
+                Some("resolver") if declared_namespaces.contains(source.namespace.as_str()) => 1,
                 // Protocol-specific discovery, including resolver admission, is direct authority
                 // rather than the declaration fallback ranked around registry announcements.
                 _ => 0,

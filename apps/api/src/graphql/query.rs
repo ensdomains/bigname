@@ -1,4 +1,4 @@
-use async_graphql::{Context, Object, Result};
+use async_graphql::{Context, ID, Object, Result};
 use bigname_storage::{
     AddressNameRelation, NameCurrentAddressFilter, NameCurrentAddressRelationFilter,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort,
@@ -6,17 +6,18 @@ use bigname_storage::{
 
 use crate::state::AppState;
 
-use super::enums::{DomainOrderBy, OrderDirection};
+use super::enums::{DomainOrderBy, OrderDirection, SubgraphErrorPolicy};
 use super::error::internal_error;
-use super::inputs::{DomainFilter, RegistrationFilter};
+use super::inputs::{BlockHeight, DomainFilter, RegistrationFilter};
+use super::meta::{SubgraphMeta, resolve_meta};
 use super::name_queries::{
     count_phase_graphql_name_list, load_phase_graphql_name_list_page_offset,
     load_phase_graphql_name_row_by_name, load_phase_graphql_name_row_by_namehash,
 };
 use super::objects::{Domain, DomainConnection, RegistrationConnection};
 use super::snapshot::{
-    graphql_snapshot_chain_ids, load_graphql_head, require_count_at_head, require_rows_at_head,
-    revalidate_graphql_head,
+    graphql_snapshot_chain_ids, load_graphql_entity_head, load_graphql_head, require_count_at_head,
+    require_rows_at_head, revalidate_graphql_head,
 };
 
 /// The compatibility surface is scoped to ENS names.
@@ -31,22 +32,29 @@ const MAX_DOMAINS_PAGE_SIZE: u64 = crate::v2::MAX_PAGE_SIZE;
 /// arbitrary prefix of the filtered set.
 const MAX_DOMAINS_SKIP: u64 = 1_000_000;
 
-pub(crate) struct QueryRoot;
+pub(crate) struct Query;
 
 #[Object]
-impl QueryRoot {
-    /// `domain(id: String!)` accepts either an ENS name string (for example `"alice.eth"`) or a
+impl Query {
+    /// `domain(id: ID!)` accepts either an ENS name string (for example `"alice.eth"`) or a
     /// namehash. Resolve by name first, then fall back to the namehash, so callers do not have to
     /// signal which id form they are sending.
-    async fn domain(&self, ctx: &Context<'_>, id: String) -> Result<Option<Domain>> {
+    async fn domain(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        block: Option<BlockHeight>,
+        #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
+    ) -> Result<Option<Domain>> {
         let state = ctx.data::<AppState>()?;
-        let head = load_graphql_head(state, "domain").await?;
-        let row = match load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, &id)
+        let head = load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "domain").await?;
+        let id = id.as_str();
+        let row = match load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, id)
             .await
             .map_err(|error| internal_error("domain", error))?
         {
             Some(row) => Some(row),
-            None => load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, &id)
+            None => load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, id)
                 .await
                 .map_err(|error| internal_error("domain", error))?,
         };
@@ -62,6 +70,7 @@ impl QueryRoot {
     }
 
     /// `domains(where, first, skip, orderBy, orderDirection)` — offset-paged list.
+    #[allow(clippy::too_many_arguments)]
     async fn domains(
         &self,
         ctx: &Context<'_>,
@@ -70,17 +79,22 @@ impl QueryRoot {
         skip: Option<i32>,
         #[graphql(name = "orderBy")] order_by: Option<DomainOrderBy>,
         #[graphql(name = "orderDirection")] order_direction: Option<OrderDirection>,
+        block: Option<BlockHeight>,
+        #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
     ) -> Result<Vec<Domain>> {
         let storage_filter = domain_filter_to_storage(filter)?;
+        let state = ctx.data::<AppState>()?;
+        let head = load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "domains").await?;
         let limit = match first {
-            Some(first) if first <= 0 => return Ok(Vec::new()),
+            Some(first) if first <= 0 => {
+                revalidate_graphql_head(state, head.as_ref(), "domains").await?;
+                return Ok(Vec::new());
+            }
             Some(first) => (first as u64).min(MAX_DOMAINS_PAGE_SIZE),
             None => DEFAULT_DOMAINS_PAGE_SIZE,
         };
         let offset = (skip.unwrap_or(0).max(0) as u64).min(MAX_DOMAINS_SKIP);
         let (sort, order) = storage_sort(order_by, order_direction);
-        let state = ctx.data::<AppState>()?;
-        let head = load_graphql_head(state, "domains").await?;
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let rows = load_phase_graphql_name_list_page_offset(
             &state.pool,
@@ -124,7 +138,7 @@ impl QueryRoot {
             ..Default::default()
         };
         let state = ctx.data::<AppState>()?;
-        let head = load_graphql_head(state, "registrationConnection").await?;
+        let head = load_graphql_head(ctx, "registrationConnection").await?;
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let count =
             count_phase_graphql_name_list(&state.pool, &storage_filter, &snapshot_chain_ids)
@@ -146,7 +160,7 @@ impl QueryRoot {
         #[graphql(name = "where")] filter: Option<DomainFilter>,
     ) -> Result<DomainConnection> {
         let state = ctx.data::<AppState>()?;
-        let head = load_graphql_head(state, "domainConnection").await?;
+        let head = load_graphql_head(ctx, "domainConnection").await?;
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let storage_filter = domain_filter_to_storage(filter)?;
         let count =
@@ -158,6 +172,16 @@ impl QueryRoot {
         Ok(DomainConnection {
             total_count: Some(count_to_i32(count.total_count)),
         })
+    }
+
+    /// Access metadata for the same publication used by GraphQL entity reads.
+    #[graphql(name = "_meta")]
+    async fn meta(
+        &self,
+        ctx: &Context<'_>,
+        block: Option<BlockHeight>,
+    ) -> Result<Option<SubgraphMeta>> {
+        resolve_meta(ctx, block).await
     }
 }
 

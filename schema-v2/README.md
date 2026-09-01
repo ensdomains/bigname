@@ -38,7 +38,7 @@ Canonicality promotion follows the stored transition graph one edge at a time. W
 
 A [`registry_announcement` discovery edge](../docs/glossary.md#registry-announcement-edge-registry_announcement) is the announcing registry's self-edge admitted forward-only by `RegistryCreated`; every other discovery kind still requires distinct endpoints, as ruled by the audit's [discovery design](../simplification-audit-20260730.md#discovery-design-decided-2026-07-30).
 
-The logical identity of an on-chain name is `<namespace>:<namehash>`. On chain, a name is its namehash: ENSv1 registry records are keyed by `bytes32` node `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L13 @ ens_v1@91c966f)`, ENSv2 resolver permissions and records use the namehash/node `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L68 @ ens_v2@ccaeb58)` `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L133 @ ens_v2@ccaeb58)`, and Basenames defines the resolver node as the namehash of the name `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L88 @ basenames@1809bbc)`. Identity is therefore chain-native and independent of normalization rules. Normalization is only a per-label visibility flag; it never participates in identity. The current [surface and resource identity ADR](../docs/adrs/0002-surface-resource-identity.md) records this rule, following the audit's [Normalization as a gate, not stored identity](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity) decision.
+The logical identity of an on-chain name is `<namespace>:<namehash>`. On chain, a name is its namehash: ENSv1 registry records are keyed by `bytes32` node `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L13 @ ens_v1@91c966f)`, ENSv2 resolver permissions and records use the namehash/node `(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L68 @ ens_v2_sepolia_20260629@ccaeb58)` `(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L133 @ ens_v2_sepolia_20260629@ccaeb58)`, and Basenames defines the resolver node as the namehash of the name `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L88 @ basenames@1809bbc)`. Identity is therefore chain-native and independent of normalization rules. Normalization is only a per-label visibility flag; it never participates in identity. The current [surface and resource identity ADR](../docs/adrs/0002-surface-resource-identity.md) records this rule, following the audit's [Normalization as a gate, not stored identity](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity) decision.
 
 Every `name_surfaces` write sets `visibility_state` explicitly. The column has no default: omitting the normalization decision fails the write instead of making an incompletely interpreted name visible.
 An attacker-controlled label that cannot decode as PostgreSQL-safe UTF-8 still has a deactivated identity row keyed by `<namespace>:<namehash>`; its unavailable text display fields are empty, and `label_preimages.raw_label` retains the authoritative bytes.
@@ -85,12 +85,12 @@ checked-in fresh-schema manifests and adapter intake admit both signatures.
 Their mandatory one-time historical-signature fetch must finish before the
 replacement rebuild. ENSv2 declares `RegistryCreated` and emits it first in the
 registry constructor.
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64)
 Its upgradeable resolver proxy declares and emits `Upgraded` with the new
 implementation.
-(upstream: .refs/ens_v2/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L30 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L114 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L30 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L114 @ ens_v2@a971bd64)
 Manifest declaration changes use `SourceManifestUpdated`.
 The deleted `ProxyImplementationChanged` and `CapabilityChanged` kinds are not
 admitted.
@@ -158,8 +158,9 @@ decoding round-trips to them. A later preimage upgrades the same child row.
 ## Live/indexed resolution differences
 
 `resolution_divergences` stores a row only when a live resolver answer differs
-from the exact indexed `record_inventory_current.entries` answer selected by
-the projected record boundary's `resource_id`. It keeps at most one unresolved
+from the indexed exact entry or manifest-authorized derived read evaluated from
+the `record_inventory_current` row selected by the projected record boundary's
+`resource_id`. It keeps at most one unresolved
 row for each exact name, resolver, and record key. A wildcard lookup with no
 exact inventory comparison executes without ledger persistence and never
 compares the request with its wildcard ancestor's inventory. Lookup execution
@@ -170,8 +171,9 @@ therefore identifies an ingested block. Every active row must identify that
 block in `chain_lineage` with the same chain, hash, height, and timestamp and
 with readable canonicality; the strict position trigger remains required. The
 guarded writer locks the compared inventory row and accepts a mutation only
-while its `xmin` is unchanged from the read. It derives the indexed answer from
-that row and verifies the current requested name, selected resolver, record
+while its `xmin` is unchanged from the read. It evaluates the indexed answer
+from that row's exact entries and projected read rules, then verifies the
+current requested name, selected resolver, record
 selector, and record boundary before targeting a ledger row. Callers supply
 only the live answer. When indexed comparison and live execution use different
 blocks on one chain, `observed_positions` retains separate `indexed` and `live`
@@ -235,7 +237,7 @@ adapter output with conflict ignore, so replaying one log under one interpreter
 build records one diagnostic. Redo preparation and reorg repair do not delete
 them. Operators may read this table; product routes may not.
 
-The phase runner writes the cursors, phase state, authority attestations, and Project failure audit. Interpret writes the malformed-event diagnostic table. The runner, redo command, health checks, and status path read cursor and phase state; redo restart also reads the attestation audit. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes the cursor and phase-state tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines [provider-trusted](../docs/glossary.md#verification-level), independently cross-checked, and node-checked status; the Issue #411 source-role contract narrows it by denying independent evidence to any source that also serves intake. The production verifier records `cross_checked` for a distinct verification-only Base or Sepolia dRPC and `node_checked` for a distinct verification-only Ethereum Mainnet reth; without one, the target-covering intake cursor records `quick_synced`. The phase runner rejects a level stronger than the chain-specific verification path earned before persistence. Base's dRPC cross-check extent stops at the Coinbase-to-dRPC ingest seam, and a partial verify redo retains the weaker of retained and currently available evidence. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
+The phase runner owns cursor and phase lifecycle, authority attestations, and the Project failure audit. Manifest synchronization and a completed Interpret pass may atomically install required Ingest work through the shared `chain_phase_state` installer; neither owns an independent queue. Interpret also owns the [discovery-watch admission snapshot](../docs/glossary.md#discovery-watch-admission-snapshot) and the malformed-event diagnostic table. The runner, redo command, health checks, and status path read cursor and phase state; redo restart also reads the attestation audit. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes the cursor and phase-state tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines [provider-trusted](../docs/glossary.md#verification-level), independently cross-checked, and node-checked status; the Issue #411 source-role contract narrows it by denying independent evidence to any source that also serves intake. The production verifier records `cross_checked` for a distinct verification-only Base or Sepolia dRPC and `node_checked` for a distinct verification-only Ethereum Mainnet reth; without one, the target-covering intake cursor records `quick_synced`. The phase runner rejects a level stronger than the chain-specific verification path earned before persistence. Base's dRPC cross-check extent stops at the Coinbase-to-dRPC ingest seam, and a partial verify redo retains the weaker of retained and currently available evidence. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
 
 Normal verification reads its start from these durable ingest cursors. A resumed
 normal scan retains the weaker whole-extent verification level when its

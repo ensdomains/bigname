@@ -25,6 +25,33 @@ position and must remain distinct from the added registry log's real `(block,
 0, 0)` position. The fixture's `case.synthetic_logs` says which logs are not
 production and which ones a real registration would also emit.
 
+`v2-expiry-retirement.json` registers and links `alice.eth`, sets its resolver,
+subregistry, and one effective permission grant, ends the first physical batch,
+and then supplies an empty block whose timestamp equals the retained expiry. A
+later `ExpiryUpdated` log revives the same token and retained resource. The
+first block also observes an ownerless reservation whose nonzero expiry equals
+that block timestamp; the corpus pins its raw history row followed in the same block immediately
+by a state-derived, bindingless release. (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L465 @
+ens_v2@a971bd64) The
+corpus pins the block-derived
+`SurfaceUnbound`, `RegistrationReleased`, `ResolverChanged`, and
+`SubregistryChanged` order and attribution, with no invented transaction or log
+position. The harness compares fresh, live incremental, tiny-cache, and
+compacted cold-restore execution; repeats the retirement from the same retained
+predecessor; and substitutes a same-height, same-timestamp block hash to prove
+stable semantic payloads with block-specific identities. The Project fixture
+anchors reserve the same identity and event provenance for downstream
+incremental-versus-fresh Project convergence coverage; this adapter harness
+does not itself run Project. ENSv2 returns no subregistry, resolver, or owner
+once the entry expires. (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249-L258 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L343-L354 @
+ens_v2@a971bd64) The registry accepts a later expiry update for the same token.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @
+ens_v2@a971bd64)
+
 The original four cases were copied from these now-deleted legacy adapter
 tests:
 
@@ -39,16 +66,16 @@ The seven A3 additions exercise:
 
 - ENSv2 registry label registration, resource linking, and subregistry
   discovery
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L468 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L472 @ ens_v2@ccaeb58);
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475 @ ens_v2@a971bd64);
 - ENSv2 permission grant and revoke
-  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L267 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L301 @ ens_v2@ccaeb58);
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L267 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L301 @ ens_v2@a971bd64);
 - an ENSv2 text record
-  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L475 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L475 @ ens_v2_sepolia_20260629@ccaeb58)
   and registrar registration
-  (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@ccaeb58);
+  (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@a971bd64);
 - ENSv1 registration followed by renewal against non-empty persisted state,
   and a losing registration branch that is orphaned before a winning branch
   restores canonical state
@@ -78,8 +105,8 @@ The four B2 discovery-semantics additions exercise:
 
 - an ENSv2 registry instance announced by its constructor's
   `RegistryCreated` event without any parent link
-  (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58);
+  (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64);
 - an ENSv1 `AddrChanged` record selected by the match-all resolver signature
   scope even though no registry resolver pointer or discovery edge names the
   emitting address

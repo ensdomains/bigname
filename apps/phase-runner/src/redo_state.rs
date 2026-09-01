@@ -22,7 +22,6 @@ pub(crate) struct RedoSession {
     stage_project_refresh_on_completion: bool,
     pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
 }
-
 impl RedoSession {
     pub(crate) const fn attempt_fence(&self) -> RedoAttemptFence {
         RedoAttemptFence {
@@ -35,6 +34,7 @@ pub(crate) enum RedoOutcome<'a> {
     Completed(&'a PhaseProgress),
     Failed(&'a RunnerError),
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn begin(
     pool: &PgPool,
     chain_id: &str,
@@ -43,6 +43,7 @@ pub(crate) async fn begin(
     sources: &[SourceConfig],
     supplied_manifest_authority_generation: Option<&str>,
     attested_by: &str,
+    automatic_discovery_ingest: bool,
 ) -> RunnerResult<RedoSession> {
     let mut transaction = pool.begin().await.map_err(|error| {
         RunnerError::database(
@@ -55,6 +56,12 @@ pub(crate) async fn begin(
     crate::redo_recompute::reject_separate_project_run(chain_id, phase, active)?;
     require_start(&rows, chain_id, phase, mode)?;
     let mut previous = row_for(&rows, phase)?.clone();
+    let range = mode.range().ok_or_else(|| {
+        RunnerError::data_integrity("explicit redo transition is missing its block range")
+    })?;
+    if automatic_discovery_ingest {
+        crate::redo_discovery_authorization::require_locked(chain_id, phase, range, &previous)?;
+    }
     let stage_project_refresh_on_completion = phase == PhaseName::Project
         && matches!(mode, RunMode::Redo(_))
         && previous.redo_in_progress
@@ -94,9 +101,6 @@ pub(crate) async fn begin(
         )
         .await?;
     }
-    let range = mode.range().ok_or_else(|| {
-        RunnerError::data_integrity("explicit redo transition is missing its block range")
-    })?;
     crate::redo_extent::require_recorded_extent(
         &mut transaction,
         chain_id,
@@ -139,9 +143,6 @@ pub(crate) async fn begin(
         ));
     }
     let redo_mode = redo_mode(mode)?;
-    // The work stamped by manifest synchronization is not yet a resumable
-    // operator attempt. Its first explicit execution binds the checkpoint to
-    // the exact event/emitter set being loaded; a later crash retry resumes it.
     let same_active_redo =
         matches_active_redo(&previous, redo_mode, execution_range) && !unbound_required_ingest;
     let attestation_audit = crate::redo_manifest_audit::record_or_resume(
@@ -175,8 +176,7 @@ pub(crate) async fn begin(
     let preserve_started_at = resume_same_epoch || same_active_audit;
     let attempt_generation = sqlx::query_scalar::<_, i64>(
         "
-        UPDATE chain_phase_state
-        SET phase_status = 'running',
+        UPDATE chain_phase_state SET phase_status = 'running',
             redo_in_progress = true,
             redo_attempt_generation = redo_attempt_generation + 1,
             redo_mode = $3,
@@ -244,12 +244,10 @@ pub(crate) async fn begin(
         )
     })?;
     if phase == PhaseName::Ingest {
-        crate::redo_stamp::stamp_required_in_transaction(
+        crate::redo_stamp::stamp_ingest_redo_dependents(
             &mut transaction,
             chain_id,
-            PhaseName::Verify,
             execution_range,
-            "ingest redo may change the raw-fact extent",
         )
         .await?;
     }

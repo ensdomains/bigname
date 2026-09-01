@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
 use bigname_storage::{BASENAMES_NAMESPACE, NameCurrentRow, RecordInventoryCurrentRow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,7 +13,7 @@ use super::support::{
     V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, load_name_current_for_selected_snapshot,
     map_internal_api_error, normalize_inferred_route_name, record_addresses_from_entries,
     record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
-    record_value_string_from_entry, snapshot_selection_api_error,
+    snapshot_selection_api_error,
 };
 use super::{
     Envelope, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams, V2Error,
@@ -206,7 +207,29 @@ pub(crate) fn build_name_record(
             .iter()
             .any(|unsupported| unsupported == field)
     };
-    let addresses = field_supported("addresses").then(|| record_addresses(record_inventory));
+    let addresses = field_supported("addresses").then(|| {
+        let mut addresses = record_addresses(record_inventory);
+        if !addresses.contains_key("60")
+            && let Some(inventory) = record_inventory
+        {
+            let answer = evaluate_indexed_record(
+                &inventory.entries,
+                &inventory.provenance,
+                &inventory.coverage,
+                "addr:60",
+                "addr",
+                Some("60"),
+            );
+            if answer.status == IndexedRecordStatus::Success
+                && let Some(value) = answer
+                    .value
+                    .and_then(|value| value.as_str().map(str::to_owned))
+            {
+                addresses.insert("60".to_owned(), value);
+            }
+        }
+        addresses
+    });
     let text_records =
         field_supported("text_records").then(|| record_text_records(record_inventory));
     let content_hash = field_supported("content_hash")
@@ -546,10 +569,6 @@ pub(super) fn record_content_hash(
         record_inventory.map(|inventory| &inventory.entries),
         direct_json_field,
     )
-}
-
-pub(super) fn record_value_string(entry: &Value) -> Option<String> {
-    record_value_string_from_entry(entry, direct_json_field)
 }
 
 fn unsupported_fields(record_inventory: Option<&RecordInventoryCurrentRow>) -> Vec<String> {

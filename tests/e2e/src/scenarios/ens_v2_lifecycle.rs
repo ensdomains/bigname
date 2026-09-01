@@ -51,14 +51,14 @@ async fn renewal_preserves_promoted_coverage_and_registry_edges_follow() -> Resu
     // Post-audit registrar renewal remains available after registry expiry
     // while the name is in grace. It pays, forwards to the registry, and
     // emits both the registrar and registry fragments from one action.
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L264 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L264 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58).
     rpc.increase_time(ens_v2::MIN_REGISTER_DURATION + 1).await?;
     let renew_receipt = ens_v2::renew_eth_name(&rpc, &deployment, alice, "promoted", MONTH).await?;
 
     // Direct registry renew (requires ROLE_RENEW) moves expiry only and
     // rejects reduction
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64).
     ens_v2::grant_roles(
         &rpc,
         deployment.eth_registry.address,
@@ -297,14 +297,14 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
 
     // Registrar registration defines the owner's role bitmap and calls the
     // registry
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L17 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L17 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@a971bd64).
     // The nonzero-owner path grants those roles on the constructed resource
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L463 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L469 @ ens_v2@ccaeb58),
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L466 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L472 @ ens_v2@a971bd64),
     // and the grant compares the current roles before emitting EACRolesChanged
-    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L267 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L267 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@a971bd64).
     // Automatic startup + replay must retain exactly that registry-scoped
     // permission derivation, attributed to the registered resource and owner.
     let edges_resource = name_resource(
@@ -358,12 +358,12 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     Ok(())
 }
 
-/// Row 5: registry expiry passes with no transaction (event-silent flip), the
-/// registrar grace period then passes, and the name re-registers, advancing
+/// Row 5: registry expiry passes with no transaction (a state-derived flip),
+/// the registrar grace period then passes, and the name re-registers, advancing
 /// lineage on two LabelRegistered derivations with no unregister and no token
 /// regeneration
-/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L259 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L531 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L259 @ ens_v2@a971bd64).
 #[tokio::test]
 async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
@@ -415,50 +415,35 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
     let first =
         support::ingest_ens_v2_sepolia_and_serve(&anvil, &deployment, Some(phase_one_ready))
             .await?;
-    // The flip is event-silent: no release-like event exists, and the last
-    // derived registration state stays granted with a past expiry.
-    let fleeting_kinds: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT event_kind FROM normalized_events \
-         WHERE after_state->>'label' = 'fleeting' \
-           AND canonicality_state = 'canonical'",
-    )
-    .fetch_all(&first.db.pool)
-    .await?;
-    assert!(
-        !fleeting_kinds
-            .iter()
-            .any(|kind| kind == "RegistrationReleased" || kind == "RegistrationUnregistered"),
-        "v2 expiry passage must stay event-silent: {fleeting_kinds:?}"
-    );
-    let summary: Value = sqlx::query_scalar(
-        "SELECT declared_summary FROM name_current \
-         WHERE logical_name_id = 'ens:0xebeb30c0ed8d518212f883517e086e19588c459e1b5d50e613df0fceca59a3fb'",
+    // The first post-expiry block derives one history-retained release before its raw log.
+    let retirement: (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE
+             after_state->>'source_event' = 'RegistryPathExpired'
+             AND after_state->>'derived_from' = 'interpreter_state'
+             AND after_state->>'terminal_reason' = 'registry_name_binding_expired'
+             AND transaction_hash IS NULL AND transaction_index IS NULL AND log_index IS NULL)
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:0xebeb30c0ed8d518212f883517e086e19588c459e1b5d50e613df0fceca59a3fb'
+           AND event_kind = 'RegistrationReleased' AND canonicality_state = 'canonical'",
     )
     .fetch_one(&first.db.pool)
     .await?;
-    let projected_expiry = summary["registration"]["expiry"]
-        .as_i64()
-        .context("fleeting expiry missing")?;
-    let head_timestamp = i64::try_from(rpc.block_timestamp().await?)?;
-    assert!(
-        projected_expiry < head_timestamp,
-        "fleeting must serve last-known state with a past expiry: {summary}"
-    );
     assert_eq!(
-        summary["registration"]["status"], "active",
-        "no event means no status flip: {summary}"
+        retirement,
+        (1, 1),
+        "expiry must derive exactly one state-attributed release without raw-log provenance"
     );
     first.db.cleanup().await?;
 
     // Registry reads already treat the name as expired, but the registrar
     // keeps it unavailable throughout the post-expiry grace period.
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L259 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L291 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L259 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L291 @ ens_v2@a971bd64).
     rpc.increase_time(ens_v2::GRACE_PERIOD + 1).await?;
 
     // Re-register the available name. Both counters advance inside register
     // with no unregister event.
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L455 @ ens_v2@a971bd64).
     ens_v2::register_eth_name(
         &rpc,
         &deployment,
@@ -579,7 +564,7 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
     .await?;
     // setParent is registry-level and root-scoped: the watched ETH registry
     // declares itself the `eth` child of the RootRegistry
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L171 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L169 @ ens_v2@a971bd64).
     ens_v2::set_parent(
         &rpc,
         deployment.eth_registry.address,
@@ -675,8 +660,8 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
 
     // Carol becomes an out-of-manifest registrar: root ROLE_REGISTRAR plus
     // ROLE_REGISTER_RESERVED
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L430 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L442 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L433 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L445 @ ens_v2@a971bd64).
     ens_v2::grant_root_roles(
         &rpc,
         deployment.eth_registry.address,
@@ -688,7 +673,7 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
 
     // Row 7: reserve (owner=0, empty bitmap), then promote preserving the
     // reservation expiry via expiry=0
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L444 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L447 @ ens_v2@a971bd64).
     let reservation_expiry = u64::try_from(rpc.block_timestamp().await?)? + 3 * MONTH;
     let reserve_receipt = ens_v2::register_in_registry_with(
         &rpc,

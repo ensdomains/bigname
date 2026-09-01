@@ -11,7 +11,7 @@ Wire format and route details live in [`api-v2.md`](api-v2.md) and
 | Lookup | `POST /v2/lookup`, `GET /v2/status` | Batched name/address lookup and indexing readiness. |
 | Product reads | `/v2/names/*`, `/v2/addresses/*`, `/v2/permissions`, `/v2/search`, `/v2/events`, `/v2/resolvers/*`, `/v2/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
 | Diagnostics | `/v2/diagnostics/*` | Coverage, binding, authority, record, manifest, and event inspection. |
-| GraphQL compatibility | `POST /graphql` | The documented narrow subgraph-compatible operations. |
+| GraphQL compatibility | `POST /graphql` | The subgraph-shaped compatibility surface described below. |
 | Operator health | `GET /healthz` | API process, opaque running-database-instance identity, and phase-runner heartbeat readiness. This is not a product route. |
 
 The v1 REST surface has been removed. In particular,
@@ -32,12 +32,65 @@ it does not preserve the deleted v1 DTOs.
 | Names by address | `GET /v2/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. |
 | Primary name | `GET /v2/addresses/{address}/primary-name` | Indexed tuples and verified ENS coin-type 60 lookup as documented. |
 | Address history | `GET /v2/addresses/{address}/history` | Latest-state address-anchored event history. |
-| Permission holders | `GET /v2/permissions` | Current resource-anchored permission rows; returned current ENSv1 wrapper registrations carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data without claiming exhaustive wrapper-holder enumeration. |
+| Permission holders | `GET /v2/permissions` | Known current permission rows that apply to each resource. Standard registry, registrar, and resolver approval/delegation paths are not yet authoritative enumerations, so coverage stays request-relative partial even for zero rows. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) ENSv1 NameWrapper holder enumeration remains a separate unsupported class. Returned current wrapper registrations still carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data when backed. |
 | Search | `GET /v2/search` | Name search only; no registration, pricing, or availability workflow. |
 | Events | `GET /v2/events` | Product event collection. |
 | Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata, total section counts with deterministic samples capped at 100 items, and a separately paginated record-shaped bound-name collection, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
 | Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
+
+## Resolver address read modes
+
+The records route, exact-name detail, and name results in batch lookup share
+one indexed ENSIP-19 behavior. Projected exact entries remain event-derived.
+When the selected resolver has the manifest-authorized
+[resolver read feature](glossary.md#resolver-read-feature), an eligible EVM
+coin-type request whose exact entry is empty or missing reads the projected
+default entry instead. The records route identifies per-key derived results in
+`records[key].meta`; values-only address maps contain the value without adding
+provenance fields. Derived values use the requested getter's verified decode:
+coin type `60` treats a 20-byte zero default as `not_found`, while EVM-range
+multicoin selectors retain that non-empty byte value. Exact stored records are
+not normalized by this rule. Completeness remains request-relative. ENSIP-19 defines the
+coin-type-to-chain eligibility rule, and the admitted resolver getter performs
+the default-entry fallback only when that rule returns a positive chain ID
+`(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)`.
+The admitted archived-Sepolia implementation exposes the same two getter shapes
+`(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)`.
+
+| Address read | Indexed | Auto | Verified |
+| --- | --- | --- | --- |
+| Exact entry | Exact value | Exact value | Chain value |
+| Eligible EVM coin type, flagged resolver, default entry present | Derived value with per-key metadata | Derived value; no provider call | Chain value |
+| Coin type 60, flagged resolver, default entry is 20 zero bytes | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain `not_found` |
+| Eligible EVM coin type, flagged resolver, default source authoritatively absent | Derived `not_found` with per-key metadata | Derived `not_found`; no provider call | Chain result |
+| Default source unavailable or inventory non-authoritative | Explicit `unsupported` | Request-scoped verified fallback | Chain result |
+| Ineligible coin type or unflagged resolver generation | Exact-key behavior; no derivation | Existing exact-key fallback policy | Chain result |
+
+The auto column's exact-answer rule has one exception: for an Ethereum Mainnet
+ENS name whose projected exact resolver is null and whose ordinary direct row
+admits [Universal Resolver ancestor
+discovery](glossary.md#universal-resolver-ancestor-discovery), all requested
+keys execute through verified lookup. Retained exact inventory predates the
+resolver-clear boundary and does not satisfy auto for that route.
+
+The flagged deployments are the current ENS PublicResolver on mainnet, the
+current Sepolia PublicResolver at `0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5`,
+and the admitted archived-Sepolia ENSv2 `PermissionedResolver` implementation. The
+admitted Basenames address is the legacy resolver and remains unflagged; its
+vendored coin-type getter reads exact storage, while the fallback-bearing
+upgradeable resolver proxy is not admitted in this change.
+`(upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20-L31 @ ens_v1@91c966f)`
+`(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L151-L166 @ ens_app_v3@7175858)`
+`(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)`
+`(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2398 @ ens_v2@a971bd64)`
+`(upstream: .refs/basenames/test/Fork/BaseMainnetConstants.sol:L9-L14 @ basenames@1809bbc)`
+`(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L61 @ basenames@1809bbc)`
+
+Verified answers never claim whether the on-chain resolver used exact storage,
+default storage, or another execution path, so they omit derived metadata.
 
 ## ENSv1→ENSv2 mixed-history ownership
 
@@ -338,12 +391,60 @@ traffic by omitting or bypassing that phase. Slices 1 and 2 remain
 separately reviewed capabilities but share the deployment boundary above; slice
 3 remains a later consumer capability.
 
-The GraphQL compatibility operations read the schema-v2 current projections
-and preserve the committed Manager response contract. Name inputs are ENS-normalized and
-matched by namehash within the `ens`
-namespace. While the `project` phase has not completed at the newest stored chain head,
-operations that would return projection rows fail rather than serve the prior
-publication. Unsupported name rows are omitted, and
+### GraphQL compatibility
+
+`POST /graphql` exposes a subgraph-shaped `Query` root over the schema-v2
+current projections. The existing `domain`, `domains`,
+`registrationConnection`, and `domainConnection` operations remain available;
+`Domain.normalizedName`, `Domain.tokenId`, and both connection count operations
+are bigname additions to the subgraph-shaped surface. `domain(id:)` accepts an
+`ID!` containing the same ENS name or namehash strings accepted previously.
+
+The schema includes graph-node-compatible `BigInt` and `Bytes` scalars,
+`Block_height`, `_SubgraphErrorPolicy_`, and `_meta`/`_Meta_`/`_Block_` shapes.
+`BigInt` is a decimal string of arbitrary width and `Bytes` is an even-length,
+`0x`-prefixed hexadecimal string. The reference implementation serializes
+these two values as a decimal string and prefixed hex bytes, respectively
+(upstream: .refs/graph_node/graph/src/data/store/scalar/bigint.rs:L297-L318 @ graph_node@aefe1737)
+(upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L16-L18 @ graph_node@aefe1737)
+(upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L41-L51 @ graph_node@aefe1737).
+`Domain.createdAt` and `Domain.expiryDate` use `BigInt`; the existing
+[ENSv2 max-expiry projection narrowing](upstream.md#known-divergences) remains
+in force, so an unrepresentable max expiry is still `null` rather than a
+fabricated decimal value. The comparison shapes follow graph-node's generated
+schema conventions
+(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L27-L28 @ graph_node@aefe1737)
+(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L41-L52 @ graph_node@aefe1737)
+(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L59-L81 @ graph_node@aefe1737).
+`BigDecimal` is not part of this compatibility surface.
+
+Entity operations accept `block: Block_height` and
+`subgraphError: _SubgraphErrorPolicy_! = deny`. The endpoint resolves an omitted block,
+an equal block number or hash, or a satisfied `number_gte` constraint against
+the current [served head](glossary.md#served-head). It rejects historical or future block constraints;
+future capability work may add database-backed historical execution, but no
+serving path filters current rows in memory. The endpoint accepts the `subgraphError`
+argument and emits the graph-node default without changing the existing
+Manager response path. The served-head eligibility gate remains authoritative;
+per-entity `allow`/`deny` behavior belongs to future entity capabilities that can
+define it without inventing in-process filtering.
+
+`_meta(block:)` reports the served head used by entity reads, including its
+number, hash, timestamp, and parent hash. All root fields within one HTTP
+GraphQL request share one request-scoped served-head selection. `deployment` is the interpreter
+[content hash](glossary.md#interpreter-content-hash) for the serving binary.
+When a head is eligible to serve, `hasIndexingErrors` derives from durable
+indexing state: a non-current or rebuilding [Project publication](glossary.md#projection),
+a phase that settled while unconfigured, or an unmet required verification
+floor set it to `true`.
+A failed or otherwise ineligible publication is rejected by the served-head
+gate before `_meta` can be returned. The value is not a constant or a
+network-freshness guess.
+
+Name inputs are ENS-normalized and matched by namehash within the `ens`
+namespace. While the `project` phase has not completed at the newest stored
+chain head, operations that would return projection rows fail rather than
+serve the prior publication. Unsupported name rows are omitted, and
 unsupported record inventories preserve the existing empty record shapes.
 
 All top-level v2 collections use the standard `page` object. Latest-state

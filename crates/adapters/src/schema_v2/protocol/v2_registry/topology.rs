@@ -1,9 +1,3 @@
-use std::collections::BTreeSet;
-
-use alloy_primitives::U256;
-use anyhow::Context;
-use serde_json::{Value, json};
-
 use crate::schema_v2::{
     catalog::Selected,
     protocol::{
@@ -12,8 +6,12 @@ use crate::schema_v2::{
     seam::{ARM_WIDE_BINDING_CLOSE_KEY, CLOSED_AUTHORITY_ARM_KEY, SURFACE_BINDING_ID_KEY},
     state::{State, V2NameTransition, V2TokenState},
 };
+use alloy_primitives::U256;
+use anyhow::Context;
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
-pub(super) fn append_v2_name_transitions(
+#[rustfmt::skip] pub(super) fn append_v2_name_transitions(
     output: &mut Interpreted,
     transitions: Vec<V2NameTransition>,
     raw: &crate::schema_v2::RawLogInput,
@@ -63,6 +61,8 @@ pub(super) fn append_v2_name_transitions(
                     }),
                     state_scope: transition_scope(&transition, source_event),
                 });
+            }
+            if let Some(resource_id) = transition.resource_id {
                 output.events.push(EventDraft {
                     event_kind: "RegistrationReleased".to_owned(),
                     logical_name_id: Some(previous.logical_name_id.clone()),
@@ -91,6 +91,11 @@ pub(super) fn append_v2_name_transitions(
                 namehash: current.namehash.clone(),
                 source_kind: format!("{source_event}_registry_suffix"),
             });
+            if !identity_reassertion && (source_event != "LabelReserved" || transition.registration.is_none()) {
+                let id = &current.logical_name_id;
+                let resource = transition.resource_id;
+                emit(output, &transition, id, resource, source_event);
+            }
         }
         let Some(ref current) = transition.current else {
             continue;
@@ -169,22 +174,26 @@ pub(super) fn append_v2_name_transitions(
                 }),
                 state_scope: transition_scope(&transition, source_event),
             });
-            append_rebound_state_events(output, &transition, current, resource_id, source_event);
+            let resource_id = Some(resource_id);
+            let id = &current.logical_name_id;
+            emit(output, &transition, id, resource_id, source_event);
+        } else if !identity_reassertion && (source_event != "LabelReserved" || transition.registration.is_none()) {
+            let resource_id = transition.resource_id;
+            let id = &current.logical_name_id;
+            emit(output, &transition, id, resource_id, source_event);
         }
     }
 }
 
-pub(super) fn boundary_expiration(transition: V2NameTransition) -> anyhow::Result<Interpreted> {
-    if transition.current.is_some()
-        || transition.current_shadow.is_some()
-        || (transition.previous.is_none() && transition.previous_shadow.is_none())
-    {
+pub(super) fn boundary_expiration(
+    transition: V2NameTransition,
+    released_at: i64,
+) -> anyhow::Result<Interpreted> {
+    if transition.current.is_some() || transition.current_shadow.is_some() {
         anyhow::bail!("block-boundary ENSv2 transition is not an expiration");
     }
     let mut output = Interpreted::new();
-    if transition.previous.is_some() {
-        append_removed_name(&mut output, &transition, "RegistryPathExpired");
-    }
+    append_removed_name(&mut output, &transition, released_at)?;
     Ok(output)
 }
 
@@ -192,7 +201,8 @@ pub(in crate::schema_v2) fn boundary_reassertion(
     transition: &V2NameTransition,
     block: &crate::schema_v2::RawBlockInput,
 ) -> Option<Interpreted> {
-    if transition.previous != transition.current
+    if transition.current.is_none()
+        || transition.previous != transition.current
         || transition.previous_shadow != transition.current_shadow
     {
         return None;
@@ -221,74 +231,110 @@ pub(in crate::schema_v2) fn boundary_reassertion(
     Some(output)
 }
 
+#[rustfmt::skip]
 fn append_removed_name(
     output: &mut Interpreted,
     transition: &V2NameTransition,
-    source_event: &str,
-) {
-    let Some(previous) = transition.previous.as_ref() else {
-        return;
-    };
-    if transition.registration.is_some() {
+    released_at: i64,
+) -> anyhow::Result<()> {
+    let expiry = transition.expiry.context("block-boundary ENSv2 expiry transition has no retained expiry")?;
+    debug_assert!(transition.previous.is_none() || transition.previous_shadow.is_none());
+    let (logical_name_id, previous_namehash, normal_surface) = if let Some(previous) = transition.previous.as_ref() {
+        (&previous.logical_name_id, &previous.namehash, true)
+    } else if let Some(previous) = transition.previous_shadow.as_ref() {
+        (&previous.logical_name_id, &previous.namehash, false)
+    } else { return super::expiry::append_resource_expiration(output, transition, released_at); };
+    let registry = transition.registry.to_ascii_lowercase();
+    let registry_contract_instance_id = transition.registry_contract_instance_id.map(|id| id.to_string());
+    let registrant = transition.registration.as_ref().and_then(|registration| registration.get("registrant").or_else(|| registration.get("owner"))).cloned().unwrap_or(Value::Null);
+    if normal_surface && transition.registration.is_some() && transition.resource_id.is_some() {
         output.binding_closures.push(BindingClosureDraft {
-            logical_name_id: previous.logical_name_id.clone(),
+            logical_name_id: logical_name_id.clone(),
             authority_arm: "ens_v2".to_owned(),
         });
+        output.events.push(EventDraft {
+            event_kind: "SurfaceUnbound".to_owned(),
+            logical_name_id: Some(logical_name_id.clone()),
+            resource_id: transition.resource_id,
+            identity_suffix: format!("SurfaceUnbound:expiry:{registry}:{}", transition.token_id),
+            explicit_before: None,
+            after_state: json!({
+                "source_event":"RegistryPathExpired",
+                "derived_from":"interpreter_state",
+                "terminal_reason":"registry_name_binding_expired",
+                "registry":registry,
+                "token_id":transition.token_id,
+                "registry_contract_instance_id":registry_contract_instance_id,
+                "expiry":expiry,
+                "topology_rebind":true,
+                "previous_namehash":previous_namehash,
+                "current_namehash":Value::Null,
+            }),
+            state_scope: transition_scope(transition, "RegistryPathExpired"),
+        });
     }
-    let Some(resource_id) = transition
-        .registration
-        .as_ref()
-        .and(transition.resource_id.as_ref())
-        .copied()
-    else {
-        return;
-    };
-    output.events.push(EventDraft {
-        event_kind: "SurfaceUnbound".to_owned(),
-        logical_name_id: Some(previous.logical_name_id.clone()),
-        resource_id: Some(resource_id),
-        identity_suffix: format!(
-            "SurfaceUnbound:topology:{}:{}",
-            transition.registry, transition.token_id
-        ),
-        explicit_before: None,
-        after_state: json!({
-            "source_event": source_event,
-            "topology_rebind": true,
-            "registry": &transition.registry,
-            "token_id": &transition.token_id,
-            "previous_namehash": &previous.namehash,
-            "current_namehash": Value::Null,
-        }),
-        state_scope: transition_scope(transition, source_event),
-    });
     output.events.push(EventDraft {
         event_kind: "RegistrationReleased".to_owned(),
-        logical_name_id: Some(previous.logical_name_id.clone()),
-        resource_id: Some(resource_id),
+        logical_name_id: Some(logical_name_id.clone()),
+        resource_id: transition.resource_id,
         identity_suffix: format!(
-            "RegistrationReleased:topology:{}:{}",
-            transition.registry, transition.token_id
+            "RegistrationReleased:expiry:{registry}:{}",
+            transition.token_id
         ),
         explicit_before: Some(json!({
             "status":if transition.registration.is_some() {"registered"} else {"reserved"},
+            "expiry":expiry,
+            "registrant":registrant,
         })),
         after_state: json!({
-            "source_event":source_event,
+            "source_event":"RegistryPathExpired",
+            "derived_from":"interpreter_state",
             "terminal_reason":"registry_name_binding_expired",
-            "status":"released",
+            "registry":registry,
             "token_id":transition.token_id,
-            "registry_contract_instance_id":transition.registry_contract_instance_id.map(|id| id.to_string()),
+            "registry_contract_instance_id":registry_contract_instance_id,
+            "expiry":expiry,
+            "status":"released",
+            "released_at":released_at,
         }),
-        state_scope: transition_scope(transition, source_event),
+        state_scope: transition_scope(transition, "RegistryPathExpired"),
     });
+    for (event_kind, field, prior) in [
+        ("ResolverChanged", "resolver", transition.resolver.as_ref()),
+        (
+            "SubregistryChanged",
+            "subregistry",
+            transition.subregistry.as_ref(),
+        ),
+    ] {
+        let Some(prior) = prior else { continue };
+        output.events.push(EventDraft {
+            event_kind: event_kind.to_owned(),
+            logical_name_id: Some(logical_name_id.clone()),
+            resource_id: transition.resource_id,
+            identity_suffix: format!("{event_kind}:expiry:{registry}:{}", transition.token_id),
+            explicit_before: Some(json!({(field):prior})),
+            after_state: json!({
+                "source_event":"RegistryPathExpired",
+                "derived_from":"interpreter_state",
+                "terminal_reason":"registry_name_binding_expired",
+                "registry":registry,
+                "token_id":transition.token_id,
+                "registry_contract_instance_id":registry_contract_instance_id,
+                "expiry":expiry,
+                (field):Value::Null,
+            }),
+            state_scope: transition_scope(transition, "RegistryPathExpired"),
+        });
+    }
+    Ok(())
 }
 
-fn append_rebound_state_events(
+#[rustfmt::skip] fn emit(
     output: &mut Interpreted,
     transition: &V2NameTransition,
-    current: &crate::schema_v2::state::V2NameState,
-    resource_id: uuid::Uuid,
+    logical_name_id: &str,
+    resource_id: Option<uuid::Uuid>,
     source_event: &str,
 ) {
     let registry_instance = transition
@@ -316,8 +362,8 @@ fn append_rebound_state_events(
         );
         output.events.push(EventDraft {
             event_kind: "RegistrationGranted".to_owned(),
-            logical_name_id: Some(current.logical_name_id.clone()),
-            resource_id: Some(resource_id),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id,
             identity_suffix: format!(
                 "RegistrationGranted:topology:{}:{}",
                 transition.registry, transition.token_id
@@ -338,10 +384,10 @@ fn append_rebound_state_events(
             }),
             state_scope: transition_scope(transition, source_event),
         });
-        output.events.push(EventDraft {
+        if source_event != "LabelRegistered" { output.events.push(EventDraft {
             event_kind: "AuthorityTransferred".to_owned(),
-            logical_name_id: Some(current.logical_name_id.clone()),
-            resource_id: Some(resource_id),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id,
             identity_suffix: format!(
                 "AuthorityTransferred:topology:{}:{}",
                 transition.registry, transition.token_id
@@ -355,12 +401,12 @@ fn append_rebound_state_events(
                 "upstream_resource":upstream_resource,
             }),
             state_scope: transition_scope(transition, source_event),
-        });
-        if !expiry.is_null() {
+        }); }
+        if source_event != "LabelRegistered" && !expiry.is_null() {
             output.events.push(EventDraft {
                 event_kind: "ExpiryChanged".to_owned(),
-                logical_name_id: Some(current.logical_name_id.clone()),
-                resource_id: Some(resource_id),
+                logical_name_id: Some(logical_name_id.to_owned()),
+                resource_id,
                 identity_suffix: format!(
                     "ExpiryChanged:topology:{}:{}",
                     transition.registry, transition.token_id
@@ -377,6 +423,49 @@ fn append_rebound_state_events(
             });
         }
     }
+    if transition.registration.is_none()
+        && let Some(expiry) = transition.expiry
+    {
+        output.events.push(EventDraft {
+            event_kind: "RegistrationReserved".to_owned(),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id,
+            identity_suffix: format!(
+                "RegistrationReserved:topology:{}:{}",
+                transition.registry, transition.token_id
+            ),
+            explicit_before: Some(json!({})),
+            after_state: json!({
+                "source_event":source_event,
+                "status":"reserved",
+                "expiry":expiry,
+                "token_id":transition.token_id,
+                "current_token_id":transition.token_id,
+                "upstream_resource":upstream_resource,
+                "reservation_resource":resource_id.is_some(),
+                "registry_contract_instance_id":registry_instance,
+            }),
+            state_scope: transition_scope(transition, source_event),
+        });
+        if source_event != "LabelReserved" { output.events.push(EventDraft {
+            event_kind: "ExpiryChanged".to_owned(),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id,
+            identity_suffix: format!(
+                "ExpiryChanged:topology:{}:{}",
+                transition.registry, transition.token_id
+            ),
+            explicit_before: Some(json!({})),
+            after_state: json!({
+                "source_event":source_event,
+                "expiry":expiry,
+                "token_id":transition.token_id,
+                "current_token_id":transition.token_id,
+                "upstream_resource":upstream_resource,
+            }),
+            state_scope: transition_scope(transition, source_event),
+        }); }
+    }
     for (event_kind, field, target) in [
         (
             "ResolverChanged",
@@ -392,8 +481,8 @@ fn append_rebound_state_events(
         let Some(target) = target else { continue };
         output.events.push(EventDraft {
             event_kind: event_kind.to_owned(),
-            logical_name_id: Some(current.logical_name_id.clone()),
-            resource_id: Some(resource_id),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id,
             identity_suffix: format!(
                 "{event_kind}:topology:{}:{}",
                 transition.registry, transition.token_id

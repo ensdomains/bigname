@@ -91,15 +91,15 @@ mod registry_calls {
 ///
 /// Constructor signatures are pinned in upstream sources:
 /// - `LabelStore(IContractNamer)`
-///   (upstream: .refs/ens_v2/contracts/src/utils/LabelStore.sol:L26 @ ens_v2@ccaeb58)
+///   (upstream: .refs/ens_v2/contracts/src/utils/LabelStore.sol:L26 @ ens_v2@a971bd64)
 /// - `PermissionedRegistry(ILabelStore,address,uint256)`
-///   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L112 @ ens_v2@ccaeb58)
+///   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L112 @ ens_v2@a971bd64)
 /// - `MockERC20(string,uint8)`
-///   (upstream: .refs/ens_v2/contracts/test/mocks/MockERC20.sol:L18 @ ens_v2@ccaeb58)
+///   (upstream: .refs/ens_v2/contracts/test/mocks/MockERC20.sol:L18 @ ens_v2@a971bd64)
 /// - `StandardRentPriceOracle(address,uint256[],DiscountPoint[],uint128,uint256,uint64,uint64,PaymentRatio[])`
-///   (upstream: .refs/ens_v2/contracts/src/registrar/StandardRentPriceOracle.sol:L157 @ ens_v2@ccaeb58)
+///   (upstream: .refs/ens_v2/contracts/src/registrar/StandardRentPriceOracle.sol:L157 @ ens_v2@a971bd64)
 /// - `ETHRegistrar(address,IPermissionedRegistry,address,IRentPriceOracle,uint64,uint64,uint64,uint64)`
-///   (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L82 @ ens_v2@ccaeb58)
+///   (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L82 @ ens_v2@a971bd64)
 pub struct EnsV2Deployment {
     pub deployer: Address,
     pub label_store: Deployed,
@@ -232,14 +232,14 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
 
     // Root-resource grants use the dedicated entrypoint: grantRoles rejects
     // ROOT_RESOURCE directly
-    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L27 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L27 @ ens_v2@a971bd64).
     send_checked(
         rpc,
         deployer,
         eth_registry.address,
         // Upstream grants REGISTRAR | RENEW so registrar renewals can move
         // registry expiry
-        // (upstream: .refs/ens_v2/contracts/deploy/03_ETHRegistrar.ts:L44 @ ens_v2@ccaeb58).
+        // (upstream: .refs/ens_v2_sepolia_20260629/contracts/deploy/03_ETHRegistrar.ts:L44 @ ens_v2_sepolia_20260629@ccaeb58).
         &registry_calls::grantRootRolesCall {
             roleBitmap: role_bit(ROLE_REGISTRAR) | role_bit(ROLE_RENEW),
             account: eth_registrar.address,
@@ -263,7 +263,7 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
 /// Upstream's "grant all roles" bitmap: role bits occupy every fourth bit
 /// (one nibble per role), so a full grant is the repeating 0x1 nibble — not
 /// U256::MAX, whose off-pattern bits the access-control layer rejects
-/// (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L79 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L92 @ ens_v2@a971bd64).
 fn all_roles() -> U256 {
     U256::from_str_radix(
         "1111111111111111111111111111111111111111111111111111111111111111",
@@ -655,7 +655,7 @@ pub fn role_bit(bit: usize) -> U256 {
 }
 
 /// Admin-half counterpart of a role bit
-/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@a971bd64).
 pub fn admin_role_bit(bit: usize) -> U256 {
     role_bit(bit) << 128
 }
@@ -664,7 +664,7 @@ mod erc1155_calls {
     use alloy_sol_types::sol;
 
     // The registry token is an ERC1155 singleton
-    // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L88 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L88 @ ens_v2@a971bd64).
     sol! {
         function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes data) external;
         function safeBatchTransferFrom(address from, address to, uint256[] ids, uint256[] values, bytes data) external;
@@ -676,8 +676,8 @@ mod renew_calls {
 
     // Registrar renew pays and forwards; direct registry renew moves expiry
     // only and rejects reduction.
-    // (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64)
     sol! {
         function renew(string label, uint64 duration, address paymentToken, bytes32 referrer) external;
     }
@@ -855,7 +855,7 @@ pub async fn grant_root_roles(
 }
 
 /// Revoke root-scope roles
-/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L160 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L160 @ ens_v2@a971bd64).
 pub async fn revoke_root_roles(
     rpc: &RpcClient,
     registry: Address,
@@ -879,7 +879,7 @@ pub async fn revoke_root_roles(
 
 /// Direct registry register with explicit role bitmap, registry, resolver,
 /// and expiry — reservations must pass owner=0 with an empty bitmap
-/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L432 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L435 @ ens_v2@a971bd64).
 #[allow(clippy::too_many_arguments)]
 pub async fn register_in_registry_with(
     rpc: &RpcClient,
@@ -925,8 +925,8 @@ mod resolver_calls {
 
     // Writable v2 resolver (UUPS impl deployed directly for tests):
     // constructor(namer) then initialize(admin, roleBitmap, setters)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L193 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L233 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L193 @ ens_v2_sepolia_20260629@ccaeb58)
+    // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L233 @ ens_v2_sepolia_20260629@ccaeb58).
     sol! {
         function initialize(address admin, uint256 roleBitmap, bytes[] setters) external;
         function setText(bytes32 node, string key, string value) external;
@@ -946,11 +946,11 @@ mod factory_calls {
     use alloy_sol_types::sol;
 
     // User resolvers deploy behind VerifiableFactory proxies
-    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L719 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L721 @ ens_v2@ccaeb58)
-    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L722 @ ens_v2@ccaeb58) — the
+    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L786 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L788 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L789 @ ens_v2@a971bd64) — the
     // raw implementation disables its initializers
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L201 @ ens_v2@ccaeb58).
+    // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L201 @ ens_v2_sepolia_20260629@ccaeb58).
     sol! {
         function deployProxy(address implementation, uint256 salt, bytes data) external returns (address);
     }

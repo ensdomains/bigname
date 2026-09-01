@@ -212,6 +212,12 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Sync pinned upstream checkouts
+        if: matrix.name == 'core'
+        run: |
+          scripts/sync-refs
+          scripts/sync-refs --check
+
       - name: cargo test
         run: cargo test ${{ matrix.packages }} --all-features
 
@@ -1104,6 +1110,26 @@ jobs:
 
       - name: Validate Manager operations against bigname schema
         run: |
-          npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
+          # #671 changes only domain(id:) from String! to wire-compatible ID!; the pinned Manager
+          # document declaration migration remains tracked by #670. Assert that this is the only
+          # raw validation difference, then validate every unchanged field selection through a
+          # temporary declaration overlay until that coordination lands.
+          set +e
+          raw_validation="$(npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
             'apps-monorepo/packages/indexer/documents/**/*.graphql' \
+            apps/api/src/tests/fixtures/subgraph_schema.graphql 2>&1)"
+          raw_status=$?
+          set -e
+          printf '%s\n' "$raw_validation"
+          test "$raw_status" -le 1
+          test "$(printf '%s\n' "$raw_validation" | grep -c 'Detected 1 invalid document')" -eq 1
+          test "$(printf '%s\n' "$raw_validation" | grep -Fc 'Variable $id of type String! used in position expecting type ID!.')" -eq 1
+          unexpected="$(printf '%s\n' "$raw_validation" | sed -n '/\[log\]  - /p' | grep -Fv 'Variable $id of type String! used in position expecting type ID!.' || true)"
+          test -z "$unexpected"
+          compat_dir="$(mktemp -d)"
+          cp -R apps-monorepo/packages/indexer/documents "$compat_dir/documents"
+          find "$compat_dir/documents" -type f -name '*.graphql' \
+            -exec sed -i 's/\$id: String!/\$id: ID!/g' {} +
+          npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
+            "$compat_dir/documents/**/*.graphql" \
             apps/api/src/tests/fixtures/subgraph_schema.graphql

@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 use anyhow::{Context, Result as AnyResult, bail};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -161,6 +161,10 @@ fn avatar_comparison_uses_the_text_avatar_inventory_entry() -> crate::Result<()>
 async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<()> {
     let oversized_text_key = "k".repeat(4_096);
     let oversized_record_key = format!("text:{oversized_text_key}");
+    let read_rule = json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]});
     let cases = vec![
         (
             "nested value",
@@ -172,6 +176,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": { "value": "https://value.example" },
             }]),
+            json!({}),
         ),
         (
             "nested bytes",
@@ -183,6 +188,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": { "bytes": "0xe3010170" },
             }]),
+            json!({}),
         ),
         (
             "avatar exact entry preferred over text fallback",
@@ -203,6 +209,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                     "value": { "value": "ipfs://preferred" },
                 },
             ]),
+            json!({}),
         ),
         (
             "address value lowercasing",
@@ -214,8 +221,14 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": { "bytes": "0xAbCdEf0123" },
             }]),
+            json!({}),
         ),
-        ("absent entry", "text:missing".to_owned(), json!([])),
+        (
+            "absent entry",
+            "text:missing".to_owned(),
+            json!([]),
+            json!({}),
+        ),
         (
             "null value",
             "text:null".to_owned(),
@@ -226,6 +239,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": null,
             }]),
+            json!({}),
         ),
         (
             "oversized text key",
@@ -237,17 +251,131 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
                 "status": "success",
                 "value": { "value": "oversized-key-value" },
             }]),
+            json!({}),
         ),
-    ];
+        (
+            "legacy failed status alias",
+            "text:failed".to_owned(),
+            json!([{
+                "record_key":"text:failed",
+                "record_family":"text",
+                "selector_key":"failed",
+                "status":"failed",
+                "failure_reason":"record_read_failed"
+            }]),
+            json!({}),
+        ),
+        (
+            "empty exact address derives from default",
+            "addr:60".to_owned(),
+            json!([
+                {
+                    "record_key":"addr:60",
+                    "record_family":"addr",
+                    "selector_key":"60",
+                    "status":"not_found"
+                },
+                {
+                    "record_key":"addr:2147483648",
+                    "record_family":"addr",
+                    "selector_key":"2147483648",
+                    "status":"success",
+                    "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000def"}
+                }
+            ]),
+            read_rule.clone(),
+        ),
+        (
+            "empty default address derives not found",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key":"addr:2147483648",
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"not_found"
+            }]),
+            read_rule.clone(),
+        ),
+        (
+            "zero20 default for legacy address derives not found",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key":"addr:2147483648",
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"success",
+                "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+            }]),
+            read_rule.clone(),
+        ),
+        (
+            "zero20 default for EVM multicoin remains success",
+            "addr:2147483649".to_owned(),
+            json!([{
+                "record_key":"addr:2147483648",
+                "record_family":"addr",
+                "selector_key":"2147483648",
+                "status":"success",
+                "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+            }]),
+            read_rule,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, record_key, entries, provenance)| {
+        (
+            name,
+            record_key,
+            entries,
+            provenance,
+            json!({"status":"projected"}),
+            "supported",
+        )
+    })
+    .chain([(
+        "exact not found with non-authoritative coverage",
+        "text:empty".to_owned(),
+        json!([{
+            "record_key":"text:empty",
+            "record_family":"text",
+            "selector_key":"empty",
+            "status":"not_found"
+        }]),
+        json!({}),
+        json!({
+            "status":"unsupported",
+            "unsupported_reason":"coverage_incomplete"
+        }),
+        "unsupported",
+    )]);
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
 
-    for (case_name, record_key, entries) in cases {
+    for (case_name, record_key, entries, provenance, coverage, support_status) in cases {
         let selector = RecordSelector::parse(&record_key)?;
-        let rust_answer = crate::store::indexed_answer(&entries, &selector);
-        sqlx::query("UPDATE record_inventory_current SET entries = $1")
-            .bind(&entries)
-            .execute(fixture.pool())
-            .await?;
+        let rust_answer = bigname_domain::resolver_read::evaluate_indexed_record(
+            &entries,
+            &provenance,
+            &coverage,
+            &selector.record_key,
+            &selector.record_family,
+            selector.selector_key.as_deref(),
+        )
+        .comparison_value();
+        sqlx::query(
+            "UPDATE record_inventory_current
+             SET entries = $1,
+                 provenance = $2,
+                 support_status = $3,
+                 unsupported_reason = CASE WHEN $3 = 'unsupported'
+                     THEN 'coverage_incomplete'
+                     ELSE NULL
+                 END",
+        )
+        .bind(&entries)
+        .bind(&provenance)
+        .bind(support_status)
+        .execute(fixture.pool())
+        .await?;
         let snapshot = crate::store::load_snapshot(
             fixture.pool(),
             &LookupRequest::new(&fixture.logical_name_id, [&record_key])?,
@@ -303,6 +431,97 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
 }
 
 #[tokio::test]
+async fn empty_ensip19_default_agrees_with_live_miss_without_divergence() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_address_result(
+        "0x0000000000000000000000000000000000000000",
+    )?)])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET selectors = $1, entries = $2, provenance = $3",
+    )
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648"
+    }]))
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648",
+        "status":"not_found"
+    }]))
+    .bind(json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]}))
+    .execute(fixture.pool())
+    .await?;
+
+    let outcome = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(&fixture.logical_name_id, ["addr:60"])?)
+        .await?;
+    assert_eq!(outcome.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(
+        outcome.records[0].status,
+        crate::LookupRecordStatus::NotFound
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zero20_ensip19_default_agrees_with_legacy_live_miss_without_divergence() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_address_result(
+        "0x0000000000000000000000000000000000000000",
+    )?)])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET selectors = $1, entries = $2, provenance = $3",
+    )
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648"
+    }]))
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648",
+        "status":"success",
+        "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
+    }]))
+    .bind(json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]}))
+    .execute(fixture.pool())
+    .await?;
+
+    let outcome = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(&fixture.logical_name_id, ["addr:60"])?)
+        .await?;
+    assert_eq!(outcome.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(
+        outcome.records[0].status,
+        crate::LookupRecordStatus::NotFound
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn agreeing_resolution_without_active_divergence_writes_nothing() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
         INDEXED_VALUE,
@@ -348,6 +567,61 @@ async fn restored_agreement_clears_the_matching_active_divergence() -> AnyResult
     let requests = join_rpc(rpc_handle).await?;
     assert_eq!(requests.len(), 2);
     assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ensip19_derived_indexed_agreement_clears_a_prior_divergence() -> AnyResult<()> {
+    let default_address = "0x0000000000000000000000000000000000000def";
+    let different_address = "0x0000000000000000000000000000000000000abc";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_address_result(different_address)?),
+        RpcResponse::Result(encoded_address_result(default_address)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET selectors = $1, entries = $2, provenance = $3",
+    )
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648"
+    }]))
+    .bind(json!([{
+        "record_key":"addr:2147483648",
+        "record_family":"addr",
+        "selector_key":"2147483648",
+        "status":"success",
+        "value":default_address
+    }]))
+    .bind(json!({"read_rules":[{
+        "kind":"ensip19_default_address",
+        "source_record_key":"addr:2147483648"
+    }]}))
+    .execute(fixture.pool())
+    .await?;
+    let request = || LookupRequest::new(&fixture.logical_name_id, ["addr:60"]);
+
+    let disagreement = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request()?)
+        .await?;
+    assert_eq!(disagreement.records[0].ledger_action, LedgerAction::Written);
+
+    let agreement = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request()?)
+        .await?;
+    assert_eq!(agreement.records[0].ledger_action, LedgerAction::Cleared);
+    let active: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL")
+            .fetch_one(fixture.pool())
+            .await?;
+    assert_eq!(active, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 2);
     Ok(())
 }
 
@@ -874,6 +1148,490 @@ async fn wildcard_lookup_executes_without_an_indexed_record_row() -> AnyResult<(
 }
 
 #[tokio::test]
+async fn null_exact_resolver_executes_without_record_boundary_or_ledger_comparison() -> AnyResult<()>
+{
+    let effective = "0x3000000000000000000000000000000000000003";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(
+        encoded_text_result_with_resolver(LIVE_VALUE, effective)?,
+    )])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.records[0].value, Some(json!(LIVE_VALUE)));
+    assert_eq!(response.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(
+        response.resolver_address,
+        "0x0000000000000000000000000000000000000000"
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn null_exact_resolver_requires_one_effective_resolver_for_the_batch() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_text_result_with_resolver(
+            "first",
+            "0x3000000000000000000000000000000000000003",
+        )?),
+        RpcResponse::Result(encoded_text_result_with_resolver(
+            "second",
+            "0x4000000000000000000000000000000000000004",
+        )?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let error = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await
+        .expect_err("different effective resolvers must fail closed");
+    assert_eq!(error.kind(), ErrorKind::Execution);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_rejects_success_and_malformed_inner_from_different_resolvers() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_text_result_with_resolver(
+            LIVE_VALUE,
+            "0x3000000000000000000000000000000000000003",
+        )?),
+        RpcResponse::Result(encoded_malformed_text_result_with_resolver(
+            "0x4000000000000000000000000000000000000004",
+        )?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let error = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await
+        .expect_err("malformed inner data from another resolver must fail closed");
+    assert_eq!(error.kind(), ErrorKind::Execution);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_rejects_resolver_not_found_and_malformed_inner_resolver() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(resolver_not_found_revert(b"\x05alice\x03eth\0")),
+        },
+        RpcResponse::Result(encoded_malformed_text_result_with_resolver(
+            "0x4000000000000000000000000000000000000004",
+        )?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let error = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await
+        .expect_err("resolver-not-found and a decoded resolver must fail closed");
+    assert_eq!(error.kind(), ErrorKind::Execution);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_keeps_malformed_inner_per_key_for_consistent_resolver() -> AnyResult<()> {
+    let effective = "0x3000000000000000000000000000000000000003";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_text_result_with_resolver(LIVE_VALUE, effective)?),
+        RpcResponse::Result(encoded_malformed_text_result_with_resolver(effective)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let response = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await?;
+    assert!(
+        response
+            .records
+            .iter()
+            .any(|record| record.status == crate::LookupRecordStatus::Success)
+    );
+    assert!(
+        response
+            .records
+            .iter()
+            .any(|record| record.status == crate::LookupRecordStatus::ExecutionFailed)
+    );
+    assert!(
+        response
+            .records
+            .iter()
+            .all(|record| record.ledger_action == LedgerAction::None)
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_not_found_envelopes_are_live_not_found_without_ledger_mutation() -> AnyResult<()>
+{
+    let revert = resolver_not_found_revert(b"\x05alice\x03eth\0");
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: json!({"originalError":{"data":revert}}),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::NotFound
+    );
+    assert_eq!(
+        response.records[0].failure_reason.as_deref(),
+        Some("resolver_not_found")
+    );
+    assert_eq!(response.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_not_found_must_match_the_discovery_name() -> AnyResult<()> {
+    let revert = resolver_not_found_revert(b"\x03bob\x03eth\0");
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(revert),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::ExecutionFailed
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn projected_route_does_not_reclassify_resolver_not_found() -> AnyResult<()> {
+    let revert = resolver_not_found_revert(b"\x05alice\x03eth\0");
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(revert),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::ExecutionFailed
+    );
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_rejects_mixed_resolver_not_found_and_success() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(resolver_not_found_revert(b"\x05alice\x03eth\0")),
+        },
+        RpcResponse::Result(encoded_text_result_with_resolver(
+            LIVE_VALUE,
+            "0x3000000000000000000000000000000000000003",
+        )?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let error = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await
+        .expect_err("one block cannot both lack and select an effective resolver");
+    assert_eq!(error.kind(), ErrorKind::Execution);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_keeps_resolver_not_found_and_malformed_results_per_key() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(resolver_not_found_revert(b"\x05alice\x03eth\0")),
+        },
+        RpcResponse::Result(Value::String("0x1234".to_owned())),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let response = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await?;
+    assert!(response.records.iter().any(|record| {
+        record.status == crate::LookupRecordStatus::NotFound
+            && record.failure_reason.as_deref() == Some("resolver_not_found")
+    }));
+    assert!(
+        response
+            .records
+            .iter()
+            .any(|record| record.status == crate::LookupRecordStatus::ExecutionFailed)
+    );
+    assert!(
+        response
+            .records
+            .iter()
+            .all(|record| record.ledger_action == LedgerAction::None)
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn null_exact_resolver_returns_mixed_values_and_empty_record_misses() -> AnyResult<()> {
+    let effective = "0x3000000000000000000000000000000000000003";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_text_result_with_resolver("", effective)?),
+        RpcResponse::Result(encoded_text_result_with_resolver(LIVE_VALUE, effective)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let response = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(LookupRequest::new(
+            &fixture.logical_name_id,
+            ["avatar", "text:url"],
+        )?)
+        .await?;
+    assert!(response.records.iter().any(|record| {
+        record.status == crate::LookupRecordStatus::Success
+            && record.value == Some(json!(LIVE_VALUE))
+    }));
+    assert!(response.records.iter().any(|record| {
+        record.status == crate::LookupRecordStatus::NotFound && record.value.is_none()
+    }));
+    assert!(
+        response
+            .records
+            .iter()
+            .all(|record| record.ledger_action == LedgerAction::None)
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn null_exact_resolver_offchain_lookup_stays_unsupported_and_unpersisted() -> AnyResult<()> {
+    let offchain_data = encode_offchain_lookup_for_test(
+        Address::from_str(UNIVERSAL_RESOLVER)?,
+        vec!["https://gateway.invalid/{data}".to_owned()],
+        vec![0x12, 0x34],
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xab],
+    );
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::String(offchain_data),
+    }])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::Unsupported
+    );
+    assert_eq!(
+        response.records[0].unsupported_reason.as_deref(),
+        Some("offchain_lookup_required")
+    );
+    assert_eq!(response.records[0].ledger_action, LedgerAction::SkippedCcip);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_clear_retires_old_direct_divergence_as_stale_evidence() -> AnyResult<()> {
+    let effective = "0x3000000000000000000000000000000000000003";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_text_result(LIVE_VALUE)),
+        RpcResponse::Result(encoded_text_result_with_resolver(LIVE_VALUE, effective)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let direct = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(direct.records[0].ledger_action, LedgerAction::Written);
+    make_null_resolver_discovery(&fixture).await?;
+
+    let (active, cleared): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE cleared_at IS NULL),
+                count(*) FILTER (WHERE cleared_at IS NOT NULL)
+         FROM resolution_divergences",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!((active, cleared), (0, 1));
+
+    let discovery = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(discovery.records[0].ledger_action, LedgerAction::None);
+    let (active, cleared): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE cleared_at IS NULL),
+                count(*) FILTER (WHERE cleared_at IS NOT NULL)
+         FROM resolution_divergences",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!((active, cleared), (0, 1));
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn schema_migration_preserves_and_retires_populated_null_resolver_evidence() -> AnyResult<()>
+{
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let direct = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(direct.records[0].ledger_action, LedgerAction::Written);
+    sqlx::raw_sql(
+        "DROP TRIGGER name_current_retire_null_resolver_divergences ON name_current;
+         DROP FUNCTION retire_direct_divergences_for_null_resolver();",
+    )
+    .execute(fixture.pool())
+    .await?;
+    make_null_resolver_discovery(&fixture).await?;
+    assert_eq!(ledger_count(fixture.pool()).await?, 1);
+
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql"
+    ))
+    .execute(fixture.pool())
+    .await?;
+    let (total, active): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE cleared_at IS NULL)
+         FROM resolution_divergences",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!((total, active), (1, 0));
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn null_exact_resolver_revalidates_name_state_without_a_comparison_row() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(
+        encoded_text_result_with_resolver(
+            LIVE_VALUE,
+            "0x3000000000000000000000000000000000000003",
+        )?,
+    )])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+    let update_pool = fixture.pool().clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            sqlx::query("UPDATE name_current SET provenance = provenance || '{\"changed\":true}'")
+                .execute(&update_pool)
+                .await
+                .expect("second session must replace the name row");
+        })
+        .await;
+    assert_eq!(
+        result.expect_err("name mutation must be stale").kind(),
+        ErrorKind::ConcurrentState
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn wildcard_lookup_rejects_a_concurrent_name_projection_change() -> AnyResult<()> {
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
@@ -1215,10 +1973,71 @@ async fn project_generation_change_during_rpc_rejects_the_lookup() -> AnyResult<
 }
 
 #[tokio::test]
+async fn null_exact_resolver_rejects_project_generation_change_during_rpc() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            sqlx::query(
+                "UPDATE chain_phase_state
+                 SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
+                 WHERE chain_id = $1 AND phase_name = 'project'",
+            )
+            .bind(ETHEREUM)
+            .execute(&update_pool)
+            .await
+            .expect("second session must invalidate the project generation");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must reject a replaced project generation");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn manifest_declaration_change_during_rpc_rejects_the_lookup() -> AnyResult<()> {
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            sqlx::query(
+                "UPDATE manifest_contract_instances
+                 SET declared_address = declared_address
+                 WHERE role = 'universal_resolver'",
+            )
+            .execute(&update_pool)
+            .await
+            .expect("second session must replace the selected manifest declaration");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must retain the exact selected manifest declaration");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn null_exact_resolver_rejects_manifest_change_during_rpc() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
     let pool = fixture.pool().clone();
     let update_pool = pool.clone();
     let logical_name_id = fixture.logical_name_id.clone();
@@ -1356,6 +2175,31 @@ async fn head_change_between_read_and_commit_rejects_the_lookup() -> AnyResult<(
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let head_pool = pool.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            advance_head(&head_pool)
+                .await
+                .expect("second session must advance the readable head");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must revalidate the execution head through commit");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn null_exact_resolver_rejects_head_change_between_read_and_commit() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    make_null_resolver_discovery(&fixture).await?;
     let pool = fixture.pool().clone();
     let logical_name_id = fixture.logical_name_id.clone();
     let head_pool = pool.clone();
@@ -2116,6 +2960,43 @@ async fn primary_name_missing_forward_address_is_not_found() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn primary_name_does_not_reclassify_resolver_not_found() -> AnyResult<()> {
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(Value::String(hex_string(
+            &Address::from_str(reverse_resolver)?.abi_encode(),
+        ))),
+        RpcResponse::Result(Value::String(hex_string(&"alice.eth".abi_encode()))),
+        RpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: Value::String(resolver_not_found_revert(b"\x05alice\x03eth\0")),
+        },
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    seed_manifest(
+        fixture.pool(),
+        ENS_NAMESPACE,
+        "ens_v1_registry_l1",
+        "registry",
+        ENS_REGISTRY,
+        "00000000-0000-0000-0000-000000000104",
+    )
+    .await?;
+
+    let result = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup_ens_primary_name(target)
+        .await?;
+    assert_eq!(result.status, EnsPrimaryNameStatus::ExecutionFailed);
+
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn primary_name_selected_block_error_is_stale() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Error {
         code: -32000,
@@ -2237,6 +3118,27 @@ async fn ledger_count(pool: &PgPool) -> AnyResult<i64> {
         .fetch_one(pool)
         .await
         .context("failed to count resolution divergences")
+}
+
+async fn make_null_resolver_discovery(fixture: &Fixture) -> AnyResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE name_current
+        SET declared_summary = jsonb_set(
+                declared_summary #- '{topology}',
+                '{resolver}',
+                '{"chain_id":null,"address":null,"latest_event_kind":"ResolverChanged"}'::jsonb
+            )
+        WHERE logical_name_id = $1
+        "#,
+    )
+    .bind(&fixture.logical_name_id)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query("DELETE FROM record_inventory_current")
+        .execute(fixture.pool())
+        .await?;
+    Ok(())
 }
 
 async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixture> {
@@ -2687,6 +3589,25 @@ fn encoded_text_result(value: &str) -> Value {
     let record_result = (value.to_owned(),).abi_encode_params();
     let universal_result = (Bytes::from(record_result), Address::ZERO).abi_encode_params();
     Value::String(hex_string(&universal_result))
+}
+
+fn encoded_text_result_with_resolver(value: &str, resolver: &str) -> AnyResult<Value> {
+    let record_result = (value.to_owned(),).abi_encode_params();
+    let universal_result =
+        (Bytes::from(record_result), Address::from_str(resolver)?).abi_encode_params();
+    Ok(Value::String(hex_string(&universal_result)))
+}
+
+fn encoded_malformed_text_result_with_resolver(resolver: &str) -> AnyResult<Value> {
+    let universal_result =
+        (Bytes::from(vec![0x12, 0x34]), Address::from_str(resolver)?).abi_encode_params();
+    Ok(Value::String(hex_string(&universal_result)))
+}
+
+fn resolver_not_found_revert(name: &[u8]) -> String {
+    let mut encoded = keccak256("ResolverNotFound(bytes)").as_slice()[..4].to_vec();
+    encoded.extend((Bytes::copy_from_slice(name),).abi_encode_params());
+    hex_string(&encoded)
 }
 
 fn observed_position(block_number: i64, block_hash: &str, timestamp: &str) -> Value {

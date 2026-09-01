@@ -61,7 +61,7 @@ normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScop
 # (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L38 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L238 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64).
 [[abi.events]]
 name = "NameUnwrapped"
 fragment = "event NameUnwrapped(bytes32 indexed node, address owner)"
@@ -88,12 +88,30 @@ normalized_events = ["ExpiryChanged"]
 # (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L278 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L303 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L368 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+# (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58).
 [[abi.events]]
 name = "TransferSingle"
 fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
 emitter_roles = ["name_wrapper"]
 normalized_events = ["TokenControlTransferred", "PermissionChanged"]
+
+# NameWrapper delegates token approval to ERC1155Fuse, whose _approve emits the
+# ERC-721-shaped Approval event; its owner-wide setter emits ApprovalForAll.
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L124-L135 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L36-L47 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L373-L378 @ ens_v1@91c966f).
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+emitter_roles = ["name_wrapper"]
+normalized_events = []
+
+[[abi.events]]
+name = "Approval"
+fragment = "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)"
+emitter_roles = ["name_wrapper"]
+normalized_events = []
 
 # ERC1155 TransferBatch is emitted by the wrapper's ERC1155Fuse base and
 # reference indexers fan it out per id:

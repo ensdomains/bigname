@@ -1775,6 +1775,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "anyhow",
  "bigname-adapters",
  "bigname-content-hash",
  "bigname-domain",
@@ -5722,6 +5723,7 @@ dependencies = [
  "axum",
  "bigname-adapters",
  "bigname-content-hash",
+ "bigname-domain",
  "bigname-ingest",
  "bigname-interpret",
  "bigname-lookup",

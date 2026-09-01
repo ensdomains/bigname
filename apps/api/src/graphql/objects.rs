@@ -5,6 +5,7 @@ use sqlx::types::Uuid;
 use super::convert::resolver_from_store;
 use super::error::internal_error;
 use super::loader::{RecordInventoryLoader, record_inventory_key};
+use super::scalars::BigInt;
 use super::snapshot::{require_inventory_at_head, revalidate_graphql_head};
 
 /// Subgraph `Account` — the lowercased address as `id`.
@@ -66,8 +67,8 @@ pub(crate) struct Domain {
     pub(crate) name: Option<String>,
     pub(crate) normalized_name: Option<String>,
     pub(crate) token_id: Option<String>,
-    pub(crate) created_at: i32,
-    pub(crate) expiry_date: Option<i32>,
+    pub(crate) created_at: BigInt,
+    pub(crate) expiry_date: Option<BigInt>,
     pub(crate) resolver_address: Option<String>,
     pub(crate) owner_id: String,
     /// Resource and optional version boundary for the name's `record_inventory_current` row.
@@ -96,13 +97,13 @@ impl Domain {
     }
 
     #[graphql(name = "createdAt")]
-    async fn created_at(&self) -> i32 {
-        self.created_at
+    async fn created_at(&self) -> &BigInt {
+        &self.created_at
     }
 
     #[graphql(name = "expiryDate")]
-    async fn expiry_date(&self) -> Option<i32> {
-        self.expiry_date
+    async fn expiry_date(&self) -> Option<&BigInt> {
+        self.expiry_date.as_ref()
     }
 
     /// The page's `resolver` reads are coalesced through a DataLoader, so a list of N domains costs

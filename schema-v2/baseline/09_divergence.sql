@@ -291,9 +291,12 @@ DECLARE
     guard_status text;
     resolver_path jsonb;
     compared_entries jsonb;
+    compared_provenance jsonb;
+    compared_support_status text;
     selector_family text;
     selector_key text;
     indexed_entry jsonb;
+    default_entry jsonb;
     indexed_status text;
     indexed_value jsonb;
     indexed_answer jsonb;
@@ -351,8 +354,10 @@ BEGIN
     END CASE;
 
     SELECT inventory.entries,
+           inventory.provenance,
+           inventory.support_status,
            name.declared_summary #> '{topology,resolver_path}'
-    INTO compared_entries, resolver_path
+    INTO compared_entries, compared_provenance, compared_support_status, resolver_path
     FROM record_inventory_current AS inventory
     JOIN name_current AS name
       ON name.logical_name_id = requested_logical_name_id
@@ -401,13 +406,76 @@ BEGIN
     candidate.ordinal
     LIMIT 1;
 
+    IF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+       AND selector_family = 'addr'
+       AND (
+           selector_key = '60'
+           OR selector_key::numeric BETWEEN 2147483649::numeric AND 4294967295::numeric
+       )
+       AND EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(COALESCE(
+               compared_provenance -> 'read_rules', '[]'::jsonb
+           )) rule
+           WHERE rule ->> 'kind' = 'ensip19_default_address'
+             AND rule ->> 'source_record_key' = 'addr:2147483648'
+       )
+    THEN
+        IF compared_support_status <> 'supported' THEN
+            indexed_entry := jsonb_build_object('status', 'unsupported');
+        ELSE
+            SELECT candidate.entry
+            INTO default_entry
+            FROM jsonb_array_elements(compared_entries)
+                WITH ORDINALITY AS candidate(entry, ordinal)
+            WHERE candidate.entry ->> 'record_key' = 'addr:2147483648'
+               OR (
+                    candidate.entry ->> 'record_family' = 'addr'
+                    AND candidate.entry ->> 'selector_key' = '2147483648'
+               )
+            ORDER BY candidate.ordinal
+            LIMIT 1;
+
+            IF default_entry IS NULL THEN
+                indexed_entry := jsonb_build_object('status', 'not_found');
+            ELSIF default_entry ->> 'status' IN ('success', 'not_found') THEN
+                -- Match the requested getter's verified decode. addr(bytes32) converts
+                -- the coin-60 bytes to address(0); multicoin addr(bytes32,uint256)
+                -- preserves non-empty bytes, including 20 zero bytes.
+                -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+                -- (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L685-L697 @ ens_v2_sepolia_20260629@ccaeb58)
+                IF selector_key = '60'
+                   AND default_entry ->> 'status' = 'success'
+                   AND lower(COALESCE(
+                       default_entry #>> '{value,value}',
+                       default_entry #>> '{value,bytes}',
+                       default_entry ->> 'value'
+                   )) = '0x0000000000000000000000000000000000000000'
+                THEN
+                    indexed_entry := jsonb_build_object('status', 'not_found');
+                ELSE
+                    indexed_entry := default_entry;
+                END IF;
+            ELSE
+                indexed_entry := jsonb_build_object('status', 'unsupported');
+            END IF;
+        END IF;
+    ELSIF (indexed_entry IS NULL OR indexed_entry ->> 'status' = 'not_found')
+          AND compared_support_status <> 'supported'
+    THEN
+        indexed_entry := jsonb_build_object('status', 'unsupported');
+    END IF;
+
     IF indexed_entry IS NULL THEN
         indexed_answer := jsonb_build_object('status', 'not_found');
     ELSE
-        indexed_status := COALESCE(
+        indexed_status := CASE COALESCE(
             indexed_entry ->> 'status',
             'unsupported'
-        );
+        )
+            WHEN 'failed' THEN 'execution_failed'
+            ELSE COALESCE(indexed_entry ->> 'status', 'unsupported')
+        END;
         indexed_answer := jsonb_build_object('status', indexed_status);
         IF indexed_status = 'success' THEN
             indexed_value := COALESCE(
@@ -424,6 +492,8 @@ BEGIN
                         ELSE indexed_value #>> '{}'
                     END
                 );
+            ELSE
+                indexed_answer := jsonb_build_object('status', 'unsupported');
             END IF;
         END IF;
     END IF;
@@ -605,6 +675,61 @@ BEFORE INSERT OR UPDATE ON resolution_divergences
 FOR EACH ROW
 EXECUTE FUNCTION validate_resolution_divergence_positions();
 
+CREATE OR REPLACE FUNCTION retire_direct_divergences_for_null_resolver()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, bigname_phase, pg_temp
+AS $$
+DECLARE
+    surface_on_ethereum_mainnet boolean;
+BEGIN
+    -- Rust lookup admission excludes resolver.status = 'unsupported', but
+    -- retirement intentionally does not: once the exact resolver is null,
+    -- prior direct-resolver observations are stale regardless of that status.
+    IF NEW.namespace = 'ens'
+        AND NEW.declared_summary -> 'resolver' ? 'chain_id'
+        AND NEW.declared_summary -> 'resolver' ? 'address'
+        AND NEW.declared_summary -> 'resolver' -> 'chain_id' = 'null'::jsonb
+        AND NEW.declared_summary -> 'resolver' -> 'address' = 'null'::jsonb
+    THEN
+        EXECUTE format(
+            'SELECT EXISTS (
+                SELECT 1 FROM %I.name_surfaces
+                WHERE logical_name_id = $1
+                  AND chain_id = ''ethereum-mainnet''
+            )',
+            TG_TABLE_SCHEMA
+        )
+        INTO surface_on_ethereum_mainnet
+        USING NEW.logical_name_id;
+
+        IF surface_on_ethereum_mainnet THEN
+            EXECUTE format(
+                'UPDATE %I.resolution_divergences
+                 SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
+                 WHERE logical_name_id = $1
+                   AND resolver_chain_id = ''ethereum-mainnet''
+                   AND cleared_at IS NULL',
+                TG_TABLE_SCHEMA
+            )
+            USING NEW.logical_name_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION retire_direct_divergences_for_null_resolver()
+    FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS name_current_retire_null_resolver_divergences
+    ON name_current;
+CREATE TRIGGER name_current_retire_null_resolver_divergences
+AFTER INSERT OR UPDATE OF declared_summary ON name_current
+FOR EACH ROW
+EXECUTE FUNCTION retire_direct_divergences_for_null_resolver();
+
 CREATE OR REPLACE FUNCTION clear_resolution_divergences_for_block()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -666,7 +791,7 @@ COMMENT ON COLUMN resolution_divergences.first_observed_at IS
 COMMENT ON COLUMN resolution_divergences.last_observed_at IS
     'This time records the latest disagreement.';
 COMMENT ON COLUMN resolution_divergences.cleared_at IS
-    'This time records agreement restoration.';
+    'This time records agreement restoration or guarded retirement after the exact resolver becomes null.';
 COMMENT ON FUNCTION write_resolution_divergence(
     uuid, text, text, text, bigint, text, jsonb, text, text, text,
     text, jsonb, jsonb, boolean
@@ -676,3 +801,5 @@ COMMENT ON FUNCTION revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
 ) IS
     'Locks and revalidates the authoritative head, project generation, optional exact name and inventory rows, manifest declarations, and all observed canonical positions without granting the caller UPDATE on those relations.';
+COMMENT ON FUNCTION retire_direct_divergences_for_null_resolver() IS
+    'Retires active direct-resolver observations during projection publication when an ENS Mainnet exact resolver becomes null; it performs no live/indexed comparison.';

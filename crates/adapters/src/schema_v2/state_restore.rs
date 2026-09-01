@@ -5,7 +5,7 @@ mod v1_transfer;
 pub(super) fn rebuild_v2_indexes(state: &mut State) {
     state.rebuild_v2_token_indexes();
 }
-pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
+#[rustfmt::skip] pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
     if event.source_family == "ens_v2_resolver_l1" && event.event_kind == "PreimageObserved" {
         if event
             .after_state
@@ -77,7 +77,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
                 &raw_label,
                 expiry,
                 (event.event_kind == "RegistrationGranted").then(|| event.after_state.clone()),
-            );
+            ); if event.block_timestamp.is_some_and(|timestamp| super::state::v2_expiry_is_live(Some(expiry), timestamp.unix_timestamp())) { state.clear_v2_expiry_retirement(emitter, token, false); }
             state.restore_v2_unbound_resource(emitter, token, event);
         }
         "TokenResourceLinked" => {
@@ -120,6 +120,11 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             state.transfer_v2_registrant(emitter, token, registrant.to_owned());
         }
         "RegistrationReleased" => {
+            if expiry_retirement_is_projection_only(event)
+                && let Some(token) = token
+            {
+                state.mark_v2_expiry_retirement(emitter, token, event.after_state.get("expiry").and_then(parse_u64).zip(event.block_timestamp.map(time::OffsetDateTime::unix_timestamp)).is_some_and(|(expiry, timestamp)| u64::try_from(timestamp).is_ok_and(|timestamp| expiry <= timestamp)));
+            }
             if !matches!(
                 event
                     .after_state
@@ -132,6 +137,9 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             }
         }
         "ResolverChanged" => {
+            if expiry_retirement_is_projection_only(event) {
+                return;
+            }
             let Some(token) = token else { return };
             let resolver = event
                 .after_state
@@ -141,6 +149,9 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             state.set_v2_resolver(emitter, token, resolver);
         }
         "SubregistryChanged" => {
+            if expiry_retirement_is_projection_only(event) {
+                return;
+            }
             let Some(token) = token else { return };
             state.restore_v2_subregistry_change(emitter, token, &event.after_state);
         }
@@ -150,7 +161,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             else {
                 return;
             };
-            state.set_v2_expiry(emitter, token, expiry);
+            state.set_v2_expiry(emitter, token, expiry); if event.block_timestamp.is_some_and(|timestamp| super::state::v2_expiry_is_live(Some(expiry), timestamp.unix_timestamp())) { state.clear_v2_expiry_retirement(emitter, token, true); }
         }
         "ParentChanged" => {
             let Some(raw_label) = raw_label(&event.after_state) else {
@@ -165,6 +176,17 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
         }
         _ => {}
     }
+    let displaced_regeneration_event = event.after_state.get("source_event").and_then(Value::as_str) == Some("TokenRegenerated") && (event.event_kind == "SurfaceUnbound" || event.event_kind == "RegistrationReleased" && event.after_state.get("terminal_reason").and_then(Value::as_str) == Some("registry_name_binding_changed"));
+    if !displaced_regeneration_event && let (Some(token), Some(logical_name_id)) = (token, event.logical_name_id.as_deref()) { state.remember_v2_logical_name(emitter, token, logical_name_id); }
+}
+fn expiry_retirement_is_projection_only(event: &PriorEventInput) -> bool {
+    [
+        ("source_event", "RegistryPathExpired"),
+        ("derived_from", "interpreter_state"),
+        ("terminal_reason", "registry_name_binding_expired"),
+    ]
+    .into_iter()
+    .all(|(key, value)| event.after_state.get(key).and_then(Value::as_str) == Some(value))
 }
 fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
     after_state
@@ -186,7 +208,6 @@ fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
                 .map(|label| label.as_bytes().to_vec())
         })
 }
-
 pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     let source_event = event
         .after_state

@@ -1,0 +1,2982 @@
+#!/usr/bin/env python3
+"""Snapshot and verify a pinned upstream citation rotation.
+
+The verifier deliberately reads carrier files from Git objects.  A frozen base
+therefore remains reviewable after the worktree has been edited, and every
+baseline occurrence keeps a stable byte-offset identity. Final fingerprint
+reports require a committed head; ``WORKTREE`` is accepted only when clean.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, Iterable, Iterator
+
+
+ROOT = Path(__file__).resolve().parent.parent
+STRICT_CITATION_RE = re.compile(
+    rb"\(upstream: \.refs/"
+    rb"(?P<key>[A-Za-z0-9_.-]+)/"
+    rb"(?P<path>[^:\r\n)]+)"
+    rb":L(?P<start>[1-9][0-9]*)"
+    rb"(?:-L?(?P<end>[1-9][0-9]*))?"
+    rb" @ (?P=key)@(?P<short>[0-9a-f]{7,40})"
+    rb"\)"
+)
+# Baseline-only recovery parser.  Intervening PRs wrapped some citations across
+# Markdown and doc-comment lines.  They still contain one governed old tag and
+# must receive a stable ID and a disposition; the final tree remains strict.
+LOOSE_CITATION_RE = re.compile(
+    rb"\(upstream:\s+\.refs/"
+    rb"(?P<key>[A-Za-z0-9_.-]+)/"
+    rb"(?P<path>[^:\r\n)]+)"
+    rb":L(?P<start>[1-9][0-9]*)"
+    rb"(?:-L?(?P<end>[1-9][0-9]*))?"
+    rb"\s+@\s+(?P=key)@(?P<short>[^\s)]*)"
+    rb"\)"
+)
+GOVERNED_CITATION_MARKER_RE = re.compile(
+    rb"\(upstream\s*:\s*\.refs/(?P<key>[A-Za-z0-9_.-]+)/"
+)
+HUNK_RE = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"
+)
+HTML_BLOCK_TAGS = frozenset(
+    {
+        b"address",
+        b"article",
+        b"aside",
+        b"base",
+        b"basefont",
+        b"blockquote",
+        b"body",
+        b"caption",
+        b"center",
+        b"col",
+        b"colgroup",
+        b"dd",
+        b"details",
+        b"dialog",
+        b"dir",
+        b"div",
+        b"dl",
+        b"dt",
+        b"fieldset",
+        b"figcaption",
+        b"figure",
+        b"footer",
+        b"form",
+        b"frame",
+        b"frameset",
+        b"head",
+        b"header",
+        b"h1",
+        b"h2",
+        b"h3",
+        b"h4",
+        b"h5",
+        b"h6",
+        b"hr",
+        b"html",
+        b"iframe",
+        b"legend",
+        b"li",
+        b"link",
+        b"main",
+        b"menu",
+        b"menuitem",
+        b"nav",
+        b"noframes",
+        b"ol",
+        b"optgroup",
+        b"option",
+        b"p",
+        b"param",
+        b"pre",
+        b"script",
+        b"search",
+        b"section",
+        b"style",
+        b"summary",
+        b"table",
+        b"tbody",
+        b"td",
+        b"template",
+        b"textarea",
+        b"tfoot",
+        b"th",
+        b"thead",
+        b"title",
+        b"tr",
+        b"track",
+        b"ul",
+    }
+)
+COMMONMARK_TYPE6_TAGS = HTML_BLOCK_TAGS - {
+    b"pre",
+    b"script",
+    b"style",
+    b"template",
+    b"textarea",
+}
+HTML_VOID_TAGS = frozenset(
+    {b"base", b"basefont", b"col", b"frame", b"hr", b"link", b"param", b"track"}
+)
+HTML_TAG_RE = re.compile(
+    rb"<\s*(/?)\s*([A-Za-z][A-Za-z0-9-]*)\b[^>]*>"
+)
+COMMONMARK_COMPLETE_OPEN_TAG_RE = re.compile(
+    rb"^[ ]{0,3}<[A-Za-z][A-Za-z0-9-]*"
+    rb"(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    rb"(?:[ \t]*=[ \t]*(?:[^ \t\r\n\"'=<>`]+|'[^']*'|\"[^\"]*\"))?)*"
+    rb"[ \t]*/?>[ \t]*$"
+)
+COMMONMARK_COMPLETE_CLOSE_TAG_RE = re.compile(
+    rb"^[ ]{0,3}</[A-Za-z][A-Za-z0-9-]*[ \t]*>[ \t]*$"
+)
+CLAIM_CONTEXT_CACHE: dict[tuple[Any, ...], dict[int, str]] = {}
+CLAIM_LINE_CACHE: dict[tuple[Any, ...], dict[int, tuple[str, int]]] = {}
+BASELINE_CACHE: dict[tuple[str, str], Baseline] = {}
+
+
+class RotationError(RuntimeError):
+    pass
+
+
+@dataclasses.dataclass(frozen=True)
+class Citation:
+    key: str
+    path: str
+    start: int
+    end: int
+    short: str
+    begin: int
+    finish: int
+    carrier_line: int
+    raw: bytes
+    strict: bool
+    ordinal: int
+
+    def target(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "commit": self.short,
+            "path": self.path,
+            "start": self.start,
+            "end": self.end,
+        }
+
+
+@dataclasses.dataclass
+class Baseline:
+    commit: str
+    rows: list[dict[str, Any]]
+    raw_count: int
+    exact_count: int
+    parsed_count: int
+    noncanonical_count: int
+
+
+def run(
+    args: list[str], *, cwd: Path = ROOT, check: bool = True, text: bool = True
+) -> subprocess.CompletedProcess[Any]:
+    result = subprocess.run(args, cwd=cwd, capture_output=True, text=text)
+    if check and result.returncode != 0:
+        stderr = result.stderr if text else result.stderr.decode(errors="replace")
+        raise RotationError(f"command failed ({' '.join(args)}):\n{stderr}")
+    return result
+
+
+def resolve_revision(revision: str) -> str:
+    return run(["git", "rev-parse", revision]).stdout.strip()
+
+
+def report_revision(revision: str) -> str:
+    """Return the immutable commit recorded in generated reports."""
+    return resolve_revision("HEAD" if revision == "WORKTREE" else revision)
+
+
+def tracked_paths(revision: str) -> list[str]:
+    result = run(
+        ["git", "ls-tree", "-r", "-z", "--name-only", revision], text=False
+    )
+    return sorted(
+        path.decode("utf-8", errors="surrogateescape")
+        for path in result.stdout.split(b"\0")
+        if path
+    )
+
+
+def blob(revision: str, path: str) -> bytes:
+    result = run(["git", "show", f"{revision}:{path}"], text=False)
+    return result.stdout
+
+
+def worktree_or_blob(revision: str, path: str) -> bytes:
+    if revision == "WORKTREE":
+        candidate = ROOT / path
+        if candidate.is_symlink():
+            return os.readlink(candidate).encode()
+        return candidate.read_bytes()
+    return blob(revision, path)
+
+
+def revision_paths(revision: str) -> list[str]:
+    if revision != "WORKTREE":
+        return tracked_paths(revision)
+    # Include new deliverables before they are staged. Verification must not
+    # become stricter merely because an untracked file enters the index.
+    result = run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        text=False,
+    )
+    return sorted(
+        path.decode("utf-8", errors="surrogateescape")
+        for path in result.stdout.split(b"\0")
+        if path
+    )
+
+
+def parse_citations(data: bytes, *, loose: bool) -> list[Citation]:
+    regex = LOOSE_CITATION_RE if loose else STRICT_CITATION_RE
+    citations: list[Citation] = []
+    matches = list(regex.finditer(data))
+    for match in matches:
+        end = int(match.group("end") or match.group("start"))
+        raw = match.group(0)
+        citations.append(
+            Citation(
+                key=match.group("key").decode(),
+                path=match.group("path").decode(),
+                start=int(match.group("start")),
+                end=end,
+                short=match.group("short").decode(),
+                begin=match.start(),
+                finish=match.end(),
+                carrier_line=data.count(b"\n", 0, match.start()) + 1,
+                raw=raw,
+                strict=STRICT_CITATION_RE.fullmatch(raw) is not None,
+                ordinal=0,
+            )
+        )
+    if loose:
+        governed_tags = re.compile(rb"(?P<key>[A-Za-z0-9_.-]+)@(?P<short>[0-9a-f]{7,40})")
+        path_pattern = re.compile(
+            rb"\.refs/(?P<key>[A-Za-z0-9_.-]+)/(?P<path>[^:\r\n)]+)"
+            rb":L(?P<start>[1-9][0-9]*)(?:-L?(?P<end>[1-9][0-9]*))?"
+        )
+        covered = [(match.start(), match.end()) for match in matches]
+        for tag in governed_tags.finditer(data):
+            if any(begin <= tag.start() < finish for begin, finish in covered):
+                continue
+            window_start = max(0, tag.start() - 1200)
+            candidates = [
+                candidate
+                for candidate in path_pattern.finditer(data, window_start, tag.start())
+                if candidate.group("key") == tag.group("key")
+            ]
+            if not candidates:
+                wrapped_pattern = re.compile(
+                    rb"\.refs/(?P<key>[A-Za-z0-9_.-]+)/(?P<path>[^:)]+?)"
+                    rb":L(?P<start>[1-9][0-9]*)(?:-L?(?P<end>[1-9][0-9]*))?"
+                )
+                wrapped = [
+                    candidate
+                    for candidate in wrapped_pattern.finditer(
+                        data, window_start, tag.start()
+                    )
+                    if candidate.group("key") == tag.group("key")
+                ]
+                if not wrapped:
+                    continue
+                candidates = wrapped
+            source = candidates[-1]
+            closing = tag.end() + (1 if data[tag.end() : tag.end() + 1] == b")" else 0)
+            citation_begin = data.rfind(b"upstream:", window_start, source.start())
+            if citation_begin < 0:
+                citation_begin = source.start()
+            elif citation_begin > 0 and data[citation_begin - 1 : citation_begin] == b"(":
+                citation_begin -= 1
+            end = int(source.group("end") or source.group("start"))
+            citations.append(
+                Citation(
+                    key=tag.group("key").decode(),
+                    path=re.sub(rb"\s+", b"", source.group("path")).decode(),
+                    start=int(source.group("start")),
+                    end=end,
+                    short=tag.group("short").decode(),
+                    begin=citation_begin,
+                    finish=closing,
+                    carrier_line=data.count(b"\n", 0, citation_begin) + 1,
+                    raw=data[citation_begin:closing],
+                    strict=False,
+                    ordinal=0,
+                )
+            )
+    citations.sort(key=lambda citation: citation.begin)
+    citations = [
+        dataclasses.replace(citation, ordinal=ordinal)
+        for ordinal, citation in enumerate(citations)
+    ]
+    return citations
+
+
+def byte_lines(data: bytes) -> list[bytes]:
+    """Split bytes using Git's LF-only line convention, without terminators."""
+    if not data:
+        return []
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return lines
+
+
+def strip_indentation(line: bytes, columns: int) -> bytes:
+    """Remove up to a Markdown container's indentation columns."""
+    index = 0
+    consumed = 0
+    while index < len(line) and consumed < columns and line[index] in b" \t":
+        consumed = consumed + 1 if line[index] == ord(" ") else (consumed // 4 + 1) * 4
+        index += 1
+    return line[index:] if consumed >= columns else line
+
+
+def strip_blockquote_containers(line: bytes) -> bytes:
+    """Remove Markdown blockquote markers before parsing child structure."""
+    content = line
+    while True:
+        match = re.match(rb"^[ ]{0,3}>[ \t]?(.*)$", content)
+        if match is None:
+            return content
+        content = match.group(1)
+
+
+def mask_code_span_segment(lines: list[bytes]) -> list[bytes]:
+    """Mask code spans in a paragraph-capable run of Markdown lines."""
+    data = b"\n".join(lines)
+    masked = bytearray(data)
+    index = 0
+    while index < len(data):
+        if data[index] != ord("`"):
+            index += 1
+            continue
+        end = index
+        while end < len(data) and data[end] == ord("`"):
+            end += 1
+        marker = data[index:end]
+        closing = data.find(marker, end)
+        while closing >= 0 and (
+            (closing and data[closing - 1] == ord("`"))
+            or (
+                closing + len(marker) < len(data)
+                and data[closing + len(marker)] == ord("`")
+            )
+        ):
+            closing = data.find(marker, closing + len(marker))
+        if closing < 0:
+            index = end
+            continue
+        for offset in range(index, closing + len(marker)):
+            if masked[offset] != ord("\n"):
+                masked[offset] = ord(" ")
+        index = closing + len(marker)
+    return bytes(masked).split(b"\n")
+
+
+def mask_markdown_code_spans(lines: list[bytes]) -> list[bytes]:
+    """Mask code spans without consuming fenced-code block delimiters."""
+    fenced = [False] * len(lines)
+    active_fence: tuple[bytes, int] | None = None
+    active_list_indent: int | None = None
+    for index, raw_line in enumerate(lines):
+        line = strip_blockquote_containers(raw_line)
+        leading = re.match(rb"^[ \t]*", line)
+        assert leading is not None
+        indentation = len(leading.group(0).expandtabs(4))
+        if active_list_indent is not None and line.strip() and indentation < active_list_indent:
+            active_list_indent = None
+        list_item = re.match(
+            rb"^[ ]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+", line
+        )
+        structural_line = line
+        if list_item is not None:
+            active_list_indent = len(list_item.group(0).expandtabs(4))
+            structural_line = line[list_item.end() :]
+        elif active_list_indent is not None and indentation >= active_list_indent:
+            structural_line = strip_indentation(line, active_list_indent)
+        if active_fence is not None:
+            fenced[index] = True
+            closing = re.match(
+                rb"^[ ]{0,3}(`{3,}|~{3,})[ \t]*$", structural_line
+            )
+            if (
+                closing is not None
+                and closing.group(1)[:1] == active_fence[0]
+                and len(closing.group(1)) >= active_fence[1]
+            ):
+                active_fence = None
+            continue
+        opener = markdown_fence_open(structural_line)
+        if opener is not None:
+            fenced[index] = True
+            active_fence = opener
+
+    masked = list(lines)
+    segment_start = 0
+    for index in range(len(lines) + 1):
+        is_blank_boundary = index < len(lines) and not strip_blockquote_containers(
+            lines[index]
+        ).strip()
+        if index < len(lines) and not fenced[index] and not is_blank_boundary:
+            continue
+        if segment_start < index:
+            masked[segment_start:index] = mask_code_span_segment(
+                lines[segment_start:index]
+            )
+        if index < len(lines):
+            masked[index] = lines[index]
+        segment_start = index + 1
+    return masked
+
+
+def mask_inline_html_opaque_regions(lines: list[bytes]) -> list[bytes]:
+    """Mask inline HTML comment-like bodies before scanning element tags."""
+    data = b"\n".join(lines)
+    masked = bytearray(data)
+
+    def hide(start: int, finish: int) -> None:
+        for offset in range(start, finish):
+            if masked[offset] != ord("\n"):
+                masked[offset] = ord(" ")
+
+    regions = (
+        (b"<!--", b"-->"),
+        (b"<?", b"?>"),
+        (b"<![CDATA[", b"]]>"),
+    )
+    for opener, closer in regions:
+        offset = 0
+        while True:
+            start = data.find(opener, offset)
+            if start < 0:
+                break
+            end = data.find(closer, start + len(opener))
+            finish = len(data) if end < 0 else end + len(closer)
+            hide(start, finish)
+            offset = finish
+    for declaration in re.finditer(rb"<![A-Z][^>]*(?:>|$)", data, re.S):
+        hide(declaration.start(), declaration.end())
+    for destination in re.finditer(
+        rb"\]\([ \t]*<[^>\r\n]*>[ \t]*(?:[\"'][^\r\n)]*[\"'][ \t]*)?\)",
+        data,
+    ):
+        hide(destination.start(), destination.end())
+    for label in re.finditer(rb"\]\[[^\]\r\n]*\]", data):
+        hide(label.start(), label.end())
+    unbracketed_destination = (
+        rb"(?:[^ \t\r\n()\\]|\\.|\((?:[^()\r\n\\]|\\.)*\))+"
+    )
+    title_double = rb'"[^"\r\n]*(?:\r?\n(?![ \t]*\r?$)[^"\r\n]*)*"'
+    title_single = rb"'[^'\r\n]*(?:\r?\n(?![ \t]*\r?$)[^'\r\n]*)*'"
+    title_parenthesized = (
+        rb"\([^()\r\n]*(?:\r?\n(?![ \t]*\r?$)[^()\r\n]*)*\)"
+    )
+    link_title = (
+        rb"(?:" + title_double + rb"|" + title_single + rb"|" + title_parenthesized + rb")"
+    )
+    for destination in re.finditer(
+        rb"\]\([ \t]*"
+        + unbracketed_destination
+        + rb"(?:[ \t]+"
+        + link_title
+        + rb")?[ \t]*\)",
+        data,
+    ):
+        hide(destination.start(), destination.end())
+    reference_destination = (
+        rb"(?:<[^>\r\n]*>|" + unbracketed_destination + rb")"
+    )
+    for destination in re.finditer(
+        rb"(?m)^[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*"
+        + reference_destination
+        + rb"[ \t]*\r?\n[ ]{0,3}"
+        + link_title
+        + rb"[ \t]*$",
+        data,
+    ):
+        hide(destination.start(), destination.end())
+    for destination in re.finditer(
+        rb"(?m)^[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*<[^>\r\n]*>", data
+    ):
+        hide(destination.start(), destination.end())
+    for destination in re.finditer(
+        rb"(?m)^[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*"
+        + unbracketed_destination
+        + rb"(?:[ \t]+"
+        + link_title
+        + rb")?[ \t]*$",
+        data,
+    ):
+        hide(destination.start(), destination.end())
+    for offset, byte in enumerate(data):
+        if byte != ord("<"):
+            continue
+        slash_count = 0
+        previous = offset - 1
+        while previous >= 0 and data[previous] == ord("\\"):
+            slash_count += 1
+            previous -= 1
+        if slash_count % 2:
+            masked[offset] = ord(" ")
+    return bytes(masked).split(b"\n")
+
+
+def normalized_claim_tokens(
+    data: bytes, *, preserve_indentation: bool = True
+) -> bytes:
+    """Normalize spacing/carrier markers while retaining all claim bytes."""
+    carrier_free: list[bytes] = []
+    for line in data.split(b"\n"):
+        leading = re.match(rb"[ \t]*", line)
+        assert leading is not None
+        indentation = len(leading.group(0).expandtabs(4))
+        stripped = line[leading.end() :]
+        stripped = re.sub(
+            rb"^(?://[/!]?|/\*+|--+)\s*", b"", stripped, count=1
+        )
+        stripped = re.sub(rb"\s*\*/\s*$", b"", stripped)
+        if stripped.strip():
+            indentation_marker = (
+                f"<indent:{indentation}>".encode()
+                if preserve_indentation
+                else b""
+            )
+            carrier_free.append(indentation_marker + stripped)
+        else:
+            carrier_free.append(b"")
+    return re.sub(rb"\s+", b" ", b"\n".join(carrier_free)).strip()
+
+
+def claim_context_bounds(
+    lines: list[bytes], site: int, *, markdown: bool = True
+) -> tuple[int, int]:
+    """Return the Markdown/code paragraph that contains a citation site."""
+    stripped = lines[site].lstrip()
+    if markdown and stripped.startswith(b">"):
+        return site, site + 1
+    if markdown and re.match(rb"(?:\||#{1,6}\s)", stripped):
+        return site, site + 1
+
+    start = site
+    while start and lines[start - 1].strip():
+        start -= 1
+    end = min(site + 1, len(lines))
+    while end < len(lines) and lines[end].strip():
+        end += 1
+
+    if not markdown:
+        return start, end
+
+    list_marker = re.compile(rb"^\s*[-+*]\s+")
+    list_start = next(
+        (index for index in range(site, start - 1, -1) if list_marker.match(lines[index])),
+        None,
+    )
+    if list_start is None:
+        return start, end
+    list_end = list_start + 1
+    while (
+        list_end < len(lines)
+        and lines[list_end].strip()
+        and not list_marker.match(lines[list_end])
+    ):
+        list_end += 1
+    return list_start, list_end
+
+
+def advance_html_block_stack(
+    line: bytes,
+    index: int,
+    stack: list[tuple[bytes, int]],
+) -> bool:
+    """Update HTML element ancestry and report whether this line is structural."""
+    was_active = bool(stack)
+    saw_tag = False
+    multiline_open = re.search(
+        rb"<([A-Za-z][A-Za-z0-9-]*)(?=[ \t]|$)", line
+    )
+    if (
+        multiline_open is not None
+        and b">" not in line[multiline_open.start() :]
+    ):
+        name = multiline_open.group(1).lower()
+        if name not in HTML_VOID_TAGS:
+            stack.append((name, index))
+            saw_tag = True
+    for tag_match in HTML_TAG_RE.finditer(line):
+        closing, raw_name = tag_match.group(1), tag_match.group(2)
+        name = raw_name.lower()
+        saw_tag = True
+        if closing:
+            for stack_index in range(len(stack) - 1, -1, -1):
+                if stack[stack_index][0] == name:
+                    del stack[stack_index:]
+                    break
+        elif (
+            name not in HTML_VOID_TAGS
+            and not tag_match.group(0).rstrip().endswith(b"/>")
+        ):
+            stack.append((name, index))
+    return was_active or saw_tag or bool(stack)
+
+
+def close_html_element(stack: list[tuple[bytes, int]], name: bytes) -> None:
+    """Close the nearest matching HTML element without parsing opaque body text."""
+    for stack_index in range(len(stack) - 1, -1, -1):
+        if stack[stack_index][0] == name:
+            del stack[stack_index:]
+            return
+
+
+def commonmark_raw_html_start(
+    line: bytes, *, allow_type7: bool = True
+) -> str | None:
+    """Return the CommonMark HTML-block end condition started by this line."""
+    match = re.match(rb"^[ ]{0,3}(.*)$", line)
+    if match is None:
+        return None
+    content = match.group(1)
+    if re.match(rb"<(?:pre|script|style|textarea)(?:[ \t>]|$)", content, re.I):
+        return "raw-tag"
+    if content.startswith(b"<!--"):
+        return "comment"
+    if content.startswith(b"<?"):
+        return "processing"
+    if content.startswith(b"<![CDATA["):
+        return "cdata"
+    if re.match(rb"<![A-Z]", content):
+        return "declaration"
+    block_tag = re.match(
+        rb"</?([A-Za-z][A-Za-z0-9-]*)(?=[ \t]|/?>|$)", content
+    )
+    if block_tag is not None and block_tag.group(1).lower() in COMMONMARK_TYPE6_TAGS:
+        return "blank"
+    if allow_type7 and (
+        COMMONMARK_COMPLETE_OPEN_TAG_RE.match(line)
+        or COMMONMARK_COMPLETE_CLOSE_TAG_RE.match(line)
+    ):
+        return "blank"
+    return None
+
+
+def commonmark_raw_html_ends(kind: str, line: bytes) -> bool:
+    """Return whether a CommonMark HTML block ends on this line."""
+    if kind == "raw-tag":
+        return re.search(rb"</(?:pre|script|style|textarea)>", line, re.I) is not None
+    if kind == "comment":
+        return b"-->" in line
+    if kind == "processing":
+        return b"?>" in line
+    if kind == "cdata":
+        return b"]]>" in line
+    if kind == "declaration":
+        return b">" in line
+    assert kind == "blank"
+    return not line.strip()
+
+
+def markdown_fence_open(line: bytes) -> tuple[bytes, int] | None:
+    """Return a valid CommonMark fenced-code opener's kind and width."""
+    match = re.match(rb"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
+    if match is None:
+        return None
+    marker, info = match.group(1), match.group(2)
+    if marker.startswith(b"`") and b"`" in info:
+        return None
+    return marker[:1], len(marker)
+
+
+def claim_scope_indices(
+    lines: list[bytes],
+    start: int,
+    site: int,
+    *,
+    markdown: bool = True,
+    structural_lines: list[bytes] | None = None,
+    html_scan_lines: list[bytes] | None = None,
+) -> list[int]:
+    """Return enclosing Markdown structures that affect a claim's meaning."""
+    if not markdown:
+        return []
+    if structural_lines is None:
+        structural_lines = mask_markdown_code_spans(lines)
+    if html_scan_lines is None:
+        html_scan_lines = mask_inline_html_opaque_regions(structural_lines)
+    enclosures: list[int] = []
+    if lines[site].lstrip().startswith(b">"):
+        quote_start = site
+        while quote_start and lines[quote_start - 1].lstrip().startswith(b">"):
+            quote_start -= 1
+        if quote_start != site:
+            enclosures.append(quote_start)
+    active_fence: tuple[bytes, int, int] | None = None
+    active_raw_html: tuple[str, int, bytes | None] | None = None
+    active_html_blocks: list[tuple[bytes, int]] = []
+    scope_list_indent: int | None = None
+    scope_list_start: int | None = None
+    scope_paragraph_open = False
+    for index, line in enumerate(structural_lines[: site + 1]):
+        quote_line = strip_blockquote_containers(line)
+        html_quote_line = strip_blockquote_containers(html_scan_lines[index])
+        leading = re.match(rb"^[ \t]*", quote_line)
+        assert leading is not None
+        indentation = len(leading.group(0).expandtabs(4))
+        if (
+            scope_list_indent is not None
+            and quote_line.strip()
+            and indentation < scope_list_indent
+        ):
+            scope_list_indent = None
+            scope_list_start = None
+        list_item = re.match(
+            rb"^[ ]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+", quote_line
+        )
+        structural_line = quote_line
+        html_element_line = html_quote_line
+        if list_item is not None:
+            scope_list_indent = len(list_item.group(0).expandtabs(4))
+            scope_list_start = index
+            structural_line = quote_line[list_item.end() :]
+            html_element_line = html_quote_line[list_item.end() :]
+        elif scope_list_indent is not None and indentation >= scope_list_indent:
+            structural_line = strip_indentation(quote_line, scope_list_indent)
+            html_element_line = strip_indentation(
+                html_quote_line, scope_list_indent
+            )
+        fence = markdown_fence_open(structural_line)
+        fence_close = re.match(
+            rb"^[ ]{0,3}(`{3,}|~{3,})[ \t]*$", structural_line
+        )
+        if active_fence is not None:
+            if (
+                fence_close is not None
+                and fence_close.group(1)[:1] == active_fence[0]
+                and len(fence_close.group(1)) >= active_fence[1]
+            ):
+                active_fence = None
+            scope_paragraph_open = False
+            continue
+        if active_raw_html is not None:
+            raw_kind, _, raw_name = active_raw_html
+            if raw_kind == "blank":
+                advance_html_block_stack(
+                    html_element_line, index, active_html_blocks
+                )
+            if commonmark_raw_html_ends(raw_kind, structural_line):
+                if raw_kind == "raw-tag" and raw_name is not None:
+                    close_html_element(active_html_blocks, raw_name)
+                active_raw_html = None
+            scope_paragraph_open = False
+            continue
+        structural_leading = re.match(rb"^[ \t]*", structural_line)
+        assert structural_leading is not None
+        if len(structural_leading.group(0).expandtabs(4)) >= 4:
+            scope_paragraph_open = False
+            continue
+        if fence is not None:
+            active_fence = (fence[0], fence[1], index)
+            scope_paragraph_open = False
+            continue
+        started_raw_html = commonmark_raw_html_start(
+            structural_line, allow_type7=not scope_paragraph_open
+        )
+        if started_raw_html is not None:
+            raw_name: bytes | None = None
+            if started_raw_html == "raw-tag":
+                raw_match = re.match(
+                    rb"^[ ]{0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)",
+                    structural_line,
+                    re.I,
+                )
+                assert raw_match is not None
+                raw_name_match = re.match(
+                    rb"^[ ]{0,3}<([A-Za-z]+)", structural_line
+                )
+                assert raw_name_match is not None
+                element_name = raw_name_match.group(1).lower()
+                active_html_blocks.append((element_name, index))
+                raw_name = element_name
+                if commonmark_raw_html_ends(started_raw_html, structural_line):
+                    close_html_element(active_html_blocks, element_name)
+            elif started_raw_html == "blank":
+                advance_html_block_stack(
+                    html_element_line, index, active_html_blocks
+                )
+            if not commonmark_raw_html_ends(started_raw_html, structural_line):
+                active_raw_html = (started_raw_html, index, raw_name)
+            scope_paragraph_open = False
+            continue
+        advance_html_block_stack(html_element_line, index, active_html_blocks)
+        if not structural_line.strip() or re.match(
+            rb"^[ ]{0,3}#{1,6}(?:[ \t]+|$)", structural_line
+        ):
+            scope_paragraph_open = False
+        else:
+            scope_paragraph_open = True
+    if active_fence is not None:
+        enclosures.append(active_fence[2])
+    if active_raw_html is not None:
+        enclosures.append(active_raw_html[1])
+    if scope_list_start is not None and scope_list_start < start:
+        enclosures.append(scope_list_start)
+    enclosures.extend(index for _, index in active_html_blocks)
+
+    heading_entries: list[tuple[int, list[int]]] = []
+    active_html_heading: tuple[int, int] | None = None
+    heading_fence: tuple[bytes, int, int | None] | None = None
+    raw_html_kind: str | None = None
+    raw_html_container_indent: int | None = None
+    active_list_indent: int | None = None
+    paragraph_open = False
+    for index, line in enumerate(structural_lines[:start]):
+        container_line = strip_blockquote_containers(line)
+        leading = re.match(rb"^[ \t]*", container_line)
+        assert leading is not None
+        indentation = len(leading.group(0).expandtabs(4))
+        if heading_fence is not None:
+            container_indent = heading_fence[2]
+            if (
+                container_indent is not None
+                and container_line.strip()
+                and indentation < container_indent
+            ):
+                heading_fence = None
+            else:
+                fence_line = (
+                    strip_indentation(container_line, container_indent)
+                    if container_indent is not None
+                    else container_line
+                )
+                fence_close = re.match(
+                    rb"^[ ]{0,3}(`{3,}|~{3,})[ \t]*$", fence_line
+                )
+                if (
+                    fence_close is not None
+                    and fence_close.group(1)[:1] == heading_fence[0]
+                    and len(fence_close.group(1)) >= heading_fence[1]
+                ):
+                    heading_fence = None
+                paragraph_open = False
+                continue
+        if raw_html_kind is not None:
+            if (
+                raw_html_container_indent is not None
+                and container_line.strip()
+                and indentation < raw_html_container_indent
+            ):
+                raw_html_kind = None
+                raw_html_container_indent = None
+            else:
+                if commonmark_raw_html_ends(raw_html_kind, container_line):
+                    raw_html_kind = None
+                    raw_html_container_indent = None
+                paragraph_open = False
+                continue
+        if (
+            active_list_indent is not None
+            and container_line.strip()
+            and indentation < active_list_indent
+        ):
+            active_list_indent = None
+        list_item = re.match(
+            rb"^[ ]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+", container_line
+        )
+        structural_line = container_line
+        if list_item is not None:
+            active_list_indent = len(list_item.group(0).expandtabs(4))
+            structural_line = container_line[list_item.end() :]
+        elif active_list_indent is not None and indentation >= active_list_indent:
+            structural_line = strip_indentation(container_line, active_list_indent)
+        fence = markdown_fence_open(structural_line)
+        if active_html_heading is not None:
+            level, opening_index = active_html_heading
+            if re.search(
+                rb"</\s*h" + str(level).encode() + rb"\s*>",
+                structural_line,
+                re.I,
+            ):
+                heading_entries.append(
+                    (level, list(range(opening_index, index + 1)))
+                )
+                active_html_heading = None
+            paragraph_open = False
+            continue
+        if fence is not None:
+            heading_fence = (fence[0], fence[1], active_list_indent)
+            paragraph_open = False
+            continue
+        html_match = re.match(
+            rb"^[ ]{0,3}<h([1-6])(?=[ \t]|/?>|$)", structural_line, re.I
+        )
+        if html_match is not None:
+            level = int(html_match.group(1))
+            if re.search(
+                rb"</\s*h" + str(level).encode() + rb"\s*>",
+                structural_line,
+                re.I,
+            ):
+                heading_entries.append((level, [index]))
+            else:
+                active_html_heading = (level, index)
+            paragraph_open = False
+            continue
+        started_raw_html = commonmark_raw_html_start(
+            structural_line, allow_type7=not paragraph_open
+        )
+        if started_raw_html is not None:
+            if not commonmark_raw_html_ends(started_raw_html, structural_line):
+                raw_html_kind = started_raw_html
+                raw_html_container_indent = active_list_indent
+            paragraph_open = False
+            continue
+        atx_match = re.match(
+            rb"^[ ]{0,3}(#{1,6})(?:[ \t]+|$)", structural_line
+        )
+        if atx_match is not None:
+            heading_entries.append((len(atx_match.group(1)), [index]))
+            paragraph_open = False
+            continue
+        setext_match = re.match(rb"^[ ]{0,3}(=+|-+)[ \t]*$", structural_line)
+        if setext_match is not None and paragraph_open and index:
+            level = 1 if setext_match.group(1).startswith(b"=") else 2
+            heading_entries.append((level, [index - 1, index]))
+            paragraph_open = False
+            continue
+        paragraph_open = bool(structural_line.strip())
+
+    if active_html_heading is not None:
+        level, opening_index = active_html_heading
+        heading_entries.append((level, list(range(opening_index, start))))
+
+    headings: list[int] = []
+    parent_level = 7
+    for level, indices in reversed(heading_entries):
+        if level < parent_level:
+            headings.extend(reversed(indices))
+            parent_level = level
+            if level == 1:
+                break
+    headings.reverse()
+
+    table_headers: list[int] = []
+    if lines[site].lstrip().startswith(b"|"):
+        table_start = site
+        while table_start and lines[table_start - 1].lstrip().startswith(b"|"):
+            table_start -= 1
+        if table_start < site:
+            table_headers = list(range(table_start, min(table_start + 2, site)))
+    return sorted(set(enclosures + headings + table_headers))
+
+
+def citation_claim_contexts(
+    data: bytes, citations: list[Citation], *, markdown: bool = True
+) -> dict[int, str]:
+    """Bind citations to nearby carrier text without hashing citation bytes."""
+    cache_key = (
+        hashlib.sha256(data).digest(),
+        markdown,
+        tuple(
+            (citation.begin, citation.finish, citation.carrier_line)
+            for citation in citations
+        ),
+    )
+    cached = CLAIM_CONTEXT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy()
+    masked = bytearray(data)
+    for candidate in citations:
+        for index in range(candidate.begin, candidate.finish):
+            if masked[index] not in b"\r\n":
+                masked[index] = ord(" ")
+    lines = byte_lines(bytes(masked))
+    original_lines = byte_lines(data)
+    structural_lines = (
+        mask_markdown_code_spans(original_lines) if markdown else original_lines
+    )
+    html_scan_lines = (
+        mask_inline_html_opaque_regions(structural_lines)
+        if markdown
+        else structural_lines
+    )
+
+    contexts: dict[int, str] = {}
+    for citation in citations:
+        site = citation.carrier_line - 1
+        start, end = claim_context_bounds(original_lines, site, markdown=markdown)
+        # Wrapping a citation changes comment-marker and punctuation placement,
+        # so the binding uses the words and identifiers in its logical carrier
+        # paragraph. Citation moves across paragraphs still fail closed.
+        scope = [
+            lines[index]
+            for index in claim_scope_indices(
+                original_lines,
+                start,
+                site,
+                markdown=markdown,
+                structural_lines=structural_lines,
+                html_scan_lines=html_scan_lines,
+            )
+        ]
+        paragraph = b"\n".join(scope + [b"\0"] + lines[start:end])
+        # Paragraph binding tolerates reflow; physical indentation is enforced
+        # separately by citation_line_bindings on the citation-local claim.
+        contexts[citation.begin] = sha256(
+            normalized_claim_tokens(paragraph, preserve_indentation=False)
+        )
+    CLAIM_CONTEXT_CACHE[cache_key] = contexts.copy()
+    return contexts
+
+
+def citation_claim_context(data: bytes, citation: Citation) -> str:
+    citations = parse_citations(data, loose=True)
+    return citation_claim_contexts(data, citations)[citation.begin]
+
+
+def citation_claim_bindings(
+    data: bytes, citations: list[Citation], *, markdown: bool = True
+) -> dict[int, tuple[str, int]]:
+    contexts = citation_claim_contexts(data, citations, markdown=markdown)
+    ordinals: Counter[str] = Counter()
+    bindings: dict[int, tuple[str, int]] = {}
+    for citation in citations:
+        context = contexts[citation.begin]
+        bindings[citation.begin] = (context, ordinals[context])
+        ordinals[context] += 1
+    return bindings
+
+
+def comment_carrier_marker(line: bytes) -> bytes:
+    """Return a stable tag for a line's documentation/comment carrier."""
+    stripped = line.lstrip()
+    for prefix, marker in (
+        (b"///", b"rustdoc-outer"),
+        (b"//!", b"rustdoc-inner"),
+        (b"//", b"line-comment"),
+        (b"/**", b"block-doc-outer"),
+        (b"/*!", b"block-doc-inner"),
+        (b"/*", b"block-comment"),
+        (b"--", b"sql-comment"),
+    ):
+        if stripped.startswith(prefix):
+            return b"<carrier:" + marker + b">"
+    return b""
+
+
+def citation_line_bindings(
+    data: bytes, citations: list[Citation]
+) -> dict[int, tuple[str, int]]:
+    """Bind citations to local claim text, independent of line and wrapping.
+
+    Inline whitespace changes and one leading code-comment marker do not
+    participate; physical line indentation and all other claim bytes do. The
+    content before a citation's opening and after its closing is hashed as an
+    ordered, line-local pair. A citation-only line binds to its adjacent claim
+    text; when the preceding line is only structural punctuation, the following
+    declaration participates too. A leading citation after a completed claim
+    binds backward. Moving evidence to another claim or changing indentation,
+    words, punctuation, Unicode symbols, grouping, or operators fails.
+    """
+    cache_key = (
+        hashlib.sha256(data).digest(),
+        tuple(
+            (citation.begin, citation.finish, citation.carrier_line)
+            for citation in citations
+        ),
+    )
+    cached = CLAIM_LINE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy()
+    masked = bytearray(data)
+    for citation in citations:
+        for index in range(citation.begin, citation.finish):
+            if masked[index] not in b"\r\n":
+                masked[index] = ord(" ")
+    masked_data = bytes(masked)
+    lines = byte_lines(masked_data)
+    original_lines = byte_lines(data)
+    line_starts: list[int] = []
+    offset = 0
+    for line in lines:
+        line_starts.append(offset)
+        offset += len(line) + 1
+
+    ordinals: Counter[str] = Counter()
+    bindings: dict[int, tuple[str, int]] = {}
+    for citation in citations:
+        site = citation.carrier_line - 1
+        finish = data.count(b"\n", 0, citation.finish)
+        opening_marker = comment_carrier_marker(original_lines[site])
+        closing_marker = comment_carrier_marker(original_lines[finish])
+        opening_start = line_starts[site]
+        closing_end = line_starts[finish] + len(lines[finish])
+        prefix = normalized_claim_tokens(masked_data[opening_start : citation.begin])
+        suffix = normalized_claim_tokens(
+            masked_data[citation.finish : closing_end], preserve_indentation=False
+        )
+        previous = b""
+        previous_completed = False
+        previous_has_words = False
+        for index in range(site - 1, -1, -1):
+            if not original_lines[index].strip():
+                break
+            candidate = normalized_claim_tokens(lines[index])
+            if candidate:
+                previous = candidate
+                previous_completed = (
+                    re.search(rb"[.!?][`*_)}\]]*\s*$", lines[index]) is not None
+                )
+                previous_has_words = (
+                    re.search(
+                        rb"[A-Za-z0-9_]",
+                        re.sub(rb"^<indent:\d+>", b"", candidate),
+                    )
+                    is not None
+                )
+                break
+        following = b""
+        for index in range(finish + 1, len(lines)):
+            if not original_lines[index].strip():
+                break
+            candidate = normalized_claim_tokens(lines[index])
+            if re.search(
+                rb"[A-Za-z0-9_]", re.sub(rb"^<indent:\d+>", b"", candidate)
+            ) is not None:
+                following = candidate
+                break
+        if not prefix and previous and (suffix and previous_completed):
+            prefix = previous
+            suffix = b""
+        elif not prefix and not suffix:
+            if previous and previous_has_words:
+                prefix = previous
+            elif previous or following:
+                prefix = previous
+                suffix = following
+        claim = (
+            opening_marker
+            + b"\0"
+            + closing_marker
+            + b"\0"
+            + prefix
+            + b"\0"
+            + suffix
+        )
+        context = sha256(claim)
+        bindings[citation.begin] = (context, ordinals[context])
+        ordinals[context] += 1
+    CLAIM_LINE_CACHE[cache_key] = bindings.copy()
+    return bindings
+
+
+def load_spec(path: Path) -> dict[str, Any]:
+    with path.open("rb") as handle:
+        spec = tomllib.load(handle)
+    required = {
+        "schema_version",
+        "key",
+        "old_commit",
+        "new_commit",
+        "expected_old_tag_occurrences",
+        "expected_same_line_tag_refreshes",
+        "expected_changed_occurrences",
+        "old_deployment_prefix",
+        "archive_deployment_prefix",
+    }
+    missing = sorted(required - spec.keys())
+    if missing:
+        raise RotationError(f"rotation spec is missing: {', '.join(missing)}")
+    if spec["schema_version"] != 1:
+        raise RotationError("unsupported rotation spec schema_version")
+    return spec
+
+
+def manifest_document(revision: str = "WORKTREE") -> dict[str, Any]:
+    data = worktree_or_blob(revision, ".refs/MANIFEST.toml")
+    return tomllib.loads(data.decode())
+
+
+def manifest_refs(revision: str = "WORKTREE") -> dict[str, dict[str, Any]]:
+    return manifest_document(revision)["refs"]
+
+
+def manifest_top_level_errors(
+    base_manifest: dict[str, Any], head_manifest: dict[str, Any]
+) -> list[str]:
+    """Reject manifest metadata changes outside the reference table."""
+    base_top = {key: value for key, value in base_manifest.items() if key != "refs"}
+    head_top = {key: value for key, value in head_manifest.items() if key != "refs"}
+    if base_top == head_top:
+        return []
+    return ["head manifest top-level metadata differs from the frozen base"]
+
+
+def manifest_pin_errors(
+    refs: dict[str, dict[str, Any]], spec: dict[str, Any]
+) -> list[str]:
+    expected = {
+        spec["key"]: spec["new_commit"],
+        "ens_v2_sepolia_20260629": spec["old_commit"],
+    }
+    errors: list[str] = []
+    for key, commit in expected.items():
+        actual = refs.get(key, {}).get("commit")
+        if actual != commit:
+            errors.append(
+                f"head manifest pin mismatch for {key}: {actual!r} != {commit!r}"
+            )
+    return errors
+
+
+def manifest_metadata_errors(
+    base_refs: dict[str, dict[str, Any]],
+    head_refs: dict[str, dict[str, Any]],
+    spec: dict[str, Any],
+) -> list[str]:
+    """Allow only the historical evidence entry added by this rotation."""
+    expected = {key: dict(value) for key, value in base_refs.items()}
+    if "ens_v2_sepolia_20260629" not in expected:
+        expected["ens_v2_sepolia_20260629"] = {
+            "repo": base_refs[spec["key"]]["repo"],
+            "commit": spec["old_commit"],
+            "purpose": (
+                "Historical Solidity source evidence for the admitted 2026-06-29 "
+                "old-model Sepolia deployment; claims cite it because #565 owns "
+                "deprecation of that deployment's old contract behavior, regardless "
+                "of whether individual lines survive in the current ENSv2 source "
+                "tree, and it is not authority for future ENSv2 deployments or "
+                "current-model admission."
+            ),
+            "authoritative_for": [
+                "Historical implementation behavior of the admitted 2026-06-29 "
+                "old-model Sepolia families, only where archived ABI artifacts do "
+                "not directly prove the claim"
+            ],
+        }
+    errors: list[str] = []
+    for key in sorted(expected.keys() | head_refs.keys()):
+        if head_refs.get(key) != expected.get(key):
+            errors.append(f"head reference metadata mismatch for {key}")
+    return errors
+
+
+def git_file(commit: str, path: str) -> bytes:
+    result = run(
+        ["git", "show", f"{commit}:{path}"], cwd=ROOT / ".refs" / "ens_v2", text=False
+    )
+    return result.stdout
+
+
+def git_file_for_key(key: str, commit: str, path: str) -> bytes:
+    result = run(
+        ["git", "show", f"{commit}:{path}"], cwd=ROOT / ".refs" / key, text=False
+    )
+    return result.stdout
+
+
+def excerpt(data: bytes, start: int, end: int) -> bytes:
+    lines = byte_lines(data)
+    if start < 1 or end < start or end > len(lines):
+        raise RotationError(
+            f"invalid one-based line range L{start}-L{end} for {len(lines)}-line file"
+        )
+    selected = b"\n".join(lines[start - 1 : end])
+    if end < len(lines) or data.endswith(b"\n"):
+        selected += b"\n"
+    return selected
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def stable_id(base: str, carrier: str, citation: Citation) -> str:
+    digest = hashlib.sha256()
+    digest.update(base.encode())
+    digest.update(b"\0")
+    digest.update(carrier.encode())
+    digest.update(b"\0")
+    digest.update(str(citation.begin).encode())
+    digest.update(b"\0")
+    digest.update(citation.raw)
+    return digest.hexdigest()
+
+
+def path_matches(path: str, patterns: Iterable[str]) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def semantic_candidate(citation: Citation, spec: dict[str, Any]) -> bool:
+    if path_matches(citation.path, spec.get("semantic_candidate_paths", [])):
+        return True
+    for selector in spec.get("semantic_candidate_ranges", []):
+        match = re.fullmatch(r"(.+):L(\d+)-L(\d+)", selector)
+        if match is None:
+            raise RotationError(f"invalid semantic candidate range: {selector}")
+        if (
+            citation.path == match.group(1)
+            and citation.start <= int(match.group(3))
+            and citation.end >= int(match.group(2))
+        ):
+            return True
+    return False
+
+
+def equal_line_map_from_hunks(
+    old_line_count: int,
+    new_line_count: int,
+    hunks: list[tuple[int, int, int, int]],
+) -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    old_cursor = 1
+    new_cursor = 1
+    for old_start, old_count, new_start, new_count in hunks:
+        # A zero-count hunk starts between lines: -N,0 begins at old line N+1.
+        old_change = old_start if old_count else old_start + 1
+        new_change = new_start if new_count else new_start + 1
+        old_prefix = old_change - old_cursor
+        new_prefix = new_change - new_cursor
+        if old_prefix != new_prefix or old_prefix < 0:
+            raise RotationError("Git diff hunks do not describe ordered equal regions")
+        for offset in range(old_prefix):
+            mapping[old_cursor + offset] = new_cursor + offset
+        old_cursor = old_change + old_count
+        new_cursor = new_change + new_count
+
+    old_tail = old_line_count - old_cursor + 1
+    new_tail = new_line_count - new_cursor + 1
+    if old_tail != new_tail or old_tail < 0:
+        raise RotationError("Git diff tail does not describe an equal region")
+    for offset in range(old_tail):
+        mapping[old_cursor + offset] = new_cursor + offset
+    return mapping
+
+
+def git_equal_line_map(old_commit: str, new_commit: str, path: str) -> dict[int, int]:
+    old_line_count = len(byte_lines(git_file(old_commit, path)))
+    new_line_count = len(byte_lines(git_file(new_commit, path)))
+    result = run(
+        [
+            "git",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--unified=0",
+            old_commit,
+            new_commit,
+            "--",
+            path,
+        ],
+        cwd=ROOT / ".refs" / "ens_v2",
+        check=False,
+    )
+    if result.returncode not in {0, 1}:
+        raise RotationError(f"git diff failed for {path}:\n{result.stderr}")
+    hunks: list[tuple[int, int, int, int]] = []
+    for line in result.stdout.splitlines():
+        match = HUNK_RE.match(line)
+        if match is not None:
+            hunks.append(
+                (
+                    int(match.group(1)),
+                    int(match.group(2) or 1),
+                    int(match.group(3)),
+                    int(match.group(4) or 1),
+                )
+            )
+    return equal_line_map_from_hunks(old_line_count, new_line_count, hunks)
+
+
+def mapped_range(mapping: dict[int, int], start: int, end: int) -> tuple[int, int] | None:
+    mapped = [mapping.get(line) for line in range(start, end + 1)]
+    if any(line is None for line in mapped):
+        return None
+    values = [int(line) for line in mapped]
+    if values != list(range(values[0], values[0] + len(values))):
+        return None
+    return values[0], values[-1]
+
+
+def carrier_class(path: str, citation: Citation) -> str:
+    if path in {"AGENTS.md", "CLAUDE.md"} or ("/" not in path and path.endswith(".md")):
+        return "root_process_doc"
+    if path.startswith("docs/adrs/") and path.endswith(".md"):
+        return "adr"
+    if path.startswith("docs/") and path.endswith(".md"):
+        return "docs_markdown"
+    if path.startswith("manifests/") and path.endswith(".toml"):
+        return "manifest_toml_comment"
+    if path.endswith(".rs"):
+        hashed = (
+            path.startswith("crates/adapters/src/")
+            or path.startswith("crates/manifests/src/")
+            or path.startswith("crates/project/src/")
+            or path.startswith("crates/interpret/src/write/")
+            or path
+            in {
+                "crates/domain/src/normalization.rs",
+                "crates/domain/src/resolution_topology.rs",
+                "crates/domain/src/vocabulary.rs",
+                "crates/lookup/src/abi.rs",
+                "crates/lookup/src/record_selector.rs",
+                "crates/lookup/src/reverse_names.rs",
+                "crates/lookup/src/text_records.rs",
+                "crates/lookup/src/json_rpc_envelope.rs",
+                "crates/interpret/src/write.rs",
+                "crates/interpret/src/recompute.rs",
+            }
+        )
+        return "hashed_rust_comment" if hashed else "other_rust_comment"
+    if path.endswith(".md"):
+        return "docs_markdown"
+    return "other_code_comment"
+
+
+def build_baseline(base: str, spec: dict[str, Any]) -> Baseline:
+    cache_key = (base, sha256(json.dumps(spec, sort_keys=True).encode()))
+    cached = BASELINE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    key = spec["key"]
+    old_short = spec["old_commit"][:7]
+    raw_tag = f"{key}@{old_short}".encode()
+    exact_tag = b"@ " + raw_tag
+    rows: list[dict[str, Any]] = []
+    raw_count = exact_count = parsed_count = noncanonical_count = 0
+    line_maps: dict[str, dict[int, int]] = {}
+    old_cache: dict[str, bytes] = {}
+    new_cache: dict[str, bytes] = {}
+    archive_cache: dict[str, bytes] = {}
+
+    for carrier in tracked_paths(base):
+        data = blob(base, carrier)
+        carrier_raw = data.count(raw_tag)
+        if not carrier_raw:
+            continue
+        raw_count += carrier_raw
+        exact_count += data.count(exact_tag)
+        citations = parse_citations(data, loose=True)
+        claim_bindings = citation_claim_bindings(
+            data, citations, markdown=carrier.endswith(".md")
+        )
+        claim_line_bindings = citation_line_bindings(data, citations)
+        selected = [
+            citation
+            for citation in citations
+            if citation.key == key
+            and citation.short.startswith(old_short)
+            and spec["old_commit"].startswith(citation.short)
+        ]
+        parsed_count += len(selected)
+        noncanonical_count += sum(not citation.strict for citation in selected)
+        if carrier_raw != len(selected):
+            raise RotationError(
+                f"{carrier}: {carrier_raw} raw old tags but {len(selected)} parsed citations"
+            )
+        for citation in selected:
+            old_path = citation.path
+            old_data = old_cache.setdefault(
+                old_path, git_file(spec["old_commit"], old_path)
+            )
+            old_bytes = excerpt(old_data, citation.start, citation.end)
+            disposition: str
+            target: dict[str, Any] | None
+            if old_path.startswith(spec["old_deployment_prefix"]):
+                suffix = old_path.removeprefix(spec["old_deployment_prefix"])
+                new_path = spec["archive_deployment_prefix"] + suffix
+                new_data = archive_cache.setdefault(
+                    new_path, git_file(spec["new_commit"], new_path)
+                )
+                if old_data != new_data:
+                    raise RotationError(
+                        f"archive artifact mismatch: {old_path} -> {new_path}"
+                    )
+                new_bytes = excerpt(new_data, citation.start, citation.end)
+                if old_bytes != new_bytes:
+                    raise RotationError(
+                        f"archive cited range mismatch: {old_path}:L{citation.start}-L{citation.end}"
+                    )
+                disposition = "archive_repoint"
+                target = {
+                    "key": key,
+                    "commit": spec["new_commit"][:8],
+                    "path": new_path,
+                    "start": citation.start,
+                    "end": citation.end,
+                    "excerpt_sha256": sha256(new_bytes),
+                }
+            elif semantic_candidate(citation, spec):
+                disposition = "tier3_semantic"
+                target = None
+            else:
+                if old_path not in line_maps:
+                    line_maps[old_path] = git_equal_line_map(
+                        spec["old_commit"], spec["new_commit"], old_path
+                    )
+                    new_cache[old_path] = git_file(spec["new_commit"], old_path)
+                mapped = mapped_range(
+                    line_maps[old_path], citation.start, citation.end
+                )
+                if mapped is None:
+                    raise RotationError(
+                        f"unresolved non-semantic citation: {carrier}:L{citation.carrier_line} "
+                        f"-> {old_path}:L{citation.start}-L{citation.end}"
+                    )
+                new_start, new_end = mapped
+                new_bytes = excerpt(new_cache[old_path], new_start, new_end)
+                if old_bytes != new_bytes:
+                    raise RotationError(f"mapped excerpt changed for {old_path}")
+                disposition = (
+                    "tag_refresh"
+                    if (new_start, new_end) == (citation.start, citation.end)
+                    else "line_reanchor"
+                )
+                target = {
+                    "key": key,
+                    "commit": spec["new_commit"][:8],
+                    "path": old_path,
+                    "start": new_start,
+                    "end": new_end,
+                    "excerpt_sha256": sha256(new_bytes),
+                }
+
+            row = {
+                "id": stable_id(base, carrier, citation),
+                "carrier_path": carrier,
+                "carrier_line": citation.carrier_line,
+                "carrier_byte_offset": citation.begin,
+                "carrier_ordinal": citation.ordinal,
+                "carrier_class": carrier_class(carrier, citation),
+                "baseline_canonical": citation.strict,
+                "claim_context_sha256": claim_bindings[citation.begin][0],
+                "claim_context_ordinal": claim_bindings[citation.begin][1],
+                "claim_line_sha256": claim_line_bindings[citation.begin][0],
+                "claim_line_ordinal": claim_line_bindings[citation.begin][1],
+                "old": {
+                    **citation.target(),
+                    "commit": spec["old_commit"],
+                    "excerpt_sha256": sha256(old_bytes),
+                },
+                "disposition": disposition,
+                "new": target,
+            }
+            rows.append(row)
+
+    rows.sort(key=lambda row: row["id"])
+    baseline = Baseline(
+        commit=base,
+        rows=rows,
+        raw_count=raw_count,
+        exact_count=exact_count,
+        parsed_count=parsed_count,
+        noncanonical_count=noncanonical_count,
+    )
+    BASELINE_CACHE[cache_key] = baseline
+    return baseline
+
+
+def json_line(row: dict[str, Any]) -> str:
+    return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+
+def write_reports(report_dir: Path, baseline: Baseline, spec: dict[str, Any]) -> None:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    before = "".join(json_line(row) + "\n" for row in baseline.rows)
+    (report_dir / "before.jsonl").write_text(before, encoding="utf-8")
+    inventory: dict[tuple[str, str], int] = Counter(
+        (row["carrier_class"], row["carrier_path"]) for row in baseline.rows
+    )
+    with (report_dir / "file-inventory.tsv").open("w", encoding="utf-8") as handle:
+        handle.write("carrier_class\tcarrier_path\tcitations\n")
+        for (class_name, path), count in sorted(inventory.items()):
+            handle.write(f"{class_name}\t{path}\t{count}\n")
+    semantics = [row for row in baseline.rows if row["disposition"] == "tier3_semantic"]
+    with (report_dir / "semantic-review.md").open("w", encoding="utf-8") as handle:
+        handle.write("# ENSv2 semantic citation review\n\n")
+        for row in semantics:
+            old = row["old"]
+            handle.write(
+                f"- [ ] `{row['id']}` — `{row['carrier_path']}:L{row['carrier_line']}` "
+                f"→ `{old['path']}:L{old['start']}-L{old['end']}`\n"
+            )
+
+
+def write_review_reports(
+    report_dir: Path,
+    baseline: Baseline,
+    dispositions: list[dict[str, Any]],
+    semantics: dict[str, dict[str, Any]],
+    spec: dict[str, Any],
+    head: str,
+) -> None:
+    by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in dispositions:
+        by_source[row["old"]["path"]].append(row)
+    required_ids: set[str] = set()
+    for rows in by_source.values():
+        ordered = sorted(rows, key=lambda row: (row["old"]["start"], row["id"]))
+        required_ids.add(ordered[0]["id"])
+        required_ids.add(ordered[-1]["id"])
+    samples = [
+        row
+        for row in dispositions
+        if row["disposition"] in {"archive_repoint", "tier3_semantic"}
+        or int(row["id"][:8], 16) % 10 == 0
+        or row["id"] in required_ids
+    ]
+    with (report_dir / "review-sample.md").open("w", encoding="utf-8") as handle:
+        handle.write("# ENSv2 citation rotation review sample\n\n")
+        for row in sorted(samples, key=lambda item: item["id"]):
+            old = row["old"]
+            old_data = git_file(spec["old_commit"], old["path"])
+            old_excerpt = excerpt(old_data, old["start"], old["end"])
+            new = row["new"]
+            handle.write(
+                f"## `{row['id']}`\n\n"
+                f"Baseline carrier claim: `{row['carrier_path']}:L{row['carrier_line']}`\n\n"
+                f"Old upstream: `{old['path']}:L{old['start']}-L{old['end']} @ ccaeb58`\n\n"
+                "```text\n"
+                f"{old_excerpt.decode(errors='replace')}```\n\n"
+                f"sha256: `{sha256(old_excerpt)}`\n\n"
+            )
+            if new is None:
+                handle.write("Final upstream: deleted claim\n\n")
+            else:
+                refs = manifest_refs(head)
+                commit = refs[new["key"]]["commit"]
+                new_data = git_file_for_key(new["key"], commit, new["path"])
+                new_excerpt = excerpt(new_data, new["start"], new["end"])
+                handle.write(
+                    f"Final upstream: `{new['path']}:L{new['start']}-L{new['end']} "
+                    f"@ {new['key']}@{new['commit']}`\n\n"
+                    "```text\n"
+                    f"{new_excerpt.decode(errors='replace')}```\n\n"
+                    f"sha256: `{sha256(new_excerpt)}`\n\n"
+                )
+            handle.write(
+                f"Disposition: `{row['disposition']}`\n\n"
+                f"Evidence relation: `{row['evidence_relation']}`\n\n"
+                "Reviewer: [ ]\n\n"
+            )
+    with (report_dir / "semantic-review.md").open("w", encoding="utf-8") as handle:
+        handle.write("# ENSv2 semantic citation review\n\n")
+        handle.write(
+            "| ID | Carrier | Claim | Family | Action | Evidence | Handoff |\n"
+            "|---|---|---|---|---|---|---|\n"
+        )
+        for identifier, entry in sorted(semantics.items()):
+            handle.write(
+                f"| `{identifier}` | `{entry['carrier']}` | {entry['claim']} | "
+                f"`{entry['family']}` | `{entry['action']}` | "
+                f"`{entry['evidence_relation']}` | {entry['handoff_issue']}: "
+                f"{entry['handoff']} |\n"
+            )
+    archive_rows = [row for row in baseline.rows if row["disposition"] == "archive_repoint"]
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in archive_rows:
+        grouped[(row["old"]["path"], row["new"]["path"])].append(row)
+    with (report_dir / "archive-proof.tsv").open("w", encoding="utf-8") as handle:
+        handle.write(
+            "artifact\told_path\tarchive_path\told_sha256\tarchive_sha256\tcitations\tresult\n"
+        )
+        for (old_path, new_path), rows in sorted(grouped.items()):
+            old_data = git_file(spec["old_commit"], old_path)
+            new_data = git_file(spec["new_commit"], new_path)
+            handle.write(
+                f"{Path(old_path).name}\t{old_path}\t{new_path}\t{sha256(old_data)}\t"
+                f"{sha256(new_data)}\t{len(rows)}\t{'equal' if old_data == new_data else 'mismatch'}\n"
+            )
+
+
+def expected_counts(baseline: Baseline, spec: dict[str, Any]) -> None:
+    counts = Counter(row["disposition"] for row in baseline.rows)
+    expected = {
+        "raw old-tag occurrences": (
+            baseline.raw_count,
+            spec["expected_old_tag_occurrences"],
+        ),
+        "parsed old-tag citations": (
+            baseline.parsed_count,
+            spec["expected_old_tag_occurrences"],
+        ),
+        "same-line tag refreshes": (
+            counts["tag_refresh"],
+            spec["expected_same_line_tag_refreshes"],
+        ),
+        "changed occurrences": (
+            len(baseline.rows) - counts["tag_refresh"],
+            spec["expected_changed_occurrences"],
+        ),
+        "baseline noncanonical citations": (
+            baseline.noncanonical_count,
+            spec.get("expected_baseline_noncanonical_citations", 0),
+        ),
+    }
+    failures = [
+        f"{label}: measured {actual}, expected {wanted}"
+        for label, (actual, wanted) in expected.items()
+        if actual != wanted
+    ]
+    if failures:
+        raise RotationError("baseline census mismatch:\n  " + "\n  ".join(failures))
+
+
+def summary_text(
+    baseline: Baseline,
+    head: str,
+    spec: dict[str, Any],
+    final_checks: dict[str, int] | None = None,
+    final_accounting: dict[str, int] | None = None,
+) -> str:
+    counts = Counter(row["disposition"] for row in baseline.rows)
+    changed = (
+        counts["line_reanchor"]
+        + counts["archive_repoint"]
+        + counts["tier3_semantic"]
+    )
+    lines = [
+        f"ENSv2 citation rotation: {spec['old_commit'][:7]} -> {spec['new_commit'][:8]}",
+        "",
+        f"baseline commit:      {baseline.commit}",
+        f"head commit:          {head}",
+        "",
+        f"baseline old tags:    {baseline.raw_count}",
+        f"  tag_refresh:        {counts['tag_refresh']}",
+        f"  line_reanchor:      {counts['line_reanchor']}",
+        f"  archive_repoint:    {counts['archive_repoint']}",
+        f"  tier3_semantic:     {counts['tier3_semantic']}",
+        "                      ----",
+        f"  total:              {sum(counts.values())}",
+        "",
+        "changed dispositions:",
+        f"  line_reanchor:      {counts['line_reanchor']}",
+        f"  archive_repoint:    {counts['archive_repoint']}",
+        f"  tier3_semantic:     {counts['tier3_semantic']}",
+        "                      ----",
+        f"  total:              {changed}",
+        "",
+        f"baseline exact-form tags:       {baseline.exact_count}",
+        f"baseline noncanonical citations: {baseline.noncanonical_count}",
+    ]
+    if final_checks is not None:
+        lines.extend(["", *(f"{label}: {value}" for label, value in final_checks.items())])
+    if final_accounting is not None:
+        current = spec["key"]
+        historical = "ens_v2_sepolia_20260629"
+        lines.extend(
+            [
+                "",
+                "final governed citations:",
+                f"  {current}@{spec['new_commit'][:8]}: {final_accounting['current_total']}",
+                "    tag/line/archive disposition targets: "
+                f"{final_accounting['rotated_targets']}",
+                "    reviewed targets retaining archived deployment evidence: "
+                f"{final_accounting['archive_evidence_targets']}",
+                f"    pre-existing at base: {final_accounting['current_preexisting']}",
+                f"  {historical}@{spec['old_commit'][:7]}: "
+                f"{final_accounting['historical_total']}",
+                "    reviewed targets retaining historical old-model source evidence: "
+                f"{final_accounting['historical_source_targets']}",
+                f"    pre-existing at base: {final_accounting['historical_preexisting']}",
+                "  pre-existing citation documenting the pin: "
+                f"{final_accounting['pin_manifest_authority']}",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def semantic_entries(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    entries = spec.get("semantic", [])
+    result: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        identifier = entry.get("id")
+        if not identifier or identifier in result:
+            raise RotationError("semantic entries require unique nonempty ids")
+        result[identifier] = entry
+    return result
+
+
+def semantic_family(row: dict[str, Any]) -> str:
+    path = row["old"]["path"]
+    carrier = row["carrier_path"]
+    if "/resolver/" in path or "ENSV2Resolver" in path:
+        return "ens_v2_resolver_l1"
+    if "/migration/" in path or "ETHRenewerV1.sol" in path:
+        return "ens_v2_migration_l1"
+    if "UserRegistry.sol" in path:
+        return "ens_v2_registry_l1"
+    if "IETHRenewer.sol" in path and "ens_v2_migration_l1" in carrier:
+        return "ens_v2_migration_l1"
+    return "ens_v2_registrar_l1"
+
+
+def semantic_claim(path: str) -> str:
+    if "PermissionedResolverLib.sol" in path:
+        return "admitted resolver resource and record-part permission derivation"
+    if "IPermissionedResolver.sol" in path:
+        return "admitted resolver alias event signature"
+    if "PermissionedResolver.sol" in path:
+        return "admitted resolver node/version storage, aliasing, records, and authorization behavior"
+    if "PublicResolverV2.sol" in path:
+        return "admitted PublicResolverV2 registry-ownership and approval authorization"
+    if "IETHRenewer.sol" in path:
+        return "admitted NameRenewed event signature"
+    if "ETHRenewerV1.sol" in path:
+        return "admitted renewal and ENSv1 wrapper synchronization behavior"
+    if "AbstractETHRegistrar.sol" in path:
+        return "admitted registrar renewal authorization and state transition"
+    if "UserRegistry.sol" in path:
+        return "admitted user-registry initialization and upgrade behavior"
+    if "LockedWrapperReceiver.sol" in path:
+        return "admitted locked-name migration sequencing, resolver substitution, and wrapper registration"
+    if "MigrationHelper.sol" in path:
+        return "admitted migration-helper sender attribution and grouped-transfer behavior"
+    if "ENSV2Resolver" in path:
+        return "admitted ENSV2Resolver redirect installation and ENSv1 resolver reachability"
+    if "03_ETHRegistrar.ts" in path:
+        return "admitted ETHRegistrar initialization wiring"
+    return "admitted 2026-06-29 deployment behavior"
+
+
+def prepare_semantic_spec(spec_path: Path, base: str, spec: dict[str, Any]) -> int:
+    baseline = build_baseline(base, spec)
+    expected_counts(baseline, spec)
+    rows = [row for row in baseline.rows if row["disposition"] == "tier3_semantic"]
+    text = spec_path.read_text(encoding="utf-8")
+    marker = "\n[[semantic]]\n"
+    if marker in text:
+        text = text.split(marker, maxsplit=1)[0].rstrip() + "\n"
+    entries: list[str] = []
+    for row in sorted(rows, key=lambda item: item["id"]):
+        path = row["old"]["path"]
+        action = "deprecated_historical_source"
+        final_key = "ens_v2_sepolia_20260629"
+        final_commit = spec["old_commit"]
+        final_path = path
+        final_start = row["old"]["start"]
+        final_end = row["old"]["end"]
+        if "IETHRenewer.sol" in path:
+            action = "deprecated_archive_evidence"
+            final_key = spec["key"]
+            final_commit = spec["new_commit"]
+            final_path = spec["archive_deployment_prefix"] + "ETHRenewerV1.json"
+            final_start, final_end = 110, 158
+        elif "PublicResolverV2.sol" in path:
+            final_start, final_end = 179, 183
+        evidence_relation = (
+            "direct" if action == "deprecated_archive_evidence" else "constrains"
+        )
+        values = {
+            "id": row["id"],
+            "carrier": f"{row['carrier_path']}:L{row['carrier_line']}",
+            "carrier_context_sha256": row["claim_context_sha256"],
+            "carrier_context_ordinal": row["claim_context_ordinal"],
+            "review_status": "required",
+            "claim": semantic_claim(path),
+            "family": semantic_family(row),
+            "action": action,
+            "evidence_relation": evidence_relation,
+            "retention_reason": "REVIEW REQUIRED: explain why this occurrence remains necessary pending #565",
+            "final_key": final_key,
+            "final_commit": final_commit,
+            "final_tag": final_commit[:8] if final_key == spec["key"] else final_commit[:7],
+            "final_path": final_path,
+            "final_start": final_start,
+            "final_end": final_end,
+            "handoff_issue": "#565",
+            "handoff": "replace evidence and deprecate the admitted old-model family at re-initialization",
+        }
+        lines = ["[[semantic]]"]
+        for key, value in values.items():
+            rendered = str(value) if isinstance(value, int) else json.dumps(value)
+            lines.append(f"{key} = {rendered}")
+        entries.append("\n".join(lines))
+    spec_path.write_text(text.rstrip() + "\n\n" + "\n\n".join(entries) + "\n", encoding="utf-8")
+    return len(rows)
+
+
+def canonical_citation(target: dict[str, Any]) -> bytes:
+    line_range = f"L{target['start']}"
+    if target["end"] != target["start"]:
+        line_range += f"-L{target['end']}"
+    return (
+        f"(upstream: .refs/{target['key']}/{target['path']}:{line_range} "
+        f"@ {target['key']}@{target['tag']})"
+    ).encode()
+
+
+def rewrite_input_mismatch(
+    carrier: str, original: bytes, current: bytes | None
+) -> str | None:
+    if current != original:
+        return carrier
+    return None
+
+
+def deleted_claim_is_absent(entry: dict[str, Any], data: bytes) -> bool:
+    text = entry.get("deleted_claim_text")
+    return isinstance(text, str) and bool(text) and text.encode() not in data
+
+
+def deleted_claim_replacement(
+    entry: dict[str, Any], data: bytes, citation: Citation
+) -> tuple[int, int, bytes]:
+    text = entry.get("deleted_claim_text")
+    if not isinstance(text, str) or not text:
+        raise RotationError("deleted semantic claim requires deleted_claim_text")
+    encoded = text.encode()
+    if data.count(encoded) != 1 or citation.raw not in encoded:
+        raise RotationError(
+            "deleted_claim_text must occur once and contain the governed citation"
+        )
+    begin = data.index(encoded)
+    return begin, begin + len(encoded), b""
+
+
+def rewrite_worktree(base: str, spec: dict[str, Any]) -> int:
+    baseline = build_baseline(base, spec)
+    expected_counts(baseline, spec)
+    semantics = semantic_entries(spec)
+    rows_by_id = {row["id"]: row for row in baseline.rows}
+    replacements: dict[str, list[tuple[int, int, bytes]]] = defaultdict(list)
+    key = spec["key"]
+    old_short = spec["old_commit"][:7]
+    for carrier in tracked_paths(base):
+        data = blob(base, carrier)
+        if f"{key}@{old_short}".encode() not in data:
+            continue
+        for citation in parse_citations(data, loose=True):
+            if not (
+                citation.key == key
+                and citation.short.startswith(old_short)
+                and spec["old_commit"].startswith(citation.short)
+            ):
+                continue
+            identifier = stable_id(base, carrier, citation)
+            row = rows_by_id[identifier]
+            if row["disposition"] == "tier3_semantic":
+                entry = semantics.get(identifier)
+                if entry is None:
+                    raise RotationError(f"missing semantic entry for {identifier}")
+                if entry["action"] == "deprecated_claim_deleted":
+                    replacements[carrier].append(
+                        deleted_claim_replacement(entry, data, citation)
+                    )
+                    continue
+                target = {
+                    "key": entry["final_key"],
+                    "path": entry["final_path"],
+                    "start": entry["final_start"],
+                    "end": entry["final_end"],
+                    "tag": entry["final_tag"],
+                }
+            else:
+                target = {
+                    "key": row["new"]["key"],
+                    "path": row["new"]["path"],
+                    "start": row["new"]["start"],
+                    "end": row["new"]["end"],
+                    "tag": row["new"]["commit"],
+                }
+            replacements[carrier].append(
+                (citation.begin, citation.finish, canonical_citation(target))
+            )
+    dirty: list[str] = []
+    for carrier in sorted(replacements):
+        path = ROOT / carrier
+        current = path.read_bytes() if path.is_file() else None
+        mismatch = rewrite_input_mismatch(carrier, blob(base, carrier), current)
+        if mismatch is not None:
+            dirty.append(mismatch)
+    if dirty:
+        raise RotationError(
+            "rewrite requires baseline-clean carrier files; refusing to overwrite: "
+            + ", ".join(dirty)
+        )
+    changed = 0
+    for carrier, edits in replacements.items():
+        path = ROOT / carrier
+        original = blob(base, carrier)
+        output = bytearray(original)
+        for begin, finish, replacement in sorted(edits, reverse=True):
+            output[begin:finish] = replacement
+        path.write_bytes(output)
+        changed += len(edits)
+    return changed
+
+
+def validate_final_citations(
+    revision: str, governed_keys: set[str], excluded_carriers: list[str]
+) -> tuple[list[Citation], list[str]]:
+    refs = manifest_refs(revision)
+    citations: list[Citation] = []
+    errors: list[str] = []
+    for carrier in revision_paths(revision):
+        data = worktree_or_blob(revision, carrier)
+        parsed = parse_citations(data, loose=False)
+        strict_starts = {citation.begin for citation in parsed}
+        # This file intentionally constructs one citation fixture from an
+        # f-string. It is source text for the verifier, not an evidence claim.
+        if carrier != "scripts/test-check-upstream-rotation":
+            for marker in GOVERNED_CITATION_MARKER_RE.finditer(data):
+                key = marker.group("key").decode()
+                if key in governed_keys and marker.start() not in strict_starts:
+                    line = data.count(b"\n", 0, marker.start()) + 1
+                    errors.append(
+                        f"{carrier}:L{line}: contains noncanonical upstream "
+                        "citation syntax"
+                    )
+        for citation in parsed:
+            citation = dataclasses.replace(citation, ordinal=len(citations))
+            citations.append(citation)
+            if path_matches(carrier, excluded_carriers):
+                continue
+            if citation.key not in governed_keys:
+                continue
+            entry = refs.get(citation.key)
+            if entry is None:
+                errors.append(f"{carrier}: unknown upstream key {citation.key}")
+                continue
+            commit = entry["commit"]
+            if not commit.startswith(citation.short):
+                errors.append(
+                    f"{carrier}: {citation.key}@{citation.short} does not match {commit}"
+                )
+                continue
+            try:
+                data_at_pin = git_file_for_key(citation.key, commit, citation.path)
+                excerpt(data_at_pin, citation.start, citation.end)
+            except RotationError as error:
+                errors.append(f"{carrier}: {error}")
+    return citations, errors
+
+
+def citation_target(citation: Citation) -> tuple[str, str, int, int, str]:
+    return (
+        citation.key,
+        citation.path,
+        citation.start,
+        citation.end,
+        citation.short,
+    )
+
+
+def final_citation_accounting(
+    base: str,
+    spec: dict[str, Any],
+    semantics: dict[str, dict[str, Any]],
+    dispositions: list[dict[str, Any]],
+    final_data: dict[str, bytes],
+    final_by_carrier: dict[str, list[Citation]],
+    used_final: dict[str, set[int]],
+    excluded_carriers: list[str],
+) -> tuple[dict[str, int], list[str]]:
+    """Bind every governed final citation to a disposition or the frozen base."""
+    current_key = spec["key"]
+    historical_key = "ens_v2_sepolia_20260629"
+    governed_pins = {
+        current_key: spec["new_commit"],
+        historical_key: spec["old_commit"],
+    }
+    for entry in semantics.values():
+        final_key = entry.get("final_key")
+        final_commit = entry.get("final_commit")
+        if final_key and final_commit:
+            governed_pins[final_key] = final_commit
+
+    def excluded(carrier: str) -> bool:
+        return path_matches(carrier, excluded_carriers)
+
+    def pin_manifest_authority(carrier: str, citation: Citation) -> bool:
+        # This exact pre-existing citation proves the pin used by the census. It
+        # is outside the rotation dispositions, but no other manifest citation is.
+        return carrier == ".refs/MANIFEST.toml" and citation_target(citation) == (
+            current_key,
+            spec["archive_deployment_prefix"] + ".deployment.json",
+            4,
+            4,
+            spec["new_commit"][:8],
+        )
+
+    base_current: dict[
+        str,
+        Counter[
+            tuple[
+                tuple[str, int],
+                tuple[str, int],
+                tuple[str, str, int, int, str],
+            ]
+        ],
+    ] = defaultdict(Counter)
+    pin_manifest_base: Counter[
+        tuple[tuple[str, int], tuple[str, str, int, int, str]]
+    ] = Counter()
+    for carrier in tracked_paths(base):
+        if excluded(carrier):
+            continue
+        data = blob(base, carrier)
+        citations = parse_citations(data, loose=True)
+        line_bindings = citation_line_bindings(data, citations)
+        paragraph_bindings = citation_claim_bindings(
+            data, citations, markdown=carrier.endswith(".md")
+        )
+        for citation in citations:
+            if pin_manifest_authority(carrier, citation):
+                pin_manifest_base[
+                    (line_bindings[citation.begin], citation_target(citation))
+                ] += 1
+                continue
+            pin = governed_pins.get(citation.key)
+            if pin is None or not pin.startswith(citation.short):
+                continue
+            base_current[carrier][
+                (
+                    line_bindings[citation.begin],
+                    paragraph_bindings[citation.begin],
+                    citation_target(citation),
+                )
+            ] += 1
+
+    accounting = {
+        "current_total": 0,
+        "rotated_targets": 0,
+        "archive_evidence_targets": 0,
+        "current_preexisting": 0,
+        "historical_total": 0,
+        "historical_source_targets": 0,
+        "historical_preexisting": 0,
+        "pin_manifest_authority": 0,
+    }
+    for row in dispositions:
+        final = row["new"]
+        if final is None:
+            continue
+        if row["disposition"] != "tier3_semantic":
+            accounting["rotated_targets"] += 1
+            continue
+        action = semantics[row["id"]]["action"]
+        if action == "deprecated_archive_evidence":
+            accounting["archive_evidence_targets"] += 1
+        elif action == "deprecated_historical_source":
+            accounting["historical_source_targets"] += 1
+
+    errors: list[str] = []
+    for carrier, citations in final_by_carrier.items():
+        if excluded(carrier):
+            continue
+        line_bindings = citation_line_bindings(final_data[carrier], citations)
+        paragraph_bindings = citation_claim_bindings(
+            final_data[carrier], citations, markdown=carrier.endswith(".md")
+        )
+        for index, citation in enumerate(citations):
+            if pin_manifest_authority(carrier, citation):
+                occurrence = (
+                    line_bindings[citation.begin],
+                    citation_target(citation),
+                )
+                if pin_manifest_base[occurrence]:
+                    pin_manifest_base[occurrence] -= 1
+                    accounting["pin_manifest_authority"] += 1
+                else:
+                    errors.append(
+                        f"{carrier}:L{citation.carrier_line}: undispositioned "
+                        f"citation documenting the pin: "
+                        f"{citation.raw.decode(errors='replace')}"
+                    )
+                continue
+            if citation.key not in governed_pins:
+                continue
+            if citation.key == current_key:
+                accounting["current_total"] += 1
+            elif citation.key == historical_key:
+                accounting["historical_total"] += 1
+            if index in used_final.get(carrier, set()):
+                continue
+            occurrence = (
+                line_bindings[citation.begin],
+                paragraph_bindings[citation.begin],
+                citation_target(citation),
+            )
+            if base_current[carrier][occurrence]:
+                base_current[carrier][occurrence] -= 1
+                if citation.key == current_key:
+                    accounting["current_preexisting"] += 1
+                elif citation.key == historical_key:
+                    accounting["historical_preexisting"] += 1
+                continue
+            errors.append(
+                f"{carrier}:L{citation.carrier_line}: undispositioned governed "
+                f"citation: {citation.raw.decode(errors='replace')}"
+            )
+    for carrier, occurrences in sorted(base_current.items()):
+        for (_, _, target), count in occurrences.items():
+            if count:
+                key, path, start, end, short = target
+                errors.append(
+                    f"{carrier}: {count} pre-existing governed citation(s) "
+                    f"missing from final tree: .refs/{key}/{path}:L{start}-L{end} "
+                    f"@ {key}@{short}"
+                )
+    for (_, target), count in pin_manifest_base.items():
+        if count:
+            key, path, start, end, short = target
+            errors.append(
+                f".refs/MANIFEST.toml: {count} pre-existing citation(s) "
+                f"documenting the pin missing from final tree: "
+                f".refs/{key}/{path}:L{start}-L{end} @ {key}@{short}"
+            )
+    return accounting, errors
+
+
+def rust_without_comments_and_space(data: bytes) -> bytes:
+    tokens: list[bytes] = []
+    index = 0
+    length = len(data)
+
+    def identifier_start(byte: int) -> bool:
+        return byte == ord("_") or chr(byte).isalpha() or byte >= 128
+
+    def identifier_continue(byte: int) -> bool:
+        return identifier_start(byte) or chr(byte).isdigit()
+
+    while index < length:
+        byte = data[index]
+        if byte in b" \t\r\n\x0b\x0c":
+            index += 1
+            continue
+        if data.startswith(b"//", index):
+            newline = data.find(b"\n", index + 2)
+            index = length if newline < 0 else newline + 1
+            continue
+        if data.startswith(b"/*", index):
+            depth = 1
+            index += 2
+            while index < length and depth:
+                if data.startswith(b"/*", index):
+                    depth += 1
+                    index += 2
+                elif data.startswith(b"*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            if depth:
+                raise RotationError("unterminated Rust block comment")
+            continue
+
+        prefix = index
+        if data.startswith(b"br", index):
+            raw_start = index + 2
+        elif data.startswith(b"r", index):
+            raw_start = index + 1
+        else:
+            raw_start = -1
+        if raw_start >= 0:
+            hashes = 0
+            while raw_start + hashes < length and data[raw_start + hashes] == ord("#"):
+                hashes += 1
+            quote = raw_start + hashes
+            if quote < length and data[quote] == ord('"'):
+                closing = b'"' + (b"#" * hashes)
+                end = data.find(closing, quote + 1)
+                if end < 0:
+                    raise RotationError("unterminated Rust raw string")
+                end += len(closing)
+                content = data[quote + 1 : end - len(closing)]
+                if b"SELECT " in content and re.search(rb"(?m)^\s*--", content):
+                    # A citation inside a PostgreSQL `--` comment changes a
+                    # Rust literal token but not the query token stream. Keep
+                    # every non-citation SQL comment byte-sensitive and remove
+                    # only canonical upstream-citation suffixes.
+                    scrubbed_lines: list[bytes] = []
+                    for line in content.split(b"\n"):
+                        sql_prefix, separator, comment = line.partition(b"--")
+                        if separator and not sql_prefix.strip():
+                            citations = parse_citations(comment, loose=False)
+                            if citations:
+                                rewritten = bytearray(comment)
+                                for citation in reversed(citations):
+                                    rewritten[citation.begin : citation.finish] = (
+                                        b"<UPSTREAM_CITATION>"
+                                    )
+                                comment = bytes(rewritten)
+                        scrubbed_lines.append(sql_prefix + separator + comment)
+                    content = b"\n".join(scrubbed_lines)
+                tokens.append(data[prefix : quote + 1] + content + closing)
+                index = end
+                continue
+
+        literal_start = index
+        if byte == ord("b") and index + 1 < length and data[index + 1] in b"\"'":
+            index += 1
+            byte = data[index]
+        elif (
+            byte == ord("'")
+            and index + 1 < length
+            and (chr(data[index + 1]).isalnum() or data[index + 1] == ord("_"))
+            and not (index + 2 < length and data[index + 2] == ord("'"))
+        ):
+            end = index + 2
+            while end < length and identifier_continue(data[end]):
+                end += 1
+            tokens.append(data[index:end])
+            index = end
+            continue
+        if byte in b"\"'":
+            quote = byte
+            index += 1
+            while index < length:
+                if data[index] == ord("\\"):
+                    index += 2
+                    continue
+                if data[index] == quote:
+                    index += 1
+                    break
+                index += 1
+            else:
+                raise RotationError("unterminated Rust literal")
+            tokens.append(data[literal_start:index])
+            continue
+
+        if data.startswith(b"r#", index) and index + 2 < length and identifier_start(data[index + 2]):
+            end = index + 3
+            while end < length and identifier_continue(data[end]):
+                end += 1
+            tokens.append(data[index:end])
+            index = end
+            continue
+
+        if identifier_start(byte):
+            end = index + 1
+            while end < length and identifier_continue(data[end]):
+                end += 1
+            tokens.append(data[index:end])
+            index = end
+            continue
+
+        if chr(byte).isdigit():
+            end = index + 1
+            while end < length and (chr(data[end]).isalnum() or data[end] == ord("_")):
+                end += 1
+            if (
+                end < length
+                and data[end] == ord(".")
+                and not data.startswith(b"..", end)
+            ):
+                end += 1
+                while end < length and (chr(data[end]).isdigit() or data[end] == ord("_")):
+                    end += 1
+            if end < length and data[end] in b"eE":
+                exponent = end + 1
+                if exponent < length and data[exponent] in b"+-":
+                    exponent += 1
+                digits = exponent
+                while exponent < length and (
+                    chr(data[exponent]).isdigit() or data[exponent] == ord("_")
+                ):
+                    exponent += 1
+                if exponent > digits:
+                    end = exponent
+            while end < length and identifier_continue(data[end]):
+                end += 1
+            tokens.append(data[index:end])
+            index = end
+            continue
+
+        punctuator = next(
+            (
+                candidate
+                for candidate in (
+                    b"<<=", b">>=", b"...", b"..=", b"!=", b"%=", b"&&",
+                    b"&=", b"*=", b"+=", b"-=", b"->", b"..", b"/=", b"::",
+                    b"<<", b"<=", b"==", b"=>", b">=", b">>", b"^=", b"|=", b"||",
+                )
+                if data.startswith(candidate, index)
+            ),
+            bytes([byte]),
+        )
+        tokens.append(punctuator)
+        index += len(punctuator)
+    return b"\0".join(tokens)
+
+
+def scrub_fixture_citations(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: ([] if key == "upstream_citations" else scrub_fixture_citations(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [scrub_fixture_citations(item) for item in value]
+    return value
+
+
+def changed_paths(base: str, head: str) -> list[str]:
+    args = ["git", "diff", "--name-only", "-z", base]
+    if head != "WORKTREE":
+        args.append(head)
+    result = run(args, text=False)
+    paths = {
+        path.decode("utf-8", errors="surrogateescape")
+        for path in result.stdout.split(b"\0")
+        if path
+    }
+    if head == "WORKTREE":
+        untracked = run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            text=False,
+        )
+        paths.update(
+            path.decode("utf-8", errors="surrogateescape")
+            for path in untracked.stdout.split(b"\0")
+            if path
+        )
+    return sorted(paths)
+
+
+def production_delta_errors(base: str, head: str) -> tuple[list[str], list[str]]:
+    """Reject production changes outside citations and manifest comments.
+
+    Repository tooling under scripts/ and Markdown content are exempt because
+    human review covers those changes; .refs/MANIFEST.toml comments are likewise
+    metadata, while parsed production manifest values remain protected below.
+    """
+    errors: list[str] = []
+    hashed_carriers: list[str] = []
+    base_paths = set(tracked_paths(base))
+    head_paths = set(revision_paths(head))
+    for path in changed_paths(base, head):
+        if path.startswith("scripts/") or path == ".refs/MANIFEST.toml":
+            continue
+        if path not in base_paths or path not in head_paths:
+            errors.append(f"production file set changed: {path}")
+            continue
+        old = blob(base, path)
+        new = worktree_or_blob(head, path)
+        if path.endswith(".md"):
+            continue
+        if path.startswith("manifests/") and path.endswith(".toml"):
+            if tomllib.loads(old.decode()) != tomllib.loads(new.decode()):
+                errors.append(f"parsed production manifest changed: {path}")
+            continue
+        if path.endswith(".rs"):
+            if rust_without_comments_and_space(old) != rust_without_comments_and_space(new):
+                errors.append(f"Rust tokens changed: {path}")
+            if carrier_class(path, Citation("", "", 1, 1, "", 0, 0, 1, b"", True, 0)) == "hashed_rust_comment":
+                hashed_carriers.append(path)
+            continue
+        if path == "crates/adapters/tests/fixtures/interpreters/raw-events.json":
+            before = scrub_fixture_citations(json.loads(old))
+            after = scrub_fixture_citations(json.loads(new))
+            if before != after:
+                errors.append(f"non-citation fixture JSON changed: {path}")
+            continue
+        errors.append(f"unsupported changed production path: {path}")
+    return errors, sorted(hashed_carriers)
+
+
+def parse_generated_hashes(path: Path) -> tuple[str, dict[str, str]]:
+    text = path.read_text(encoding="utf-8")
+    interpreter = re.search(r'INTERPRETER_CONTENT_HASH: &str = "([^"]+)"', text)
+    if interpreter is None:
+        raise RotationError(f"missing INTERPRETER_CONTENT_HASH in {path}")
+    profiles = dict(re.findall(r'\("([^"]+)", "([^"]+)"\)', text))
+    return interpreter.group(1), profiles
+
+
+def generated_hash_file(target: Path) -> Path | None:
+    matches = sorted(
+        target.glob("debug/build/bigname-content-hash-*/out/interpreter_content_hash.rs")
+    )
+    return matches[0] if matches else None
+
+
+def build_hashes(repo: Path, target: Path) -> tuple[str, dict[str, str]]:
+    environment = os.environ.copy()
+    environment["CARGO_TARGET_DIR"] = str(target)
+    result = subprocess.run(
+        ["cargo", "build", "--quiet", "--locked", "-p", "bigname-content-hash"],
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RotationError(f"content-hash build failed:\n{result.stderr}")
+    generated = generated_hash_file(target)
+    if generated is None:
+        raise RotationError(f"content-hash build generated no constants under {target}")
+    return parse_generated_hashes(generated)
+
+
+def fingerprint_report(base: str, head: str, hashed_carriers: list[str]) -> str:
+    # Always build both committed revisions in fresh target directories. A report
+    # directory can outlive worktree edits, so generated constants stored there
+    # are not a sound cache key.
+    if head == "WORKTREE":
+        dirty = run(["git", "status", "--porcelain", "--untracked-files=all"]).stdout
+        if dirty:
+            raise RotationError(
+                "fingerprint after-state requires a committed head; worktree is dirty"
+            )
+        head = report_revision(head)
+    with tempfile.TemporaryDirectory(prefix="bigname-rotation-") as temporary:
+        temp = Path(temporary)
+        base_tree = temp / "base"
+        run(["git", "worktree", "add", "--detach", str(base_tree), base])
+        try:
+            before = build_hashes(base_tree, temp / "target-before")
+            head_tree = temp / "head"
+            run(["git", "worktree", "add", "--detach", str(head_tree), head])
+            try:
+                after = build_hashes(head_tree, temp / "target-after")
+            finally:
+                run(["git", "worktree", "remove", "--force", str(head_tree)])
+        finally:
+            run(["git", "worktree", "remove", "--force", str(base_tree)])
+    before_interpreter, before_profiles = before
+    after_interpreter, after_profiles = after
+    if before_interpreter != after_interpreter and not hashed_carriers:
+        raise RotationError(
+            "interpreter fingerprint changed without an interpreter-content-hash carrier"
+        )
+    lines = [
+        "INTERPRETER_CONTENT_HASH",
+        f"  before: {before_interpreter}",
+        f"  after:  {after_interpreter}",
+        f"  delta:  {'changed' if before_interpreter != after_interpreter else 'unchanged'}",
+        "",
+        "HASHED_MANIFEST_PROFILES",
+    ]
+    for profile in sorted(set(before_profiles) | set(after_profiles)):
+        old = before_profiles.get(profile, "missing")
+        new = after_profiles.get(profile, "missing")
+        lines.extend(
+            [
+                f"  {profile}:",
+                f"    before: {old}",
+                f"    after:  {new}",
+                f"    delta:  {'changed' if old != new else 'unchanged'}",
+            ]
+        )
+    lines.extend(["", "INTERPRETER_CONTENT_HASH_CARRIERS"])
+    lines.extend(f"  {path}" for path in hashed_carriers)
+    return "\n".join(lines) + "\n"
+
+
+def verify(base: str, head: str, spec: dict[str, Any], report_dir: Path) -> str:
+    baseline = build_baseline(base, spec)
+    expected_counts(baseline, spec)
+    semantics = semantic_entries(spec)
+    semantic_rows = {
+        row["id"]: row for row in baseline.rows if row["disposition"] == "tier3_semantic"
+    }
+    missing_semantics = sorted(semantic_rows.keys() - semantics.keys())
+    extra_semantics = sorted(semantics.keys() - semantic_rows.keys())
+    if missing_semantics or extra_semantics:
+        raise RotationError(
+            f"semantic ledger mismatch: {len(missing_semantics)} missing, "
+            f"{len(extra_semantics)} extra"
+        )
+
+    final_by_carrier: dict[str, list[Citation]] = {}
+    final_binding_by_carrier: dict[str, dict[int, tuple[str, int]]] = {}
+    final_line_binding_by_carrier: dict[str, dict[int, tuple[str, int]]] = {}
+    final_data: dict[str, bytes] = {}
+    for carrier in revision_paths(head):
+        data = worktree_or_blob(head, carrier)
+        final_data[carrier] = data
+        final_by_carrier[carrier] = parse_citations(data, loose=True)
+        final_binding_by_carrier[carrier] = citation_claim_bindings(
+            data,
+            final_by_carrier[carrier],
+            markdown=carrier.endswith(".md"),
+        )
+        final_line_binding_by_carrier[carrier] = citation_line_bindings(
+            data, final_by_carrier[carrier]
+        )
+
+    dispositions: list[dict[str, Any]] = []
+    base_manifest = manifest_document(base)
+    head_manifest = manifest_document(head)
+    base_refs = base_manifest["refs"]
+    head_refs = head_manifest["refs"]
+    errors = manifest_pin_errors(head_refs, spec)
+    errors.extend(manifest_top_level_errors(base_manifest, head_manifest))
+    errors.extend(manifest_metadata_errors(base_refs, head_refs, spec))
+    used_final: dict[str, set[int]] = defaultdict(set)
+    for row in sorted(
+        baseline.rows,
+        key=lambda item: (item["carrier_path"], item["carrier_byte_offset"]),
+    ):
+        carrier = row["carrier_path"]
+        candidates = final_by_carrier.get(carrier, [])
+        expected = row["new"]
+        evidence_relation = "direct"
+        semantic_family = None
+        handoff_issue = None
+        if row["disposition"] == "tier3_semantic":
+            entry = semantics[row["id"]]
+            action = entry["action"]
+            evidence_relation = entry["evidence_relation"]
+            semantic_family = entry["family"]
+            handoff_issue = entry["handoff_issue"]
+            expected_carrier = f"{row['carrier_path']}:L{row['carrier_line']}"
+            if entry.get("carrier") != expected_carrier:
+                errors.append(f"{row['id']}: semantic carrier does not match baseline")
+            if entry.get("carrier_context_sha256") != row["claim_context_sha256"]:
+                errors.append(f"{row['id']}: semantic carrier context does not match baseline")
+            if entry.get("carrier_context_ordinal") != row["claim_context_ordinal"]:
+                errors.append(f"{row['id']}: semantic carrier ordinal does not match baseline")
+            if entry.get("review_status") != "reviewed":
+                errors.append(f"{row['id']}: semantic disposition is not reviewed")
+            if not str(entry.get("claim", "")).strip():
+                errors.append(f"{row['id']}: semantic claim summary is empty")
+            if "#565" not in str(entry.get("retention_reason", "")):
+                errors.append(f"{row['id']}: semantic retention reason must name #565")
+            if evidence_relation not in {"direct", "constrains"}:
+                errors.append(f"{row['id']}: unsupported evidence relation")
+            if handoff_issue != "#565":
+                errors.append(f"{row['id']}: semantic handoff must be #565")
+            if action not in {
+                "deprecated_historical_source",
+                "deprecated_archive_evidence",
+                "deprecated_claim_deleted",
+            }:
+                errors.append(f"{row['id']}: unsupported semantic action {action}")
+            if action == "deprecated_claim_deleted":
+                data = final_data.get(carrier, b"")
+                if not deleted_claim_is_absent(entry, data):
+                    errors.append(f"{row['id']}: deleted semantic claim remains")
+                dispositions.append(
+                    {
+                        **row,
+                        "new": None,
+                        "evidence_relation": evidence_relation,
+                        "semantic_family": semantic_family,
+                        "handoff_issue": handoff_issue,
+                    }
+                )
+                continue
+            else:
+                expected = {
+                    "key": entry["final_key"],
+                    "commit": entry["final_tag"],
+                    "path": entry.get("final_path", row["old"]["path"]),
+                    "start": entry.get("final_start", row["old"]["start"]),
+                    "end": entry.get("final_end", row["old"]["end"]),
+                }
+        if expected is None:
+            errors.append(f"{row['id']}: no final target")
+            continue
+        expected_short = expected["commit"]
+        wanted = (
+            expected["key"],
+            expected["path"],
+            expected["start"],
+            expected["end"],
+            expected_short,
+        )
+        target_candidates = [
+            (index, citation)
+            for index, citation in enumerate(candidates)
+            if index not in used_final[carrier]
+            and citation_target(citation) == wanted
+        ]
+        selected_index = next(
+            (
+                index
+                for index, citation in target_candidates
+                if final_binding_by_carrier[carrier][citation.begin]
+                == (row["claim_context_sha256"], row["claim_context_ordinal"])
+                and final_line_binding_by_carrier[carrier][citation.begin]
+                == (row["claim_line_sha256"], row["claim_line_ordinal"])
+            ),
+            None,
+        )
+        if selected_index is None:
+            line_candidates = [
+                (index, citation)
+                for index, citation in target_candidates
+                if final_line_binding_by_carrier[carrier][citation.begin]
+                == (row["claim_line_sha256"], row["claim_line_ordinal"])
+            ]
+            if target_candidates and not line_candidates:
+                lines = ", ".join(
+                    str(citation.carrier_line)
+                    for _, citation in target_candidates
+                )
+                errors.append(
+                    f"{row['id']}: final claim-line binding mismatch: "
+                    f"{carrier}:L{lines}"
+                )
+            elif line_candidates:
+                lines = ", ".join(
+                    str(citation.carrier_line)
+                    for _, citation in line_candidates
+                )
+                errors.append(
+                    f"{row['id']}: final claim-context binding mismatch: "
+                    f"{carrier}:L{lines}"
+                )
+            else:
+                errors.append(f"{row['id']}: final target missing: {wanted!r}")
+            continue
+        used_final[carrier].add(selected_index)
+        final = candidates[selected_index]
+        if not final.strict:
+            errors.append(f"{row['id']}: final citation is not canonical")
+        dispositions.append(
+            {
+                **row,
+                "new": {
+                    "key": final.key,
+                    "commit": final.short,
+                    "path": final.path,
+                    "start": final.start,
+                    "end": final.end,
+                },
+                "final_carrier_line": final.carrier_line,
+                "final_carrier_byte_offset": final.begin,
+                "final_claim_context_sha256": final_binding_by_carrier[carrier][
+                    final.begin
+                ][0],
+                "final_claim_context_ordinal": final_binding_by_carrier[carrier][
+                    final.begin
+                ][1],
+                "final_claim_line_sha256": final_line_binding_by_carrier[carrier][
+                    final.begin
+                ][0],
+                "final_claim_line_ordinal": final_line_binding_by_carrier[carrier][
+                    final.begin
+                ][1],
+                "evidence_relation": evidence_relation,
+                "semantic_family": semantic_family,
+                "handoff_issue": handoff_issue,
+            }
+        )
+
+    governed_keys = {spec["key"], "ens_v2_sepolia_20260629"}
+    excluded_carriers = spec.get("historical_carrier_exclusions", [])
+    all_final, citation_errors = validate_final_citations(
+        head, governed_keys, excluded_carriers
+    )
+    errors.extend(citation_errors)
+    accounting, accounting_errors = final_citation_accounting(
+        base,
+        spec,
+        semantics,
+        dispositions,
+        final_data,
+        final_by_carrier,
+        used_final,
+        excluded_carriers,
+    )
+    errors.extend(accounting_errors)
+    old_tag = f"{spec['key']}@{spec['old_commit'][:7]}".encode()
+    final_raw = sum(data.count(old_tag) for data in final_data.values())
+    final_canonical_old = sum(
+        citation.key == spec["key"]
+        and citation.short.startswith(spec["old_commit"][:7])
+        and spec["old_commit"].startswith(citation.short)
+        for citation in all_final
+    )
+    live_prefix = spec["old_deployment_prefix"]
+    allowlisted: Counter[tuple[str, int, str, int, int, str]] = Counter()
+    for entry in spec.get("live_deployment_allowlist", []):
+        if entry.get("purpose") != "unadmitted_redeploy":
+            errors.append("live-deployment allowlist purpose must be unadmitted_redeploy")
+            continue
+        allowlisted[
+            (
+                entry["carrier"],
+                entry["carrier_line"],
+                entry["path"],
+                entry["start"],
+                entry["end"],
+                entry["tag"],
+            )
+        ] += 1
+    forbidden_live = 0
+    for carrier, citations in final_by_carrier.items():
+        if path_matches(carrier, excluded_carriers):
+            continue
+        for citation in citations:
+            if citation.key == spec["key"] and citation.path.startswith(live_prefix):
+                occurrence = (
+                    carrier,
+                    citation.carrier_line,
+                    citation.path,
+                    citation.start,
+                    citation.end,
+                    citation.short,
+                )
+                if allowlisted[occurrence]:
+                    allowlisted[occurrence] -= 1
+                else:
+                    forbidden_live += 1
+    unused_live_allowlist = sum(allowlisted.values())
+    if unused_live_allowlist:
+        errors.append(f"live-deployment allowlist has {unused_live_allowlist} unused entries")
+    delta_errors, hashed_carriers = production_delta_errors(base, head)
+    errors.extend(delta_errors)
+    if final_raw:
+        errors.append(f"final tree contains {final_raw} raw stale tags")
+    if final_canonical_old:
+        errors.append(f"final tree contains {final_canonical_old} canonical stale tags")
+    if forbidden_live:
+        errors.append(f"final tree contains {forbidden_live} forbidden live-deployment cites")
+    if len(dispositions) != len(baseline.rows):
+        errors.append(
+            f"disposition count {len(dispositions)} != baseline {len(baseline.rows)}"
+        )
+    if len({row["id"] for row in dispositions}) != len(dispositions):
+        errors.append("duplicate disposition IDs")
+    if errors:
+        raise RotationError("verification failed:\n  " + "\n  ".join(errors[:50]))
+
+    immutable_head = report_revision(head)
+    fingerprint_text = fingerprint_report(base, head, hashed_carriers)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    write_reports(report_dir, baseline, spec)
+    disposition_text = "".join(json_line(row) + "\n" for row in sorted(dispositions, key=lambda row: row["id"]))
+    (report_dir / "dispositions.jsonl").write_text(disposition_text, encoding="utf-8")
+    write_review_reports(
+        report_dir, baseline, dispositions, semantics, spec, immutable_head
+    )
+    (report_dir / "after.jsonl").write_text(
+        "".join(
+            json_line(
+                {
+                    "carrier_path": carrier,
+                    "carrier_line": citation.carrier_line,
+                    **citation.target(),
+                }
+            )
+            + "\n"
+            for carrier in sorted(final_by_carrier)
+            for citation in final_by_carrier[carrier]
+        ),
+        encoding="utf-8",
+    )
+    (report_dir / "production-delta.txt").write_text(
+        "production Rust and embedded-SQL executable-token delta: zero\n"
+        "upstream citations in PostgreSQL -- comments are metadata-only\n"
+        "parsed production-manifest delta: zero\n"
+        + "interpreter-content-hash carriers:\n"
+        + "".join(f"  {path}\n" for path in hashed_carriers),
+        encoding="utf-8",
+    )
+    (report_dir / "fingerprint-delta.txt").write_text(
+        fingerprint_text,
+        encoding="utf-8",
+    )
+    checks = {
+        "final broad old tags": final_raw,
+        "final canonical old tags": final_canonical_old,
+        "final ens_v2 manifest mismatches": 0,
+        "missing disposition IDs": 0,
+        "duplicate disposition IDs": 0,
+        "unresolved citations": 0,
+        "invalid paths/ranges": 0,
+        "forbidden live-deployment cites": forbidden_live,
+    }
+    text = summary_text(
+        baseline,
+        immutable_head,
+        spec,
+        checks,
+        accounting,
+    )
+    (report_dir / "summary.txt").write_text(text, encoding="utf-8")
+    return text
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    snapshot = subparsers.add_parser("snapshot")
+    snapshot.add_argument("--base", required=True)
+    snapshot.add_argument("--spec", type=Path, required=True)
+    snapshot.add_argument("--report-dir", type=Path, required=True)
+    verify_parser = subparsers.add_parser("verify")
+    verify_parser.add_argument("--base", required=True)
+    verify_parser.add_argument(
+        "--head",
+        required=True,
+        help="committed revision; WORKTREE is accepted only when the tree is clean",
+    )
+    verify_parser.add_argument("--spec", type=Path, required=True)
+    verify_parser.add_argument("--report-dir", type=Path, required=True)
+    verify_pr = subparsers.add_parser("verify-pr")
+    verify_pr.add_argument("--base", required=True)
+    verify_pr.add_argument(
+        "--head",
+        default="HEAD",
+        help="committed revision; WORKTREE is accepted only when the tree is clean",
+    )
+    verify_pr.add_argument("--spec", type=Path, required=True)
+    verify_pr.add_argument(
+        "--report-dir",
+        type=Path,
+        default=Path("target/upstream-rotations/ens_v2-ccaeb58-a971bd64"),
+    )
+    prepare = subparsers.add_parser("prepare-semantic-spec")
+    prepare.add_argument("--base", required=True)
+    prepare.add_argument("--spec", type=Path, required=True)
+    rewrite = subparsers.add_parser("rewrite")
+    rewrite.add_argument("--base", required=True)
+    rewrite.add_argument("--spec", type=Path, required=True)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        spec = load_spec(args.spec)
+        base = resolve_revision(args.base)
+        if args.command == "prepare-semantic-spec":
+            count = prepare_semantic_spec(args.spec, base, spec)
+            print(f"wrote {count} semantic decisions to {args.spec}")
+        elif args.command == "rewrite":
+            count = rewrite_worktree(base, spec)
+            print(f"rewrote {count} baseline citation occurrences")
+        elif args.command == "snapshot":
+            baseline = build_baseline(base, spec)
+            expected_counts(baseline, spec)
+            write_reports(args.report_dir, baseline, spec)
+            text = summary_text(baseline, base, spec)
+            (args.report_dir / "summary.txt").write_text(text, encoding="utf-8")
+            print(text, end="")
+        else:
+            head = args.head if args.head == "WORKTREE" else resolve_revision(args.head)
+            print(verify(base, head, spec, args.report_dir), end="")
+        return 0
+    except (OSError, RotationError, tomllib.TOMLDecodeError) as error:
+        print(f"check-upstream-rotation: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

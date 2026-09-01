@@ -6,9 +6,9 @@ use crate::state::AppState;
 
 use super::http::{graphiql, graphql_handler};
 use super::loader::RecordInventoryLoader;
-use super::query::QueryRoot;
+use super::query::Query;
 
-pub(crate) type SubgraphSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
+pub(crate) type SubgraphSchema = Schema<Query, EmptyMutation, EmptySubscription>;
 
 /// Depth/complexity ceilings. The deepest legitimate documents are GraphiQL's introspection query
 /// (~14 levels through the nested `ofType` fragment) and the supported `Domain` shape (~5);
@@ -24,7 +24,7 @@ fn build_schema(state: AppState) -> SubgraphSchema {
     // one query and never memoizes rows across requests (the phase projection can change).
     let record_inventory_loader =
         DataLoader::new(RecordInventoryLoader::new(state.pool.clone()), tokio::spawn);
-    Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
+    Schema::build(Query, EmptyMutation, EmptySubscription)
         .limit_depth(MAX_QUERY_DEPTH)
         .limit_complexity(MAX_QUERY_COMPLEXITY)
         .data(state)
@@ -44,7 +44,7 @@ pub(crate) fn graphql_routes(state: AppState) -> Router {
 /// snapshot test that guards the compatibility contract.
 #[cfg(test)]
 pub(crate) fn subgraph_sdl() -> String {
-    Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
+    Schema::build(Query, EmptyMutation, EmptySubscription)
         .finish()
         .sdl()
 }

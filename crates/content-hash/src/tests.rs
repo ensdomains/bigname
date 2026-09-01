@@ -198,6 +198,63 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
         first, normalized_change,
         "manifest normalized-event mappings must affect the hash"
     );
+
+    tree.write_example_manifest_details(
+        "ensip15@old",
+        "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
+        "[\"registry\"]",
+        "[]",
+    );
+    let intake_only_change =
+        interpreter_content_hash(tree.path()).expect("intake-only event block must hash");
+    assert_ne!(
+        first, intake_only_change,
+        "an empty-output manifest ABI addition must rotate the interpreter hash"
+    );
+}
+
+#[test]
+fn base_and_sepolia_manifest_edits_rotate_only_their_containing_profiles() {
+    let tree = SampleTree::empty();
+    tree.write(
+        "manifests/mainnet/base/basenames/registry.toml",
+        "source_family = \"basenames_base_registry\"\n",
+    );
+    tree.write(
+        "manifests/sepolia/ethereum/ens/registry.toml",
+        "source_family = \"ens_v1_registry_l1\"\n",
+    );
+    let mainnet_root = tree.path().join("manifests/mainnet");
+    let sepolia_root = tree.path().join("manifests/sepolia");
+    let mainnet_before = manifest_profile_hash(&mainnet_root).expect("mainnet profile must hash");
+    let sepolia_before = manifest_profile_hash(&sepolia_root).expect("Sepolia profile must hash");
+
+    tree.write(
+        "manifests/mainnet/base/basenames/registry.toml",
+        "source_family = \"basenames_base_registry\"\napproval_intake = true\n",
+    );
+    let mainnet_after_base =
+        manifest_profile_hash(&mainnet_root).expect("mainnet profile must hash");
+    assert_ne!(mainnet_after_base, mainnet_before);
+    assert_eq!(
+        manifest_profile_hash(&sepolia_root).expect("Sepolia profile must hash"),
+        sepolia_before,
+        "Base manifests belong to the mainnet profile only"
+    );
+
+    tree.write(
+        "manifests/sepolia/ethereum/ens/registry.toml",
+        "source_family = \"ens_v1_registry_l1\"\napproval_intake = true\n",
+    );
+    assert_ne!(
+        manifest_profile_hash(&sepolia_root).expect("Sepolia profile must hash"),
+        sepolia_before
+    );
+    assert_eq!(
+        manifest_profile_hash(&mainnet_root).expect("mainnet profile must hash"),
+        mainnet_after_base,
+        "Sepolia manifests must not rotate the mainnet profile"
+    );
 }
 
 #[test]

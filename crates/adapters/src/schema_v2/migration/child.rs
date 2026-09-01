@@ -3,8 +3,8 @@
 //! A child never reaches a migration controller: the batch helper routes child groups to the
 //! already-migrated parent's own registry, which inherits the wrapper receiver and registers the
 //! child into itself.
-//! (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2@ccaeb58)
-//! (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58)
+//! (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2_sepolia_20260629@ccaeb58)
+//! (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L32 @ ens_v2@a971bd64)
 //! Correlation is therefore per child registration, never per transaction: one transaction may
 //! carry a parent migration and several children.
 
@@ -30,7 +30,7 @@ const REGISTRY_FAMILY: &str = "ens_v2_registry_l1";
 /// One registry proven to have been created by an ENSv1→ENSv2 migration, with the namehash of the
 /// name it holds children for. That namehash is the factory CREATE2 salt, so the parent's own
 /// migration evidence names the parent without any `.eth` assumption.
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2_sepolia_20260629@ccaeb58)
 struct MigrationRegistry {
     correlation_id: String,
     evidence: Vec<Value>,
@@ -199,8 +199,8 @@ fn derive_boundaries(
         // that: the receiver parks a locked child's wrapper token in the Graveyard, and unwraps an
         // emancipated child into it. Without that evidence the self-claim is an ordinary ENSv2
         // registration, whatever its sender.
-        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
-        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64)
         let Some((cleanup_kind, cleanup)) = v1_cleanup(
             output,
             &registration,
@@ -218,10 +218,10 @@ fn derive_boundaries(
         // and there is no third branch, so the two halves must agree. Classifying by registry
         // presence alone would relabel a locked child whose registry evidence is missing as an
         // emancipated one, inventing a shape the chain does not show.
-        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
-        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
-        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
-        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
+        // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2_sepolia_20260629@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64)
+        // (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L190 @ ens_v2@a971bd64)
         let migration_path = match (cleanup_kind, child_registry.is_some()) {
             (Cleanup::Parked, true) => "locked_child",
             (Cleanup::Unwrapped, false) => "emancipated_child",
@@ -367,9 +367,9 @@ fn derive_boundaries(
 /// wrapper receiver re-enters through an external self-call restricted to itself, so
 /// `LabelRegistered` reports the emitting registry as its sender. A parent owner registering an
 /// unprotected child reports an ordinary account instead, and is not migration evidence.
-/// (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L149 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L167 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2@a971bd64)
 fn receiver_registered_itself(event: &NormalizedEvent) -> bool {
     if event.source_family != REGISTRY_FAMILY
         || event.event_kind != "RegistrationGranted"
@@ -401,10 +401,10 @@ fn receiver_registered_itself(event: &NormalizedEvent) -> bool {
 ///
 /// The receiver retires the ENSv1 name and only then injects the successor label, so a cleanup at
 /// or after the registration is not that sequence and proves nothing about it
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2_sepolia_20260629@ccaeb58)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@a971bd64).
 fn v1_cleanup(
     output: &BatchOutput,
     registration: &NormalizedEvent,

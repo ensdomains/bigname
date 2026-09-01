@@ -15,6 +15,11 @@ use super::{LiveMismatchReason, PhaseRunner};
 pub(super) type AfterRequiredRedoCatchUp =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+enum PostLiveDownstream {
+    Complete,
+    RepairDiscovery,
+}
+
 impl PhaseRunner {
     #[doc(hidden)]
     pub fn with_after_required_redo_catch_up<F, Fut>(mut self, hook: F) -> Self
@@ -32,18 +37,14 @@ impl PhaseRunner {
         }
     }
 
-    async fn acquire_post_live_ingest_fence(
+    async fn acquire_post_live_fence(
         &self,
         chain: &ChainConfig,
+        phase: PhaseName,
         cancellation: &CancellationToken,
     ) -> RunnerResult<Option<PhaseLock>> {
         loop {
-            match PhaseLock::acquire(
-                self.database.connect_options(),
-                &chain.chain_id,
-                PhaseName::Ingest,
-            )
-            .await
+            match PhaseLock::acquire(self.database.connect_options(), &chain.chain_id, phase).await
             {
                 Ok(phase_lock) => return Ok(Some(phase_lock)),
                 Err(error) if error.kind() == ErrorKind::LockHeld || error.is_retryable() => {
@@ -62,47 +63,137 @@ impl PhaseRunner {
         chain: &ChainConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        let Some(mut ingest_fence) = self
-            .acquire_post_live_ingest_fence(chain, &cancellation)
+        // The paired normal Verify may still be running when Live reaches its downstream
+        // boundary. Wait for it before Interpret can admit new intake coverage, and retain this
+        // fence until Project is rebuilt. Required Verify redo runs only after releasing the lock.
+        let Some(mut verify_fence) = self
+            .acquire_post_live_fence(chain, PhaseName::Verify, &cancellation)
             .await?
         else {
             return Ok(());
         };
-        let result = ingest_fence
-            .run_while_alive(self.timing.live_poll_interval, async {
-                if let Some(range) = self
-                    .store
-                    .required_redo_range(&chain.chain_id, PhaseName::Ingest)
-                    .await?
-                {
-                    self.catch_up_required_range(chain, range, cancellation.clone())
+        let result = verify_fence
+            .run_while_alive(
+                self.timing.live_poll_interval,
+                self.run_post_live_downstream_fenced(chain, cancellation.clone()),
+            )
+            .await;
+        let release = verify_fence.release().await;
+        match (result, release) {
+            (Ok(()), Ok(())) => {}
+            (Ok(()), Err(error)) | (Err(error), Ok(())) => return Err(error),
+            (Err(error), Err(release_error)) => {
+                return Err(error.with_secondary(
+                    "release the post-Live Verify coordination lock",
+                    release_error,
+                ));
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
+        self.reject_pending_required_ingest(&chain.chain_id).await?;
+        self.run_required_verify_redo(chain, cancellation).await
+    }
+
+    async fn run_post_live_downstream_fenced(
+        &self,
+        chain: &ChainConfig,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
+        let Some((rule_count, iteration_limit)) = self
+            .discovery_repair_iteration_limit(&chain.chain_id, &cancellation)
+            .await?
+        else {
+            return Ok(());
+        };
+        for _iteration in 1..=iteration_limit {
+            let Some(mut ingest_fence) = self
+                .acquire_post_live_fence(chain, PhaseName::Ingest, &cancellation)
+                .await?
+            else {
+                return Ok(());
+            };
+            let result = ingest_fence
+                .run_while_alive(self.timing.live_poll_interval, async {
+                    if let Some(range) = self
+                        .store
+                        .required_redo_range(&chain.chain_id, PhaseName::Ingest)
+                        .await?
+                    {
+                        self.catch_up_required_range(chain, range, cancellation.clone())
+                            .await?;
+                        if cancellation.is_cancelled() {
+                            return Ok(PostLiveDownstream::Complete);
+                        }
+                        let Some(discovery_owned) = self
+                            .discovery_required_ingest_pending(&chain.chain_id, &cancellation)
+                            .await?
+                        else {
+                            return Ok(PostLiveDownstream::Complete);
+                        };
+                        if discovery_owned {
+                            return Ok(PostLiveDownstream::RepairDiscovery);
+                        }
+                        return Err(crate::transitions::required_ingest_redo_error(
+                            &chain.chain_id,
+                            range,
+                        ));
+                    }
+                    self.run_spine_phase(chain, PhaseName::Interpret, cancellation.clone())
+                        .await?;
+                    if let Some(range) = self
+                        .store
+                        .required_redo_range(&chain.chain_id, PhaseName::Ingest)
+                        .await?
+                    {
+                        let Some(discovery_owned) = self
+                            .discovery_required_ingest_pending(&chain.chain_id, &cancellation)
+                            .await?
+                        else {
+                            return Ok(PostLiveDownstream::Complete);
+                        };
+                        if discovery_owned {
+                            return Ok(PostLiveDownstream::RepairDiscovery);
+                        }
+                        return Err(crate::transitions::required_ingest_redo_error(
+                            &chain.chain_id,
+                            range,
+                        ));
+                    }
+                    self.run_spine_phase(chain, PhaseName::Project, cancellation.clone())
+                        .await?;
+                    self.reject_pending_required_ingest(&chain.chain_id).await?;
+                    Ok(PostLiveDownstream::Complete)
+                })
+                .await;
+            let release = ingest_fence.release().await;
+            let outcome = match (result, release) {
+                (Ok(outcome), Ok(())) => outcome,
+                (Ok(_), Err(error)) | (Err(error), Ok(())) => return Err(error),
+                (Err(error), Err(release_error)) => {
+                    return Err(error.with_secondary(
+                        "release the post-Live Ingest coordination lock",
+                        release_error,
+                    ));
+                }
+            };
+            match outcome {
+                PostLiveDownstream::Complete => return Ok(()),
+                PostLiveDownstream::RepairDiscovery => {
+                    self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
                         .await?;
                     if cancellation.is_cancelled() {
                         return Ok(());
                     }
-                    return Err(crate::transitions::required_ingest_redo_error(
-                        &chain.chain_id,
-                        range,
-                    ));
                 }
-                for phase in [PhaseName::Interpret, PhaseName::Project] {
-                    self.run_spine_phase(chain, phase, cancellation.clone())
-                        .await?;
-                }
-                self.run_required_verify_redo(chain, cancellation.clone())
-                    .await?;
-                Ok(())
-            })
-            .await;
-        let release = ingest_fence.release().await;
-        match (result, release) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(release_error)) => Err(error.with_secondary(
-                "release the post-Live Ingest coordination lock",
-                release_error,
-            )),
+            }
         }
+        Err(Self::discovery_repair_exhausted_error(
+            &chain.chain_id,
+            rule_count,
+            iteration_limit,
+        ))
     }
 
     pub(super) async fn run_live_follow(
@@ -259,6 +350,7 @@ impl PhaseRunner {
                 RunMode::Normal,
                 cancellation.clone(),
                 Some(Arc::clone(&live_mismatch)),
+                false,
             )
             .await?;
             if cancellation.is_cancelled() {

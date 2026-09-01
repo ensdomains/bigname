@@ -16,6 +16,7 @@ use bigname_ingest::load_watch_filter;
 use bigname_interpret::{
     BatchRequest, Engine, ErrorKind as InterpretErrorKind, Marker, RunMode as InterpretRunMode,
 };
+use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_project::{
     BatchRequest as ProjectBatchRequest, Engine as ProjectEngine, RunMode as ProjectRunMode,
 };
@@ -32,7 +33,7 @@ use phase_runner::{
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     postgres::PgPoolOptions,
@@ -75,6 +76,7 @@ sol! {
         string key,
         string value
     );
+    event Upgraded(address indexed implementation);
     event AddrChanged(bytes32 indexed node, address a);
     event NameChanged(bytes32 indexed node, string name);
     event ReverseClaimed(address indexed addr, bytes32 indexed node);
@@ -104,9 +106,9 @@ mod v2_registry_events {
         event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
         event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
         event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
-        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@a971bd64)
         event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
-        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58)
+        // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@a971bd64)
         event ParentUpdated(address indexed parent, string label, address indexed sender);
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
         event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
@@ -3295,21 +3297,162 @@ async fn subregistry_topology_edge_does_not_expand_the_watch_plan() -> Result<()
 }
 
 #[tokio::test]
-async fn ens_v2_root_resolver_discovery_uses_resolver_manifest_watch_topics() -> Result<()> {
+async fn root_resolver_discovery_projects_single_label_records_in_normal_and_redo() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_root_resolver_watch").await?;
     let chain = "interpret-root-resolver-watch";
     seed_root_resolver_watch_fixture(scratch.pool(), chain).await?;
 
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+
+    let pointer: (String, String, String, Uuid, String) = sqlx::query_as(
+        "SELECT event.source_family, event.after_state ->> 'resolver',
+                event.logical_name_id, event.resource_id, surface.raw_name
+         FROM normalized_events event
+         JOIN name_surfaces surface USING (logical_name_id)
+         WHERE event.chain_id = $1 AND event.event_kind = 'ResolverChanged'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(pointer.0, "ens_v2_root_l1");
+    assert_eq!(pointer.1, DISCOVERED_RESOLVER);
+    assert_eq!(pointer.4, "box");
+
+    let edge: (i64, String, String, String) = sqlx::query_as(
+        "SELECT count(*), min(source.source_family), min(address.address),
+                min(edge.admission_basis)
+         FROM discovery_edges edge
+         JOIN manifest_versions source ON source.manifest_id = edge.source_manifest_id
+         JOIN contract_instance_addresses address
+           ON address.contract_instance_id = edge.to_contract_instance_id
+          AND address.chain_id = edge.chain_id
+         WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+           AND edge.deactivated_at IS NULL
+           AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        edge,
+        (
+            1,
+            "ens_v2_root_l1".into(),
+            DISCOVERED_RESOLVER.into(),
+            "reachable_from_root".into(),
+        )
+    );
+
     let record_topic = format!("{:#x}", TextChanged::SIGNATURE_HASH);
-    let watch = load_watch_filter(scratch.pool(), chain, 0, 5).await?;
+    let watch = load_watch_filter(scratch.pool(), chain, 0, 2).await?;
 
     assert!(!watch.includes(DISCOVERED_RESOLVER, &record_topic, 0));
     assert!(
         watch.includes(DISCOVERED_RESOLVER, &record_topic, 1),
         "a root-discovered resolver must use ens_v2_resolver_l1 event topics"
     );
-    assert!(watch.includes(DISCOVERED_RESOLVER, &record_topic, 5));
+    assert!(watch.includes(DISCOVERED_RESOLVER, &record_topic, 2));
+
+    let record: (String, String, Uuid, String, String, String) = sqlx::query_as(
+        "SELECT source_family, logical_name_id, resource_id,
+                after_state ->> 'record_family', after_state ->> 'selector_key',
+                after_state ->> 'value'
+         FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RecordChanged'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(record.0, "ens_v2_resolver_l1");
+    assert_eq!(record.1, pointer.2);
+    assert_eq!(record.2, pointer.3);
+    assert_eq!(record.3, "text");
+    assert_eq!(record.4, "url");
+    assert_eq!(record.5, "https://example.test");
+
+    run_project(scratch.pool(), chain, 2, 0, 2).await?;
+    assert_root_resolver_projection(scratch.pool(), chain, &pointer.2, pointer.3).await?;
+
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Redo).await?;
+    let replay_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM discovery_edges
+              WHERE chain_id = $1 AND edge_kind = 'resolver' AND deactivated_at IS NULL),
+             (SELECT count(*) FROM contract_instance_addresses
+              WHERE chain_id = $1 AND lower(address) = lower($2) AND deactivated_at IS NULL),
+             (SELECT count(*) FROM normalized_events
+              WHERE chain_id = $1 AND event_kind IN ('ResolverChanged', 'RecordChanged'))",
+    )
+    .bind(chain)
+    .bind(DISCOVERED_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(replay_counts, (1, 1, 2));
+    run_project(scratch.pool(), chain, 2, 0, 2).await?;
+    assert_root_resolver_projection(scratch.pool(), chain, &pointer.2, pointer.3).await?;
     scratch.cleanup().await
+}
+
+async fn assert_root_resolver_projection(
+    pool: &PgPool,
+    chain_id: &str,
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> Result<()> {
+    let name: (Uuid, String, String) = sqlx::query_as(
+        "SELECT resource_id, raw_name, declared_summary #>> '{resolver,address}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        name,
+        (resource_id, "box".into(), DISCOVERED_RESOLVER.into())
+    );
+
+    let resolver: (String, String) = sqlx::query_as(
+        "SELECT support_status, declared_summary #>> '{classification,source_family}'
+         FROM resolver_current
+         WHERE chain_id = $1 AND lower(resolver_address) = lower($2)",
+    )
+    .bind(chain_id)
+    .bind(DISCOVERED_RESOLVER)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(resolver, ("supported".into(), "ens_v2_resolver_l1".into()));
+
+    let inventory: (serde_json::Value, serde_json::Value, String, String) = sqlx::query_as(
+        "SELECT selectors, entries, provenance ->> 'logical_name_id',
+                provenance ->> 'resolver_address'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(inventory.2, logical_name_id);
+    assert_eq!(inventory.3, DISCOVERED_RESOLVER);
+    assert!(
+        inventory
+            .0
+            .as_array()
+            .is_some_and(|selectors| selectors.iter().any(|selector| {
+                selector["record_key"] == "text:url"
+                    && selector["record_family"] == "text"
+                    && selector["selector_key"] == "url"
+            }))
+    );
+    assert!(
+        inventory
+            .1
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry["record_key"] == "text:url"
+                    && entry["status"] == "success"
+                    && entry["value"] == "https://example.test"
+            }))
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -3347,6 +3490,264 @@ async fn discovery_admission_applies_to_later_logs_in_the_same_batch() -> Result
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(resolver_event, ("ens_v2_resolver_l1".into(), 1));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> Result<()> {
+    const CHAIN: &str = "ethereum-sepolia";
+    const REGISTRY: &str = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    const RESOLVER: &str = "0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5";
+    const FIRST_BLOCK: i64 = 11_163_391;
+
+    let scratch = ScratchDatabase::create("production_interpret_declared_v1_resolver").await?;
+    let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(scratch.pool(), &load_repository(profile)?).await?;
+    for block in FIRST_BLOCK..=FIRST_BLOCK + 2 {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, block))
+        .bind((block > FIRST_BLOCK).then(|| block_hash(CHAIN, block - 1)))
+        .bind(block)
+        .execute(scratch.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO raw_transactions (
+                 chain_id, block_hash, block_number, transaction_hash,
+                 transaction_index, from_address, to_address
+             ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, block))
+        .bind(block)
+        .bind(format!("{CHAIN}-transaction-{block}"))
+        .bind(SENDER)
+        .bind(if block == FIRST_BLOCK + 2 {
+            RESOLVER
+        } else {
+            REGISTRY
+        })
+        .execute(scratch.pool())
+        .await?;
+    }
+
+    let token_id = versioned_token("alice", 1);
+    let owner: Address = SENDER.parse()?;
+    for (log_index, fact) in [
+        v2_registry_events::LabelRegistered {
+            tokenId: token_id,
+            labelHash: keccak256(b"alice"),
+            label: "alice".to_owned(),
+            owner,
+            expiry: 4_000_000_000,
+            sender: owner,
+        }
+        .encode_log_data(),
+        v2_registry_events::TokenResource {
+            tokenId: token_id,
+            resource: U256::from(5_031),
+        }
+        .encode_log_data(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_log_at(
+            scratch.pool(),
+            CHAIN,
+            FIRST_BLOCK,
+            &format!("{CHAIN}-transaction-{FIRST_BLOCK}"),
+            i64::try_from(log_index)?,
+            REGISTRY,
+            fact.topics(),
+            fact.data.as_ref(),
+        )
+        .await?;
+    }
+    let pointer = ResolverUpdated {
+        tokenId: token_id,
+        resolver: RESOLVER.parse()?,
+        sender: owner,
+    }
+    .encode_log_data();
+    insert_log_at(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 1,
+        &format!("{CHAIN}-transaction-{}", FIRST_BLOCK + 1),
+        0,
+        REGISTRY,
+        pointer.topics(),
+        pointer.data.as_ref(),
+    )
+    .await?;
+    let record = TextChanged {
+        node: raw_namehash(&[b"alice", b"eth"]),
+        indexedKey: keccak256(b"url"),
+        key: "url".into(),
+        value: "https://declared-v1.example.test".into(),
+    }
+    .encode_log_data();
+    insert_log_at(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 2,
+        &format!("{CHAIN}-transaction-{}", FIRST_BLOCK + 2),
+        0,
+        RESOLVER,
+        record.topics(),
+        record.data.as_ref(),
+    )
+    .await?;
+
+    run_engine(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK,
+        FIRST_BLOCK + 2,
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        FIRST_BLOCK + 2,
+        FIRST_BLOCK,
+        FIRST_BLOCK + 2,
+    )
+    .await?;
+    let projected_family: String = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{classification,source_family}'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(projected_family, "ens_v1_resolver_l1");
+    let projected_resolver: (String, String, String, String, bool, bool) = sqlx::query_as(
+        "SELECT current.support_status,
+                    current.declared_summary #>> '{classification,basis}',
+                    current.declared_summary #>> '{classification,role}',
+                    manifest.source_family,
+                    current.declared_summary #> '{classification,implementation}' IS NULL,
+                    current.provenance -> 'upgrade_event_id' IS NULL
+             FROM resolver_current current
+             JOIN manifest_versions manifest
+               ON manifest.manifest_id = (current.provenance ->> 'manifest_id')::bigint
+             WHERE current.chain_id = $1
+               AND current.resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        projected_resolver,
+        (
+            "supported".into(),
+            "manifest_declared_address".into(),
+            "public_resolver".into(),
+            "ens_v1_resolver_l1".into(),
+            true,
+            true,
+        )
+    );
+    let record_event: (String, String, String) = sqlx::query_as(
+        "SELECT source_family, after_state ->> 'record_key', after_state ->> 'value'
+         FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2 AND event_kind = 'RecordChanged'",
+    )
+    .bind(CHAIN)
+    .bind(FIRST_BLOCK + 2)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        record_event,
+        (
+            "ens_v1_resolver_l1".into(),
+            "text:url".into(),
+            "https://declared-v1.example.test".into(),
+        )
+    );
+    let topology: (String, String, i64) = sqlx::query_as(
+        "SELECT manifest.source_family, lower(address.address), edge.active_from_block_number
+         FROM discovery_edges edge
+         JOIN manifest_versions manifest ON manifest.manifest_id = edge.source_manifest_id
+         JOIN contract_instance_addresses address
+           ON address.contract_instance_id = edge.to_contract_instance_id
+         WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        topology,
+        (
+            "ens_v2_registry_l1".into(),
+            RESOLVER.to_ascii_lowercase(),
+            FIRST_BLOCK + 1,
+        )
+    );
+    let pointer_events: (i64, Option<String>, i64) = sqlx::query_as(
+        "SELECT count(*), min(logical_name_id), min(normalized_event_id)
+         FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2
+           AND source_family = 'ens_v2_registry_l1'
+           AND event_kind = 'ResolverChanged'
+           AND lower(after_state ->> 'resolver') = lower($3)",
+    )
+    .bind(CHAIN)
+    .bind(FIRST_BLOCK + 1)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        pointer_events,
+        (
+            1,
+            Some(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"]))),
+            pointer_events.2,
+        )
+    );
+    let candidate_event_ids: Value = sqlx::query_scalar(
+        "SELECT provenance -> 'candidate_event_ids'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(candidate_event_ids.as_array().is_some_and(|event_ids| {
+        event_ids
+            .iter()
+            .any(|event_id| event_id == pointer_events.2)
+    }));
+    let inventory: (String, Value) = sqlx::query_as(
+        "SELECT inventory.support_status, inventory.entries
+         FROM record_inventory_current inventory
+         JOIN name_current name ON name.resource_id = inventory.resource_id
+         WHERE name.logical_name_id = $1",
+    )
+    .bind(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"])))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(inventory.0, "supported");
+    assert!(inventory.1.as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry["record_key"] == "text:url"
+                && entry["value"] == "https://declared-v1.example.test"
+        })
+    }));
     scratch.cleanup().await
 }
 
@@ -4106,7 +4507,7 @@ async fn quiet_v2_expiry_reorg_matches_full_redo_on_the_winning_fork() -> Result
         .await?;
     }
     run_engine(scratch.pool(), chain, 1, 2, InterpretRunMode::Normal).await?;
-    assert_eq!(readable_v2_expiries(scratch.pool(), chain).await?.len(), 2);
+    assert_eq!(readable_v2_expiries(scratch.pool(), chain).await?.len(), 5);
 
     let mut reorg = scratch.pool().begin().await?;
     sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = $1 AND block_number = 2")
@@ -4134,7 +4535,7 @@ async fn quiet_v2_expiry_reorg_matches_full_redo_on_the_winning_fork() -> Result
             .iter()
             .map(|(_, block, _)| *block)
             .collect::<Vec<_>>(),
-        [3, 3]
+        [3, 3, 3, 3, 3]
     );
     run_engine(scratch.pool(), chain, 1, 3, InterpretRunMode::Redo).await?;
     assert_eq!(
@@ -5884,21 +6285,29 @@ async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
 
 async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
     let root_id = Uuid::new_v4();
-    let resolver_id = Uuid::new_v4();
-    for instance_id in [root_id, resolver_id] {
+    for block in 0..=2 {
         sqlx::query(
-            "
-            INSERT INTO contract_instances (
-                contract_instance_id, chain_id, contract_kind, provenance
-            )
-            VALUES ($1, $2, 'contract', '{}'::jsonb)
-            ",
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number, block_timestamp,
+                 canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'canonical')",
         )
-        .bind(instance_id)
         .bind(chain_id)
+        .bind(block_hash(chain_id, block))
+        .bind((block > 0).then(|| block_hash(chain_id, block - 1)))
+        .bind(block)
         .execute(pool)
         .await?;
     }
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind, provenance
+         ) VALUES ($1, $2, 'contract', '{}'::jsonb)",
+    )
+    .bind(root_id)
+    .bind(chain_id)
+    .execute(pool)
+    .await?;
     let root_payload = json!({
         "manifest_version": 1,
         "namespace": "ens",
@@ -5908,7 +6317,11 @@ async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Resu
         "rollout_status": "active",
         "normalizer_version": NORMALIZER,
         "capability_flags": {},
-        "roots": [],
+        "roots": [{
+            "name": "RootRegistry",
+            "address": CONTRACT,
+            "start_block": 0
+        }],
         "contracts": [{
             "role": "root_registry",
             "address": CONTRACT,
@@ -5921,12 +6334,26 @@ async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Resu
             "from_role": "root_registry",
             "admission": "reachable_from_root"
         }],
-        "abi": { "events": [{
-            "name": "ResolverUpdated",
-            "fragment": "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
-            "emitter_roles": ["root_registry"],
-            "normalized_events": ["ResolverChanged"]
-        }], "calls": [] }
+        "abi": { "events": [
+            {
+                "name": "LabelRegistered",
+                "fragment": "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                "emitter_roles": ["root_registry"],
+                "normalized_events": ["RegistrationGranted", "PreimageObserved"]
+            },
+            {
+                "name": "TokenResource",
+                "fragment": "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                "emitter_roles": ["root_registry"],
+                "normalized_events": ["TokenResourceLinked"]
+            },
+            {
+                "name": "ResolverUpdated",
+                "fragment": "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
+                "emitter_roles": ["root_registry"],
+                "normalized_events": ["ResolverChanged"]
+            }
+        ], "calls": [] }
     });
     let resolver_payload = json!({
         "manifest_version": 1,
@@ -5936,16 +6363,28 @@ async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Resu
         "deployment_epoch": "fixture",
         "rollout_status": "active",
         "normalizer_version": NORMALIZER,
+        "resolver_implementations": [{
+            "role": "permissioned_resolver",
+            "address": "0x0000000000000000000000000000000000000077"
+        }],
         "capability_flags": {},
         "roots": [],
         "contracts": [],
         "discovery_rules": [],
-        "abi": { "events": [{
-            "name": "TextChanged",
-            "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
-            "emitter_roles": [],
-            "normalized_events": ["RecordChanged"]
-        }], "calls": [] }
+        "abi": { "events": [
+            {
+                "name": "Upgraded",
+                "fragment": "event Upgraded(address indexed implementation)",
+                "emitter_roles": [],
+                "normalized_events": ["Upgraded"]
+            },
+            {
+                "name": "TextChanged",
+                "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+                "emitter_roles": [],
+                "normalized_events": ["RecordChanged"]
+            }
+        ], "calls": [] }
     });
     let root_manifest_id = insert_manifest(
         pool,
@@ -5962,6 +6401,34 @@ async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Resu
         "tests/root-resolver-target.toml",
         resolver_payload,
     )
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, raw_fact_ref,
+             derivation_kind, canonicality_state, before_state, after_state
+         )
+         SELECT $1 || ':manifest:' || manifest.manifest_id::text,
+                manifest.namespace, 'SourceManifestUpdated', manifest.source_family,
+                manifest.manifest_version, manifest.manifest_id, manifest.chain_id,
+                jsonb_build_object(
+                    'manifest_id', manifest.manifest_id,
+                    'namespace', manifest.namespace,
+                    'source_family', manifest.source_family,
+                    'chain', manifest.chain_id,
+                    'deployment_epoch', manifest.deployment_label
+                ), 'manifest_sync', 'finalized', '{}'::jsonb,
+                jsonb_build_object(
+                    'manifest_version', manifest.manifest_version,
+                    'normalizer_version', manifest.normalizer_version,
+                    'rollout_status', manifest.rollout_status,
+                    'manifest_payload', manifest.manifest_payload
+                )
+         FROM manifest_versions manifest
+         WHERE manifest.chain_id = $1",
+    )
+    .bind(chain_id)
+    .execute(pool)
     .await?;
     sqlx::query(
         "
@@ -5991,46 +6458,99 @@ async fn seed_root_resolver_watch_fixture(pool: &PgPool, chain_id: &str) -> Resu
     .bind(root_manifest_id)
     .execute(pool)
     .await?;
-    for (instance_id, address, active_from) in [
-        (root_id, CONTRACT, 0_i64),
-        (resolver_id, DISCOVERED_RESOLVER, 1_i64),
-    ] {
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(root_id)
+    .bind(chain_id)
+    .bind(CONTRACT)
+    .bind(root_manifest_id)
+    .execute(pool)
+    .await?;
+
+    for (block, to_address) in [(1, CONTRACT), (2, DISCOVERED_RESOLVER)] {
         sqlx::query(
-            "
-            INSERT INTO contract_instance_addresses (
-                contract_instance_id, chain_id, address,
-                active_from_block_number, source_manifest_id, provenance
-            )
-            VALUES ($1, $2, $3, $4, $5, '{}'::jsonb)
-            ",
+            "INSERT INTO raw_transactions (
+                 chain_id, block_hash, block_number, transaction_hash,
+                 transaction_index, from_address, to_address
+             ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
         )
-        .bind(instance_id)
         .bind(chain_id)
-        .bind(address)
-        .bind(active_from)
-        .bind(root_manifest_id)
+        .bind(block_hash(chain_id, block))
+        .bind(block)
+        .bind(format!("{chain_id}-transaction-{block}"))
+        .bind(SENDER)
+        .bind(to_address)
         .execute(pool)
         .await?;
     }
-    sqlx::query(
-        "
-        INSERT INTO discovery_edges (
-            chain_id, edge_kind, from_contract_instance_id,
-            to_contract_instance_id, discovery_source, admission_basis,
-            source_manifest_id, active_from_block_number,
-            active_from_block_hash, canonicality_state, provenance
+
+    let token_id = versioned_token("box", 1);
+    let root_facts = [
+        v2_registry_events::LabelRegistered {
+            tokenId: token_id,
+            labelHash: keccak256(b"box"),
+            label: "box".to_owned(),
+            owner: SENDER.parse()?,
+            expiry: 100,
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data(),
+        v2_registry_events::TokenResource {
+            tokenId: token_id,
+            resource: U256::from(374),
+        }
+        .encode_log_data(),
+        ResolverUpdated {
+            tokenId: token_id,
+            resolver: DISCOVERED_RESOLVER.parse()?,
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data(),
+    ];
+    for (log_index, fact) in root_facts.into_iter().enumerate() {
+        insert_log_at(
+            pool,
+            chain_id,
+            1,
+            &format!("{chain_id}-transaction-1"),
+            i64::try_from(log_index)?,
+            CONTRACT,
+            fact.topics(),
+            fact.data.as_ref(),
         )
-        VALUES ($1, 'resolver', $2, $3, 'ResolverUpdated',
-                'reachable_from_root', $4, 1, $5, 'canonical', '{}'::jsonb)
-        ",
-    )
-    .bind(chain_id)
-    .bind(root_id)
-    .bind(resolver_id)
-    .bind(root_manifest_id)
-    .bind(format!("{chain_id}-block-1"))
-    .execute(pool)
-    .await?;
+        .await?;
+    }
+
+    let resolver_facts = [
+        Upgraded {
+            implementation: "0x0000000000000000000000000000000000000077".parse()?,
+        }
+        .encode_log_data(),
+        TextChanged {
+            node: raw_namehash(&[b"box"]),
+            indexedKey: keccak256(b"url"),
+            key: "url".to_owned(),
+            value: "https://example.test".to_owned(),
+        }
+        .encode_log_data(),
+    ];
+    for (log_index, fact) in resolver_facts.into_iter().enumerate() {
+        insert_log_at(
+            pool,
+            chain_id,
+            2,
+            &format!("{chain_id}-transaction-2"),
+            i64::try_from(log_index)?,
+            DISCOVERED_RESOLVER,
+            fact.topics(),
+            fact.data.as_ref(),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -6245,9 +6765,9 @@ async fn seed_v2_lifecycle_fixture(pool: &PgPool, chain_id: &str) -> Result<()> 
                 "emitter_roles": ["registry"],
                 "normalized_events": ["TokenResourceLinked"]
             },
-            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@ccaeb58)
+            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56-L60 @ ens_v2@a971bd64)
             { "name": "SubregistryUpdated", "fragment": "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)", "emitter_roles": ["registry"], "normalized_events": ["SubregistryChanged"] },
-            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58)
+            // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@a971bd64)
             { "name": "ParentUpdated", "fragment": "event ParentUpdated(address indexed parent, string label, address indexed sender)", "emitter_roles": ["registry"], "normalized_events": ["ParentChanged"] },
             {
                 "name": "EACRolesChanged",

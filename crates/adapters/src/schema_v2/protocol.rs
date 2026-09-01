@@ -1,3 +1,4 @@
+mod intake_only;
 mod migration;
 pub(super) mod permissions;
 pub(super) mod v1;
@@ -42,6 +43,7 @@ pub(super) fn event_allows_empty_emitter_roles(
 #[derive(Clone, Debug)]
 pub(super) struct Interpreted {
     pub events: Vec<EventDraft>,
+    pub boundary_events: Vec<EventDraft>,
     pub labels: Vec<LabelDraft>,
     pub names: Vec<NameDraft>,
     pub shadow_names: Vec<ShadowNameDraft>,
@@ -59,6 +61,7 @@ impl Interpreted {
     pub(super) fn new() -> Self {
         Self {
             events: Vec::new(),
+            boundary_events: Vec::new(),
             labels: Vec::new(),
             names: Vec::new(),
             shadow_names: Vec::new(),
@@ -73,6 +76,7 @@ impl Interpreted {
 
     pub(super) fn append(&mut self, other: &mut Self) {
         self.events.append(&mut other.events);
+        self.boundary_events.append(&mut other.boundary_events);
         self.labels.append(&mut other.labels);
         self.names.append(&mut other.names);
         self.shadow_names.append(&mut other.shadow_names);
@@ -100,8 +104,9 @@ pub(super) struct MigrationObservation {
 
 pub(super) fn v2_boundary_expiration(
     transition: super::state::V2NameTransition,
+    released_at: i64,
 ) -> anyhow::Result<Interpreted> {
-    v2_registry::boundary_expiration(transition)
+    v2_registry::boundary_expiration(transition, released_at)
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +226,9 @@ pub(super) fn interpret(
     state: &mut State,
     registrar_migration_enabled: bool,
 ) -> anyhow::Result<Interpreted> {
+    if let Some(output) = intake_only::approval(selected, raw)? {
+        return Ok(output);
+    }
     let mut output = match selected.source.source_family.as_str() {
         family if family.starts_with("ens_v1_") || family.starts_with("basenames_") => {
             v1::interpret(selected, raw, state, registrar_migration_enabled)
@@ -338,6 +346,15 @@ pub(super) fn validate_manifest(
                 event.signature
             );
         }
+        if bigname_manifests::is_address_scoped_approval(&source.source_family, &event.signature)
+            && !event.normalized_events.is_empty()
+        {
+            bail!(
+                "source family {} intake-only approval {} must declare no normalized events",
+                source.source_family,
+                event.signature
+            );
+        }
         let has_registry_announcement_rule = rules.iter().any(|rule| {
             rule.manifest_id == source.manifest_id && rule.edge_kind == "registry_announcement"
         });
@@ -365,7 +382,9 @@ pub(super) fn is_match_all(
     rules: &[DiscoveryRuleInput],
 ) -> bool {
     match source.source_family.as_str() {
-        "ens_v1_resolver_l1" | "basenames_base_resolver" => true,
+        "ens_v1_resolver_l1" | "basenames_base_resolver" => {
+            !bigname_manifests::is_address_scoped_approval(&source.source_family, &event.signature)
+        }
         "ens_v2_registry_l1" if event.name == "RegistryCreated" => rules.iter().any(|rule| {
             rule.manifest_id == source.manifest_id && rule.edge_kind == "registry_announcement"
         }),
@@ -378,6 +397,9 @@ pub(super) fn is_match_all(
 }
 
 fn supports_signature(source_family: &str, signature: &str) -> bool {
+    if bigname_manifests::is_address_scoped_approval(source_family, signature) {
+        return true;
+    }
     match source_family {
         "ens_v1_registrar_l1" => matches!(
             signature,

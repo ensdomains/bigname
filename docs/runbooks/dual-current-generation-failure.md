@@ -950,8 +950,8 @@ test deployments on the same chain: the pinned ENSv1 registry is
 while the pinned ENSv2 RootRegistry and ETHRegistry are
 `0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c` and
 `0x67b728a792e789a8978b30cf1b3b641f19354b43`
-(upstream: .refs/ens_v2/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/RootRegistry.json:L2 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2 @ ens_v2@a971bd64).
 
 Genuine Sepolia overlap therefore means that the same logical name has readable
 ENSv1 and ENSv2 evidence from those independent deployments **without** an
@@ -967,10 +967,10 @@ An actual unlocked ENSv1→ENSv2 migration transaction is stronger evidence, but
 its two entry paths must not be conflated. The registrar-token path reclaims the
 token, replaces the ENSv1 registry record, transfers the token to the Graveyard,
 and injects the ENSv2 registration
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64).
 The unlocked-wrapped path instead clears the wrapper resolver, unwraps the name
 to the Graveyard, and then performs the same ENSv2 injection
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L160 @ ens_v2@ccaeb58).
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L160 @ ens_v2@a971bd64).
 Only a proven per-name boundary derived from such admitted evidence connects the
 two arms. If Sepolia has that proof and an open predecessor, capture and file it
 as an indexing or authority-selection defect; do not label it the Mainnet

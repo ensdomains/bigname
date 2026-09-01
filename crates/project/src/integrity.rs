@@ -241,11 +241,11 @@ async fn assert_exact_name_authority(
 /// child normally keeps its ENSv1 relation as residue, because neither migration
 /// branch retracts the ENSv1 registry entry: the locked branch only parks the wrapper
 /// token
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58,
-/// upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L301 @ ens_v1@91c966f), and the
+/// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58),
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L301 @ ens_v1@91c966f), and the
 /// emancipated branch unwraps to a reassignment rather than a deletion
-/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58,
-/// upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f).
+/// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64),
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f).
 /// What cannot be reconciled is an ENSv1
 /// relation asserted *after* that authority epoch started — the selection would
 /// silently drop it, and dropping a live contradiction is what this refuses.

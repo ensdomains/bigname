@@ -36,4 +36,5 @@ alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 axum.workspace = true
 bigname-adapters.workspace = true
+bigname-domain.workspace = true
 bigname-test-support.workspace = true

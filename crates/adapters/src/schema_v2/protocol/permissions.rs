@@ -78,13 +78,13 @@ pub(super) fn v2_states(
             );
         value
     };
-    let grant_source = if effective_powers.is_empty() {
-        json!({})
-    } else {
+    let (has_grant, revoked_last_grant) = source_transition(&old_powers, &effective_powers);
+    let grant_source = if has_grant {
         source(changed_powers.clone())
+    } else {
+        json!({})
     };
-    let revocation_source =
-        (effective_powers.is_empty() && !old_powers.is_empty()).then(|| source(changed_powers));
+    let revocation_source = revoked_last_grant.then(|| source(changed_powers));
     let before = json!({
         "subject":permission.account,
         "role_bitmap":word(permission.old_bitmap),
@@ -194,6 +194,14 @@ fn changed_powers(old: U256, new: U256, vocabulary: V2Vocabulary) -> Vec<String>
         .collect()
 }
 
+fn source_transition(old_powers: &[String], new_powers: &[String]) -> (bool, bool) {
+    let has_authorizing_power =
+        |powers: &[String]| powers.iter().any(|power| power != "was_reserved");
+    let old_grant = has_authorizing_power(old_powers);
+    let new_grant = has_authorizing_power(new_powers);
+    (new_grant, old_grant && !new_grant)
+}
+
 fn word(bitmap: U256) -> String {
     crate::evm_abi::u256_word_hex(bitmap)
 }
@@ -205,6 +213,8 @@ fn role_bits(vocabulary: V2Vocabulary) -> &'static [(usize, &'static str)] {
     }
 }
 
+// Review this vocabulary against the pinned ENSv2 registry role constants.
+// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L7 @ ens_v2@a971bd64)
 const REGISTRY_ROLE_BITS: &[(usize, &str)] = &[
     (0, "registrar"),
     (4, "register_reserved"),
@@ -213,6 +223,7 @@ const REGISTRY_ROLE_BITS: &[(usize, &str)] = &[
     (16, "renew"),
     (20, "set_subregistry"),
     (24, "set_resolver"),
+    (32, "was_reserved"),
     (36, "set_uri"),
     (120, "can_name"),
     (124, "upgrade"),
@@ -229,6 +240,8 @@ const REGISTRY_ROLE_BITS: &[(usize, &str)] = &[
     (252, "admin_upgrade"),
 ];
 
+// Review this vocabulary against the admitted historical ENSv2 resolver role constants.
+// (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7 @ ens_v2_sepolia_20260629@ccaeb58)
 const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
     (0, "set_addr"),
     (4, "set_text"),
@@ -255,3 +268,54 @@ const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
     (248, "admin_can_name"),
     (252, "admin_upgrade"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pinned_source(relative_path: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative_path);
+        std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read pinned upstream source {}: {error}; run scripts/sync-refs",
+                path.display()
+            )
+        })
+    }
+
+    #[test]
+    #[should_panic(expected = "run scripts/sync-refs")]
+    fn missing_pinned_source_names_the_sync_command() {
+        pinned_source(".refs/intentionally-missing-role-vocabulary.sol");
+    }
+
+    #[test]
+    fn role_tables_cover_each_pinned_upstream_constant() {
+        let registry =
+            pinned_source(".refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol");
+        let resolver = pinned_source(
+            ".refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol",
+        );
+        let role_count = |source: &str| {
+            source
+                .lines()
+                .filter(|line| line.contains("uint256 internal constant ROLE_"))
+                .count()
+        };
+        assert_eq!(REGISTRY_ROLE_BITS.len(), role_count(&registry));
+        assert_eq!(RESOLVER_ROLE_BITS.len(), role_count(&resolver));
+        assert_eq!(
+            powers(U256::from(1_u8) << 32, V2Vocabulary::Registry),
+            ["was_reserved"]
+        );
+    }
+
+    #[test]
+    fn marker_only_state_preserves_real_permission_revocation() {
+        let old = vec!["renew".to_owned(), "was_reserved".to_owned()];
+        let new = vec!["was_reserved".to_owned()];
+        assert_eq!(source_transition(&old, &new), (false, true));
+    }
+}

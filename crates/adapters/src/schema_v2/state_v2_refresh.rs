@@ -1,4 +1,4 @@
-use super::{State, V2NameState, V2NameTransition, V2RawNameState};
+use super::{State, V2NameState, V2NameTransition, V2RawNameState, v2::v2_key};
 use crate::schema_v2::common::surface_labels;
 
 #[cfg(test)]
@@ -17,18 +17,34 @@ pub(in crate::schema_v2) fn v2_refresh_visits() -> usize {
 }
 
 impl State {
+    pub(in crate::schema_v2) fn remember_v2_logical_name(
+        &mut self,
+        emitter: &str,
+        token_id: &str,
+        logical_name_id: &str,
+    ) {
+        if let Some(token) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) {
+            token.last_logical_name_id = Some(logical_name_id.to_owned());
+        }
+    }
+
+    #[rustfmt::skip]
+    pub(in crate::schema_v2) fn mark_v2_expiry_retirement(&mut self, emitter: &str, token_id: &str, own_expiry: bool) {
+        if let Some(token) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) { token.expiry_retirement_emitted = true; token.resource_expiry_retirement_emitted = own_expiry; }
+    }
+
     pub(in crate::schema_v2) fn refresh_dirty_v2_names(
         &mut self,
         at_unix_timestamp: i64,
     ) -> Vec<V2NameTransition> {
         let previous_timestamp = self.latest_v2_timestamp;
         let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
-        self.capture_crossed_v2_expiries(previous_timestamp, at_unix_timestamp);
+        let crossed = self.capture_crossed_v2_expiries(previous_timestamp, at_unix_timestamp);
         self.expand_dirty_v2_registries();
         let keys = std::mem::take(&mut self.v2_dirty_tokens)
             .into_iter()
             .collect();
-        self.refresh_v2_name_keys(keys, at_unix_timestamp)
+        self.refresh_v2_name_keys(keys, at_unix_timestamp, &crossed)
     }
 
     pub(super) fn refresh_all_v2_names(&mut self, at_unix_timestamp: i64) -> Vec<V2NameTransition> {
@@ -36,7 +52,7 @@ impl State {
         self.v2_dirty_tokens.clear();
         self.v2_dirty_registries.clear();
         let keys = self.v2_tokens.keys().cloned().collect::<Vec<_>>();
-        self.refresh_v2_name_keys(keys, at_unix_timestamp)
+        self.refresh_v2_name_keys(keys, at_unix_timestamp, &imbl::ordset::OrdSet::new())
     }
 
     pub(super) fn mark_v2_token_dirty(&mut self, token_key: impl Into<String>) {
@@ -85,10 +101,10 @@ impl State {
         &mut self,
         previous_timestamp: Option<i64>,
         current_timestamp: i64,
-    ) {
+    ) -> imbl::ordset::OrdSet<String> {
         let previous_timestamp = previous_timestamp.unwrap_or(-1);
         if current_timestamp <= previous_timestamp || current_timestamp < 0 {
-            return;
+            return imbl::ordset::OrdSet::new();
         }
         let first_expiry = u64::try_from(previous_timestamp.saturating_add(1)).unwrap_or_default();
         let last_expiry = u64::try_from(current_timestamp).expect("non-negative timestamp");
@@ -97,10 +113,11 @@ impl State {
             .range((first_expiry, String::new())..)
             .take_while(|(expiry, _)| *expiry <= last_expiry)
             .map(|(_, token_key)| token_key.clone())
-            .collect::<Vec<_>>();
-        for token_key in crossed {
-            self.mark_v2_token_component_dirty(&token_key);
+            .collect::<imbl::ordset::OrdSet<String>>();
+        for token_key in &crossed {
+            self.mark_v2_token_component_dirty(token_key);
         }
+        crossed
     }
 
     fn expand_dirty_v2_registries(&mut self) {
@@ -142,6 +159,7 @@ impl State {
         &mut self,
         keys: Vec<String>,
         at_unix_timestamp: i64,
+        resource_retirements: &imbl::ordset::OrdSet<String>,
     ) -> Vec<V2NameTransition> {
         let mut transitions = Vec::new();
         let mut terminal_closure_hits = std::mem::take(&mut self.v2_terminal_closure_hits);
@@ -167,12 +185,15 @@ impl State {
             else {
                 continue;
             };
-            let raw_name = self
-                .v2_registry_raw_suffix(emitter, namespace, at_unix_timestamp)
-                .map(|mut suffix| {
-                    suffix.insert(0, raw_label.clone());
-                    suffix
-                });
+            let raw_name = super::topology::v2_expiry_is_live(token.expiry, at_unix_timestamp)
+                .then(|| {
+                    self.v2_registry_raw_suffix(emitter, namespace, at_unix_timestamp)
+                        .map(|mut suffix| {
+                            suffix.insert(0, raw_label.clone());
+                            suffix
+                        })
+                })
+                .flatten();
             let name = raw_name
                 .as_ref()
                 .and_then(|raw_labels| surface_labels(raw_labels))
@@ -193,6 +214,14 @@ impl State {
                     namehash,
                 }
             });
+            let current_logical_name_id = name
+                .as_ref()
+                .map(|name| name.logical_name_id.clone())
+                .or_else(|| {
+                    shadow_name
+                        .as_ref()
+                        .map(|name| name.logical_name_id.clone())
+                });
             let previous = token.name.clone();
             let previous_shadow = token.shadow_name.clone();
             let current_resource = token
@@ -201,7 +230,17 @@ impl State {
                 .then_some(token.resource_id)
                 .flatten();
             let changed = previous != name || previous_shadow != shadow_name;
-            if changed {
+            let resource_retirement = resource_retirements.contains(&key)
+                && token.resource_id.is_some()
+                && !token.expiry_retirement_emitted
+                && previous.is_none()
+                && previous_shadow.is_none();
+            let expiry_retirement = (changed || resource_retirement)
+                && current_logical_name_id.is_none()
+                && (resource_retirements.contains(&key)
+                    || (!resource_retirements.is_empty()
+                        && (previous.is_some() || previous_shadow.is_some())));
+            if changed || resource_retirement {
                 if token.registration.is_some()
                     && let Some(previous) = previous.as_ref()
                     && name
@@ -224,6 +263,7 @@ impl State {
                     registry: emitter.to_owned(),
                     registry_contract_instance_id: token.registry_contract_instance_id,
                     token_id: token_id.to_owned(),
+                    expiry: token.expiry,
                     previous: previous.clone(),
                     previous_shadow: previous_shadow.clone(),
                     current: name.clone(),
@@ -244,6 +284,9 @@ impl State {
                 let mut current = token.clone();
                 current.name = name.clone();
                 current.shadow_name = shadow_name.clone();
+                if let Some(logical_name_id) = current_logical_name_id.as_ref() {
+                    current.last_logical_name_id = Some(logical_name_id.clone());
+                }
                 self.replace_v2_token_indexes(&key, Some(&token), Some(&current));
             }
             if changed
@@ -263,6 +306,14 @@ impl State {
             if let Some(current) = self.v2_tokens.get_mut(&key) {
                 current.name = name;
                 current.shadow_name = shadow_name;
+                if expiry_retirement || current_logical_name_id.is_some() {
+                    current.expiry_retirement_emitted = expiry_retirement;
+                    current.resource_expiry_retirement_emitted =
+                        expiry_retirement && resource_retirements.contains(&key);
+                }
+                if let Some(logical_name_id) = current_logical_name_id {
+                    current.last_logical_name_id = Some(logical_name_id);
+                }
             }
         }
         terminal_closure_hits.extend(std::mem::take(&mut self.v2_terminal_closure_hits));
@@ -289,6 +340,7 @@ impl State {
             registry: registry.to_owned(),
             registry_contract_instance_id: token.registry_contract_instance_id,
             token_id: token_id.to_owned(),
+            expiry: token.expiry,
             previous: Some(current.clone()),
             previous_shadow: token.shadow_name.clone(),
             current: Some(current),

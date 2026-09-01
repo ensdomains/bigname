@@ -3,6 +3,10 @@ use std::collections::BTreeSet;
 use super::State;
 use crate::schema_v2::common::surface_labels;
 
+pub(in crate::schema_v2) fn v2_expiry_is_live(expiry: Option<u64>, at_unix_timestamp: i64) -> bool {
+    expiry.is_some_and(|expiry| u64::try_from(at_unix_timestamp).is_ok_and(|now| now < expiry))
+}
+
 impl State {
     pub(super) fn v2_registry_suffix(
         &self,
@@ -53,9 +57,9 @@ impl State {
                     .v2_entry_by_parent_label
                     .get(&(parent.clone(), label.clone()))?;
                 let entry = self.v2_tokens.get(token_key)?;
-                let expiry = entry.expiry?;
-                let now = u64::try_from(at_unix_timestamp).ok()?;
-                if now >= expiry || entry.subregistry.as_deref() != Some(registry) {
+                if !v2_expiry_is_live(entry.expiry, at_unix_timestamp)
+                    || entry.subregistry.as_deref() != Some(registry)
+                {
                     return None;
                 }
                 let mut suffix = self.v2_registry_raw_suffix_inner(
