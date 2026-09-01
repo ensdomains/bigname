@@ -2,9 +2,7 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result, scope::Window};
 
-/// Interpret redo replaces normalized events in-place. Retain the incremental keys of current
-/// rows whose cited event disappeared so project can retract losing-fork output after interpret
-/// has already deleted that event.
+/// Retain keys whose cited events Interpret deleted during redo so Project can retract losing-fork output.
 pub(super) async fn seed(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -77,23 +75,13 @@ async fn seed_names(
         INSERT INTO project_scope_names
         SELECT DISTINCT event.logical_name_id
         FROM normalized_events event
-        JOIN chain_lineage lineage
-          ON lineage.chain_id = event.chain_id
-         AND lineage.block_hash = event.block_hash
-         AND lineage.block_number = event.block_number
-        WHERE event.chain_id = $1
-          AND event.block_number BETWEEN $2 AND $3
+        JOIN chain_lineage lineage ON (lineage.chain_id, lineage.block_hash, lineage.block_number) = (event.chain_id, event.block_hash, event.block_number)
+        WHERE event.chain_id = $1 AND event.block_number BETWEEN $2 AND $3
           AND event.logical_name_id IS NOT NULL
           AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-          AND event.event_kind = 'RegistrationReleased'
-          AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
-          AND event.after_state ->> 'derived_from' = 'interpreter_state'
-          AND event.after_state ->> 'terminal_reason' =
-              'registry_name_binding_expired'
-          AND (
-              event.canonicality_state = 'orphaned'
-              OR lineage.canonicality_state = 'orphaned'
-          )
+          AND event.event_kind = 'RegistrationReleased' AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+          AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
+          AND (event.canonicality_state = 'orphaned' OR lineage.canonicality_state = 'orphaned')
         ON CONFLICT DO NOTHING
         "#,
     )
@@ -126,7 +114,20 @@ async fn seed_names(
               )
         ), expiry_candidate_events AS MATERIALIZED (
             SELECT event.logical_name_id,
-                   COALESCE(event.resource_id::text, NULLIF(CONCAT(
+                   COALESCE(event.resource_id::text, (
+                       SELECT linked.resource_id::text
+                       FROM normalized_events linked
+                       JOIN chain_lineage linked_lineage ON (linked_lineage.chain_id, linked_lineage.block_hash, linked_lineage.block_number) = (linked.chain_id, linked.block_hash, linked.block_number)
+                       WHERE (linked.chain_id, linked.logical_name_id) = (event.chain_id, event.logical_name_id)
+                         AND linked.block_number <= $4 AND linked.resource_id IS NOT NULL
+                         AND linked.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
+                         AND linked.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                         AND linked.canonicality_state IN ('canonical', 'safe', 'finalized')
+                         AND linked_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                         AND COALESCE(linked.after_state ->> 'registry_contract_instance_id', linked.raw_fact_ref ->> 'emitting_address', linked.after_state ->> 'registry') = COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry')
+                         AND linked.after_state ->> 'token_id' = event.after_state ->> 'token_id'
+                       ORDER BY linked.block_number DESC NULLS LAST, linked.normalized_event_id DESC LIMIT 1
+                   ), NULLIF(CONCAT(
                        COALESCE(event.after_state ->> 'registry_contract_instance_id',
                                 event.raw_fact_ref ->> 'emitting_address',
                                 event.after_state ->> 'registry'),
