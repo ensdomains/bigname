@@ -78,8 +78,16 @@ registration histories for those instances. This transitive step can rebuild a
 whole connected topology component: every child edge whose parent or child
 enters deletion scope must have its complete per-name event history staged
 before publication. Candidate events and events whose block is no longer on
-readable canonical lineage never widen this scope. `project_events` remains the
-single filter for data that builders may serve.
+readable canonical lineage never contribute builder input or ordinary topology
+expansion. Redo recovery has one narrower exception: a retained orphaned,
+state-derived ENSv2 path-expiry release may recover its own logical name after
+publication deleted that row. When Interpret has already deleted those release
+events, Project marks a still-live ENSv2 lifecycle whose prior expiry crossed
+the displaced branch's timestamps, including a lifecycle renewed by the
+replacement branch, and follows only activated canonical ENSv2 subregistry
+edges from that expiry root to its descendants. The orphaned release is not
+served, and unrelated topology components are not admitted.
+`project_events` remains the single filter for data that builders may serve.
 
 Rows outside an incremental tick's affected scope keep the target block number,
 hash, and timestamp from the last tick that rebuilt them. Readers require each
@@ -310,6 +318,13 @@ owner-derived rows remain available, but neither those rows nor a zero-row
 summary is an authoritative permission enumeration. API contract tests inject
 an independently proven full summary to verify that resource-bound public
 requests are not globally forced to partial.
+
+When a state-derived ENSv2 path-expiry release retires effective permission
+rows, the resource summary keeps the selected registration-authority event's
+provenance unchanged. Separate `expiry_retirement_*` fields identify the
+release event, its source manifest and source family, its manifest version, and
+its block/transaction/log position. The retirement citation therefore explains
+why the rows are absent without rewriting which event established authority.
 
 For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
 holder grant. A separately observed compatible holder grant is masked by the
