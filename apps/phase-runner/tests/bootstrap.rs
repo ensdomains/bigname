@@ -35,6 +35,43 @@ async fn schema_migrations_apply_to_an_empty_database_before_the_phase_baseline(
 }
 
 #[tokio::test]
+async fn expiry_scope_index_migration_repairs_an_initialized_phase_schema() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_expiry_scope_index_migration")
+            .pool_max_connections(2)
+            .parse_context("failed to parse expiry index schema-migration test database URL")
+            .admin_connect_context(
+                "failed to connect expiry index schema-migration test admin pool",
+            )
+            .pool_connect_context("failed to connect expiry index schema-migration test pool"),
+    )
+    .await?;
+    initialize_schema_v2(database.pool()).await?;
+    sqlx::query("DROP INDEX bigname_phase.normalized_events_v2_expiry_scope_idx")
+        .execute(database.pool())
+        .await?;
+    let absent_before: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx') IS NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(absent_before);
+
+    bigname_storage::MIGRATOR.run(database.pool()).await?;
+    let ready_and_valid: bool = sqlx::query_scalar(
+        "SELECT COALESCE(bool_and(index_state.indisready AND index_state.indisvalid), false)
+         FROM pg_index index_state
+         WHERE index_state.indexrelid =
+               to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx')",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(ready_and_valid);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manifest_change_counter_migrates_existing_history_with_baseline_parity() -> Result<()> {
     let migrated = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_manifest_change_counter_migration")

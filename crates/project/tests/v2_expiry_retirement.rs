@@ -441,20 +441,34 @@ async fn rebound_permission_provenance_includes_the_registration_event() -> Resu
 async fn expiry_retirement_provenance_carries_release_manifest_and_position() -> Result<()> {
     let (database, pool) = database("v2_expiry_retirement_provenance").await?;
     seed_formerly_named_flag_only_renewal(&pool).await?;
+    let release_manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version,
+             file_path, manifest_payload
+         ) VALUES (7, 'ens', 'ens_v2_root_l1', $1, 'fixture', 'active',
+             'ensip15', 'tests/expiry-retirement-provenance.toml', '{}'::jsonb)
+         RETURNING manifest_id",
+    )
+    .bind(CHAIN)
+    .fetch_one(&pool)
+    .await?;
     sqlx::query(
         "UPDATE normalized_events
-         SET source_family = 'ens_v2_root_l1', manifest_version = 7
+         SET source_family = 'ens_v2_root_l1', manifest_version = 7,
+             source_manifest_id = $2
          WHERE resource_id = $1::uuid
            AND event_kind = 'RegistrationReleased'
            AND after_state ->> 'source_event' = 'RegistryPathExpired'",
     )
     .bind(RESOURCE)
+    .bind(release_manifest_id)
     .execute(&pool)
     .await?;
     run(&pool, 101, None).await?;
 
-    let release: (i64, String, i64, i64, String, Option<i64>, Option<i64>) = sqlx::query_as(
-        "SELECT normalized_event_id, source_family, manifest_version,
+    let release: (i64, i64, String, i64, i64, String, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT normalized_event_id, source_manifest_id, source_family, manifest_version,
                 block_number, block_hash, transaction_index, log_index
          FROM normalized_events
          WHERE resource_id = $1::uuid
@@ -474,15 +488,16 @@ async fn expiry_retirement_provenance_carries_release_manifest_and_position() ->
     .await?;
 
     assert_eq!(summary.0["expiry_retirement_event_id"], release.0);
-    assert_eq!(summary.0["expiry_retirement_source_family"], release.1);
-    assert_eq!(summary.0["expiry_retirement_manifest_version"], release.2);
+    assert_eq!(summary.0["expiry_retirement_source_manifest_id"], release.1);
+    assert_eq!(summary.0["expiry_retirement_source_family"], release.2);
+    assert_eq!(summary.0["expiry_retirement_manifest_version"], release.3);
     assert_eq!(
         summary.0["expiry_retirement_chain_position"],
         json!({
-            "block_number":release.3,
-            "block_hash":release.4,
-            "transaction_index":release.5,
-            "log_index":release.6,
+            "block_number":release.4,
+            "block_hash":release.5,
+            "transaction_index":release.6,
+            "log_index":release.7,
         })
     );
     assert_ne!(summary.0["authority_event_id"], release.0);
