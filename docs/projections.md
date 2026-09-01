@@ -130,8 +130,9 @@ outcomes, or durable traces.
 - Review every projection-builder change for replacement-row inputs: each value
   must come from the current batch's staged normalized events, from
   interpretation- and manifest-owned authority tables (identity rows, discovery
-  edges, contract instance addresses, migration associations, and staged
-  manifest state — inputs to projection, not projection rows), from the Project
+  edges, contract instance addresses, migration associations, verified label
+  preimages, and staged manifest state — inputs to projection, not projection
+  rows), from the Project
   request's target context (chain, target block number and hash, and the
   `chain_lineage` timestamp of that target block, written as publication
   context), or from a field deliberately stored for later reuse. A live projection-table read is allowed
