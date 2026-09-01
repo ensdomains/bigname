@@ -90,6 +90,33 @@ async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() ->
     .await?
     .unwrap_or(false);
     assert!(reserved_history_ready);
+    let mut planner = database.pool().begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *planner)
+        .await?;
+    let plan = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (COSTS OFF)
+         SELECT logical_name_id
+         FROM bigname_phase.normalized_events
+         WHERE chain_id = 'planner-probe'
+           AND after_state ->> 'registry_contract_instance_id' = 'probe-instance'
+           AND block_number <= 1
+           AND event_kind IN (
+               'RegistrationGranted', 'RegistrationReserved',
+               'RegistrationRenewed', 'RegistrationReleased'
+           )
+           AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND logical_name_id IS NOT NULL",
+    )
+    .fetch_all(&mut *planner)
+    .await?
+    .join("\n");
+    assert!(
+        plan.contains("normalized_events_subregistry_registration_history_idx"),
+        "reserved topology history query lost its bounded index:\n{plan}"
+    );
+    planner.rollback().await?;
 
     database.cleanup().await
 }

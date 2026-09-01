@@ -131,10 +131,8 @@ pub(super) async fn include_topology_dependents(
              AND (address.active_to_block_number IS NULL
                   OR address.active_to_block_number > $2)
              AND address.deactivated_at IS NULL
-            JOIN project_scope_children candidate ON TRUE
             JOIN normalized_events registration
               ON registration.chain_id = $1
-             AND registration.logical_name_id = candidate.logical_name_id
              AND registration.after_state ->> 'registry_contract_instance_id' =
                  address.contract_instance_id::text
             JOIN chain_lineage registration_lineage

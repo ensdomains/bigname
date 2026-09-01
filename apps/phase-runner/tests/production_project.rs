@@ -17163,6 +17163,7 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     const CHILD_REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000008f01";
     const GRANDCHILD_REGISTRY: &str = "0x0000000000000000000000000000000000008f02";
     const GRANDCHILD_REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000008f02";
+    const CHILD_RESERVED_RESOURCE: &str = "00000000-0000-0000-0000-000000008f03";
     const REPLACEMENT_TWO: &str =
         "0x8f02000000000000000000000000000000000000000000000000000000000000";
     const REPLACEMENT_THREE: &str =
@@ -17257,6 +17258,18 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             .execute(pool)
             .await?;
         }
+        if child_registration_kind == "RegistrationReserved" {
+            sqlx::query(
+                "INSERT INTO resources (
+                     resource_id, chain_id, block_hash, block_number, canonicality_state
+                 ) VALUES ($1, $2, $3, 1, 'canonical')",
+            )
+            .bind(Uuid::parse_str(CHILD_RESERVED_RESOURCE)?)
+            .bind(CHAIN)
+            .bind(block_hash(CHAIN, 1))
+            .execute(pool)
+            .await?;
+        }
         insert_event(
             pool,
             CHAIN,
@@ -17279,7 +17292,7 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             CHAIN,
             1,
             Some(CHILD),
-            None,
+            (child_registration_kind == "RegistrationReserved").then_some(CHILD_RESERVED_RESOURCE),
             "SubregistryChanged",
             "ens_v2_registry_l1",
             json!({
@@ -17309,7 +17322,7 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             CHAIN,
             1,
             Some(CHILD),
-            None,
+            (child_registration_kind == "RegistrationReserved").then_some(CHILD_RESERVED_RESOURCE),
             child_registration_kind,
             "ens_v2_registry_l1",
             json!({
@@ -17374,7 +17387,8 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
                 CHAIN,
                 2,
                 Some(logical_name_id),
-                None,
+                (logical_name_id == CHILD && child_registration_kind == "RegistrationReserved")
+                    .then_some(CHILD_RESERVED_RESOURCE),
                 "RegistrationReleased",
                 "ens_v2_registry_l1",
                 json!({
@@ -17418,7 +17432,7 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             CHAIN,
             2,
             Some(CHILD),
-            None,
+            (child_registration_kind == "RegistrationReserved").then_some(CHILD_RESERVED_RESOURCE),
             "SubregistryChanged",
             "ens_v2_registry_l1",
             json!({

@@ -499,7 +499,8 @@ CREATE INDEX IF NOT EXISTS normalized_events_subregistry_registration_history_id
         logical_name_id
     )
     WHERE event_kind IN (
-              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased'
+              'RegistrationGranted', 'RegistrationReserved',
+              'RegistrationRenewed', 'RegistrationReleased'
           )
       AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
       AND canonicality_state IN ('canonical', 'safe', 'finalized')

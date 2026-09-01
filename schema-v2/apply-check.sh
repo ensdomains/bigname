@@ -1709,7 +1709,7 @@ BEGIN
                         'logical_name_id'
                     ],
                     ARRAY[
-                        '%event_kind%RegistrationGranted%RegistrationRenewed%RegistrationReleased%',
+                        '%event_kind%RegistrationGranted%RegistrationReserved%RegistrationRenewed%RegistrationReleased%',
                         '%source_family%ens_v2_root_l1%ens_v2_registry_l1%',
                         '%canonicality_state%canonical%safe%finalized%',
                         '%logical_name_id%IS NOT NULL%',

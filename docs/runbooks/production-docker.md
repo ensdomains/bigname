@@ -243,12 +243,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_before_reso
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND before_state #>> '{scope,kind}' = 'resolver'
       AND resource_id IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_subregistry_registration_history_idx
+DROP INDEX CONCURRENTLY IF EXISTS normalized_events_subregistry_registration_history_idx;
+CREATE INDEX CONCURRENTLY normalized_events_subregistry_registration_history_idx
     ON bigname_phase.normalized_events
        (chain_id, (after_state ->> 'registry_contract_instance_id'),
         block_number DESC, normalized_event_id DESC, logical_name_id)
     WHERE event_kind IN (
-              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased'
+              'RegistrationGranted', 'RegistrationReserved',
+              'RegistrationRenewed', 'RegistrationReleased'
           )
       AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
