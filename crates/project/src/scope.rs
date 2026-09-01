@@ -73,7 +73,7 @@ pub(crate) async fn initialize(
     // event-history staging begins.
     // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
-    authority::include_topology_dependents(transaction).await?;
+    authority::include_topology_dependents(transaction, chain_id, target.number).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     inventory::close(transaction, chain_id, target).await?;
     resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
@@ -86,6 +86,7 @@ pub(crate) async fn initialize(
 async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
         "CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_expiry_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_permission_effect_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",

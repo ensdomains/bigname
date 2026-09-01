@@ -206,7 +206,7 @@ async fn seed_names(
                      event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
         )
-        INSERT INTO project_scope_names
+        INSERT INTO project_scope_expiry_names
         SELECT DISTINCT lifecycle.logical_name_id
         FROM lifecycle_heads lifecycle
         JOIN expiry_heads expiry USING (logical_name_id, lifecycle_key)
@@ -224,6 +224,14 @@ async fn seed_names(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to retain expiry name scope", error))?;
+    sqlx::query(
+        "INSERT INTO project_scope_names
+         SELECT logical_name_id FROM project_scope_expiry_names
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to install expiry name scope", error))?;
     Ok(())
 }
 
