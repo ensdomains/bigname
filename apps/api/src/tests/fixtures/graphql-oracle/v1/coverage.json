@@ -1,0 +1,65 @@
+{
+  "claimed_paths": [
+    "root:query",
+    "arg:Query.domain(block)", "arg:Query.domain(id)",
+    "arg:Query.domains(block)", "arg:Query.domains(first)",
+    "arg:Query.domains(orderBy)", "arg:Query.domains(orderDirection)",
+    "enum:Domain_orderBy.id", "enum:OrderDirection.asc",
+    "field:Domain.createdAt", "field:Domain.expiryDate", "field:Domain.name",
+    "field:Domain.owner", "field:Query._meta", "field:Query.domain",
+    "field:Query.domains", "field:_Block_.hash", "field:_Block_.number",
+    "field:_Meta_.block", "field:_Meta_.hasIndexingErrors",
+    "input:Block_height.number", "type:Account", "type:Block_height",
+    "type:Domain", "type:Domain_orderBy", "type:OrderDirection",
+    "type:Query", "type:_Block_", "type:_Meta_"
+  ],
+  "known_upstream_types": {
+    "Account": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T2"},
+    "Domain": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0"},
+    "Domain_filter": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3"},
+    "Resolver": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T2"},
+    "Transfer": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T4"}
+  },
+  "local_extensions": [
+    {"path": "type:AddressRecord", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:AddressRecord.address", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:AddressRecord.coinType", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:AddressRecord.coinTypeBig", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "type:DomainConnection", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:DomainConnection.totalCount", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "type:DomainFilter", "status": "intentional-extension", "owner": "#670/T3", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "input:DomainFilter.id", "status": "intentional-extension", "owner": "#670/T3", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "input:DomainFilter.isMigrated", "status": "intentional-extension", "owner": "#670/T3", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "input:DomainFilter.name", "status": "intentional-extension", "owner": "#670/T3", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "input:DomainFilter.name_contains", "status": "intentional-extension", "owner": "#670/T3", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "input:DomainFilter.owner", "status": "intentional-extension", "owner": "#670/T3", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "input:DomainFilter.owner_in", "status": "intentional-extension", "owner": "#670/T3", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "type:RegistrationConnection", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:RegistrationConnection.totalCount", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "type:RegistrationFilter", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "input:RegistrationFilter.registrant", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "input:RegistrationFilter.registrant_in", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Domain.normalizedName", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Domain.tokenId", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Query.domainConnection", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "arg:Query.domainConnection(first)", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "arg:Query.domainConnection(where)", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Query.registrationConnection", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "arg:Query.registrationConnection(first)", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "arg:Query.registrationConnection(where)", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Resolver.addresses", "status": "intentional-extension", "owner": "#670/T0", "docs": "consumer-capabilities.md#graphql-compatibility"}
+  ],
+  "schema_signature_differences": [
+    {"path": "field:Account.id", "upstream": {"deprecated": false, "type": "ID!"}, "local": {"deprecated": false, "type": "String!"}, "status": "deferred", "owner": "#670/T2", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Domain.id", "upstream": {"deprecated": false, "type": "ID!"}, "local": {"deprecated": false, "type": "String!"}, "status": "deferred", "owner": "#670/T2", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "arg:Query.domains(where)", "upstream": {"default": null, "deprecated": false, "type": "Domain_filter"}, "local": {"default": null, "deprecated": false, "type": "DomainFilter"}, "status": "deferred", "owner": "#670/T3", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Resolver.address", "upstream": {"deprecated": false, "type": "Bytes!"}, "local": {"deprecated": false, "type": "String!"}, "status": "deferred", "owner": "#670/T2", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Resolver.contentHash", "upstream": {"deprecated": false, "type": "Bytes"}, "local": {"deprecated": false, "type": "String"}, "status": "deferred", "owner": "#670/T2", "docs": "consumer-capabilities.md#graphql-compatibility"},
+    {"path": "field:Resolver.id", "upstream": {"deprecated": false, "type": "ID!"}, "local": {"deprecated": false, "type": "String!"}, "status": "deferred", "owner": "#670/T2", "docs": "consumer-capabilities.md#graphql-compatibility"}
+  ],
+  "upstream_only": [
+    {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3", "scope": "type:Domain_filter", "status": "deferred"},
+    {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T4", "scope": "type:Transfer", "status": "deferred"},
+    {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T4", "scope": "root:Query.transfers", "status": "deferred"}
+  ]
+}

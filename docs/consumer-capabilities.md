@@ -399,6 +399,11 @@ current projections. The existing `domain`, `domains`,
 `Domain.normalizedName`, `Domain.tokenId`, and both connection count operations
 are bigname additions to the subgraph-shaped surface. `domain(id:)` accepts an
 `ID!` containing the same ENS name or namehash strings accepted previously.
+The reviewed [GraphQL compatibility oracle](graphql-compatibility-oracle.md)
+currently claims one `Domain` point case and one `name` equality-filter case.
+Its complete captured SDL is a [GraphQL upstream
+census](glossary.md#graphql-upstream-census), not a claim of complete entity
+coverage.
 
 The schema includes graph-node-compatible `BigInt` and `Bytes` scalars,
 `Block_height`, `_SubgraphErrorPolicy_`, and `_meta`/`_Meta_`/`_Block_` shapes.
@@ -430,7 +435,9 @@ per-entity `allow`/`deny` behavior belongs to future entity capabilities that ca
 define it without inventing in-process filtering.
 
 `_meta(block:)` reports the served head used by entity reads, including its
-number, hash, timestamp, and parent hash. All root fields within one HTTP
+number, timestamp, and parent hash. Its hash is present for an unconstrained or
+hash-constrained selection and may be `null` for a number-constrained selection;
+the initial oracle pin asserts only the block number in that case. All root fields within one HTTP
 GraphQL request share one request-scoped served-head selection. `deployment` is the interpreter
 [content hash](glossary.md#interpreter-content-hash) for the serving binary.
 When a head is eligible to serve, `hasIndexingErrors` derives from durable

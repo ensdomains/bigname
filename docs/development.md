@@ -71,6 +71,36 @@ phase-runner verification integration tests also create one shared, unprivileged
 test login role; that server user therefore needs `CREATEROLE` for the full
 phase-runner suite.
 
+## GraphQL compatibility fixture refresh
+
+Capture is operator-only and never runs in CI. Use Python 3.12, pinned Rust, PostgreSQL 16 via `scripts/test-db`, and
+the checkouts in `.refs/MANIFEST.toml`.
+
+Choose an indexed block and one `Domain` with `id`, `name`, `createdAt`, `owner.id`, a selected nullable field, and
+a name unique for the equality filter. Verify `_meta.block.number`; its hash may be `null` for a numeric pin.
+
+```sh
+THE_GRAPH_API_KEY='set-explicitly-for-this-command' \
+scripts/graphql-compat-oracle capture \
+  --upstream-endpoint-template \
+  'https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/DEPLOYMENT' \
+  --block-number N --domain-id DOMAIN_ID \
+  --output apps/api/src/tests/fixtures/graphql-oracle/v1
+
+scripts/graphql-compat-oracle compare \
+  --fixtures apps/api/src/tests/fixtures/graphql-oracle/v1 \
+  --bigname-endpoint http://127.0.0.1:8000/graphql
+
+scripts/graphql-compat-oracle verify-fixtures --offline
+```
+
+Supply credentials only through `THE_GRAPH_API_KEY`; the live template must contain its placeholder. The tool never
+reads `.env`, shell configuration/history, or user files. Never retain or paste resolved credentials.
+
+Capture writes the manifest, maintained coverage, sanitized provenance, deterministic SDL, semantic index, queries,
+variables, and responses. Review source identity, block/time, pins, digests, classified schema/response changes,
+ownership, gzip, and tests. A refresh is a contract change, not a snapshot rebless.
+
 ## Bootstrap migration hygiene
 
 During bootstrap, bigname has no active deployments or shared production

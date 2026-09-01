@@ -1169,6 +1169,12 @@ counter used by old-runtime destructive raw-log repair and backfill coverage.
 The schema remains in schema-migration history, but Stage B has no Rust writer or
 coverage consumer for this counter.
 
+<a id="graphql-claimed-compatibility-surface"></a> **GraphQL claimed compatibility surface** — exact schema paths and response cases promised compatible with a pin.
+
+<a id="graphql-dispositioned-remainder"></a> **GraphQL dispositioned remainder** — differences outside the claim, owned as deferred work or extensions.
+
+<a id="graphql-upstream-census"></a> **GraphQL upstream census** — one deployment's full schema, without claiming complete implementation.
+
 **Hash-pinned** — anchored to an exact block hash rather than a block number or
 `latest` tag, so a chain reorganization cannot silently change what was read.
 
