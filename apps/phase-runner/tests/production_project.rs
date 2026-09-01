@@ -17119,8 +17119,12 @@ async fn expiry_release_redo_uses_displaced_branch_timestamps_for_name_scope() -
 
 #[tokio::test]
 async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expiry() -> Result<()> {
-    assert_ancestor_expiry_release_redo_restores_descendant("project_ancestor_expiry_reorg", None)
-        .await
+    assert_ancestor_expiry_release_redo_restores_descendant(
+        "project_ancestor_expiry_reorg",
+        None,
+        "RegistrationGranted",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -17129,6 +17133,17 @@ async fn ancestor_expiry_release_redo_restores_descendant_after_replacement_rene
     assert_ancestor_expiry_release_redo_restores_descendant(
         "project_ancestor_expiry_reorg_renewed",
         Some(200),
+        "RegistrationGranted",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn ancestor_expiry_release_redo_restores_reserved_descendant_subtree() -> Result<()> {
+    assert_ancestor_expiry_release_redo_restores_descendant(
+        "project_ancestor_expiry_reserved_reorg",
+        None,
+        "RegistrationReserved",
     )
     .await
 }
@@ -17136,6 +17151,7 @@ async fn ancestor_expiry_release_redo_restores_descendant_after_replacement_rene
 async fn assert_ancestor_expiry_release_redo_restores_descendant(
     fixture_name: &str,
     replacement_parent_expiry: Option<i64>,
+    child_registration_kind: &str,
 ) -> Result<()> {
     const CHAIN: &str = "project-ancestor-expiry-reorg";
     const PARENT: &str = "ens:0x8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f";
@@ -17294,10 +17310,15 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             1,
             Some(CHILD),
             None,
-            "RegistrationGranted",
+            child_registration_kind,
             "ens_v2_registry_l1",
             json!({
-                "status":"registered",
+                "status":if child_registration_kind == "RegistrationReserved" {
+                    "reserved"
+                } else {
+                    "registered"
+                },
+                "reservation_resource":child_registration_kind == "RegistrationReserved",
                 "expiry":100,
                 "token_id":"0xchild",
                 "registry":"0xchildregistry",
