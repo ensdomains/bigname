@@ -135,9 +135,12 @@ outcomes, or durable traces.
   rows), from the Project
   request's target context (chain, target block number and hash, and the
   `chain_lineage` timestamp of that target block, written as publication
-  context), from `chain_lineage` block timestamps joined at a staged event's
-  own chain position (source-event times such as registration, creation, and
-  last-change), or from a field deliberately stored for later reuse. A live projection-table read is allowed
+  context), from `chain_lineage` context resolved deterministically from those
+  inputs — at a staged event's own chain position (source-event times such as
+  registration, creation, and last-change), or by timestamp alignment selecting
+  another chain's latest canonical-family block at or before an input timestamp
+  (auxiliary-chain positions such as a declared registry path's execution-chain
+  context) — or from a field deliberately stored for later reuse. A live projection-table read is allowed
   only to obtain such a stored reuse field when the query proves the row is
   outside the affected scope and merges staged replacements for affected rows,
   or for explicit existing-row-only carry-forward. It must never use a row that
