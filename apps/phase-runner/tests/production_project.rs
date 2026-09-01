@@ -17428,6 +17428,44 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             pool,
             CHAIN,
             1,
+            Some(GRANDCHILD),
+            None,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            json!({
+                "status":"registered",
+                "expiry":140,
+                "token_id":"0xgrandchild-released",
+                "registry":"0xgrandchildregistry",
+                "registry_contract_instance_id":GRANDCHILD_REGISTRY_INSTANCE,
+                "parent_logical_name_id":CHILD
+            }),
+            json!({"fixture":"ancestor-expiry-grandchild-released-registration"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(GRANDCHILD),
+            None,
+            "RegistrationReleased",
+            "ens_v2_registry_l1",
+            json!({
+                "source_event":"LabelUnregistered",
+                "status":"released",
+                "expiry":140,
+                "token_id":"0xgrandchild-released",
+                "registry":"0xgrandchildregistry",
+                "registry_contract_instance_id":GRANDCHILD_REGISTRY_INSTANCE
+            }),
+            json!({"fixture":"ancestor-expiry-grandchild-released"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
             Some(SENTINEL),
             None,
             "RegistrationGranted",
