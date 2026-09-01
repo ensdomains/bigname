@@ -491,49 +491,44 @@ pub(super) async fn build(
                      event.normalized_event_id DESC
         ),
         expiry_retirements AS (
-            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.normalized_event_id FROM project_events event
+            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.normalized_event_id, event.source_manifest_id,
+                   event.source_family, event.manifest_version, event.block_number, event.block_hash, event.transaction_index, event.log_index
+            FROM project_events event
             WHERE event.resource_id IS NOT NULL AND event.event_kind = 'RegistrationReleased' AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
-              AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' ORDER BY event.resource_id, event.block_number DESC NULLS LAST, event.normalized_event_id DESC
+              AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
+            ORDER BY event.resource_id, event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST, event.normalized_event_id DESC
         ),
         resource_authority AS (
             SELECT resource.*,
                    CASE COALESCE(
-                       summary.direct_authority_kind,
-                       summary.scoped_authority_kind,
-                       resource.provenance ->> 'authority_kind',
+                       summary.direct_authority_kind, summary.scoped_authority_kind, resource.provenance ->> 'authority_kind',
                        CASE
-                           WHEN COALESCE(
-                               resource.provenance ->> 'source_family',
-                               resource.provenance ->> 'binding_source_family'
-                           ) IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                           WHEN COALESCE(resource.provenance ->> 'source_family', resource.provenance ->> 'binding_source_family')
+                                IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
                                THEN 'ens_v2_registry'
                        END
                    )
                        WHEN 'name_wrapper' THEN 'wrapper'
                        ELSE COALESCE(
-                           summary.direct_authority_kind,
-                           summary.scoped_authority_kind,
-                           resource.provenance ->> 'authority_kind',
+                           summary.direct_authority_kind, summary.scoped_authority_kind, resource.provenance ->> 'authority_kind',
                            CASE
-                               WHEN COALESCE(
-                                   resource.provenance ->> 'source_family',
-                                   resource.provenance ->> 'binding_source_family'
-                               ) IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+                               WHEN COALESCE(resource.provenance ->> 'source_family', resource.provenance ->> 'binding_source_family')
+                                    IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
                                    THEN 'ens_v2_registry'
                            END
                        )
                    END AS authority_kind,
-                   summary.raw_fact_ref, summary.authority_block_number,
-                   summary.authority_block_hash, summary.authority_manifest_version, summary.authority_event_id,
-                   modifier.fuses AS wrapper_fuses,
-                   modifier.normalized_event_id AS wrapper_modifier_event_id,
-                   modifier.block_number AS wrapper_modifier_block_number,
-                   modifier.block_hash AS wrapper_modifier_block_hash,
-                   expiry.expiry_seconds AS wrapper_expiry_seconds,
-                   expiry.normalized_event_id AS wrapper_expiry_event_id,
-                   expiry.block_number AS wrapper_expiry_block_number,
-                   expiry.block_hash AS wrapper_expiry_block_hash,
-                   retirement.normalized_event_id AS expiry_retirement_event_id
+                   summary.raw_fact_ref, summary.authority_block_number, summary.authority_block_hash,
+                   summary.authority_manifest_version, summary.authority_event_id, modifier.fuses AS wrapper_fuses,
+                   modifier.normalized_event_id AS wrapper_modifier_event_id, modifier.block_number AS wrapper_modifier_block_number,
+                   modifier.block_hash AS wrapper_modifier_block_hash, expiry.expiry_seconds AS wrapper_expiry_seconds,
+                   expiry.normalized_event_id AS wrapper_expiry_event_id, expiry.block_number AS wrapper_expiry_block_number,
+                   expiry.block_hash AS wrapper_expiry_block_hash, retirement.normalized_event_id AS expiry_retirement_event_id,
+                   retirement.source_manifest_id AS expiry_retirement_source_manifest_id, retirement.source_family AS expiry_retirement_source_family,
+                   retirement.manifest_version AS expiry_retirement_manifest_version, retirement.block_number AS expiry_retirement_block_number,
+                   retirement.block_hash AS expiry_retirement_block_hash, retirement.transaction_index AS expiry_retirement_transaction_index,
+                   retirement.log_index AS expiry_retirement_log_index
             FROM project_resources resource
             LEFT JOIN resource_event_summaries summary USING (resource_id)
             LEFT JOIN wrapper_modifiers modifier USING (resource_id)
@@ -561,7 +556,12 @@ pub(super) async fn build(
                END,
                COALESCE(resource.raw_fact_ref, resource.provenance) || jsonb_strip_nulls(jsonb_build_object(
                    'chain_id', $1, 'authority_event_id', resource.authority_event_id,
-                   'expiry_retirement_event_id', resource.expiry_retirement_event_id,
+                   'expiry_retirement_event_id', resource.expiry_retirement_event_id, 'expiry_retirement_source_manifest_id', resource.expiry_retirement_source_manifest_id,
+                   'expiry_retirement_source_family', resource.expiry_retirement_source_family, 'expiry_retirement_manifest_version', resource.expiry_retirement_manifest_version,
+                   'expiry_retirement_chain_position', CASE WHEN resource.expiry_retirement_event_id IS NOT NULL THEN
+                       jsonb_strip_nulls(jsonb_build_object('block_number', resource.expiry_retirement_block_number,
+                           'block_hash', resource.expiry_retirement_block_hash, 'transaction_index',
+                           resource.expiry_retirement_transaction_index, 'log_index', resource.expiry_retirement_log_index)) END,
                    'coverage', jsonb_build_object(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'
