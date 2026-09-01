@@ -17653,6 +17653,27 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             "redo failed to restore descendant {descendant} removed by ancestor expiry"
         );
     }
+    let incremental_edge: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM children_current current
+         WHERE parent_logical_name_id = $1 AND child_logical_name_id = $2",
+    )
+    .bind(CHILD)
+    .bind(GRANDCHILD)
+    .fetch_optional(incremental.pool())
+    .await?;
+    let fresh_edge: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM children_current current
+         WHERE parent_logical_name_id = $1 AND child_logical_name_id = $2",
+    )
+    .bind(CHILD)
+    .bind(GRANDCHILD)
+    .fetch_optional(fresh.pool())
+    .await?;
+    assert!(fresh_edge.is_some());
+    assert_eq!(
+        incremental_edge, fresh_edge,
+        "redo failed to restore the recovered descendant's child edge"
+    );
     let sentinel_name: String =
         sqlx::query_scalar("SELECT raw_name FROM name_current WHERE logical_name_id = $1")
             .bind(SENTINEL)
