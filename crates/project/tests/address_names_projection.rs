@@ -570,6 +570,108 @@ async fn pre_surface_zero_owner_projects_as_supported_unregistered() -> Result<(
 }
 
 #[tokio::test]
+async fn pre_surface_owner_order_matches_full_rebuild_after_surface_activation() -> Result<()> {
+    const LATER_OWNER: &str = "0x7777777777777777777777777777777777777777";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:pre-surface-zero-owner",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        8,
+        1,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "owner": "0x0000000000000000000000000000000000000000",
+            "owner_getter": "0x0000000000000000000000000000000000000000",
+            "owner_getter_reason": "literal_zero",
+            "authority_kind": null
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:pre-surface-later-owner",
+        None,
+        Some(OWNERLESS_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        8,
+        2,
+        json!({
+            "node": OWNERLESS_NAMEHASH,
+            "owner": LATER_OWNER,
+            "owner_getter": LATER_OWNER,
+            "authority_kind": "registry_only"
+        }),
+        json!({"emitting_address": REGISTRY_ADDRESS}),
+    )
+    .await?;
+    run_project(&pool, 8, 8, None).await?;
+
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1, 'ens', 'pre-surface-owner-order.eth',
+             ARRAY['pre-surface-owner-order', 'eth'], '\\x00', $2,
+             ARRAY[
+                 '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+             ], 'test', 'active', $3, $4, 9, 'canonical'
+         )",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .bind(OWNERLESS_NAMEHASH)
+    .bind(CHAIN)
+    .bind(block_hash(9))
+    .execute(&pool)
+    .await?;
+
+    run_project(&pool, 9, 9, Some(8)).await?;
+    let incremental: (String, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+
+    run_project(&pool, 9, 8, None).await?;
+    let full: (String, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason
+         FROM name_current
+         WHERE logical_name_id = $1",
+    )
+    .bind(OWNERLESS_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(incremental, full);
+    assert_eq!(full.0, "unsupported");
+    assert_eq!(full.1.as_deref(), Some("current_authority_not_projected"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn registry_self_with_linked_resolver_serves_without_control() -> Result<()> {
     let (database, pool) = migrated_pool().await?;
     seed_chain(&pool).await?;
