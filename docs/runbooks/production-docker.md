@@ -152,13 +152,14 @@ schema-migration to perform the first build against a populated production
 The release containing
 `20260831150000_normalized_events_v2_expiry_scope_idx.sql` adds the bounded
 ENSv2 expiry lookup used to select affected names during replay. On an
-initialized production namespace, build
-`normalized_events_v2_expiry_scope_idx` concurrently in step 3 with the
-reviewed statement below and validate that it is ready and valid. Then apply
-the schema-migration in step 4; its `IF NOT EXISTS` build is a no-op when the
-concurrent index is already valid. Do not allow the versioned schema-migration
-to perform the first build against a populated production `normalized_events`
-table.
+initialized production namespace, build both
+`normalized_events_v2_expiry_scope_idx` and the widened
+`normalized_events_subregistry_registration_history_idx` concurrently in step
+3 with the reviewed statements below, and validate that both are ready and
+valid. Then apply the schema-migration in step 4; its index builds are no-ops
+when the concurrent indexes are already valid. Do not allow the versioned
+schema-migration to perform either first build against a populated production
+`normalized_events` table.
 
 ```sql
 SELECT
@@ -182,7 +183,19 @@ SELECT EXISTS (
           to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx')
       AND index_state.indisvalid
       AND index_state.indisready
-) AS normalized_events_v2_expiry_scope_index_ready;
+) AS normalized_events_v2_expiry_scope_index_ready,
+EXISTS (
+    SELECT 1
+    FROM pg_class index_relation
+    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+    WHERE index_relation.oid = to_regclass(
+              'bigname_phase.normalized_events_subregistry_registration_history_idx'
+          )
+      AND index_state.indisvalid
+      AND index_state.indisready
+      AND pg_get_expr(index_state.indpred, index_state.indrelid, true)
+          LIKE '%RegistrationReserved%'
+) AS normalized_events_reserved_registration_history_index_ready;
 ```
 
 Apply the following index statements one at a time with the writer role. Do not
@@ -243,7 +256,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_before_reso
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND before_state #>> '{scope,kind}' = 'resolver'
       AND resource_id IS NOT NULL;
-DROP INDEX CONCURRENTLY IF EXISTS normalized_events_subregistry_registration_history_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_subregistry_registration_history_idx;
 CREATE INDEX CONCURRENTLY normalized_events_subregistry_registration_history_idx
     ON bigname_phase.normalized_events
        (chain_id, (after_state ->> 'registry_contract_instance_id'),
