@@ -17118,6 +17118,229 @@ async fn expiry_release_redo_uses_displaced_branch_timestamps_for_name_scope() -
 }
 
 #[tokio::test]
+async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expiry() -> Result<()> {
+    const CHAIN: &str = "project-ancestor-expiry-reorg";
+    const PARENT: &str = "ens:0x8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f";
+    const CHILD: &str = "ens:0x8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c";
+    const REPLACEMENT_TWO: &str =
+        "0x8f02000000000000000000000000000000000000000000000000000000000000";
+    const REPLACEMENT_THREE: &str =
+        "0x8f03000000000000000000000000000000000000000000000000000000000000";
+    let incremental = ScratchDatabase::create("project_ancestor_expiry_reorg").await?;
+    let fresh = ScratchDatabase::create("project_ancestor_expiry_reorg_fresh").await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        for (number, timestamp) in [(0_i64, 0_i64), (1, 10), (2, 30), (3, 40)] {
+            sqlx::query(
+                "INSERT INTO chain_lineage (
+                     chain_id, block_hash, parent_hash, block_number,
+                     block_timestamp, canonicality_state
+                 ) VALUES ($1, $2, $3, $4, to_timestamp($5), 'canonical')",
+            )
+            .bind(CHAIN)
+            .bind(block_hash(CHAIN, number))
+            .bind((number > 0).then(|| block_hash(CHAIN, number - 1)))
+            .bind(number)
+            .bind(timestamp)
+            .execute(pool)
+            .await?;
+        }
+        for (logical_name_id, raw_name, raw_labels, labelhashes) in [
+            (
+                PARENT,
+                "parent.eth",
+                vec!["parent", "eth"],
+                vec!["0xparent", "0xeth"],
+            ),
+            (
+                CHILD,
+                "child.parent.eth",
+                vec!["child", "parent", "eth"],
+                vec!["0xchild", "0xparent", "0xeth"],
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO name_surfaces (
+                     logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+                     namehash, labelhashes, normalizer_version, visibility_state,
+                     chain_id, block_hash, block_number, canonicality_state
+                 ) VALUES ($1, 'ens', $2, $3, decode('00','hex'), $4,
+                     $5, $6, 'active', $7, $8, 1, 'canonical')",
+            )
+            .bind(logical_name_id)
+            .bind(raw_name)
+            .bind(raw_labels)
+            .bind(logical_name_id.trim_start_matches("ens:"))
+            .bind(labelhashes)
+            .bind(NORMALIZER)
+            .bind(CHAIN)
+            .bind(block_hash(CHAIN, 1))
+            .execute(pool)
+            .await?;
+        }
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(PARENT),
+            None,
+            "RegistrationGranted",
+            "ens_v2_root_l1",
+            json!({
+                "status":"registered",
+                "expiry":20,
+                "token_id":"0xparent",
+                "registry":"0xrootregistry"
+            }),
+            json!({"fixture":"ancestor-expiry-parent-registration"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(CHILD),
+            None,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            json!({
+                "status":"registered",
+                "expiry":100,
+                "token_id":"0xchild",
+                "registry":"0xchildregistry",
+                "parent_logical_name_id":PARENT
+            }),
+            json!({"fixture":"ancestor-expiry-child-registration"}),
+        )
+        .await?;
+        for (logical_name_id, token_id, registry, expiry) in [
+            (PARENT, "0xparent", "0xrootregistry", 20),
+            (CHILD, "0xchild", "0xchildregistry", 100),
+        ] {
+            insert_event(
+                pool,
+                CHAIN,
+                2,
+                Some(logical_name_id),
+                None,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+                json!({
+                    "source_event":"RegistryPathExpired",
+                    "derived_from":"interpreter_state",
+                    "terminal_reason":"registry_name_binding_expired",
+                    "status":"released",
+                    "expiry":expiry,
+                    "token_id":token_id,
+                    "registry":registry
+                }),
+                json!({"fixture":"ancestor-expiry-release"}),
+            )
+            .await?;
+        }
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 1).await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 1,
+            hash: block_hash(CHAIN, 1),
+        }),
+        RunMode::Normal,
+        2,
+        2,
+    )
+    .await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(CHAIN, 2),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await?;
+    let expired_child_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(CHILD)
+            .fetch_one(incremental.pool())
+            .await?;
+    assert_eq!(expired_child_count, 0);
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+             WHERE chain_id = $1 AND block_number BETWEEN 2 AND 3",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events SET canonicality_state = 'orphaned'
+             WHERE chain_id = $1 AND block_number = 2
+               AND event_kind = 'RegistrationReleased'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $4, 2, to_timestamp(15), 'canonical'),
+                      ($1, $3, $2, 3, to_timestamp(16), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(REPLACEMENT_TWO)
+        .bind(REPLACEMENT_THREE)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: REPLACEMENT_THREE.into(),
+        }),
+        RunMode::Redo,
+        2,
+        3,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    let incremental_child: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(CHILD)
+    .fetch_optional(incremental.pool())
+    .await?;
+    let fresh_child: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(CHILD)
+    .fetch_optional(fresh.pool())
+    .await?;
+    assert!(fresh_child.is_some());
+    assert_eq!(
+        incremental_child, fresh_child,
+        "redo failed to restore the descendant removed by ancestor expiry"
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn expiry_release_redo_restores_deleted_permissions_like_fresh_rebuild() -> Result<()> {
     let incremental = ScratchDatabase::create("project_expiry_permission_redo").await?;
     let fresh = ScratchDatabase::create("project_expiry_permission_redo_fresh").await?;
