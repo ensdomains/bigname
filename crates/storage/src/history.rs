@@ -44,6 +44,7 @@ pub struct HistoryEvent {
     pub namespace: String,
     pub logical_name_id: Option<String>,
     pub resource_id: Option<Uuid>,
+    pub registration_id: Option<Uuid>,
     pub event_kind: String,
     pub source_family: String,
     pub manifest_version: i64,
@@ -137,6 +138,7 @@ pub struct EventHistoryFilter {
 #[derive(Clone, Debug, Default)]
 pub(in crate::history) struct EventHistoryReadFilter {
     pub(in crate::history) selectors: Vec<selectors::HistorySelector>,
+    pub(in crate::history) registration_id: Option<Uuid>,
     pub(in crate::history) namespace: Option<String>,
     pub(in crate::history) event_kinds: Vec<String>,
     pub(in crate::history) from_block: Option<i64>,
@@ -535,6 +537,11 @@ async fn event_history_read_filter(
 
     Ok(EventHistoryReadFilter {
         selectors,
+        registration_id: if include_candidates {
+            None
+        } else {
+            filter.resource_id
+        },
         namespace: filter.namespace,
         event_kinds: filter.event_kinds,
         from_block: filter.from_block,

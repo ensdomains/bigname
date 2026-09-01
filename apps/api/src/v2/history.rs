@@ -189,7 +189,9 @@ pub(crate) fn build_history_event(
         event_type,
         name: history_event_name(row, anchor_name),
         namespace: row.namespace.clone(),
-        registration_id: row.resource_id.map(|resource_id| resource_id.to_string()),
+        registration_id: row
+            .registration_id
+            .map(|registration_id| registration_id.to_string()),
         block_number: row.block_number,
         timestamp: row.block_timestamp.map(format_timestamp),
         transaction_hash: row.transaction_hash.clone(),

@@ -731,6 +731,8 @@ Field ownership:
 - Scope behavior: `scope=name` reads name-surface events only,
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
+  A V1 ownerless row linked only to the registry resource retained for reads is
+  visible through name history with `registration_id=null`.
 - Snapshot behavior: the parent anchor and history rows are selected from
   current state. The response omits `meta.as_of` and `meta.as_of_token`, and
   its cursor carries no snapshot validity claim. True as-of history
@@ -1237,6 +1239,9 @@ Field ownership:
   the underlying resource identity, including non-registration resources such
   as reserved entries. A reservation fact carries `resource_id` but never
   `registration_id`; resource identity is not registration authority. The
+  product `registration_id` filter likewise excludes V1 ownerless rows linked
+  only to the registry resource retained for reads. Raw diagnostics keeps that
+  resource attribution.
   served API currently exposes the old single-field shape, with
   `registration_id` only; the field change is the committed contract and lands
   in an immediate companion change. The
