@@ -195,6 +195,122 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 }
 
 #[tokio::test]
+async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007130";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:ownerless-history.eth";
+    let control_resource_id = Uuid::from_u128(0x7130);
+    let read_resource_id = Uuid::from_u128(0x7131);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "ownerless-history.eth",
+        "ownerless-history.eth",
+        "node:ownerless-history.eth",
+        control_resource_id,
+        Uuid::from_u128(0x8130),
+        Uuid::from_u128(0x9130),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            read_resource_id,
+            None,
+            "0xownerless-history-resource",
+            81,
+        )],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET serving_resource_id = $2,
+             surface_binding_id = NULL,
+             resource_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL,
+             declared_summary = jsonb_build_object(
+                 'registration', jsonb_build_object('status', 'unregistered'),
+                 'control', jsonb_build_object('status', 'unregistered')
+             )
+         WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .bind(read_resource_id)
+    .execute(&database.pool)
+    .await?;
+    seed_v2_history_blocks(&database, 121..=122).await?;
+    let mut authority = v2_history_event(
+        "ownerless-registry-authority",
+        Some(logical_name_id),
+        Some(read_resource_id),
+        "AuthorityTransferred",
+        121,
+    );
+    authority.source_family = "ens_v1_registry_l1".to_owned();
+    authority.after_state = json!({
+        "node": "node:ownerless-history.eth",
+        "owner": "0x0000000000000000000000000000000000000000",
+        "owner_getter": "0x0000000000000000000000000000000000000000",
+        "owner_getter_reason": "literal_zero",
+        "authority_kind": null
+    });
+    let mut resolver = v2_history_event(
+        "ownerless-registry-resolver",
+        Some(logical_name_id),
+        Some(read_resource_id),
+        "ResolverChanged",
+        122,
+    );
+    resolver.source_family = "ens_v1_registry_l1".to_owned();
+    resolver.after_state = json!({
+        "node": "node:ownerless-history.eth",
+        "resolver": "0x00000000000000000000000000000000000000aa"
+    });
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[authority, resolver],
+    )
+    .await?;
+
+    for route in [
+        "/v2/names/ownerless-history.eth/history?scope=both&page_size=20",
+        "/v2/events?name=ownerless-history.eth&page_size=20",
+    ] {
+        let payload = v2_history_payload_for_database(&database, route).await?;
+        let rows = payload["data"].as_array().expect("product history rows");
+        assert_eq!(rows.len(), 2, "{route}: {rows:?}");
+        assert!(
+            rows.iter().all(|row| row.get("registration_id").is_none()),
+            "{route} exposed the read-only registry resource as a registration: {rows:?}"
+        );
+    }
+
+    let filtered = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={read_resource_id}&page_size=20"),
+    )
+    .await?;
+    assert_eq!(filtered["data"], json!([]));
+
+    let diagnostics = v2_history_payload_for_database(
+        &database,
+        "/v2/diagnostics/events?name=ownerless-history.eth&page_size=20",
+    )
+    .await?;
+    let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic rows");
+    assert_eq!(diagnostic_rows.len(), 2);
+    assert!(diagnostic_rows.iter().all(|row| {
+        row["registration_id"] == json!(read_resource_id.to_string())
+    }));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
     const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
     const ADDRESS: &str = "0x0000000000000000000000000000000000034930";
