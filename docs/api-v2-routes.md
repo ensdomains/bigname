@@ -1241,8 +1241,7 @@ Field ownership:
   `registration_id`; resource identity is not registration authority. The
   product `registration_id` filter likewise excludes V1 ownerless rows linked
   only to the registry resource retained for reads. Raw diagnostics keeps that
-  resource attribution.
-  served API currently exposes the old single-field shape, with
+  resource attribution. The served API currently exposes the old single-field shape, with
   `registration_id` only; the field change is the committed contract and lands
   in an immediate companion change. The
   slice-2 consumer activation contract maps each

@@ -42,15 +42,16 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
     );
     assert!(
         data.iter()
-            .any(|row| row["type"] == json!("record") && row.get("registration_id").is_none()),
-        "surface-only rows must omit registration_id"
+            .any(|row| row["type"] == json!("record")
+                && row.get("registration_id") == Some(&Value::Null)),
+        "surface-only rows must return a null registration_id"
     );
     assert!(
         data.iter().any(|row| {
             row["block_number"] == json!(105)
                 && row["transaction_hash"] == json!("0xtx105")
                 && row["type"] == json!("authority")
-                && row.get("registration_id").is_none()
+                && row.get("registration_id") == Some(&Value::Null)
         }),
         "AuthorityEpochChanged must surface as an authority history row"
     );

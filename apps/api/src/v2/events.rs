@@ -56,7 +56,6 @@ pub(crate) struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
     pub(crate) namespace: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registration_id: Option<String>,
     pub(crate) block_number: Option<i64>,
     pub(crate) timestamp: Option<String>,

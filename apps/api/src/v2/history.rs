@@ -51,7 +51,6 @@ pub(crate) struct HistoryEvent {
     pub(crate) event_type: HistoryEventType,
     pub(crate) name: String,
     pub(crate) namespace: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registration_id: Option<String>,
     pub(crate) block_number: Option<i64>,
     pub(crate) timestamp: Option<String>,
