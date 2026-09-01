@@ -64,42 +64,12 @@ pub(super) async fn include_changed_child_proofs(
 
 pub(super) async fn include_topology_dependents(
     transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    target_block: i64,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO project_scope_names
-         SELECT child.logical_name_id
-         FROM project_scope_children child
-         WHERE EXISTS (
-             SELECT 1
-             FROM normalized_events registration
-             JOIN migration_discovery_associations association
-               ON association.chain_id = registration.chain_id
-              AND association.registry_contract_instance_id::text =
-                  registration.after_state ->> 'registry_contract_instance_id'
-              AND association.correlation_kind = 'migration_registry_creation'
-             WHERE registration.chain_id = $1
-               AND registration.logical_name_id = child.logical_name_id
-               AND registration.block_number <= $2
-               AND registration.event_kind = 'RegistrationGranted'
-               AND registration.consumer_visibility = 'activated'
-               AND registration.canonicality_state IN (
-                   'canonical', 'safe', 'finalized'
-               )
-         )
-         OR EXISTS (
-             SELECT 1
-             FROM name_current current
-             WHERE current.logical_name_id = child.logical_name_id
-               AND current.provenance ->> 'chain_id' = $1
-               AND current.provenance #>> '{authority_selection,proof_kind}' =
-                   'positive_v2_child_registration'
-         )
+         SELECT logical_name_id FROM project_scope_children
          ON CONFLICT DO NOTHING",
     )
-    .bind(chain_id)
-    .bind(target_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| {

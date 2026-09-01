@@ -73,7 +73,7 @@ pub(crate) async fn initialize(
     // event-history staging begins.
     // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
-    authority::include_topology_dependents(transaction, chain_id, target.number).await?;
+    authority::include_topology_dependents(transaction).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     inventory::close(transaction, chain_id, target).await?;
     resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
