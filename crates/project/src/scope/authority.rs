@@ -112,56 +112,82 @@ pub(super) async fn include_topology_dependents(
             UNION
             SELECT registration.logical_name_id
             FROM expiry_topology parent
-            JOIN normalized_events topology
-              ON topology.chain_id = $1
-             AND topology.logical_name_id = parent.logical_name_id
-            JOIN chain_lineage topology_lineage
-              ON topology_lineage.chain_id = topology.chain_id
-             AND topology_lineage.block_number = topology.block_number
-             AND topology_lineage.block_hash = topology.block_hash
-            CROSS JOIN LATERAL (
-                VALUES (topology.after_state ->> 'subregistry'),
-                       (topology.before_state ->> 'subregistry')
-            ) pointer(address)
+            JOIN LATERAL (
+                SELECT topology.after_state ->> 'subregistry' AS address
+                FROM normalized_events topology
+                JOIN chain_lineage topology_lineage
+                  ON topology_lineage.chain_id = topology.chain_id
+                 AND topology_lineage.block_number = topology.block_number
+                 AND topology_lineage.block_hash = topology.block_hash
+                WHERE topology.chain_id = $1
+                  AND topology.logical_name_id = parent.logical_name_id
+                  AND topology.block_number <= $2
+                  AND topology.event_kind = 'SubregistryChanged'
+                  AND topology.source_family IN (
+                      'ens_v2_root_l1', 'ens_v2_registry_l1'
+                  )
+                  AND topology.consumer_visibility = 'activated'
+                  AND topology.canonicality_state IN (
+                      'canonical', 'safe', 'finalized'
+                  )
+                  AND topology_lineage.canonicality_state IN (
+                      'canonical', 'safe', 'finalized'
+                  )
+                ORDER BY topology.block_number DESC NULLS LAST,
+                         topology.transaction_index DESC NULLS LAST,
+                         topology.log_index DESC NULLS LAST,
+                         topology.normalized_event_id DESC
+                LIMIT 1
+            ) pointer ON pointer.address IS NOT NULL
+                     AND btrim(pointer.address) <> ''
             JOIN contract_instance_addresses address
-              ON address.chain_id = topology.chain_id
+              ON address.chain_id = $1
              AND lower(address.address) = lower(pointer.address)
              AND (address.active_from_block_number IS NULL
                   OR address.active_from_block_number <= $2)
              AND (address.active_to_block_number IS NULL
                   OR address.active_to_block_number > $2)
              AND address.deactivated_at IS NULL
-            JOIN normalized_events registration
-              ON registration.chain_id = $1
-             AND registration.after_state ->> 'registry_contract_instance_id' =
-                 address.contract_instance_id::text
-            JOIN chain_lineage registration_lineage
-              ON registration_lineage.chain_id = registration.chain_id
-             AND registration_lineage.block_number = registration.block_number
-             AND registration_lineage.block_hash = registration.block_hash
-            WHERE topology.block_number <= $2
-              AND topology.event_kind = 'SubregistryChanged'
-              AND topology.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-              AND topology.consumer_visibility = 'activated'
-              AND topology.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND topology_lineage.canonicality_state IN (
-                  'canonical', 'safe', 'finalized'
-              )
-              AND pointer.address IS NOT NULL
-              AND btrim(pointer.address) <> ''
-              AND registration.block_number <= $2
-              AND registration.event_kind IN (
-                  'RegistrationGranted', 'RegistrationReserved',
-                  'RegistrationRenewed', 'RegistrationReleased'
-              )
-              AND registration.source_family IN (
-                  'ens_v2_root_l1', 'ens_v2_registry_l1'
-              )
-              AND registration.consumer_visibility = 'activated'
-              AND registration.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND registration_lineage.canonicality_state IN (
-                  'canonical', 'safe', 'finalized'
-              )
+            JOIN LATERAL (
+                SELECT head.logical_name_id
+                FROM (
+                    SELECT DISTINCT ON (event.logical_name_id)
+                           event.logical_name_id, event.event_kind
+                    FROM normalized_events event
+                    JOIN chain_lineage lineage
+                      ON lineage.chain_id = event.chain_id
+                     AND lineage.block_number = event.block_number
+                     AND lineage.block_hash = event.block_hash
+                    WHERE event.chain_id = $1
+                      AND event.after_state ->> 'registry_contract_instance_id' =
+                          address.contract_instance_id::text
+                      AND event.block_number <= $2
+                      AND event.event_kind IN (
+                          'RegistrationGranted', 'RegistrationReserved',
+                          'RegistrationRenewed', 'RegistrationReleased'
+                      )
+                      AND event.source_family IN (
+                          'ens_v2_root_l1', 'ens_v2_registry_l1'
+                      )
+                      AND event.consumer_visibility = 'activated'
+                      AND event.canonicality_state IN (
+                          'canonical', 'safe', 'finalized'
+                      )
+                      AND lineage.canonicality_state IN (
+                          'canonical', 'safe', 'finalized'
+                      )
+                      AND event.logical_name_id IS NOT NULL
+                    ORDER BY event.logical_name_id,
+                             event.block_number DESC NULLS LAST,
+                             event.transaction_index DESC NULLS LAST,
+                             event.log_index DESC NULLS LAST,
+                             event.normalized_event_id DESC
+                ) head
+                WHERE head.event_kind IN (
+                    'RegistrationGranted', 'RegistrationReserved',
+                    'RegistrationRenewed'
+                )
+            ) registration ON TRUE
         )
         INSERT INTO project_scope_names
         SELECT logical_name_id FROM expiry_topology
