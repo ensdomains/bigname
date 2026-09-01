@@ -212,8 +212,19 @@ async fn seed_names(
         JOIN expiry_heads expiry USING (logical_name_id, lifecycle_key)
         CROSS JOIN affected_times affected
         WHERE lifecycle.after_state ->> 'status' IN ('registered', 'reserved')
-          AND expiry.expiry > affected.prior_seconds
-          AND expiry.expiry <= affected.target_seconds
+          AND (
+              (
+                  expiry.expiry > affected.prior_seconds
+                  AND expiry.expiry <= affected.target_seconds
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM registration_events changed
+                  WHERE changed.logical_name_id = lifecycle.logical_name_id
+                    AND changed.lifecycle_key = lifecycle.lifecycle_key
+                    AND changed.block_number BETWEEN $2 AND $3
+              )
+          )
         ON CONFLICT DO NOTHING
         "#,
     )
