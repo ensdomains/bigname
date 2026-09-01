@@ -856,8 +856,11 @@ row for a [released v2 authority](glossary.md#released-v2-authority) whose
 `resource_id` still references the released resource;
 the tombstone's summary nulls resolver state, so inventory attributed to that
 resource stays out of current serving. A state-derived ENSv2 expiry release
-removes the `name_current` row entirely, leaving the retained inventory
-reachable only through history. ENSv2 stores resolver records by node and version.
+removes the `name_current` row when ENSv2 is the selected authority, or when no
+authority is selected and the row reports `current_authority_not_projected`.
+A surviving mixed-authority row instead remains explicitly unsupported. For a
+removed row, retained inventory is reachable only through history. ENSv2 stores
+resolver records by node and version.
 `setName` passes
 part zero, selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no

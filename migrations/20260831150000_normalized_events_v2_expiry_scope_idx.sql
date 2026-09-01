@@ -1,5 +1,6 @@
 -- A schema-migration database can exist before phase-runner installs the phase
--- baseline. Existing initialized schemas receive the additive redo-scope index.
+-- baseline. Existing initialized schemas receive the additive expiry lookup
+-- used by Project replay.
 DO $migration$
 BEGIN
     IF to_regclass('bigname_phase.normalized_events') IS NULL THEN
