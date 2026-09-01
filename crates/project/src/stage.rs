@@ -342,8 +342,6 @@ async fn create_scoped_event_ids(
                   AND event.source_family IN (
                       'ens_v1_registry_l1', 'basenames_base_registry'
                   )
-                  AND lower(event.after_state ->> 'owner_getter') =
-                      '0x0000000000000000000000000000000000000000'
               )
           )
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
