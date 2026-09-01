@@ -255,6 +255,15 @@ children derive from admitted graph events rather than token enumeration, and
 join the child's own active surface, so none of the name-less shapes arises
 there.[^v1-registry-l45][^v1-registry-l82][^v2-events-l49][^v2-events-l75]
 
+Chain-observed label preimages are shared across namespaces in one table set, as
+is the child builder's labelhash join. Within one projection chain, a newly
+observed mapping restages matching children in every namespace only when their
+published label bytes would change; repeated observations of the same mapping
+do not rebuild already-correct children. Label restaging is per projection
+chain; cross-chain preimage propagation is tracked separately in issue
+[#672](https://github.com/ensdomains/bigname/issues/672). Proof-checked rainbow
+imports retain their separate explicit Project-redo path.
+
 ## History
 
 History routes read normalized events, not a current projection cache. Product

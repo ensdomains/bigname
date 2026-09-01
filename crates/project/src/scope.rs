@@ -7,6 +7,7 @@ use crate::{
 mod authority;
 mod classification;
 mod inventory;
+mod labels;
 mod primary;
 mod resolver;
 mod resolver_dependents;
@@ -37,6 +38,7 @@ pub(crate) async fn initialize(
     stage_changed_events(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_direct_scope(transaction, chain_id, window.from_block, window.to_block).await?;
     inventory::include_changed_node_record_dependents(transaction, chain_id).await?;
+    labels::include_changed_children(transaction, chain_id).await?;
     inventory::include_changed_record_consumers(transaction, chain_id, target.number).await?;
     include_registry_resolver_parent_names(transaction, chain_id, target.number).await?;
     authority::include_changed_child_proofs(
@@ -397,14 +399,7 @@ async fn include_topology_scope(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    loop {
-        let inserted = topology::include_current_edges(transaction, chain_id).await?
-            + topology::include_event_edges(transaction, chain_id, target_block).await?;
-        if inserted == 0 {
-            break;
-        }
-    }
-    Ok(())
+    topology::close(transaction, chain_id, target_block).await
 }
 
 async fn include_classification_scope(
