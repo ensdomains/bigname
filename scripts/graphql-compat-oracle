@@ -8,6 +8,8 @@ import urllib.error, urllib.request
 FORMAT = 1
 GENERATOR = "graphql-compat-oracle/1"
 DEFAULT_FIXTURES = Path("apps/api/src/tests/fixtures/graphql-oracle/v1")
+ALLOW_PROVISIONAL = "BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"
+LIVE_ENDPOINT_PREFIX = "https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/"
 TYPE_REF = "kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }"
 INTROSPECTION = "query OracleIntrospection { __schema { queryType { name } mutationType { name } subscriptionType { name } directives { name isRepeatable locations args { name defaultValue type { %s } } } types { kind name interfaces { name } possibleTypes { name } fields(includeDeprecated:true) { name isDeprecated type { %s } args(includeDeprecated:true) { name defaultValue isDeprecated type { %s } } } inputFields(includeDeprecated:true) { name defaultValue isDeprecated type { %s } } enumValues(includeDeprecated:true) { name isDeprecated } } } }" % (TYPE_REF, TYPE_REF, TYPE_REF, TYPE_REF)
 META = "query OracleMeta($block: Block_height!) { _meta(block: $block) { block { number hash } deployment hasIndexingErrors } }"
@@ -29,6 +31,11 @@ def canonical(value): return (json.dumps(value, sort_keys=True, separators=(",",
 
 
 def sha(data): return hashlib.sha256(data).hexdigest()
+
+
+def is_live_endpoint_template(template):
+    deployment = template.removeprefix(LIVE_ENDPOINT_PREFIX)
+    return template.startswith(LIVE_ENDPOINT_PREFIX) and bool(deployment) and all(character.isalnum() for character in deployment)
 
 
 def reference_pins():
@@ -163,8 +170,8 @@ def install_tree(staged, output):
 def capture(args):
     pins = reference_pins()
     template = args.upstream_endpoint_template
-    if template != "stub://local-mock" and "${THE_GRAPH_API_KEY}" not in template:
-        raise ValueError("live endpoint template must contain ${THE_GRAPH_API_KEY}")
+    if template != "stub://local-mock" and not is_live_endpoint_template(template):
+        raise ValueError("live endpoint must use the operator refresh template in docs/development.md")
     token = os.environ.get("THE_GRAPH_API_KEY")
     if "${THE_GRAPH_API_KEY}" in template and not token:
         raise ValueError("THE_GRAPH_API_KEY is required by the endpoint template")
@@ -251,11 +258,13 @@ def verify(root):
         raise ValueError("provenance does not identify one number-pinned deployment")
     if provenance["provisional_stub"] != (provenance["endpoint_template"] == "stub://local-mock"):
         raise ValueError("provisional stub provenance is inconsistent")
+    if provenance["provisional_stub"] and os.environ.get(ALLOW_PROVISIONAL) != "1":
+        raise ValueError("provisional GraphQL fixture rejected; run the operator refresh procedure in docs/development.md")
+    if not provenance["provisional_stub"] and not is_live_endpoint_template(provenance["endpoint_template"]):
+        raise ValueError("non-upstream GraphQL fixture rejected; run the operator refresh procedure in docs/development.md")
     observed_pins = {"ens_subgraph": provenance["ens_subgraph_commit"], "graph_node": provenance["graph_node_commit"]}
     if observed_pins != pins or manifest.get("upstream_checkouts") != pins:
         raise ValueError("fixture reference pins differ from .refs/MANIFEST.toml; recapture the fixture")
-    if not provenance["provisional_stub"] and "${THE_GRAPH_API_KEY}" not in provenance["endpoint_template"]:
-        raise ValueError("live endpoint provenance is not credential-sanitized")
     seen = set()
     for entry in manifest.get("artifacts", []):
         relative = entry["path"]

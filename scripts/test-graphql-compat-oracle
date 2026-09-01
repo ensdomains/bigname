@@ -79,8 +79,11 @@ def resign(path,relative):
   if item["path"]==relative: item["sha256"]=hashlib.sha256(data).hexdigest()
  if relative=="coverage.json": manifest["coverage_sha256"]=hashlib.sha256(data).hexdigest()
  (path/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n")
-def verify(path,ok=True):
- result=subprocess.run([tool,"verify-fixtures","--offline","--fixtures",path],text=True,capture_output=True)
+def verify(path,ok=True,allow_stub=True):
+ env=os.environ.copy()
+ if allow_stub: env["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"
+ else: env.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None)
+ result=subprocess.run([tool,"verify-fixtures","--offline","--fixtures",path],env=env,text=True,capture_output=True)
  if (result.returncode==0)!=ok: raise AssertionError(result.stdout+result.stderr)
  return result
 
@@ -91,9 +94,12 @@ if len(sys.argv)>2 and sys.argv[2]=="--generate":
 
 with tempfile.TemporaryDirectory() as temporary:
  temp=pathlib.Path(temporary); first=temp/"first"; second=temp/"second"; seed(first); seed(second); run_capture(first); run_capture(second); assert tree(first)==tree(second)
- compared=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/ok"],text=True,capture_output=True); assert compared.returncode==0 and "2 passed, 0 failed" in compared.stdout
- wrong_head=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/wrong-block"],text=True,capture_output=True); assert wrong_head.returncode!=0 and "requested block" in wrong_head.stderr
- schema_drift=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/schema-drift"],text=True,capture_output=True); assert schema_drift.returncode!=0 and "schema" in schema_drift.stderr
+ rejected=verify(first,False,False); assert "docs/development.md" in rejected.stderr
+ verify(first,allow_stub=True)
+ stub_env={**os.environ,"BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE":"1"}
+ compared=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/ok"],env=stub_env,text=True,capture_output=True); assert compared.returncode==0 and "2 passed, 0 failed" in compared.stdout
+ wrong_head=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/wrong-block"],env=stub_env,text=True,capture_output=True); assert wrong_head.returncode!=0 and "requested block" in wrong_head.stderr
+ schema_drift=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/schema-drift"],env=stub_env,text=True,capture_output=True); assert schema_drift.returncode!=0 and "schema" in schema_drift.stderr
  changed=temp/"changed"; seed(changed); run_capture(changed,block=415); assert json.loads((changed/"upstream/provenance.json").read_text())["block_number"]==415; assert json.loads((changed/"entities/domain/entity-by-id/variables.json").read_text())["block"]["number"]==415
  for mode in ("wrong-block","filter-mismatch","null-point","missing-meta","missing-introspection","missing-deployment","errors","invalid","status"):
   target=temp/mode; seed(target); (target/"marker").write_text("preserve"); run_capture(target,mode=mode,ok=False); assert (target/"marker").read_text()=="preserve"
@@ -103,6 +109,7 @@ with tempfile.TemporaryDirectory() as temporary:
  edited=temp/"edited"; shutil.copytree(first,edited); (edited/"entities/domain/entity-by-id/upstream-response.json").write_bytes(b"{}\n"); verify(edited,False)
  missing=temp/"missing"; shutil.copytree(first,missing); prov=json.loads((missing/"upstream/provenance.json").read_text()); del prov["pin_kind"]; (missing/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(missing,"upstream/provenance.json"); verify(missing,False)
  identity=temp/"identity"; shutil.copytree(first,identity); prov=json.loads((identity/"upstream/provenance.json").read_text()); prov.update({"pin_kind":"hash","upstream_identifier":"other"}); (identity/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(identity,"upstream/provenance.json"); verify(identity,False)
+ fake_live=temp/"fake-live"; shutil.copytree(first,fake_live); prov=json.loads((fake_live/"upstream/provenance.json").read_text()); prov.update({"endpoint_template":"https://example.test/${THE_GRAPH_API_KEY}","provisional_stub":False}); (fake_live/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(fake_live,"upstream/provenance.json"); verify(fake_live,False)
  stale_pin=temp/"stale-pin"; shutil.copytree(first,stale_pin); prov=json.loads((stale_pin/"upstream/provenance.json").read_text()); prov["ens_subgraph_commit"]="deadbee"; (stale_pin/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_pin,"upstream/provenance.json"); verify(stale_pin,False)
  census=temp/"census"; shutil.copytree(first,census); coverage=json.loads((census/"coverage.json").read_text()); coverage["known_upstream_types"]["Transfer"]={}; (census/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(census,"coverage.json"); verify(census,False)
  stale_census=temp/"stale-census"; shutil.copytree(first,stale_census); coverage=json.loads((stale_census/"coverage.json").read_text()); coverage["known_upstream_types"]["Ghost"]={"owner":"#1","docs":"x"}; (stale_census/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_census,"coverage.json"); verify(stale_census,False)
@@ -113,8 +120,10 @@ with tempfile.TemporaryDirectory() as temporary:
  sys.dont_write_bytecode=True; loader=importlib.machinery.SourceFileLoader("oracle",str(tool)); spec=importlib.util.spec_from_loader("oracle",loader); module=importlib.util.module_from_spec(spec); loader.exec_module(module)
  membership={"types":[obj("Query",[]),{"kind":"INTERFACE","name":"DomainEvent","fields":[],"inputFields":None,"enumValues":None,"possibleTypes":[{"name":"Transfer"}],"interfaces":[]},{**obj("Transfer",[]),"interfaces":[{"name":"DomainEvent"}]}],"queryType":{"name":"Query"},"mutationType":None,"subscriptionType":None,"directives":[]}; surface=module.schema_surface(membership); assert surface["root:query"]=={"type":"Query"} and "implements:Transfer.DomainEvent" in surface and "member:DomainEvent.Transfer" in surface; assert b"type Transfer implements DomainEvent" in module.render_sdl(membership)
  import socket; original=socket.socket; socket.socket=lambda *_args,**_kwargs: (_ for _ in ()).throw(AssertionError("offline verifier opened a socket"))
- try: module.verify(first)
- finally: socket.socket=original
- print("graphql compatibility oracle tool tests: 31 passed")
+ try:
+  os.environ["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"; module.verify(first)
+ finally:
+  os.environ.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None); socket.socket=original
+ print("graphql compatibility oracle tool tests: 34 passed")
 server.shutdown()
 PY

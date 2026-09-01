@@ -94,6 +94,11 @@ scripts/graphql-compat-oracle compare \
 scripts/graphql-compat-oracle verify-fixtures --offline
 ```
 
+The verifier and Rust oracle tests reject local-stub provenance by default. For tool development only, a developer
+may opt into a provisional fixture for one command with
+`BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE=1`; CI must never set this variable. The checked-in gate remains red until
+an operator completes the live refresh above.
+
 Supply credentials only through `THE_GRAPH_API_KEY`; the live template must contain its placeholder. The tool never
 reads `.env`, shell configuration/history, or user files. Never retain or paste resolved credentials.
 

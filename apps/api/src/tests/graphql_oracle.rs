@@ -42,6 +42,24 @@ fn verify_oracle_integrity() -> Result<Value> {
     Ok(manifest)
 }
 
+#[test]
+fn graphql_oracle_rejects_provisional_fixture_without_local_escape() -> Result<()> {
+    let workspace = OraclePath::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = OracleCommand::new(workspace.join("scripts/graphql-compat-oracle"))
+        .args(["verify-fixtures", "--offline", "--fixtures"])
+        .arg(oracle_root())
+        .env_remove("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE")
+        .current_dir(&workspace)
+        .output()?;
+    anyhow::ensure!(!output.status.success(), "provisional fixture was accepted");
+    anyhow::ensure!(
+        String::from_utf8_lossy(&output.stderr).contains("docs/development.md"),
+        "rejection did not name the operator refresh procedure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 fn oracle_type_ref(value: &Value) -> Result<String> {
     match value["kind"].as_str().context("type reference kind")? {
         "NON_NULL" => Ok(format!("{}!", oracle_type_ref(&value["ofType"])?)),
