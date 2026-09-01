@@ -131,8 +131,10 @@ outcomes, or durable traces.
   must come from the current batch's staged normalized events, from
   interpretation- and manifest-owned authority tables (identity rows, discovery
   edges, contract instance addresses, migration associations, and staged
-  manifest state — inputs to projection, not projection rows), or from a field
-  deliberately stored for later reuse. A live projection-table read is allowed
+  manifest state — inputs to projection, not projection rows), from the Project
+  request's target context (chain, target block number and hash, and the
+  `chain_lineage` timestamp of that target block, written as publication
+  context), or from a field deliberately stored for later reuse. A live projection-table read is allowed
   only to obtain such a stored reuse field when the query proves the row is
   outside the affected scope and merges staged replacements for affected rows,
   or for explicit existing-row-only carry-forward. It must never use a row that

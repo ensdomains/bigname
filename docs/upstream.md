@@ -137,7 +137,7 @@ to the applicable entries below.
 > **Since**: `2026-08-20`
 
 <a id="verified-resolution-text-selector-key-narrowing"></a>
-> **Verified-resolution text selector-key narrowing** — bigname's public `text:<key>` record selectors accept only non-empty keys containing no ASCII whitespace and no commas; a request whose key falls outside that grammar is rejected as `400 invalid_input` rather than resolved. On-chain text records whose keys contain such characters exist upstream but are not requestable through the product record routes.
+> **Verified-resolution text selector-key narrowing** — bigname's public `text:<key>` record selectors accept only non-empty keys containing no ASCII whitespace and no commas. Request parsing first strips boundary whitespace from each comma-separated request item, so a request like `text:display ` selects the `display` key; after that trim, a key that still falls outside the grammar is rejected as `400 invalid_input` rather than resolved. On-chain text records whose keys contain whitespace or commas — including boundary whitespace — exist upstream but are not requestable through the product record routes.
 > **Upstream**: ENSv1 defines text records by node and unconstrained string key `(upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L4-L19 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/api-v2-routes.md` § Public record-field completeness.
 > **Why**: route parsing separates multiple requested record keys with commas and dedupes selectors textually; whitespace- and comma-free keys keep selector identity unambiguous in request parameters and stored diagnostics.
