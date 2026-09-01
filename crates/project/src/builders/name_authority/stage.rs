@@ -8,8 +8,16 @@ pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgre
          SELECT latest.logical_name_id, latest.resource_id, latest.owner_getter,
                 latest.owner_getter_reason
          FROM (
-             SELECT DISTINCT ON (COALESCE(event.logical_name_id, linked.logical_name_id))
-                    COALESCE(event.logical_name_id, linked.logical_name_id) AS logical_name_id,
+             SELECT DISTINCT ON (COALESCE(
+                        event.logical_name_id,
+                        linked.logical_name_id,
+                        surface.logical_name_id
+                    ))
+                    COALESCE(
+                        event.logical_name_id,
+                        linked.logical_name_id,
+                        surface.logical_name_id
+                    ) AS logical_name_id,
                     event.resource_id,
                     event.after_state ->> 'owner_getter' AS owner_getter,
                     event.after_state ->> 'owner_getter_reason' AS owner_getter_reason
@@ -27,12 +35,28 @@ pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgre
                           candidate.event_identity DESC
                  LIMIT 1
              ) linked ON TRUE
+             LEFT JOIN project_surfaces surface
+               ON event.logical_name_id IS NULL
+              AND surface.namespace = event.namespace
+              AND surface.visibility_state = 'active'
+              AND lower(surface.namehash) = lower(COALESCE(
+                      NULLIF(event.after_state ->> 'child_node', ''),
+                      NULLIF(event.after_state ->> 'node', '')
+                  ))
              WHERE event.event_kind = 'AuthorityTransferred'
                AND event.source_family IN (
                    'ens_v1_registry_l1', 'basenames_base_registry'
                )
-               AND COALESCE(event.logical_name_id, linked.logical_name_id) IS NOT NULL
-             ORDER BY COALESCE(event.logical_name_id, linked.logical_name_id),
+               AND COALESCE(
+                       event.logical_name_id,
+                       linked.logical_name_id,
+                       surface.logical_name_id
+                   ) IS NOT NULL
+             ORDER BY COALESCE(
+                          event.logical_name_id,
+                          linked.logical_name_id,
+                          surface.logical_name_id
+                      ),
                       event.block_number DESC NULLS LAST,
                       event.transaction_index DESC NULLS LAST,
                       event.log_index DESC NULLS LAST,
