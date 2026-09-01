@@ -335,7 +335,17 @@ async fn create_scoped_event_ids(
         ) scope
           ON scope.logical_name_id = candidate.logical_name_id
         WHERE event.chain_id = $1 AND event.block_number <= $2
-          AND event.event_kind IN ('SubregistryChanged', 'AliasChanged')
+          AND (
+              event.event_kind IN ('SubregistryChanged', 'AliasChanged')
+              OR (
+                  event.event_kind = 'AuthorityTransferred'
+                  AND event.source_family IN (
+                      'ens_v1_registry_l1', 'basenames_base_registry'
+                  )
+                  AND lower(event.after_state ->> 'owner_getter') =
+                      '0x0000000000000000000000000000000000000000'
+              )
+          )
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
         SELECT event.normalized_event_id
