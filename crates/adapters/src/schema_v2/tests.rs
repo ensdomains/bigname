@@ -7011,6 +7011,18 @@ fn literal_zero_owner_word_records_zero_getter_reason() -> anyhow::Result<()> {
         transfer.after_state["owner_getter_reason"],
         json!("literal_zero")
     );
+    let anchor_resource_id = transfer
+        .resource_id
+        .expect("ownerless registry event retains its read resource");
+    assert_eq!(
+        output
+            .resources
+            .iter()
+            .filter(|resource| resource.resource_id == anchor_resource_id)
+            .count(),
+        1,
+        "the retained registry resource must be emitted once"
+    );
     Ok(())
 }
 
