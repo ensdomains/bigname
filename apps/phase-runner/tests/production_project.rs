@@ -17166,6 +17166,8 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     const CHILD_RESERVED_RESOURCE: &str = "00000000-0000-0000-0000-000000008f03";
     const FORMER_CHILD: &str =
         "ens:0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a";
+    const RELEASED_CHILD: &str =
+        "ens:0x8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b";
     const FORMER_REGISTRY: &str = "0x0000000000000000000000000000000000008f04";
     const FORMER_REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000008f04";
     const REPLACEMENT_TWO: &str =
@@ -17221,6 +17223,12 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
                 "former.parent.eth",
                 vec!["former", "parent", "eth"],
                 vec!["0xformer", "0xparent", "0xeth"],
+            ),
+            (
+                RELEASED_CHILD,
+                "released.parent.eth",
+                vec!["released", "parent", "eth"],
+                vec!["0xreleased", "0xparent", "0xeth"],
             ),
         ] {
             sqlx::query(
@@ -17390,6 +17398,44 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             pool,
             CHAIN,
             1,
+            Some(RELEASED_CHILD),
+            None,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            json!({
+                "status":"registered",
+                "expiry":500,
+                "token_id":"0xreleased",
+                "registry":"0xchildregistry",
+                "registry_contract_instance_id":CHILD_REGISTRY_INSTANCE,
+                "parent_logical_name_id":PARENT
+            }),
+            json!({"fixture":"ancestor-expiry-current-registry-released-registration"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(RELEASED_CHILD),
+            None,
+            "RegistrationReleased",
+            "ens_v2_registry_l1",
+            json!({
+                "source_event":"LabelUnregistered",
+                "status":"released",
+                "expiry":500,
+                "token_id":"0xreleased",
+                "registry":"0xchildregistry",
+                "registry_contract_instance_id":CHILD_REGISTRY_INSTANCE
+            }),
+            json!({"fixture":"ancestor-expiry-current-registry-released"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
             Some(FORMER_CHILD),
             None,
             "RegistrationReleased",
@@ -17424,44 +17470,46 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             json!({"fixture":"ancestor-expiry-grandchild-registration"}),
         )
         .await?;
-        insert_event(
-            pool,
-            CHAIN,
-            1,
-            Some(GRANDCHILD),
-            None,
-            "RegistrationGranted",
-            "ens_v2_registry_l1",
-            json!({
-                "status":"registered",
-                "expiry":140,
-                "token_id":"0xgrandchild-released",
-                "registry":"0xgrandchildregistry",
-                "registry_contract_instance_id":GRANDCHILD_REGISTRY_INSTANCE,
-                "parent_logical_name_id":CHILD
-            }),
-            json!({"fixture":"ancestor-expiry-grandchild-released-registration"}),
-        )
-        .await?;
-        insert_event(
-            pool,
-            CHAIN,
-            1,
-            Some(GRANDCHILD),
-            None,
-            "RegistrationReleased",
-            "ens_v2_registry_l1",
-            json!({
-                "source_event":"LabelUnregistered",
-                "status":"released",
-                "expiry":140,
-                "token_id":"0xgrandchild-released",
-                "registry":"0xgrandchildregistry",
-                "registry_contract_instance_id":GRANDCHILD_REGISTRY_INSTANCE
-            }),
-            json!({"fixture":"ancestor-expiry-grandchild-released"}),
-        )
-        .await?;
+        if child_registration_kind == "RegistrationGranted" {
+            insert_event(
+                pool,
+                CHAIN,
+                1,
+                Some(CHILD),
+                None,
+                "RegistrationGranted",
+                "ens_v2_registry_l1",
+                json!({
+                    "status":"registered",
+                    "expiry":90,
+                    "token_id":"0xchild-released",
+                    "registry":"0xchildregistry",
+                    "registry_contract_instance_id":CHILD_REGISTRY_INSTANCE,
+                    "parent_logical_name_id":PARENT
+                }),
+                json!({"fixture":"ancestor-expiry-child-released-registration"}),
+            )
+            .await?;
+            insert_event(
+                pool,
+                CHAIN,
+                1,
+                Some(CHILD),
+                None,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+                json!({
+                    "source_event":"LabelUnregistered",
+                    "status":"released",
+                    "expiry":90,
+                    "token_id":"0xchild-released",
+                    "registry":"0xchildregistry",
+                    "registry_contract_instance_id":CHILD_REGISTRY_INSTANCE
+                }),
+                json!({"fixture":"ancestor-expiry-child-released"}),
+            )
+            .await?;
+        }
         insert_event(
             pool,
             CHAIN,
@@ -17656,6 +17704,13 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     .bind(FORMER_CHILD)
     .execute(incremental.pool())
     .await?;
+    sqlx::query(
+        "UPDATE name_current SET raw_name = 'released-sentinel-unchanged.eth'
+         WHERE logical_name_id = $1",
+    )
+    .bind(RELEASED_CHILD)
+    .execute(incremental.pool())
+    .await?;
 
     run_project(
         incremental.pool(),
@@ -17737,6 +17792,12 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             .fetch_one(incremental.pool())
             .await?;
     assert_eq!(former_name, "former-sentinel-unchanged.eth");
+    let released_name: String =
+        sqlx::query_scalar("SELECT raw_name FROM name_current WHERE logical_name_id = $1")
+            .bind(RELEASED_CHILD)
+            .fetch_one(incremental.pool())
+            .await?;
+    assert_eq!(released_name, "released-sentinel-unchanged.eth");
 
     incremental.cleanup().await?;
     fresh.cleanup().await

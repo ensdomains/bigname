@@ -105,13 +105,12 @@ pub(super) async fn include_topology_dependents(
     .map_err(|error| {
         ProjectError::database("failed to scope authority topology dependents", error)
     })?;
-    sqlx::query(
-        r#"
-        WITH RECURSIVE expiry_topology(logical_name_id) AS (
-            SELECT logical_name_id FROM project_scope_expiry_names
-            UNION
-            SELECT registration.logical_name_id
-            FROM expiry_topology parent
+    loop {
+        let added = sqlx::query(
+            r#"
+            INSERT INTO project_scope_expiry_names
+            SELECT DISTINCT registration.logical_name_id
+            FROM project_scope_expiry_names parent
             JOIN LATERAL (
                 SELECT topology.after_state ->> 'subregistry' AS address
                 FROM normalized_events topology
@@ -149,61 +148,86 @@ pub(super) async fn include_topology_dependents(
                   OR address.active_to_block_number > $2)
              AND address.deactivated_at IS NULL
             JOIN LATERAL (
-                SELECT head.logical_name_id
+                SELECT DISTINCT head.logical_name_id
                 FROM (
-                    SELECT DISTINCT ON (event.logical_name_id)
-                           event.logical_name_id, event.event_kind
-                    FROM normalized_events event
-                    JOIN chain_lineage lineage
-                      ON lineage.chain_id = event.chain_id
-                     AND lineage.block_number = event.block_number
-                     AND lineage.block_hash = event.block_hash
-                    WHERE event.chain_id = $1
-                      AND event.after_state ->> 'registry_contract_instance_id' =
-                          address.contract_instance_id::text
-                      AND event.block_number <= $2
-                      AND event.event_kind IN (
-                          'RegistrationGranted', 'RegistrationReserved',
-                          'RegistrationRenewed', 'RegistrationReleased'
-                      )
-                      AND event.source_family IN (
-                          'ens_v2_root_l1', 'ens_v2_registry_l1'
-                      )
-                      AND event.consumer_visibility = 'activated'
-                      AND event.canonicality_state IN (
-                          'canonical', 'safe', 'finalized'
-                      )
-                      AND lineage.canonicality_state IN (
-                          'canonical', 'safe', 'finalized'
-                      )
-                      AND event.logical_name_id IS NOT NULL
-                    ORDER BY event.logical_name_id,
-                             event.block_number DESC NULLS LAST,
-                             event.transaction_index DESC NULLS LAST,
-                             event.log_index DESC NULLS LAST,
-                             event.normalized_event_id DESC
+                    SELECT DISTINCT ON (
+                               candidate.logical_name_id,
+                               candidate.lifecycle_key
+                           )
+                           candidate.logical_name_id, candidate.event_kind
+                    FROM (
+                        SELECT event.*,
+                               COALESCE(
+                                   event.resource_id::text,
+                                   NULLIF(CONCAT(
+                                       event.after_state ->> 'registry_contract_instance_id',
+                                       ':', event.after_state ->> 'token_id'
+                                   ), ':')
+                               ) AS lifecycle_key
+                        FROM normalized_events event
+                        JOIN chain_lineage lineage
+                          ON lineage.chain_id = event.chain_id
+                         AND lineage.block_number = event.block_number
+                         AND lineage.block_hash = event.block_hash
+                        WHERE event.chain_id = $1
+                          AND event.after_state ->> 'registry_contract_instance_id' =
+                              address.contract_instance_id::text
+                          AND event.block_number <= $2
+                          AND event.event_kind IN (
+                              'RegistrationGranted', 'RegistrationReserved',
+                              'RegistrationRenewed', 'RegistrationReleased'
+                          )
+                          AND event.source_family IN (
+                              'ens_v2_root_l1', 'ens_v2_registry_l1'
+                          )
+                          AND event.consumer_visibility = 'activated'
+                          AND event.canonicality_state IN (
+                              'canonical', 'safe', 'finalized'
+                          )
+                          AND lineage.canonicality_state IN (
+                              'canonical', 'safe', 'finalized'
+                          )
+                          AND event.logical_name_id IS NOT NULL
+                    ) candidate
+                    WHERE candidate.lifecycle_key IS NOT NULL
+                    ORDER BY candidate.logical_name_id,
+                             candidate.lifecycle_key,
+                             candidate.block_number DESC NULLS LAST,
+                             candidate.transaction_index DESC NULLS LAST,
+                             candidate.log_index DESC NULLS LAST,
+                             candidate.normalized_event_id DESC
                 ) head
                 WHERE head.event_kind IN (
                     'RegistrationGranted', 'RegistrationReserved',
                     'RegistrationRenewed'
                 )
             ) registration ON TRUE
-        ), inserted_names AS (
-            INSERT INTO project_scope_names
-            SELECT logical_name_id FROM expiry_topology
             ON CONFLICT DO NOTHING
-            RETURNING logical_name_id
+            "#,
         )
-        INSERT INTO project_scope_children
-        SELECT logical_name_id FROM expiry_topology
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(chain_id)
-    .bind(target_block)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to scope expiry topology dependents", error))?;
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to close expiry topology scope", error))?
+        .rows_affected();
+        if added == 0 {
+            break;
+        }
+    }
+    for table in ["project_scope_names", "project_scope_children"] {
+        let statement = format!(
+            "INSERT INTO {table}
+             SELECT logical_name_id FROM project_scope_expiry_names
+             ON CONFLICT DO NOTHING"
+        );
+        sqlx::query(&statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to publish expiry topology scope", error)
+            })?;
+    }
     Ok(())
 }
 
