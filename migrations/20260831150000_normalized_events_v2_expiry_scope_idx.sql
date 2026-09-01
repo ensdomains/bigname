@@ -23,22 +23,37 @@ BEGIN
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND jsonb_typeof(after_state -> 'expiry') = 'number';
 
-    DROP INDEX IF EXISTS bigname_phase.normalized_events_subregistry_registration_history_idx;
-    CREATE INDEX normalized_events_subregistry_registration_history_idx
-    ON bigname_phase.normalized_events (
-        chain_id,
-        (after_state ->> 'registry_contract_instance_id'),
-        block_number DESC,
-        normalized_event_id DESC,
-        logical_name_id
-    )
-    WHERE event_kind IN (
-              'RegistrationGranted', 'RegistrationReserved',
-              'RegistrationRenewed', 'RegistrationReleased'
-          )
-      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND logical_name_id IS NOT NULL
-      AND after_state ->> 'registry_contract_instance_id' IS NOT NULL;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_index index_state
+        WHERE index_state.indexrelid = to_regclass(
+                  'bigname_phase.normalized_events_subregistry_registration_history_idx'
+              )
+          AND index_state.indisready
+          AND index_state.indisvalid
+          AND pg_get_expr(
+                  index_state.indpred,
+                  index_state.indrelid,
+                  true
+              ) LIKE '%RegistrationReserved%'
+    ) THEN
+        DROP INDEX IF EXISTS bigname_phase.normalized_events_subregistry_registration_history_idx;
+        CREATE INDEX normalized_events_subregistry_registration_history_idx
+        ON bigname_phase.normalized_events (
+            chain_id,
+            (after_state ->> 'registry_contract_instance_id'),
+            block_number DESC,
+            normalized_event_id DESC,
+            logical_name_id
+        )
+        WHERE event_kind IN (
+                  'RegistrationGranted', 'RegistrationReserved',
+                  'RegistrationRenewed', 'RegistrationReleased'
+              )
+          AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
+          AND logical_name_id IS NOT NULL
+          AND after_state ->> 'registry_contract_instance_id' IS NOT NULL;
+    END IF;
 END
 $migration$;
