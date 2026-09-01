@@ -17140,8 +17140,13 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     const CHAIN: &str = "project-ancestor-expiry-reorg";
     const PARENT: &str = "ens:0x8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f";
     const CHILD: &str = "ens:0x8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c";
+    const GRANDCHILD: &str =
+        "ens:0x8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d";
+    const SENTINEL: &str = "ens:0x8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e";
     const CHILD_REGISTRY: &str = "0x0000000000000000000000000000000000008f01";
     const CHILD_REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000008f01";
+    const GRANDCHILD_REGISTRY: &str = "0x0000000000000000000000000000000000008f02";
+    const GRANDCHILD_REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000008f02";
     const REPLACEMENT_TWO: &str =
         "0x8f02000000000000000000000000000000000000000000000000000000000000";
     const REPLACEMENT_THREE: &str =
@@ -17178,6 +17183,18 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
                 vec!["child", "parent", "eth"],
                 vec!["0xchild", "0xparent", "0xeth"],
             ),
+            (
+                GRANDCHILD,
+                "grandchild.child.parent.eth",
+                vec!["grandchild", "child", "parent", "eth"],
+                vec!["0xgrandchild", "0xchild", "0xparent", "0xeth"],
+            ),
+            (
+                SENTINEL,
+                "unrelated.eth",
+                vec!["unrelated", "eth"],
+                vec!["0xunrelated", "0xeth"],
+            ),
         ] {
             sqlx::query(
                 "INSERT INTO name_surfaces (
@@ -17198,27 +17215,32 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             .execute(pool)
             .await?;
         }
-        sqlx::query(
-            "INSERT INTO contract_instances (
-                 contract_instance_id, chain_id, contract_kind, provenance
-             ) VALUES ($1, $2, 'contract', '{\"fixture\":true}'::jsonb)",
-        )
-        .bind(Uuid::parse_str(CHILD_REGISTRY_INSTANCE)?)
-        .bind(CHAIN)
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            "INSERT INTO contract_instance_addresses (
-                 contract_instance_id, chain_id, address,
-                 active_from_block_number, active_from_block_hash, provenance
-             ) VALUES ($1, $2, $3, 1, $4, '{\"fixture\":true}'::jsonb)",
-        )
-        .bind(Uuid::parse_str(CHILD_REGISTRY_INSTANCE)?)
-        .bind(CHAIN)
-        .bind(CHILD_REGISTRY)
-        .bind(block_hash(CHAIN, 1))
-        .execute(pool)
-        .await?;
+        for (instance, address) in [
+            (CHILD_REGISTRY_INSTANCE, CHILD_REGISTRY),
+            (GRANDCHILD_REGISTRY_INSTANCE, GRANDCHILD_REGISTRY),
+        ] {
+            sqlx::query(
+                "INSERT INTO contract_instances (
+                     contract_instance_id, chain_id, contract_kind, provenance
+                 ) VALUES ($1, $2, 'contract', '{\"fixture\":true}'::jsonb)",
+            )
+            .bind(Uuid::parse_str(instance)?)
+            .bind(CHAIN)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO contract_instance_addresses (
+                     contract_instance_id, chain_id, address,
+                     active_from_block_number, active_from_block_hash, provenance
+                 ) VALUES ($1, $2, $3, 1, $4, '{\"fixture\":true}'::jsonb)",
+            )
+            .bind(Uuid::parse_str(instance)?)
+            .bind(CHAIN)
+            .bind(address)
+            .bind(block_hash(CHAIN, 1))
+            .execute(pool)
+            .await?;
+        }
         insert_event(
             pool,
             CHAIN,
@@ -17234,6 +17256,21 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
                 "registry":"0xrootregistry"
             }),
             json!({"fixture":"ancestor-expiry-parent-registration"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(CHILD),
+            None,
+            "SubregistryChanged",
+            "ens_v2_registry_l1",
+            json!({
+                "source_event":"SubregistryUpdated",
+                "subregistry":GRANDCHILD_REGISTRY
+            }),
+            json!({"fixture":"ancestor-expiry-child-subregistry"}),
         )
         .await?;
         insert_event(
@@ -17270,9 +17307,46 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             json!({"fixture":"ancestor-expiry-child-registration"}),
         )
         .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(GRANDCHILD),
+            None,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            json!({
+                "status":"registered",
+                "expiry":150,
+                "token_id":"0xgrandchild",
+                "registry":"0xgrandchildregistry",
+                "registry_contract_instance_id":GRANDCHILD_REGISTRY_INSTANCE,
+                "parent_logical_name_id":CHILD
+            }),
+            json!({"fixture":"ancestor-expiry-grandchild-registration"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            Some(SENTINEL),
+            None,
+            "RegistrationGranted",
+            "ens_v2_root_l1",
+            json!({
+                "status":"registered",
+                "expiry":500,
+                "token_id":"0xunrelated",
+                "registry":"0xrootregistry"
+            }),
+            json!({"fixture":"unrelated-scope-sentinel"}),
+        )
+        .await?;
         for (logical_name_id, token_id, registry, expiry) in [
             (PARENT, "0xparent", "0xrootregistry", 20),
             (CHILD, "0xchild", "0xchildregistry", 100),
+            (GRANDCHILD, "0xgrandchild", "0xgrandchildregistry", 150),
         ] {
             insert_event(
                 pool,
@@ -17290,10 +17364,10 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
                     "expiry":expiry,
                     "token_id":token_id,
                     "registry":registry,
-                    "registry_contract_instance_id":if logical_name_id == CHILD {
-                        Value::String(CHILD_REGISTRY_INSTANCE.into())
-                    } else {
-                        Value::Null
+                    "registry_contract_instance_id":match logical_name_id {
+                        CHILD => Value::String(CHILD_REGISTRY_INSTANCE.into()),
+                        GRANDCHILD => Value::String(GRANDCHILD_REGISTRY_INSTANCE.into()),
+                        _ => Value::Null,
                     }
                 }),
                 json!({"fixture":"ancestor-expiry-release"}),
@@ -17316,6 +17390,24 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
                 "subregistry":null
             }),
             json!({"fixture":"ancestor-expiry-subregistry-release"}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            2,
+            Some(CHILD),
+            None,
+            "SubregistryChanged",
+            "ens_v2_registry_l1",
+            json!({
+                "source_event":"RegistryPathExpired",
+                "derived_from":"interpreter_state",
+                "terminal_reason":"registry_name_binding_expired",
+                "expiry":100,
+                "subregistry":null
+            }),
+            json!({"fixture":"ancestor-expiry-grandchild-subregistry-release"}),
         )
         .await?;
     }
@@ -17351,6 +17443,12 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             .fetch_one(incremental.pool())
             .await?;
     assert_eq!(expired_child_count, 0);
+    let expired_grandchild_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(GRANDCHILD)
+            .fetch_one(incremental.pool())
+            .await?;
+    assert_eq!(expired_grandchild_count, 0);
 
     for pool in [incremental.pool(), fresh.pool()] {
         sqlx::query(
@@ -17408,6 +17506,13 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
         }
     }
 
+    sqlx::query(
+        "UPDATE name_current SET raw_name = 'sentinel-unchanged.eth' WHERE logical_name_id = $1",
+    )
+    .bind(SENTINEL)
+    .execute(incremental.pool())
+    .await?;
+
     run_project(
         incremental.pool(),
         CHAIN,
@@ -17423,23 +17528,31 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
     normalize_projection_clocks(incremental.pool()).await?;
     normalize_projection_clocks(fresh.pool()).await?;
-    let incremental_child: Option<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
-    )
-    .bind(CHILD)
-    .fetch_optional(incremental.pool())
-    .await?;
-    let fresh_child: Option<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
-    )
-    .bind(CHILD)
-    .fetch_optional(fresh.pool())
-    .await?;
-    assert!(fresh_child.is_some());
-    assert_eq!(
-        incremental_child, fresh_child,
-        "redo failed to restore the descendant removed by ancestor expiry"
-    );
+    for descendant in [CHILD, GRANDCHILD] {
+        let incremental_descendant: Option<Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+        )
+        .bind(descendant)
+        .fetch_optional(incremental.pool())
+        .await?;
+        let fresh_descendant: Option<Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+        )
+        .bind(descendant)
+        .fetch_optional(fresh.pool())
+        .await?;
+        assert!(fresh_descendant.is_some());
+        assert_eq!(
+            incremental_descendant, fresh_descendant,
+            "redo failed to restore descendant {descendant} removed by ancestor expiry"
+        );
+    }
+    let sentinel_name: String =
+        sqlx::query_scalar("SELECT raw_name FROM name_current WHERE logical_name_id = $1")
+            .bind(SENTINEL)
+            .fetch_one(incremental.pool())
+            .await?;
+    assert_eq!(sentinel_name, "sentinel-unchanged.eth");
 
     incremental.cleanup().await?;
     fresh.cleanup().await
