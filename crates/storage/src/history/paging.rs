@@ -354,9 +354,13 @@ fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgres>) {
                         WHERE binding.resource_id = ne.resource_id
                           AND binding.chain_id = ne.chain_id
                           AND binding.active_from <= rb.block_timestamp
+                              + GREATEST(COALESCE(ne.log_index, 0), 0)
+                                * interval '1 microsecond'
                           AND (
                               binding.active_to IS NULL
                               OR binding.active_to > rb.block_timestamp
+                                  + GREATEST(COALESCE(ne.log_index, 0), 0)
+                                    * interval '1 microsecond'
                           )
                           AND binding.canonicality_state IN (
                               'canonical'::bigname_phase.canonicality_state,
