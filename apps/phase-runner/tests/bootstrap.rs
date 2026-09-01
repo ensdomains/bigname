@@ -35,7 +35,7 @@ async fn schema_migrations_apply_to_an_empty_database_before_the_phase_baseline(
 }
 
 #[tokio::test]
-async fn expiry_scope_index_migration_repairs_an_initialized_phase_schema() -> Result<()> {
+async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() -> Result<()> {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_expiry_scope_index_migration")
             .pool_max_connections(2)
@@ -48,6 +48,9 @@ async fn expiry_scope_index_migration_repairs_an_initialized_phase_schema() -> R
     .await?;
     initialize_schema_v2(database.pool()).await?;
     sqlx::query("DROP INDEX bigname_phase.normalized_events_v2_expiry_scope_idx")
+        .execute(database.pool())
+        .await?;
+    sqlx::query("DROP INDEX bigname_phase.normalized_events_subregistry_registration_history_idx")
         .execute(database.pool())
         .await?;
     let absent_before: bool = sqlx::query_scalar(
@@ -67,6 +70,26 @@ async fn expiry_scope_index_migration_repairs_an_initialized_phase_schema() -> R
     .fetch_one(database.pool())
     .await?;
     assert!(ready_and_valid);
+    let reserved_history_ready: bool = sqlx::query_scalar(
+        "SELECT COALESCE(
+             index_state.indisready
+             AND index_state.indisvalid
+             AND pg_get_expr(
+                     index_state.indpred,
+                     index_state.indrelid,
+                     true
+                 ) LIKE '%RegistrationReserved%',
+             false
+         )
+         FROM pg_index index_state
+         WHERE index_state.indexrelid = to_regclass(
+             'bigname_phase.normalized_events_subregistry_registration_history_idx'
+         )",
+    )
+    .fetch_optional(database.pool())
+    .await?
+    .unwrap_or(false);
+    assert!(reserved_history_ready);
 
     database.cleanup().await
 }
