@@ -122,6 +122,39 @@ async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() ->
 }
 
 #[tokio::test]
+async fn expiry_scope_migration_preserves_a_prebuilt_reserved_history_index() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_prebuilt_reserved_history_index")
+            .pool_max_connections(2)
+            .parse_context("failed to parse prebuilt index schema-migration test database URL")
+            .admin_connect_context(
+                "failed to connect prebuilt index schema-migration test admin pool",
+            )
+            .pool_connect_context("failed to connect prebuilt index schema-migration test pool"),
+    )
+    .await?;
+    initialize_schema_v2(database.pool()).await?;
+    let before_oid: i64 = sqlx::query_scalar(
+        "SELECT 'bigname_phase.normalized_events_subregistry_registration_history_idx'::regclass::oid::bigint",
+    )
+    .fetch_one(database.pool())
+    .await?;
+
+    bigname_storage::MIGRATOR.run(database.pool()).await?;
+    let after_oid: i64 = sqlx::query_scalar(
+        "SELECT 'bigname_phase.normalized_events_subregistry_registration_history_idx'::regclass::oid::bigint",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        after_oid, before_oid,
+        "schema-migration rebuilt the production-prebuilt reserved history index"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manifest_change_counter_migrates_existing_history_with_baseline_parity() -> Result<()> {
     let migrated = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_manifest_change_counter_migration")
