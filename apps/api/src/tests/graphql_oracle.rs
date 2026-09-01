@@ -10,7 +10,7 @@ const ORACLE_INTROSPECTION: &str = r#"query OracleIntrospection {
   types { kind name interfaces { name } possibleTypes { name } fields(includeDeprecated: true) {
     name isDeprecated type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }
     args(includeDeprecated: true) { name defaultValue isDeprecated type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } }
-  } inputFields(includeDeprecated: true) { name defaultValue isDeprecated type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } }
+  } inputFields { name defaultValue isDeprecated type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } }
   enumValues(includeDeprecated: true) { name isDeprecated } } }
 }"#;
 
@@ -45,12 +45,27 @@ fn verify_oracle_integrity() -> Result<Value> {
 #[test]
 fn graphql_oracle_rejects_provisional_fixture_without_local_escape() -> Result<()> {
     let workspace = OraclePath::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixtures = std::env::temp_dir().join(format!(
+        "bigname-graphql-oracle-{}-{}",
+        std::process::id(),
+        NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let generated = OracleCommand::new(workspace.join("scripts/test-graphql-compat-oracle"))
+        .args(["--generate", fixtures.to_str().context("temporary fixture path")?])
+        .current_dir(&workspace)
+        .output()?;
+    anyhow::ensure!(
+        generated.status.success(),
+        "failed to generate provisional fixture: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
     let output = OracleCommand::new(workspace.join("scripts/graphql-compat-oracle"))
         .args(["verify-fixtures", "--offline", "--fixtures"])
-        .arg(oracle_root())
+        .arg(&fixtures)
         .env_remove("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE")
         .current_dir(&workspace)
         .output()?;
+    oracle_fs::remove_dir_all(fixtures)?;
     anyhow::ensure!(!output.status.success(), "provisional fixture was accepted");
     anyhow::ensure!(
         String::from_utf8_lossy(&output.stderr).contains("docs/development.md"),

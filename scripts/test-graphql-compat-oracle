@@ -47,6 +47,9 @@ class Handler(BaseHTTPRequestHandler):
   length=int(self.headers.get("Content-Length","0")); raw=self.rfile.read(length)
   if mode=="invalid": self.send_response(200); self.end_headers(); self.wfile.write(b"{"); return
   body=json.loads(raw); op=body.get("operationName"); block=body.get("variables",{}).get("block",{}).get("number",414)
+  # Graph Node's pinned __Type.inputFields has no arguments. (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L35 @ graph_node@aefe1737)
+  if op=="OracleIntrospection" and "inputFields(" in body["query"]:
+   encoded=b'{"errors":[{"message":"Unknown argument includeDeprecated on field inputFields"}]}\n'; self.send_response(200); self.send_header("Content-Length",str(len(encoded))); self.end_headers(); self.wfile.write(encoded); return
   meta={"block":{"number":block+(1 if mode=="wrong-block" else 0),"hash":None},"deployment":"secret" if mode=="leak" else "QmStubEnsDeployment","hasIndexingErrors":False}
   if mode=={"OracleMeta":"meta-indexing-errors","OracleDomain":"point-indexing-errors","OracleDomainName":"filter-indexing-errors"}.get(op): meta["hasIndexingErrors"]=True
   if mode=="missing-deployment": meta["deployment"]=None
