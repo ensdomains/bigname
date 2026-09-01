@@ -188,8 +188,13 @@ pub(super) async fn include_topology_dependents(
                     'RegistrationRenewed'
                 )
             ) registration ON TRUE
+        ), inserted_names AS (
+            INSERT INTO project_scope_names
+            SELECT logical_name_id FROM expiry_topology
+            ON CONFLICT DO NOTHING
+            RETURNING logical_name_id
         )
-        INSERT INTO project_scope_names
+        INSERT INTO project_scope_children
         SELECT logical_name_id FROM expiry_topology
         ON CONFLICT DO NOTHING
         "#,

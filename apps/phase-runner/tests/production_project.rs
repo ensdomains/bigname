@@ -17674,6 +17674,19 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
         incremental_edge, fresh_edge,
         "redo failed to restore the recovered descendant's child edge"
     );
+    if child_registration_kind == "RegistrationReserved" {
+        for pool in [incremental.pool(), fresh.pool()] {
+            let reserved_edge_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM children_current
+                 WHERE parent_logical_name_id = $1 AND child_logical_name_id = $2",
+            )
+            .bind(PARENT)
+            .bind(CHILD)
+            .fetch_one(pool)
+            .await?;
+            assert_eq!(reserved_edge_count, 0);
+        }
+    }
     let sentinel_name: String =
         sqlx::query_scalar("SELECT raw_name FROM name_current WHERE logical_name_id = $1")
             .bind(SENTINEL)
