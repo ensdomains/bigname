@@ -160,7 +160,8 @@ pub(super) async fn include_event_edges(
                AND btrim(pointer.address) <> ''
                AND registration.block_number <= $2
                AND registration.event_kind IN (
-                   'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased'
+                   'RegistrationGranted', 'RegistrationReserved',
+                   'RegistrationRenewed', 'RegistrationReleased'
                )
                AND registration.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
                AND registration.consumer_visibility = 'activated'
