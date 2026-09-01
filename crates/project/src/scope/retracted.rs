@@ -74,6 +74,39 @@ async fn seed_names(
     .map_err(|error| ProjectError::database("failed to retain retracted name scope", error))?;
     sqlx::query(
         r#"
+        INSERT INTO project_scope_names
+        SELECT DISTINCT event.logical_name_id
+        FROM normalized_events event
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = event.chain_id
+         AND lineage.block_hash = event.block_hash
+         AND lineage.block_number = event.block_number
+        WHERE event.chain_id = $1
+          AND event.block_number BETWEEN $2 AND $3
+          AND event.logical_name_id IS NOT NULL
+          AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+          AND event.event_kind = 'RegistrationReleased'
+          AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+          AND event.after_state ->> 'derived_from' = 'interpreter_state'
+          AND event.after_state ->> 'terminal_reason' =
+              'registry_name_binding_expired'
+          AND (
+              event.canonicality_state = 'orphaned'
+              OR lineage.canonicality_state = 'orphaned'
+          )
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to retain orphaned expiry name scope", error)
+    })?;
+    sqlx::query(
+        r#"
         WITH affected_times AS (
             SELECT COALESCE((
                        SELECT extract(epoch FROM prior.block_timestamp)
