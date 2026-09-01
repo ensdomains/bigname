@@ -6149,8 +6149,10 @@ async fn pre_surface_attribution_isolated_by_node_and_resolver_in_project_db_fix
 }
 
 #[tokio::test]
-async fn ens_v2_pointer_does_not_claim_unlinked_ens_v1_pre_surface_records() -> Result<()> {
+async fn undeclared_ens_v2_pointer_does_not_claim_unlinked_ens_v1_pre_surface_records() -> Result<()>
+{
     const ENS_V2_RESOURCE: &str = "00000000-0000-0000-0000-0000000000e2";
+    const UNDECLARED: &str = "0x00000000000000000000000000000000000000e2";
     let incremental = ScratchDatabase::create("project_cross_family_incremental").await?;
     let full = ScratchDatabase::create("project_cross_family_full").await?;
     for pool in [incremental.pool(), full.pool()] {
@@ -6181,8 +6183,28 @@ async fn ens_v2_pointer_does_not_claim_unlinked_ens_v1_pre_surface_records() -> 
             Some(ENS_V2_RESOURCE),
             "ResolverChanged",
             "ens_v2_registry_l1",
-            json!({"resolver":RESOLVER}),
+            json!({"resolver":UNDECLARED}),
             json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node":"0xalice",
+                "resolver":UNDECLARED,
+                "record_key":"text:undeclared-v1-only",
+                "record_family":"text",
+                "selector_key":"undeclared-v1-only",
+                "value_retained":true,
+                "value":"undeclared-v1-value"
+            }),
+            json!({"emitting_address":UNDECLARED}),
         )
         .await?;
         insert_event(
@@ -12208,6 +12230,950 @@ async fn checked_in_sepolia_v1_resolver_logs_flow_through_interpret_and_project(
 }
 
 #[tokio::test]
+async fn declared_v1_shared_resolver_reclassifies_both_v2_pointer_origins_and_converges()
+-> Result<()> {
+    const CHAIN: &str = "project-declared-v1-shared";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_shared_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_shared_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let interim: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT resolver.declared_summary #>> '{classification,source_family}',
+                resolver.support_status,
+                (SELECT count(*) FROM record_inventory_current
+                 WHERE resource_id IN ($3::uuid, $4::uuid)
+                   AND jsonb_array_length(entries) = 0),
+                (SELECT count(*) FROM resolver_current
+                 WHERE chain_id = $1 AND resolver_address = lower($2))
+         FROM resolver_current resolver
+         WHERE resolver.chain_id = $1 AND resolver.resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(DECLARED_V1_ALICE_RESOURCE)
+    .bind(DECLARED_V1_BOB_RESOURCE)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        interim,
+        ("ens_v2_resolver_l1".into(), "unsupported".into(), 2, 1),
+        "a foreign-namespace declaration must not override ENS discovery",
+    );
+    sqlx::query("DELETE FROM record_inventory_current WHERE resource_id = $1::uuid")
+        .bind(DECLARED_V1_BOB_RESOURCE)
+        .execute(incremental.pool())
+        .await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let projected_family: String = sqlx::query_scalar(
+            "SELECT declared_summary #>> '{classification,source_family}'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(projected_family, "ens_v1_resolver_l1");
+        let classification: (i64, String, String, String, i64) = sqlx::query_as(
+            "SELECT count(*),
+                    min(support_status),
+                    min(declared_summary #>> '{classification,basis}'),
+                    min(declared_summary #>> '{classification,role}'),
+                    (SELECT count(*) FROM resolver_current
+                     WHERE chain_id = $1
+                       AND resolver_address = lower($3)
+                       AND declared_summary #>> '{classification,source_family}' =
+                           'ens_v2_resolver_l1'
+                       AND support_status = 'unsupported')
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .bind(DECLARED_V1_UNDECLARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            classification,
+            (
+                1,
+                "supported".into(),
+                "manifest_declared_address".into(),
+                "public_resolver".into(),
+                1,
+            ),
+        );
+        let inventories: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT resource_id, support_status,
+                    entries -> 0 ->> 'value'
+             FROM record_inventory_current
+             WHERE resource_id IN ($1::uuid, $2::uuid)
+             ORDER BY resource_id",
+        )
+        .bind(DECLARED_V1_ALICE_RESOURCE)
+        .bind(DECLARED_V1_BOB_RESOURCE)
+        .fetch_all(pool)
+        .await?;
+        assert_eq!(
+            inventories,
+            vec![
+                (
+                    Uuid::parse_str(DECLARED_V1_ALICE_RESOURCE)?,
+                    "supported".into(),
+                    "https://alice.shared.example.test".into(),
+                ),
+                (
+                    Uuid::parse_str(DECLARED_V1_BOB_RESOURCE)?,
+                    "supported".into(),
+                    "https://bob.shared.example.test".into(),
+                ),
+            ],
+            "each pointer origin must receive only its node-matched v1 record",
+        );
+    }
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "manifest-only incremental reclassification diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn declared_v1_node_only_record_update_matches_fresh_projection() -> Result<()> {
+    assert_declared_v1_node_only_delta(
+        "project-declared-v1-node-record-update",
+        DeclaredV1NodeOnlyDelta::RecordUpdate,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn declared_v1_node_only_version_reset_matches_fresh_projection() -> Result<()> {
+    assert_declared_v1_node_only_delta(
+        "project-declared-v1-node-version-reset",
+        DeclaredV1NodeOnlyDelta::VersionReset,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn declared_v1_node_only_unrelated_record_preserves_inventory_clock() -> Result<()> {
+    assert_declared_v1_node_only_delta(
+        "project-declared-v1-unrelated-node-record",
+        DeclaredV1NodeOnlyDelta::UnrelatedRecord,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn declared_v1_node_only_update_rebuilds_retained_pointer_resource() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-retained-pointer-resource";
+    const REPLACEMENT_RESOURCE: &str = "00000000-0000-0000-0000-000000000d03";
+    const ALIAS_BINDING: &str = "00000000-0000-0000-0000-000000000d13";
+    const REPLACEMENT_BINDING: &str = "00000000-0000-0000-0000-000000000d14";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_retained_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_retained_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    let alice_node = format!("{:#x}", raw_namehash(&[b"alice", b"eth"]));
+    let alice_name = format!("ens:{alice_node}");
+    let alias_node = format!("{:#x}", raw_namehash(&[b"alias", b"eth"]));
+    let alias_name = format!("ens:{alias_node}");
+
+    for (pool, manifest_id) in [
+        (incremental.pool(), manifests.0),
+        (fresh.pool(), manifests.1),
+    ] {
+        insert_manifest_update_event(
+            pool,
+            CHAIN,
+            "ens_v1_resolver_l1",
+            manifest_id,
+            resolver_declaration_payload("ens", CHAIN, DECLARED_V1_SHARED_RESOLVER),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_set(after_state, '{value}', '\"old\"')
+             WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+               AND after_state ->> 'node' = $2",
+        )
+        .bind(CHAIN)
+        .bind(&alice_node)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, 'ens', 'alias.eth', ARRAY['alias', 'eth'],
+                 decode('00', 'hex'), $2, ARRAY[$3, $4], $5,
+                 'active', $6, $7, 1, 'canonical'
+             )",
+        )
+        .bind(&alias_name)
+        .bind(&alias_node)
+        .bind(format!("{:#x}", keccak256(b"alias")))
+        .bind(format!("{:#x}", keccak256(b"eth")))
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, $2, $3::uuid, 'declared_registry_path', 'ens_v2',
+                 to_timestamp(1), $4, $5, 1, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(ALIAS_BINDING)?)
+        .bind(&alias_name)
+        .bind(DECLARED_V1_ALICE_RESOURCE)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1::uuid, $2, $3, 4, 'canonical')",
+        )
+        .bind(REPLACEMENT_RESOURCE)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE surface_bindings SET active_to = to_timestamp(4)
+             WHERE logical_name_id = $1 AND resource_id = $2::uuid",
+        )
+        .bind(&alice_name)
+        .bind(DECLARED_V1_ALICE_RESOURCE)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, $2, $3::uuid, 'declared_registry_path', 'ens_v2',
+                 to_timestamp(4), $4, $5, 4, 'canonical'
+             )",
+        )
+        .bind(Uuid::parse_str(REPLACEMENT_BINDING)?)
+        .bind(&alice_name)
+        .bind(REPLACEMENT_RESOURCE)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 4))
+        .execute(pool)
+        .await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    let rebound_resources: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT logical_name_id, resource_id
+         FROM name_current WHERE logical_name_id IN ($1, $2)
+         ORDER BY CASE WHEN logical_name_id = $1 THEN 0 ELSE 1 END",
+    )
+    .bind(&alice_name)
+    .bind(&alias_name)
+    .fetch_all(incremental.pool())
+    .await?;
+    assert_eq!(
+        rebound_resources,
+        vec![
+            (alice_name.clone(), Uuid::parse_str(REPLACEMENT_RESOURCE)?),
+            (
+                alias_name.clone(),
+                Uuid::parse_str(DECLARED_V1_ALICE_RESOURCE)?,
+            ),
+        ],
+        "the pointer name must rebind while another name retains the old resource",
+    );
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 5).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            5,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node": alice_node,
+                "resolver": DECLARED_V1_SHARED_RESOLVER,
+                "record_key": "text:url",
+                "record_family": "text",
+                "selector_key": "url",
+                "value_retained": true,
+                "value": "new"
+            }),
+            json!({"emitting_address": DECLARED_V1_SHARED_RESOLVER}),
+        )
+        .await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT entries -> 0 ->> 'value'
+             FROM record_inventory_current WHERE resource_id = $1::uuid",
+        )
+        .bind(DECLARED_V1_ALICE_RESOURCE)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(value.as_deref(), Some("new"));
+    }
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "retained pointer resource update diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn foreign_namespace_v2_pointer_matches_fresh_declared_v1_attribution() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-foreign-pointer";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_foreign_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_foreign_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "UPDATE normalized_events SET namespace = 'foreign'
+             WHERE chain_id = $1 AND resource_id = $2::uuid
+               AND event_kind = 'ResolverChanged'",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_BOB_RESOURCE)
+        .execute(pool)
+        .await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        let bob_inventory: (i32, String, Option<String>) = sqlx::query_as(
+            "SELECT jsonb_array_length(entries), support_status, unsupported_reason
+             FROM record_inventory_current WHERE resource_id = $1::uuid",
+        )
+        .bind(DECLARED_V1_BOB_RESOURCE)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            bob_inventory,
+            (
+                0,
+                "unsupported".into(),
+                Some("resolver_classification_missing".into()),
+            ),
+            "a foreign-namespace pointer must not claim authoritative v1 coverage",
+        );
+    }
+    let clocks_before = declared_v1_shared_clocks(incremental.pool(), CHAIN).await?;
+    insert_lineage_block(incremental.pool(), CHAIN, 4).await?;
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(incremental.pool())
+        .await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    let clocks_after = declared_v1_shared_clocks(incremental.pool(), CHAIN).await?;
+    assert_eq!(
+        clocks_after, clocks_before,
+        "a foreign declaration must not keep invalidating an unchanged resolver",
+    );
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "foreign-namespace pointer attribution diverged from a fresh rebuild",
+    );
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn cross_namespace_declared_resolver_collapse_is_deterministic_and_converges() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-cross-namespace";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_cross_ns_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_cross_ns_fresh").await?;
+    let ens_manifests =
+        seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    let mut basenames_manifests = Vec::new();
+    for pool in [incremental.pool(), fresh.pool()] {
+        basenames_manifests
+            .push(add_shared_resolver_discovery_namespace(pool, CHAIN, "basenames").await?);
+        sqlx::query(
+            "UPDATE normalized_events
+             SET namespace = 'basenames', source_family = 'basenames_base_registry'
+             WHERE chain_id = $1 AND resource_id = $2::uuid
+               AND event_kind = 'ResolverChanged'",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_BOB_RESOURCE)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let interim: (i64, String) = sqlx::query_as(
+        "SELECT (provenance ->> 'manifest_id')::bigint, support_status
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        interim,
+        (basenames_manifests[0], "supported".into()),
+        "the sole applicable same-namespace declaration must win before the second declaration",
+    );
+
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, ens_manifests)
+        .await?;
+    let mut outcomes = Vec::new();
+    for ((pool, ens_manifest_id), basenames_manifest_id) in [
+        (incremental.pool(), ens_manifests.0),
+        (fresh.pool(), ens_manifests.1),
+    ]
+    .into_iter()
+    .zip(basenames_manifests)
+    {
+        assert!(
+            ens_manifest_id < basenames_manifest_id,
+            "the fixture must make the ENS declaration the manifest-identity tie-break winner",
+        );
+        let winner: (i64, i64, String, String, String) = sqlx::query_as(
+            "SELECT count(*), min((provenance ->> 'manifest_id')::bigint),
+                    min(declared_summary #>> '{classification,source_family}'),
+                    min(declared_summary #>> '{classification,basis}'),
+                    min(support_status)
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        let losing_inventory: (i32, String, Option<String>) = sqlx::query_as(
+            "SELECT jsonb_array_length(entries), support_status, unsupported_reason
+             FROM record_inventory_current WHERE resource_id = $1::uuid",
+        )
+        .bind(DECLARED_V1_BOB_RESOURCE)
+        .fetch_one(pool)
+        .await?;
+        outcomes.push((winner, losing_inventory, ens_manifest_id));
+    }
+    assert_eq!(
+        outcomes[0].0, outcomes[1].0,
+        "cross-namespace declaration winner varied between incremental and fresh walks",
+    );
+    assert_eq!(
+        outcomes[0].1, outcomes[1].1,
+        "losing-namespace attribution varied between incremental and fresh walks",
+    );
+    for (winner, losing_inventory, ens_manifest_id) in outcomes {
+        assert_eq!(
+            winner,
+            (
+                1,
+                ens_manifest_id,
+                "ens_v1_resolver_l1".into(),
+                "manifest_declared_address".into(),
+                "supported".into(),
+            ),
+            "equal-rank declarations must collapse to the lower manifest identity",
+        );
+        assert_eq!(
+            losing_inventory,
+            (
+                0,
+                "unsupported".into(),
+                Some("resolver_classification_missing".into()),
+            ),
+            "the pointer in the losing declaration namespace must remain unsupported",
+        );
+    }
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "cross-namespace declaration collapse changed across incremental boundaries",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn declaration_winner_requires_same_namespace_admission_after_close() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-same-namespace-close";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_same_ns_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_same_ns_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        deactivate_foreign_declared_v1_manifest(pool, CHAIN).await?;
+        add_shared_resolver_discovery_namespace(pool, CHAIN, "basenames").await?;
+        insert_namespaced_manifest(
+            pool,
+            "basenames",
+            CHAIN,
+            "ens_v2_resolver_l1",
+            1,
+            "fixture",
+            "tests/project-shared-cross-namespace-v2-resolver.toml",
+            json!({"resolver_implementations": []}),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_set(after_state, '{rollout_status}', '\"deprecated\"')
+             WHERE chain_id = $1 AND namespace = 'ens'
+               AND event_kind = 'SourceManifestUpdated'
+               AND source_family = 'ens_v2_resolver_l1'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        set_shared_resolver_discovery_namespace_end(pool, CHAIN, "ens", Some(4)).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let winner: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT declared_summary #>> '{classification,source_family}',
+                    support_status,
+                    provenance ->> 'classification_admission_namespace'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            winner,
+            ("ens_v2_resolver_l1".into(), "unsupported".into(), None),
+            "a foreign-namespace admission must not preserve the ENS declaration winner",
+        );
+    }
+
+    let clocks_before = declared_v1_shared_clocks(incremental.pool(), CHAIN).await?;
+    insert_lineage_block(incremental.pool(), CHAIN, 5).await?;
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(incremental.pool())
+        .await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    assert_eq!(
+        declared_v1_shared_clocks(incremental.pool(), CHAIN).await?,
+        clocks_before,
+        "a foreign-namespace admission must not re-scope an unchanged resolver",
+    );
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "same-namespace declaration eligibility diverged across incremental boundaries",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn same_namespace_declared_resolver_uses_greatest_applicable_start_role() -> Result<()> {
+    assert_same_namespace_declared_resolver_role(
+        "project-declared-v1-multi-role-start",
+        ("later_start_resolver_role", 1),
+        ("earlier_start_resolver_role", 0),
+        "later_start_resolver_role",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn same_namespace_declared_resolver_uses_later_equal_start_role() -> Result<()> {
+    assert_same_namespace_declared_resolver_role(
+        "project-declared-v1-multi-role-order",
+        ("first_equal_start_role", 0),
+        ("later_equal_start_role", 0),
+        "later_equal_start_role",
+    )
+    .await
+}
+
+async fn assert_same_namespace_declared_resolver_role(
+    chain: &str,
+    first_role: (&str, i64),
+    second_role: (&str, i64),
+    expected_role: &str,
+) -> Result<()> {
+    let first = ScratchDatabase::create(&format!("{chain}_first")).await?;
+    let second = ScratchDatabase::create(&format!("{chain}_second")).await?;
+    let manifests = seed_declared_v1_shared_pair(first.pool(), second.pool(), chain).await?;
+
+    for (pool, manifest_id) in [(first.pool(), manifests.0), (second.pool(), manifests.1)] {
+        let mut payload = resolver_declaration_payload("ens", chain, DECLARED_V1_SHARED_RESOLVER);
+        payload["contracts"] = json!([
+            {
+                "role": first_role.0,
+                "address": DECLARED_V1_SHARED_RESOLVER,
+                "proxy_kind": "none",
+                "start_block": first_role.1
+            },
+            {
+                "role": second_role.0,
+                "address": DECLARED_V1_SHARED_RESOLVER,
+                "proxy_kind": "none",
+                "start_block": second_role.1
+            }
+        ]);
+        insert_manifest_update_event(pool, chain, "ens_v1_resolver_l1", manifest_id, payload)
+            .await?;
+        run_project(pool, chain, None, RunMode::Normal, 0, 3).await?;
+    }
+
+    let mut roles = Vec::new();
+    for pool in [first.pool(), second.pool()] {
+        roles.push(
+            sqlx::query_scalar::<_, String>(
+                "SELECT declared_summary #>> '{classification,role}'
+                 FROM resolver_current
+                 WHERE chain_id = $1 AND resolver_address = lower($2)",
+            )
+            .bind(chain)
+            .bind(DECLARED_V1_SHARED_RESOLVER)
+            .fetch_one(pool)
+            .await?,
+        );
+    }
+    assert_eq!(roles, vec![expected_role, expected_role]);
+
+    first.cleanup().await?;
+    second.cleanup().await
+}
+
+#[tokio::test]
+async fn declared_resolver_last_discovery_close_matches_fresh_rebuild() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-discovery-close";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_close_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_close_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND event_kind IN (
+                 'ResolverChanged', 'RecordChanged', 'RecordVersionChanged'
+             )",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        set_shared_resolver_discovery_end(pool, CHAIN, Some(4)).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+
+    let incremental_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    let fresh_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .fetch_one(fresh.pool())
+    .await?;
+    assert_eq!(
+        fresh_count, 0,
+        "a declaration alone must not admit a resolver"
+    );
+    assert_eq!(
+        incremental_count, fresh_count,
+        "closing the last discovery admission left a stale declared resolver",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn root_origin_declared_resolver_noop_preserves_clocks_and_converges() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-root-origin";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_root_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_root_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        set_shared_resolver_discovery_origin(pool, CHAIN, "ens_v2_root_l1").await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let winner: (String, Option<String>) = sqlx::query_as(
+            "SELECT support_status,
+                    provenance ->> 'classification_admission_namespace'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(winner, ("supported".into(), Some("ens".into())));
+    }
+    let clocks_before = declared_v1_shared_clocks(incremental.pool(), CHAIN).await?;
+    insert_lineage_block(incremental.pool(), CHAIN, 4).await?;
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(incremental.pool())
+        .await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    assert_eq!(
+        declared_v1_shared_clocks(incremental.pool(), CHAIN).await?,
+        clocks_before,
+        "a root-origin declaration winner must not re-scope on a no-op batch",
+    );
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "root-origin declaration classification diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn observed_declared_resolver_close_and_reopen_converges() -> Result<()> {
+    const CHAIN: &str = "project-declared-v1-observed-reopen";
+
+    let incremental = ScratchDatabase::create("project_declared_v1_reopen_incremental").await?;
+    let fresh = ScratchDatabase::create("project_declared_v1_reopen_fresh").await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        deactivate_foreign_declared_v1_manifest(pool, CHAIN).await?;
+        sqlx::query(
+            "UPDATE normalized_events SET source_family = 'ens_v1_registry_l1'
+             WHERE chain_id = $1 AND event_kind = 'ResolverChanged'",
+        )
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    }
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    activate_declared_v1_shared_pair(incremental.pool(), fresh.pool(), CHAIN, manifests).await?;
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 4).await?;
+        set_shared_resolver_discovery_end(pool, CHAIN, Some(4)).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        let closed: (String, Option<String>) = sqlx::query_as(
+            "SELECT support_status,
+                    provenance ->> 'classification_admission_namespace'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(closed, ("supported".into(), None));
+    }
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, CHAIN, 5).await?;
+        set_shared_resolver_discovery_end(pool, CHAIN, None).await?;
+    }
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        let reopened_namespace: Option<String> = sqlx::query_scalar(
+            "SELECT provenance ->> 'classification_admission_namespace'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(DECLARED_V1_SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(reopened_namespace.as_deref(), Some("ens"));
+    }
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "resolver admission reopen diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn registrar_transfer_nested_resolver_scope_matches_full_rebuild() -> Result<()> {
     assert_registrar_transfer_matches_full_rebuild("project-resolver-transfer", false).await
 }
@@ -13248,8 +14214,8 @@ async fn normal_pointer_move_rederives_retained_binding_family() -> Result<()> {
     .fetch_one(incremental.pool())
     .await?;
     assert_eq!(
-        retained_target, "3",
-        "the surviving binding was unexpectedly rebuilt"
+        retained_target, "4",
+        "address-level resolver classification changes must rebuild every current pointer"
     );
     normalize_projection_clocks(incremental.pool()).await?;
     normalize_projection_clocks(fresh.pool()).await?;
@@ -17924,6 +18890,661 @@ async fn seed_declaration_boundary_fixture(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+const DECLARED_V1_SHARED_RESOLVER: &str = "0x0000000000000000000000000000000000000d01";
+const DECLARED_V1_UNDECLARED_RESOLVER: &str = "0x0000000000000000000000000000000000000d02";
+const DECLARED_V1_ALICE_RESOURCE: &str = "00000000-0000-0000-0000-000000000d01";
+const DECLARED_V1_BOB_RESOURCE: &str = "00000000-0000-0000-0000-000000000d02";
+
+#[derive(Clone, Copy)]
+enum DeclaredV1NodeOnlyDelta {
+    RecordUpdate,
+    VersionReset,
+    UnrelatedRecord,
+}
+
+async fn assert_declared_v1_node_only_delta(
+    chain: &str,
+    delta: DeclaredV1NodeOnlyDelta,
+) -> Result<()> {
+    let incremental = ScratchDatabase::create(&format!("{chain}-incremental")).await?;
+    let fresh = ScratchDatabase::create(&format!("{chain}-fresh")).await?;
+    let manifests = seed_declared_v1_shared_pair(incremental.pool(), fresh.pool(), chain).await?;
+    let alice_node = format!("{:#x}", raw_namehash(&[b"alice", b"eth"]));
+
+    for (pool, manifest_id) in [
+        (incremental.pool(), manifests.0),
+        (fresh.pool(), manifests.1),
+    ] {
+        insert_manifest_update_event(
+            pool,
+            chain,
+            "ens_v1_resolver_l1",
+            manifest_id,
+            resolver_declaration_payload("ens", chain, DECLARED_V1_SHARED_RESOLVER),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_set(after_state, '{value}', '\"old\"')
+             WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+               AND after_state ->> 'node' = $2",
+        )
+        .bind(chain)
+        .bind(&alice_node)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 3).await?;
+    let before: (Option<String>, String) = sqlx::query_as(
+        "SELECT entries -> 0 ->> 'value', last_recomputed_at::text
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(DECLARED_V1_ALICE_RESOURCE)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(before.0.as_deref(), Some("old"));
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        insert_lineage_block(pool, chain, 4).await?;
+        let (event_kind, node, after_state) = match delta {
+            DeclaredV1NodeOnlyDelta::RecordUpdate => (
+                "RecordChanged",
+                alice_node.clone(),
+                json!({
+                    "node": alice_node,
+                    "resolver": DECLARED_V1_SHARED_RESOLVER,
+                    "record_key": "text:url",
+                    "record_family": "text",
+                    "selector_key": "url",
+                    "value_retained": true,
+                    "value": "new"
+                }),
+            ),
+            DeclaredV1NodeOnlyDelta::VersionReset => (
+                "RecordVersionChanged",
+                alice_node.clone(),
+                json!({
+                    "node": alice_node,
+                    "resolver": DECLARED_V1_SHARED_RESOLVER,
+                    "record_version": 2
+                }),
+            ),
+            DeclaredV1NodeOnlyDelta::UnrelatedRecord => {
+                let node = format!("{:#x}", raw_namehash(&[b"unrelated", b"eth"]));
+                (
+                    "RecordChanged",
+                    node.clone(),
+                    json!({
+                        "node": node,
+                        "resolver": DECLARED_V1_SHARED_RESOLVER,
+                        "record_key": "text:url",
+                        "record_family": "text",
+                        "selector_key": "url",
+                        "value_retained": true,
+                        "value": "unrelated"
+                    }),
+                )
+            }
+        };
+        insert_event(
+            pool,
+            chain,
+            4,
+            None,
+            None,
+            event_kind,
+            "ens_v1_resolver_l1",
+            after_state,
+            json!({"emitting_address": DECLARED_V1_SHARED_RESOLVER, "node": node}),
+        )
+        .await?;
+    }
+
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(incremental.pool())
+        .await?;
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(chain, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    run_project(fresh.pool(), chain, None, RunMode::Normal, 0, 4).await?;
+
+    let incremental_after: (Option<String>, String) = sqlx::query_as(
+        "SELECT entries -> 0 ->> 'value', last_recomputed_at::text
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(DECLARED_V1_ALICE_RESOURCE)
+    .fetch_one(incremental.pool())
+    .await?;
+    let fresh_value: Option<String> = sqlx::query_scalar(
+        "SELECT entries -> 0 ->> 'value'
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(DECLARED_V1_ALICE_RESOURCE)
+    .fetch_one(fresh.pool())
+    .await?;
+    match delta {
+        DeclaredV1NodeOnlyDelta::RecordUpdate => {
+            assert_eq!(incremental_after.0.as_deref(), Some("new"));
+            assert_eq!(fresh_value.as_deref(), Some("new"));
+        }
+        DeclaredV1NodeOnlyDelta::VersionReset => {
+            assert_eq!(incremental_after.0, None);
+            assert_eq!(fresh_value, None);
+        }
+        DeclaredV1NodeOnlyDelta::UnrelatedRecord => {
+            assert_eq!(incremental_after.0.as_deref(), Some("old"));
+            assert_eq!(fresh_value.as_deref(), Some("old"));
+            assert_eq!(
+                incremental_after.1, before.1,
+                "a node-only change for another name must not republish this inventory",
+            );
+        }
+    }
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(fresh.pool()).await?,
+        "node-only record delta diverged from a fresh rebuild",
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+fn resolver_declaration_payload(namespace: &str, chain: &str, address: &str) -> Value {
+    json!({
+        "manifest_version": 1,
+        "namespace": namespace,
+        "source_family": "ens_v1_resolver_l1",
+        "chain": chain,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "role": "public_resolver",
+            "address": address,
+            "proxy_kind": "none",
+            "start_block": 0
+        }],
+        "discovery_rules": [],
+        "abi": {"events": [], "calls": []}
+    })
+}
+
+async fn seed_declared_v1_shared_pair(
+    incremental: &PgPool,
+    fresh: &PgPool,
+    chain: &str,
+) -> Result<(i64, i64)> {
+    let seed = |pool| {
+        seed_declared_v1_shared_resolver_fixture(
+            pool,
+            chain,
+            DECLARED_V1_SHARED_RESOLVER,
+            DECLARED_V1_UNDECLARED_RESOLVER,
+            DECLARED_V1_ALICE_RESOURCE,
+            DECLARED_V1_BOB_RESOURCE,
+        )
+    };
+    Ok((seed(incremental).await?, seed(fresh).await?))
+}
+
+async fn activate_declared_v1_shared_pair(
+    incremental: &PgPool,
+    fresh: &PgPool,
+    chain: &str,
+    manifests: (i64, i64),
+) -> Result<()> {
+    for (pool, manifest_id) in [(incremental, manifests.0), (fresh, manifests.1)] {
+        insert_manifest_update_event(
+            pool,
+            chain,
+            "ens_v1_resolver_l1",
+            manifest_id,
+            resolver_declaration_payload("ens", chain, DECLARED_V1_SHARED_RESOLVER),
+        )
+        .await?;
+    }
+    run_project(
+        incremental,
+        chain,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(chain, 3),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await?;
+    run_project(fresh, chain, None, RunMode::Normal, 0, 3).await
+}
+
+async fn declared_v1_shared_clocks(pool: &PgPool, chain: &str) -> Result<(String, String)> {
+    Ok(sqlx::query_as(
+        "SELECT resolver.last_recomputed_at::text,
+                (SELECT max(last_recomputed_at)::text
+                 FROM record_inventory_current
+                 WHERE resource_id IN ($3::uuid, $4::uuid))
+         FROM resolver_current resolver
+         WHERE resolver.chain_id = $1 AND resolver.resolver_address = lower($2)",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(DECLARED_V1_ALICE_RESOURCE)
+    .bind(DECLARED_V1_BOB_RESOURCE)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn set_shared_resolver_discovery_origin(
+    pool: &PgPool,
+    chain: &str,
+    source_family: &str,
+) -> Result<()> {
+    let origin_manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = $1 AND namespace = 'ens' AND source_family = $2",
+    )
+    .bind(chain)
+    .bind(source_family)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE discovery_edges edge SET source_manifest_id = $3
+         FROM contract_instance_addresses address
+         WHERE edge.chain_id = $1
+           AND edge.to_contract_instance_id = address.contract_instance_id
+           AND address.chain_id = edge.chain_id
+           AND lower(address.address) = lower($2)",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(origin_manifest)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn set_shared_resolver_discovery_end(
+    pool: &PgPool,
+    chain: &str,
+    active_to: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE discovery_edges edge
+         SET active_to_block_number = $3, active_to_block_hash = $4
+         FROM contract_instance_addresses address
+         WHERE edge.chain_id = $1
+           AND edge.to_contract_instance_id = address.contract_instance_id
+           AND address.chain_id = edge.chain_id
+           AND lower(address.address) = lower($2)",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(active_to)
+    .bind(active_to.map(|block| block_hash(chain, block)))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn set_shared_resolver_discovery_namespace_end(
+    pool: &PgPool,
+    chain: &str,
+    namespace: &str,
+    active_to: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE discovery_edges edge
+         SET active_to_block_number = $4, active_to_block_hash = $5
+         FROM contract_instance_addresses address, manifest_versions origin
+         WHERE edge.chain_id = $1
+           AND edge.to_contract_instance_id = address.contract_instance_id
+           AND address.chain_id = edge.chain_id
+           AND lower(address.address) = lower($2)
+           AND origin.manifest_id = edge.source_manifest_id
+           AND origin.namespace = $3",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .bind(namespace)
+    .bind(active_to)
+    .bind(active_to.map(|block| block_hash(chain, block)))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn deactivate_foreign_declared_v1_manifest(pool: &PgPool, chain: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = jsonb_set(after_state, '{rollout_status}', '\"deprecated\"')
+         WHERE chain_id = $1 AND namespace = 'basenames'
+           AND event_kind = 'SourceManifestUpdated'
+           AND source_family = 'ens_v1_resolver_l1'",
+    )
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn add_shared_resolver_discovery_namespace(
+    pool: &PgPool,
+    chain: &str,
+    namespace: &str,
+) -> Result<i64> {
+    let declaration_manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id
+         FROM manifest_versions
+         WHERE chain_id = $1 AND namespace = $2
+           AND source_family = 'ens_v1_resolver_l1'",
+    )
+    .bind(chain)
+    .bind(namespace)
+    .fetch_one(pool)
+    .await?;
+    let origin_manifest = insert_namespaced_manifest(
+        pool,
+        namespace,
+        chain,
+        "ens_v2_registry_l1",
+        1,
+        "fixture",
+        "tests/project-shared-cross-namespace-v2-registry.toml",
+        json!({"contracts": []}),
+    )
+    .await?;
+    let resolver_instance: Uuid = sqlx::query_scalar(
+        "SELECT contract_instance_id
+         FROM contract_instance_addresses
+         WHERE chain_id = $1 AND address = lower($2)",
+    )
+    .bind(chain)
+    .bind(DECLARED_V1_SHARED_RESOLVER)
+    .fetch_one(pool)
+    .await?;
+    let source_instance = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind
+         ) VALUES ($1, $2, 'contract')",
+    )
+    .bind(source_instance)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis,
+             source_manifest_id, active_from_block_number,
+             active_from_block_hash, canonicality_state
+         ) VALUES (
+             $1, 'resolver', $2, $3, 'fixture', 'reachable_from_root',
+             $4, 1, $5, 'canonical'
+         )",
+    )
+    .bind(chain)
+    .bind(source_instance)
+    .bind(resolver_instance)
+    .bind(origin_manifest)
+    .bind(block_hash(chain, 1))
+    .execute(pool)
+    .await?;
+    Ok(declaration_manifest)
+}
+
+async fn seed_declared_v1_shared_resolver_fixture(
+    pool: &PgPool,
+    chain: &str,
+    shared_resolver: &str,
+    undeclared_resolver: &str,
+    alice_resource: &str,
+    bob_resource: &str,
+) -> Result<i64> {
+    seed_lineage(pool, chain, 3).await?;
+    let origin_manifest = insert_namespaced_manifest(
+        pool,
+        "ens",
+        chain,
+        "ens_v2_registry_l1",
+        1,
+        "fixture",
+        "tests/project-shared-v2-registry.toml",
+        json!({"contracts": []}),
+    )
+    .await?;
+    insert_namespaced_manifest(
+        pool,
+        "ens",
+        chain,
+        "ens_v2_root_l1",
+        1,
+        "fixture",
+        "tests/project-shared-v2-root.toml",
+        json!({"contracts": []}),
+    )
+    .await?;
+    insert_namespaced_manifest(
+        pool,
+        "ens",
+        chain,
+        "ens_v2_resolver_l1",
+        1,
+        "fixture",
+        "tests/project-shared-v2-resolver.toml",
+        json!({"resolver_implementations": []}),
+    )
+    .await?;
+    let v1_manifest = insert_namespaced_manifest(
+        pool,
+        "ens",
+        chain,
+        "ens_v1_resolver_l1",
+        1,
+        "fixture",
+        "tests/project-shared-v1-resolver.toml",
+        json!({"contracts": []}),
+    )
+    .await?;
+    insert_namespaced_manifest(
+        pool,
+        "basenames",
+        chain,
+        "ens_v1_resolver_l1",
+        1,
+        "fixture",
+        "tests/project-shared-foreign-v1-resolver.toml",
+        resolver_declaration_payload("basenames", chain, shared_resolver),
+    )
+    .await?;
+
+    let source_instance = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind
+         ) VALUES ($1, $2, 'contract')",
+    )
+    .bind(source_instance)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    for address in [shared_resolver, undeclared_resolver] {
+        let resolver_instance = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO contract_instances (
+                 contract_instance_id, chain_id, contract_kind
+             ) VALUES ($1, $2, 'contract')",
+        )
+        .bind(resolver_instance)
+        .bind(chain)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address,
+                 active_from_block_number, active_from_block_hash,
+                 source_manifest_id
+             ) VALUES ($1, $2, lower($3), 1, $4, $5)",
+        )
+        .bind(resolver_instance)
+        .bind(chain)
+        .bind(address)
+        .bind(block_hash(chain, 1))
+        .bind(origin_manifest)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO discovery_edges (
+                 chain_id, edge_kind, from_contract_instance_id,
+                 to_contract_instance_id, discovery_source, admission_basis,
+                 source_manifest_id, active_from_block_number,
+                 active_from_block_hash, canonicality_state
+             ) VALUES (
+                 $1, 'resolver', $2, $3, 'fixture', 'reachable_from_root',
+                 $4, 1, $5, 'canonical'
+             )",
+        )
+        .bind(chain)
+        .bind(source_instance)
+        .bind(resolver_instance)
+        .bind(origin_manifest)
+        .bind(block_hash(chain, 1))
+        .execute(pool)
+        .await?;
+    }
+
+    for (resource, label) in [(alice_resource, "alice"), (bob_resource, "bob")] {
+        let node = format!("{:#x}", raw_namehash(&[label.as_bytes(), b"eth"]));
+        let logical_name_id = format!("ens:{node}");
+        let binding_id = if label == "alice" {
+            Uuid::parse_str("00000000-0000-0000-0000-000000000d11")?
+        } else {
+            Uuid::parse_str("00000000-0000-0000-0000-000000000d12")?
+        };
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES ($1::uuid, $2, $3, 1, 'canonical')",
+        )
+        .bind(resource)
+        .bind(chain)
+        .bind(block_hash(chain, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, 'ens', $2, ARRAY[$3, 'eth'], decode('00', 'hex'), $4,
+                 ARRAY[$5, $6], $7, 'active', $8, $9, 1, 'canonical'
+             )",
+        )
+        .bind(&logical_name_id)
+        .bind(format!("{label}.eth"))
+        .bind(label)
+        .bind(&node)
+        .bind(format!("{:#x}", keccak256(label.as_bytes())))
+        .bind(format!("{:#x}", keccak256(b"eth")))
+        .bind(NORMALIZER)
+        .bind(chain)
+        .bind(block_hash(chain, 1))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (
+                 surface_binding_id, logical_name_id, resource_id, binding_kind,
+                 authority_arm, active_from, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, $2, $3::uuid, 'declared_registry_path', 'ens_v2',
+                 to_timestamp(1), $4, $5, 1, 'canonical'
+             )",
+        )
+        .bind(binding_id)
+        .bind(&logical_name_id)
+        .bind(resource)
+        .bind(chain)
+        .bind(block_hash(chain, 1))
+        .execute(pool)
+        .await?;
+        let pointer_family = if label == "alice" {
+            "ens_v2_registry_l1"
+        } else {
+            "ens_v2_root_l1"
+        };
+        insert_event(
+            pool,
+            chain,
+            2,
+            Some(&logical_name_id),
+            Some(resource),
+            "ResolverChanged",
+            pointer_family,
+            json!({"resolver": shared_resolver}),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            chain,
+            3,
+            None,
+            None,
+            "RecordVersionChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node": node,
+                "resolver": shared_resolver,
+                "record_version": 1
+            }),
+            json!({"emitting_address": shared_resolver}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            chain,
+            3,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "node": node,
+                "resolver": shared_resolver,
+                "record_key": "text:url",
+                "record_family": "text",
+                "selector_key": "url",
+                "value_retained": true,
+                "value": format!("https://{label}.shared.example.test")
+            }),
+            json!({"emitting_address": shared_resolver}),
+        )
+        .await?;
+    }
+    Ok(v1_manifest)
 }
 
 async fn seed_reconvergence_fixture(pool: &PgPool, chain: &str) -> Result<i64> {

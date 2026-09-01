@@ -1,5 +1,6 @@
 mod alias_summary;
 mod binding_summary;
+mod declaration_precedence;
 mod permission_summary;
 mod read_features;
 
@@ -8,6 +9,7 @@ use sqlx::{Postgres, Transaction};
 use crate::{
     Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
 };
+use declaration_precedence::DISCOVERY_CTES;
 use read_features::{DECLARED_READ_FEATURES, IMPLEMENTATION_READ_FEATURES};
 
 const SUMMARY_SAMPLE_LIMIT: i32 = 100;
@@ -24,54 +26,7 @@ pub(super) async fn build(
 
     let resolver_build = format!(
         r#"
-        WITH discovered AS (
-            SELECT lower(address.address) AS resolver_address,
-                   CASE origin.source_family
-                       WHEN 'ens_v1_registry_l1' THEN 'ens_v1_resolver_l1'
-                       WHEN 'ens_v1_resolver_l1' THEN 'ens_v1_resolver_l1'
-                       WHEN 'ens_v2_registry_l1' THEN 'ens_v2_resolver_l1'
-                       WHEN 'ens_v2_resolver_l1' THEN 'ens_v2_resolver_l1'
-                       WHEN 'basenames_base_registry' THEN 'basenames_base_resolver'
-                       WHEN 'basenames_base_resolver' THEN 'basenames_base_resolver'
-                   END AS source_family,
-                   NULL::text AS classification_role,
-                   1 AS priority
-            FROM discovery_edges edge
-            JOIN contract_instance_addresses address
-              ON address.contract_instance_id = edge.to_contract_instance_id
-             AND address.chain_id = edge.chain_id
-            LEFT JOIN project_manifests origin
-              ON origin.manifest_id = edge.source_manifest_id
-            WHERE edge.chain_id = $1
-              AND edge.edge_kind = 'resolver'
-              AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND (edge.active_from_block_number IS NULL OR edge.active_from_block_number <= $2)
-              AND (edge.active_to_block_number IS NULL OR edge.active_to_block_number > $2)
-              AND edge.deactivated_at IS NULL
-              AND (
-                  edge.active_from_block_hash IS NULL
-                  OR EXISTS (
-                      SELECT 1 FROM chain_lineage lineage
-                      WHERE lineage.chain_id = edge.chain_id
-                        AND lineage.block_number = edge.active_from_block_number
-                        AND lineage.block_hash = edge.active_from_block_hash
-                        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  )
-              )
-              AND (address.active_from_block_number IS NULL OR address.active_from_block_number <= $2)
-              AND (address.active_to_block_number IS NULL OR address.active_to_block_number > $2)
-              AND address.deactivated_at IS NULL
-              AND (
-                  address.active_from_block_hash IS NULL
-                  OR EXISTS (
-                      SELECT 1 FROM chain_lineage lineage
-                      WHERE lineage.chain_id = address.chain_id
-                        AND lineage.block_number = address.active_from_block_number
-                        AND lineage.block_hash = address.active_from_block_hash
-                        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  )
-              )
-        ),
+        WITH {DISCOVERY_CTES},
         resolver_event_candidates AS (
             SELECT lower(CASE
                        WHEN event.event_kind = 'Upgraded'
@@ -311,11 +266,16 @@ pub(super) async fn build(
             SELECT DISTINCT ON (combined.resolver_address)
                    combined.resolver_address,
                    combined.source_family,
-                   combined.classification_role
+                   combined.classification_role,
+                   combined.classification_manifest_id,
+                   combined.classification_admission_namespace
             FROM (
                 SELECT * FROM discovered WHERE source_family IS NOT NULL
-                UNION ALL SELECT * FROM observed
-                UNION ALL SELECT * FROM retained_permission_candidates
+                UNION ALL SELECT observed.*, NULL::bigint, NULL::text,
+                                 NULL::bigint, NULL::bigint FROM observed
+                UNION ALL SELECT retained.*, NULL::bigint, NULL::text,
+                                 NULL::bigint, NULL::bigint
+                FROM retained_permission_candidates retained
             ) combined
             WHERE combined.resolver_address <>
                   '0x0000000000000000000000000000000000000000'
@@ -333,7 +293,11 @@ pub(super) async fn build(
               )
             ORDER BY combined.resolver_address,
                      combined.priority,
-                     combined.source_family
+                     combined.source_family,
+                     combined.classification_manifest_id NULLS LAST,
+                     COALESCE(combined.classification_declaration_start_block, 0) DESC,
+                     combined.classification_declaration_ordinality DESC NULLS LAST,
+                     combined.classification_role
         ),
         upgrade_ranked AS (
             SELECT event.*,
@@ -356,6 +320,7 @@ pub(super) async fn build(
         classified AS (
             SELECT candidate.resolver_address,
                    candidate.source_family,
+                   candidate.classification_admission_namespace,
                    manifest.manifest_id,
                    manifest.manifest_version,
                    manifest.manifest_payload,
@@ -415,7 +380,13 @@ pub(super) async fn build(
                    ) AS upgraded_to_declared
             FROM candidates candidate
             JOIN project_manifests manifest
-              ON manifest.source_family = candidate.source_family
+              ON (
+                  candidate.classification_manifest_id IS NOT NULL
+                  AND manifest.manifest_id = candidate.classification_manifest_id
+              ) OR (
+                  candidate.classification_manifest_id IS NULL
+                  AND manifest.source_family = candidate.source_family
+              )
             LEFT JOIN latest_upgrades upgrade
               ON upgrade.source_family = candidate.source_family
              AND upgrade.resolver_address = candidate.resolver_address
@@ -548,6 +519,8 @@ pub(super) async fn build(
                jsonb_strip_nulls(jsonb_build_object(
                    'chain_id', $1, 'manifest_id', manifest_id,
                    'manifest_event_id', manifest_event_id,
+                   'classification_admission_namespace',
+                       classification_admission_namespace,
                    'upgrade_event_id', upgrade_event_id,
                    'candidate_event_ids', NULLIF(candidate_event_ids, '[]'::jsonb)
                )),

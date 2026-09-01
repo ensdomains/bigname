@@ -139,9 +139,13 @@ outcomes, or durable traces.
   event whose `logical_name_id` is null, attribution instead requires the
   selected pointer's source family to be `ens_v1_registry_l1`,
   `ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`, then joins chain, surface
-  namehash to event node, and current resolver to emitting address. Incremental
-  Project staging uses the same three-family pointer restriction when adding
-  those null-name events. Serving still
+  namehash to event node, and current resolver to emitting address. A selected
+  `ens_v2_registry_l1` or `ens_v2_root_l1` pointer may also attribute the event
+  when its target resolver's final classification is supported
+  `ens_v1_resolver_l1` from an applicable exact declaration and the classifying
+  manifest's namespace matches the pointer's namespace. Incremental Project
+  staging applies the same declaration and namespace guard when adding those
+  null-name events. Serving still
   attaches that inventory to a name only through the name's current readable
   resource.
 - Project stages only ordinary or `consumer_visibility=activated` interpreted
@@ -358,17 +362,19 @@ unsupported families, and any retained indexed values. The record event need
 not carry that resource: Project normally joins its `logical_name_id` and
 emitting resolver to the pointer without restricting either event's source
 family. An `ens_v1_resolver_l1` event whose `logical_name_id` is null may join
-only when the selected pointer's source family is `ens_v1_registry_l1`,
+when the selected pointer's source family is `ens_v1_registry_l1`,
 `ens_v1_registrar_l1`, or `ens_v1_wrapper_l1`, and only through the same chain,
 the surface namehash equal to its retained node, and the pointer address equal
-to its emitting resolver. Incremental staging applies the same pointer-family
-restriction. Whether an ENSv2-family pointer should serve node-keyed
-pre-surface ENSv1 records is deliberately unresolved and tracked in
-[#621](https://github.com/ensdomains/bigname/issues/621); that issue's comment
-records the sibling question for `basenames_base_resolver` records with no
-logical-name attribution and a Basenames pointer. Pointer position is not a
-write-time lower bound: selecting a resolver exposes its retained pre-pointer
-writes, switching away hides them,
+to its emitting resolver. A selected `ens_v2_registry_l1` or `ens_v2_root_l1`
+pointer may also join when its target resolver's final classification is
+supported `ens_v1_resolver_l1` from an applicable exact declaration and the
+classifying manifest's namespace matches the pointer's namespace. Incremental
+staging applies the same guarded exception. The sibling question for
+`basenames_base_resolver` records with no logical-name attribution and a
+Basenames pointer remains unresolved in
+[#621](https://github.com/ensdomains/bigname/issues/621). Pointer position is
+not a write-time lower bound: selecting a resolver exposes its retained
+pre-pointer writes, switching away hides them,
 and switching back restores them. The latest `RecordVersionChanged` from that
 resolver remains the boundary, and records must be strictly later than it. This
 follows the registry resolver lookup

@@ -5,9 +5,11 @@ use crate::{
 };
 
 mod authority;
+mod classification;
 mod inventory;
 mod primary;
 mod resolver;
+mod resolver_dependents;
 mod retracted;
 mod topology;
 mod wrapper;
@@ -34,6 +36,7 @@ pub(crate) async fn initialize(
 
     stage_changed_events(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_direct_scope(transaction, chain_id, window.from_block, window.to_block).await?;
+    inventory::include_changed_node_record_dependents(transaction, chain_id).await?;
     inventory::include_changed_record_consumers(transaction, chain_id, target.number).await?;
     include_registry_resolver_parent_names(transaction, chain_id, target.number).await?;
     authority::include_changed_child_proofs(
@@ -64,7 +67,7 @@ pub(crate) async fn initialize(
         })?;
     }
     include_classification_scope(transaction, chain_id, window.previous, target.number).await?;
-    include_resolver_dependents(transaction, chain_id, target.number).await?;
+    resolver_dependents::include(transaction, chain_id).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
@@ -414,8 +417,7 @@ async fn include_classification_scope(
         "INSERT INTO project_scope_resolver_dependents
          SELECT lower(live.resolver_address) FROM resolver_current live
          LEFT JOIN project_manifests manifest
-           ON manifest.source_family =
-              live.declared_summary -> 'classification' ->> 'source_family'
+           ON manifest.manifest_id = (live.provenance ->> 'manifest_id')::bigint
          WHERE live.chain_id = $1
            AND (
                manifest.manifest_id IS NULL
@@ -423,14 +425,31 @@ async fn include_classification_scope(
                   manifest.manifest_event_id::text
            )
          UNION
-         SELECT lower(declaration ->> 'address') FROM project_manifests manifest
+         SELECT declaration.resolver_address
+         FROM project_declared_resolver_addresses declaration
+         LEFT JOIN resolver_current live
+           ON live.chain_id = $1
+          AND lower(live.resolver_address) = declaration.resolver_address
+         LEFT JOIN project_manifests live_manifest
+           ON live_manifest.manifest_id =
+              (live.provenance ->> 'manifest_id')::bigint
+         WHERE live.resolver_address IS NULL
+            OR declaration.declaration_start_block BETWEEN $3::bigint + 1 AND $2
+            OR (
+                live_manifest.namespace = declaration.namespace
+                AND live.provenance ->> 'manifest_event_id' IS DISTINCT FROM
+                    declaration.manifest_event_id::text
+            )
+         UNION
+         SELECT lower(declaration ->> 'address')
+         FROM project_manifests manifest
          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
              manifest.manifest_payload -> 'contracts', '[]'::jsonb
          )) declaration
          LEFT JOIN resolver_current live
            ON live.chain_id = $1
           AND lower(live.resolver_address) = lower(declaration ->> 'address')
-         WHERE manifest.source_family IN ('ens_v1_resolver_l1', 'basenames_base_resolver')
+         WHERE manifest.source_family = 'basenames_base_resolver'
            AND declaration ->> 'address' IS NOT NULL
            AND (
                live.resolver_address IS NULL
@@ -479,6 +498,9 @@ async fn include_classification_scope(
         ProjectError::database("failed to scope resolver classification changes", error)
     })?;
 
+    classification::include_changed_declaration_winners(transaction, chain_id, target_block)
+        .await?;
+
     sqlx::query(
         "INSERT INTO project_scope_resolvers
          SELECT resolver_address FROM project_scope_resolver_dependents
@@ -489,46 +511,6 @@ async fn include_classification_scope(
     .map_err(|error| {
         ProjectError::database("failed to rebuild changed resolver entities", error)
     })?;
-    Ok(())
-}
-
-async fn include_resolver_dependents(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    _target_block: i64,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO project_scope_resources
-         SELECT inventory.resource_id
-         FROM record_inventory_current inventory
-         JOIN project_scope_resolver_dependents scope
-           ON lower(scope.resolver_address) = lower(
-               inventory.provenance ->> 'resolver_address'
-           )
-         WHERE inventory.provenance ->> 'chain_id' = $1
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(chain_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to scope resolver resources", error))?;
-
-    sqlx::query(
-        "INSERT INTO project_scope_names
-         SELECT inventory.provenance ->> 'logical_name_id'
-         FROM record_inventory_current inventory
-         JOIN project_scope_resolver_dependents scope
-           ON lower(scope.resolver_address) = lower(
-               inventory.provenance ->> 'resolver_address'
-           )
-         WHERE inventory.provenance ->> 'chain_id' = $1
-           AND inventory.provenance ->> 'logical_name_id' IS NOT NULL
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(chain_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to scope resolver names", error))?;
     Ok(())
 }
 
