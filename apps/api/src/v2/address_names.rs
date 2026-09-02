@@ -18,7 +18,7 @@ use super::name_filter::normalize_name_prefix;
 use super::permission_support::{
     apply_role_summary_support_meta, permission_support_for_resources,
 };
-use super::support::parse_evm_address;
+use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
     AddressNamesDedupe, AddressNamesSort, Envelope, Meta, Page, QueryParamAllowlist,
     RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
@@ -103,6 +103,9 @@ pub(crate) async fn get_address_names(
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
+    if let Some(namespace) = params.namespace.as_deref() {
+        ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
+    }
     let namespace_filter = params.namespace.clone();
     let include_role_summary = address_names_include_role_summary(&params.include)?;
     let storage_relations = params

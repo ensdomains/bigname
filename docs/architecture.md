@@ -81,7 +81,7 @@ Four identity layers, each with its own continuity rules:
 
 ### `logical_name_id`
 
-Stable identity for an on-chain name within a namespace, written as `<namespace>:<namehash>` where `namehash` is the lowercase `0x`-prefixed 32-byte node. It survives backing-resource rotation, token regeneration, lapses, re-registrations, and normalizer-version changes. Raw label text and normalization results are attributes, never identity inputs, under the audit's [normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity).
+Stable identity for an on-chain name within a namespace, written as `<namespace>:<namehash>` where `namehash` is the lowercase `0x`-prefixed 32-byte node. It survives backing-resource rotation, token regeneration, lapses, re-registrations, and normalizer-version changes. Raw label text and normalization results are attributes, never identity inputs, under the audit's [normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
 
 ### `resource_id`
 
@@ -160,7 +160,14 @@ The canonical `NameSurface` carries one representative result; alternate spellin
 
 `PreimageObserved` facts may come from registrar/registry events with explicit labels, wrapper events with human-readable names, reverse/primary flows that reveal names, and metadata when a manifest allows. Invalid input is never silently coerced into a valid identity.
 
-For ENSv1, resolver `NameChanged(node, name)` strings observed through admitted reverse/primary flows are preimage observations only.[^v1-namechanged-l10][^v1-namechanged-l18][^v1-revreg-l129][^v1-revreg-l130] They can attach already-observed forward-node facts to a human-readable name; they do not synthesize ownership, resolver, or record facts.
+Across admitted ENSv1, ENSv2, and Basenames resolver-family intake,
+every `NameChanged(node, name)` normalizes as `RecordChanged` in the `name`
+family.[^v1-namechanged-l10][^v1-namechanged-l18][^v1-revreg-l129][^v1-revreg-l130][^v2-pres-namechanged][^bn-namechanged]
+A nonempty `name` also produces preimage observations that can attach
+already-observed forward-node facts to a human-readable name; an empty clear
+produces no preimage observation.
+Regardless of resolver or node type, these rows carry no `primary_claim_source`;
+they do not synthesize ownership, resolver selection, or primary-name facts.
 
 For ENSv2, admitted registry, registrar, and resolver name-bearing events produce preimage observations: registry `LabelRegistered`, `LabelReserved`, `ParentUpdated`; registrar `NameRegistered`, `NameRenewed`; resolver `AliasChanged`, `NamedResource`, `NamedTextResource`, `NamedAddrResource`.[^v2-events-l15][^v2-events-l30][^v2-events-l75][^v2-iethreg-l32][^v2-iethreg-l53][^v2-iperm-resolver-l14][^v2-pres-l132][^v2-pres-l142][^v2-pres-l153] These do not write projections or mutate manifest capability state.
 
@@ -712,9 +719,11 @@ Permissions and control are anchored to `resource_id`, never to surface text. Th
 
 ## Normalized event taxonomy
 
-Identity, preimage, discovery: `PreimageObserved`, `NameClassified`, `SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `MetadataChanged`, `SourceManifestUpdated`.
+Identity, preimage, discovery, and contract history: `PreimageObserved`,
+`SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `RegistryCreated`,
+`Upgraded`, `SourceManifestUpdated`.
 
-Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`, `PricingPolicyChanged`.
+Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`.
 
 For a version-zero initial `RegistrationReserved`, the emitted token ID also
 identifies the ENSv2 registry-entry resource, so interpretation materializes the
@@ -747,15 +756,13 @@ authority transition, or surface binding.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L154 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 
-Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`, `ResolutionEpochChanged`.
+Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`.
 
-Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `WildcardCoverageChanged`, `RecordChanged`, `RecordVersionChanged`, `RecordInventoryObserved`.
+Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `RecordChanged`, `RecordVersionChanged`.
 
 Permissions: `PermissionChanged`, `RootPermissionChanged`, `PermissionScopeChanged`.
 
-Reverse and primary: `ReverseChanged`, `PrimaryNameClaimed`, `PrimaryNameVerified`, `PrimaryNameInvalidated`.
-
-Execution and coverage: `VerifiedResolutionObserved`, `VerifiedResolutionInvalidated`, `CoverageChanged`.
+Reverse and primary: `ReverseChanged`.
 
 ENSv2 mappings:
 
@@ -1382,9 +1389,12 @@ v2 primary-name verification performs no write.
 
 ## Reorg, redo, and historical ranges
 
-The phase runner stores competing block lineage per chain. Head publication
-marks a displaced readable lineage branch `orphaned` and promotes the selected
-branch; interpretation selects raw facts through that lineage rather than
+The phase runner stores competing block hashes per chain, including observed and
+orphaned branches. In the supported phase schema, the schema-v2 baseline's
+partial unique index permits at most one `canonical`, `safe`, or `finalized`
+block at a given chain height. Head publication marks a
+displaced readable lineage branch `orphaned` before making the selected branch
+readable; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
 identity, discovery, and normalized-event output for its selected range, except
 for two bounded kinds of coordination state carried across redo preparation.
@@ -1483,7 +1493,9 @@ synchronization and phase redo path.
 - permissions are first-class
 - source manifests are first-class
 - preimage observation is first-class
-- projections are disposable and rebuildable
+- projections are disposable and rebuildable, but their foreign keys require
+  projection rows to be removed before identity rows and rebuilt only after the
+  identity rows exist; serving resumes after coherent Project publication
 - protocol-specific logic lives in adapters and execution drivers, not in the public contract
 - no silent cross-source fallback; every fallback appears in provenance/explain
 - no requirement to preserve the ENSv1 indexer API surface
@@ -1769,6 +1781,9 @@ the API; route behavior remains owned by API crate tests.
 [^v2-pres-l412]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L508 @ ens_v2_sepolia_20260629@ccaeb58)
 [^v2-pres-l437]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2_sepolia_20260629@ccaeb58)
 [^v2-pres-l650]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L767 @ ens_v2_sepolia_20260629@ccaeb58)
+[^v2-pres-namechanged]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L469-L472 @ ens_v2_sepolia_20260629@ccaeb58)
+
+[^bn-namechanged]: (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L25-L30 @ basenames@1809bbc)
 
 [^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@a971bd64)
 [^v2-eac-l176]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L180 @ ens_v2@a971bd64)

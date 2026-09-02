@@ -17,7 +17,9 @@ const SUMMARY_SELECT_COLUMNS: &str = r#"
     summary.authority_kind,
     summary.root_resource_id,
     CASE
-        WHEN summary.support_status = 'supported' THEN jsonb_build_object(
+        WHEN summary.support_status = 'supported'
+         AND summary.unsupported_reason IS NULL
+        THEN jsonb_build_object(
             'status', 'full',
             'exhaustiveness', 'authoritative',
             'source_classes_considered', jsonb_build_array('permissions_current'),

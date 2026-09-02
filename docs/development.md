@@ -71,6 +71,49 @@ phase-runner verification integration tests also create one shared, unprivileged
 test login role; that server user therefore needs `CREATEROLE` for the full
 phase-runner suite.
 
+## GraphQL compatibility fixture refresh
+
+Capture is operator-only and never runs in CI. Use Python 3.12, pinned Rust, PostgreSQL 16 via `scripts/test-db`, and
+the checkouts in `.refs/MANIFEST.toml`.
+
+Choose an indexed block and one `Domain` with `id`, `name`, `createdAt`, `owner.id`, a selected nullable field, and
+a name unique for the equality filter. Verify `_meta.block.number`; its hash may be `null` for a numeric pin.
+Before capture, confirm that the deployment ID belongs to an ENS subgraph release at or after the pinned
+`ens_subgraph` commit in `.refs/MANIFEST.toml`; the command records the logged-in operator and UTC date as that
+manual verification.
+
+```sh
+THE_GRAPH_API_KEY='set-explicitly-for-this-command' \
+scripts/graphql-compat-oracle capture \
+  --upstream-endpoint-template \
+  'https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH' \
+  --block-number 23000000 \
+  --domain-id 0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae \
+  --pinned-schema-verified-by "$(gh api user --jq .login)" \
+  --pinned-schema-verification-date "$(date -u +%F)" \
+  --output apps/api/src/tests/fixtures/graphql-oracle/v1
+
+scripts/test-db -- cargo nextest run -p bigname-api -E 'test(/graphql_oracle/)'
+
+scripts/graphql-compat-oracle verify-fixtures --offline
+```
+
+The verifier and Rust oracle tests reject local-stub provenance by default. For tool development only, a developer
+may opt into a provisional fixture for one command with
+`BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE=1`; CI must never set this variable. The checked-in live fixture passes this
+gate without the escape.
+
+The Rust command creates and seeds its own API database at the captured block. `compare` is an optional check for a
+separately prepared API whose served head equals that block; the API's default local address is
+`http://127.0.0.1:3000/graphql`.
+
+Supply credentials only through `THE_GRAPH_API_KEY`; the live template must contain its placeholder. The tool never
+reads `.env`, shell configuration/history, or user files. Never retain or paste resolved credentials.
+
+Capture writes the manifest, maintained coverage, sanitized provenance, deterministic SDL, semantic index, queries,
+variables, and responses. Review source identity, block/time, pins, digests, classified schema/response changes,
+ownership, gzip, and tests. A refresh is a contract change, not a snapshot rebless.
+
 ## Bootstrap migration hygiene
 
 During bootstrap, bigname has no active deployments or shared production

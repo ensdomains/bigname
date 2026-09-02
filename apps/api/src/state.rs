@@ -18,12 +18,10 @@ pub(crate) async fn is_absent_phase_schema(pool: &PgPool, error: &anyhow::Error)
         return false;
     }
 
-    sqlx::query_scalar::<_, bool>(
-        "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'bigname_phase')",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false)
+    bigname_storage::phase_schema_exists(pool)
+        .await
+        .map(|exists| !exists)
+        .unwrap_or(false)
 }
 
 #[derive(Clone)]

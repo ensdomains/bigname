@@ -10,7 +10,7 @@ use crate::AppState;
 
 use super::address_names::relation_set_to_storage;
 use super::cursor::{cursor_value, invalid_cursor_error};
-use super::support::parse_evm_address;
+use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
     CursorPayload, Envelope, Event, HistoryScope, Meta, Page, QueryParamAllowlist, RelationSet,
     StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event, decode, encode,
@@ -50,6 +50,7 @@ pub(crate) async fn get_address_history(
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());
+    ensure_public_namespace(&namespace).map_err(api_error_to_v2)?;
     let storage_relations = params
         .relation
         .as_ref()

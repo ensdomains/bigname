@@ -304,6 +304,7 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
 
 include!("tests/graphql.rs");
 include!("tests/graphql_contract.rs");
+include!("tests/graphql_oracle.rs");
 include!("tests/v2_name_record.rs");
 include!("tests/v2_diagnostics_names.rs");
 include!("tests/v2_history.rs");
@@ -317,3 +318,4 @@ include!("tests/v2_search.rs");
 include!("tests/v2_query_params.rs");
 include!("tests/v2_status.rs");
 include!("tests/v2_envelope_conformance.rs");
+include!("tests/api_storage_quick_wins.rs");

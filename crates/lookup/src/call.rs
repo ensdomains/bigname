@@ -23,6 +23,12 @@ pub(crate) struct RecordCallOutcome {
     pub resolver_not_found: bool,
 }
 
+enum ResolvedCallResult {
+    Provider(JsonRpcCallResult),
+    InternalFailure(&'static str),
+    InternalUnsupported(&'static str),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExecutionBlock {
     pub chain_id: String,
@@ -87,7 +93,7 @@ pub(crate) async fn execute_record_call_with_resolver(
     };
     let (result, ccip_read) =
         resolve_ccip_if_supported(context, initial, &block_selector, record).await?;
-    decode_call_result(
+    decode_resolved_call_result(
         record,
         context.result_abi,
         result,
@@ -102,9 +108,9 @@ async fn resolve_ccip_if_supported(
     initial: JsonRpcCallResult,
     block_selector: &Value,
     record: &RecordSelector,
-) -> Result<(JsonRpcCallResult, bool)> {
+) -> Result<(ResolvedCallResult, bool)> {
     let Err(rpc_error) = &initial.result else {
-        return Ok((initial, false));
+        return Ok((ResolvedCallResult::Provider(initial), false));
     };
     let offchain_lookup = rpc_error_contains_offchain_lookup(rpc_error).map_err(|error| {
         LookupError::execution(format!(
@@ -112,11 +118,11 @@ async fn resolve_ccip_if_supported(
         ))
     })?;
     if !offchain_lookup {
-        return Ok((initial, false));
+        return Ok((ResolvedCallResult::Provider(initial), false));
     }
     if !context.follow_ccip {
         return Ok((
-            synthetic_unsupported(initial, "offchain_lookup_required"),
+            ResolvedCallResult::InternalUnsupported("offchain_lookup_required"),
             true,
         ));
     }
@@ -128,16 +134,46 @@ async fn resolve_ccip_if_supported(
     )
     .await
     {
-        Ok(Some(outcome)) => Ok((outcome.result, true)),
-        Ok(None) => Ok((initial, false)),
-        Err(error) if error.is_transport_failure() && error.is_configured_timeout() => {
-            Ok((synthetic_failure(initial, "resolver_call_failed"), true))
-        }
+        Ok(Some(outcome)) => Ok((ResolvedCallResult::Provider(outcome.result), true)),
+        Ok(None) => Ok((ResolvedCallResult::Provider(initial), false)),
+        Err(error) if error.is_transport_failure() && error.is_configured_timeout() => Ok((
+            ResolvedCallResult::InternalFailure("resolver_call_failed"),
+            true,
+        )),
         Err(error) if error.is_transport_failure() => Err(LookupError::transport(format!(
             "CCIP-Read transport failed for {}: {error}",
             record.record_key
         ))),
-        Err(_error) => Ok((synthetic_failure(initial, "ccip_read_failed"), true)),
+        Err(_error) => Ok((
+            ResolvedCallResult::InternalFailure("ccip_read_failed"),
+            true,
+        )),
+    }
+}
+
+fn decode_resolved_call_result(
+    record: &RecordSelector,
+    result_abi: ResolutionResultAbi,
+    result: ResolvedCallResult,
+    ccip_read: bool,
+    resolver_not_found_is_not_found: bool,
+    dns_name: &[u8],
+) -> Result<RecordCallOutcome> {
+    match result {
+        ResolvedCallResult::Provider(result) => decode_call_result(
+            record,
+            result_abi,
+            result,
+            ccip_read,
+            resolver_not_found_is_not_found,
+            dns_name,
+        ),
+        ResolvedCallResult::InternalFailure(reason) => {
+            Ok(outcome(failed(record, reason, ccip_read), None))
+        }
+        ResolvedCallResult::InternalUnsupported(reason) => {
+            Ok(outcome(unsupported(record, reason, ccip_read), None))
+        }
     }
 }
 
@@ -178,13 +214,6 @@ fn decode_call_result(
             failed(record, "resolver_return_data_malformed", ccip_read),
             None,
         )),
-        Err(error) if error.code == Some(i64::MIN) => match error.message.as_str() {
-            "offchain_lookup_required" => Ok(outcome(
-                unsupported(record, &error.message, ccip_read),
-                None,
-            )),
-            reason => Ok(outcome(failed(record, reason, ccip_read), None)),
-        },
         Err(error)
             if resolver_not_found_is_not_found
                 && result_abi == ResolutionResultAbi::EnsUniversalResolver
@@ -277,24 +306,6 @@ fn canonical_value(record: &RecordSelector, value: String) -> Value {
     }
 }
 
-fn synthetic_failure(mut result: JsonRpcCallResult, reason: &str) -> JsonRpcCallResult {
-    result.result = Err(JsonRpcCallError {
-        code: Some(i64::MIN),
-        message: reason.to_owned(),
-        data: None,
-    });
-    result
-}
-
-fn synthetic_unsupported(mut result: JsonRpcCallResult, reason: &str) -> JsonRpcCallResult {
-    result.result = Err(JsonRpcCallError {
-        code: Some(i64::MIN),
-        message: reason.to_owned(),
-        data: Some(json!({ "classification": "unsupported" })),
-    });
-    result
-}
-
 fn success(record: &RecordSelector, value: Value, ccip_read: bool) -> LookupRecordResult {
     base_result(record, LookupRecordStatus::Success, Some(value), ccip_read)
 }
@@ -378,3 +389,7 @@ pub(crate) fn provider_unavailable_for_selected_block(error: &JsonRpcCallError) 
     .iter()
     .any(|needle| text.contains(needle))
 }
+
+#[cfg(test)]
+#[path = "call/tests.rs"]
+mod tests;

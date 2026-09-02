@@ -26,3 +26,6 @@ bigname-lookup.workspace = true
 bigname-project.workspace = true
 bigname-storage.workspace = true
 bigname-test-support.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
