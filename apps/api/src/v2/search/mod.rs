@@ -455,6 +455,13 @@ pub(crate) mod public_namespace_read_test_hooks {
         resume: Arc<Barrier>,
     }
 
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    pub(crate) enum ReadHookPoint {
+        AfterPage,
+        AfterExplicitSelection,
+        BeforeUnfencedGenerations,
+    }
+
     pub(crate) struct ReadControl {
         reached: Arc<Barrier>,
         resume: Arc<Barrier>,
@@ -470,16 +477,30 @@ pub(crate) mod public_namespace_read_test_hooks {
         }
     }
 
-    static HOOKS: ScopedTestHookRegistry<String, ReadHook> = ScopedTestHookRegistry::new();
+    static HOOKS: ScopedTestHookRegistry<(String, ReadHookPoint), ReadHook> =
+        ScopedTestHookRegistry::new();
 
     pub(crate) async fn install(
         pool: &PgPool,
-    ) -> Result<(ScopedTestHookGuard<String, ReadHook>, ReadControl)> {
+    ) -> Result<(
+        ScopedTestHookGuard<(String, ReadHookPoint), ReadHook>,
+        ReadControl,
+    )> {
+        install_at(pool, ReadHookPoint::AfterPage).await
+    }
+
+    pub(crate) async fn install_at(
+        pool: &PgPool,
+        point: ReadHookPoint,
+    ) -> Result<(
+        ScopedTestHookGuard<(String, ReadHookPoint), ReadHook>,
+        ReadControl,
+    )> {
         let database = current_test_database(pool).await?;
         let reached = Arc::new(Barrier::new(2));
         let resume = Arc::new(Barrier::new(2));
         let guard = HOOKS.install(
-            database,
+            (database, point),
             ReadHook {
                 reached: Arc::clone(&reached),
                 resume: Arc::clone(&resume),
@@ -488,11 +509,15 @@ pub(crate) mod public_namespace_read_test_hooks {
         Ok((guard, ReadControl { reached, resume }))
     }
 
-    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+    pub(crate) async fn run(pool: &PgPool) -> V2Result<()> {
+        run_at(pool, ReadHookPoint::AfterPage).await
+    }
+
+    pub(crate) async fn run_at(pool: &PgPool, point: ReadHookPoint) -> V2Result<()> {
         let database = current_test_database(pool)
             .await
             .map_err(|_| V2Error::internal_error("failed to run search read test hook"))?;
-        if let Some(hook) = HOOKS.take(&database) {
+        if let Some(hook) = HOOKS.take(&(database, point)) {
             hook.reached.wait().await;
             hook.resume.wait().await;
         }

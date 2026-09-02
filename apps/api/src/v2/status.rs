@@ -219,7 +219,7 @@ fn phase_readiness(
     if !row.project_generation_current {
         return StatusReadiness::Degraded;
     }
-    if row.project_redo_in_progress {
+    if row.interpret_redo_in_progress || row.project_redo_in_progress {
         return StatusReadiness::Degraded;
     }
     match row.project_phase_status.as_deref() {
@@ -521,6 +521,7 @@ mod tests {
             any_phase_settled_while_unconfigured: false,
             provider_trusted_verification_required: false,
             project_generation_current: true,
+            interpret_redo_in_progress: false,
             project_redo_in_progress: false,
             phase_runner_heartbeat_age_seconds: Some(0),
         }

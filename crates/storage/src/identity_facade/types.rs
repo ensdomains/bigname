@@ -140,6 +140,7 @@ pub struct IndexingStatusChainRow {
     pub any_phase_settled_while_unconfigured: bool,
     pub provider_trusted_verification_required: bool,
     pub project_generation_current: bool,
+    pub interpret_redo_in_progress: bool,
     pub project_redo_in_progress: bool,
     pub phase_runner_heartbeat_age_seconds: Option<i64>,
 }

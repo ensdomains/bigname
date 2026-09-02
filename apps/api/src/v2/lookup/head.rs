@@ -114,7 +114,7 @@ pub(crate) async fn load_selected_project_generations(
     pool: &PgPool,
     selected: &SelectedSnapshot,
 ) -> V2Result<BTreeMap<String, String>> {
-    crate::v2::support::load_selected_project_generations_for_read(pool, selected, false)
+    crate::v2::support::load_selected_project_generations_for_read(pool, selected, true)
         .await
         .map_err(|_| V2Error::internal_error("failed to validate lookup data"))?
         .ok_or_else(|| V2Error::stale("served data is not available at the selected snapshot"))
