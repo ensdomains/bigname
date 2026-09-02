@@ -180,7 +180,8 @@ async fn seed_surface(
     sqlx::query(
         "INSERT INTO resources (
              resource_id, chain_id, block_hash, block_number, canonicality_state
-         ) VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+         ) VALUES ($1::uuid, $2, $3, 8, 'canonical')
+         ON CONFLICT (chain_id, resource_id) DO NOTHING",
     )
     .bind(resource)
     .bind(CHAIN)
@@ -350,6 +351,33 @@ async fn serving_projection_snapshot(pool: &PgPool) -> Result<Vec<(String, serde
     }
     Ok(snapshot)
 }
+
+#[rustfmt::skip]
+async fn registrar_reveal_projection(split: bool) -> Result<((String, i64, String), Vec<(String, serde_json::Value)>)> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 8, 'canonical')")
+        .bind(OWNERLESS_RESOURCE).bind(CHAIN).bind(block_hash(8)).execute(&pool).await?;
+    for (kind, index) in [("RegistrationGranted", 1), ("ExpiryChanged", 2)] {
+        seed_normalized_event(&pool, &format!("fixture:surface-less-{kind}"), None, Some(OWNERLESS_RESOURCE), kind, "ens_v1_registrar_l1", 8, index, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:fixture","registrant":CONTROL_OWNER,"expiry":4242}), json!({})).await?;
+    }
+    if split { run_project(&pool, 8, 8, None).await?; }
+    seed_surface(&pool, OWNERLESS_NAMEHASH, "revealed.eth", OWNERLESS_RESOURCE, OWNERLESS_BINDING).await?;
+    run_project(&pool, 9, 8, split.then_some(8)).await?;
+    let summary = sqlx::query_as("SELECT declared_summary #>> '{registration,status}', (declared_summary #>> '{registration,expiry}')::bigint, resource_id::text FROM name_current WHERE logical_name_id = $1")
+        .bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
+    let snapshot = serving_projection_snapshot(&pool).await?;
+    database.cleanup().await?;
+    Ok((summary, snapshot))
+}
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn registrar_only_then_enrichment_projects_name_addressable_registration() -> Result<()> { let (summary, _) = registrar_reveal_projection(false).await?; assert_eq!(summary, ("active".to_owned(), 4242, OWNERLESS_RESOURCE.to_owned())); Ok(()) }
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn registrar_only_then_enrichment_converges_across_project_batches() -> Result<()> { assert_eq!(registrar_reveal_projection(false).await?, registrar_reveal_projection(true).await?); Ok(()) }
 
 async fn ownerless_serving_projection_snapshot(
     pool: &PgPool,

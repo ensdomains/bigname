@@ -185,11 +185,16 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
     let displaced_regeneration_event = event.after_state.get("source_event").and_then(Value::as_str) == Some("TokenRegenerated") && (event.event_kind == "SurfaceUnbound" || event.event_kind == "RegistrationReleased" && event.after_state.get("terminal_reason").and_then(Value::as_str) == Some("registry_name_binding_changed"));
     if !displaced_regeneration_event && let (Some(token), Some(logical_name_id)) = (token, event.logical_name_id.as_deref()) { state.remember_v2_logical_name(emitter, token, logical_name_id); }
 }
+#[rustfmt::skip]
 pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
-    let source_event = event
-        .after_state
-        .get("source_event")
-        .and_then(Value::as_str);
+    let v1_family = event.source_family.starts_with("ens_v1_") || event.source_family.starts_with("basenames_");
+    let explicit_surface = event.after_state.get("surface_known").and_then(Value::as_bool) == Some(true); let active_preimage = event.event_kind == "PreimageObserved" && event.after_state.get("visibility_state").and_then(Value::as_str) != Some("shadow");
+    let restoring_state_key = (v1_family && !explicit_surface && !active_preimage).then(|| state.restoring_state_key.take()).flatten();
+    v1_inner(state, event); if restoring_state_key.is_some() { state.restoring_state_key = restoring_state_key; }
+}
+#[rustfmt::skip]
+fn v1_inner(state: &mut State, event: &PriorEventInput) {
+    let source_event = event.after_state.get("source_event").and_then(Value::as_str);
     if event.source_family == "ens_v2_migration_l1"
         && source_event == Some("NameRenewed")
         && let (Some(namehash), Some(expiry)) = (
@@ -199,15 +204,10 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     {
         state.restore_v1_correlated_wrapper_expiry(&event.namespace, namehash, expiry);
     }
-    if !(event.source_family.starts_with("ens_v1_")
-        || event.source_family.starts_with("basenames_"))
-    {
+    if !(event.source_family.starts_with("ens_v1_") || event.source_family.starts_with("basenames_")) {
         return;
     }
-    if event.event_kind == "PreimageObserved"
-        && event.logical_name_id.is_some()
-        && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str)
-    {
+    if event.event_kind == "PreimageObserved" && event.logical_name_id.is_some() && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str) {
         if event
             .after_state
             .get("visibility_state")
@@ -419,11 +419,14 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
         state.restore_v1_registration_release(&event.namespace, namehash);
         return;
     }
-    let (Some(logical_name_id), Some(resource_id)) =
-        (event.logical_name_id.as_ref(), event.resource_id)
-    else {
+    let Some(resource_id) = event.resource_id else {
         return;
     };
+    let restored_logical_name_id = event.logical_name_id.clone().or_else(|| {
+        event.after_state.get("namehash").and_then(Value::as_str)
+            .map(|namehash| format!("{}:{namehash}", event.namespace))
+    });
+    let Some(logical_name_id) = restored_logical_name_id.as_ref() else { return; };
     let lineage = event
         .after_state
         .get("token_lineage_id")

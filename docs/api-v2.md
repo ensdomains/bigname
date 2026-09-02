@@ -106,6 +106,12 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
 | `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
 
+A controller-free ENSv1 BaseRegistrar registration is initially addressable by its
+`registration_id`, not by name: its lifecycle history is keyed to that registration while no
+plaintext name exists. After plaintext enrichment binds the name to the same registration, name
+detail and name-scoped history expose the registrar-derived owner and expiry; the earlier events
+remain registration-scoped and are not rewritten.
+
 `GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
 read current permission rows and per-resource permission summaries. Canonical
 identity checks exclude rows from an orphaned chain lineage. These routes do

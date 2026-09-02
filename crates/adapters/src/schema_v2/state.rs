@@ -117,7 +117,7 @@ pub(super) struct State {
     restored_surface_counts: OrdMap<String, usize>,
     v2_current_surface_counts: OrdMap<String, usize>,
     surface_removal_candidates: OrdSet<String>,
-    restoring_state_key: Option<String>,
+    pub(super) restoring_state_key: Option<String>,
     active_resources: OrdMap<String, Uuid>,
     v2_tokens: OrdMap<String, V2TokenState>,
     v2_subregistry_tokens_by_observation: OrdMap<(String, String), OrdSet<String>>,

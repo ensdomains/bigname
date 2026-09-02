@@ -20,6 +20,7 @@ use crate::schema_v2::{
 mod identity;
 use identity::{new_registrar_identity, registrar_namehash};
 
+mod base;
 mod decode;
 mod wrapper_renewal;
 
@@ -33,25 +34,44 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    migration_enabled: bool,
+    context: super::super::super::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
     match selected.event.signature.as_str() {
-        "ControllerAdded(address)"
-        | "ControllerRemoved(address)"
-        | "NameRegistered(uint256,address,uint256)"
-        | "NameRenewed(uint256,uint256)" => {
-            return if migration_enabled {
+        "ControllerAdded(address)" | "ControllerRemoved(address)" => {
+            return if context.migration_enabled {
                 super::super::migration::interpret_base_registrar(selected, raw, state)
             } else {
                 Ok(Interpreted::new())
             };
+        }
+        "NameRegistered(uint256,address,uint256)" | "NameRenewed(uint256,uint256)"
+            if selected.source.source_family == "ens_v1_registrar_l1"
+                && selected.emitter_role.as_deref() == Some("registrar") =>
+        {
+            let mut correlated = if context.migration_enabled {
+                super::super::migration::interpret_base_registrar(selected, raw, state)?
+            } else {
+                Interpreted::new()
+            };
+            let lifecycle_enabled = selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|event| event == "RegistrationGranted");
+            let mut ordinary = if context.graveyard_cleanup || !lifecycle_enabled {
+                Interpreted::new()
+            } else {
+                base::interpret(selected, raw, state)?
+            };
+            ordinary.append(&mut correlated);
+            return Ok(ordinary);
         }
         "Transfer(address,address,uint256)"
             if selected.source.source_family == "ens_v1_registrar_l1"
                 && selected.emitter_role.as_deref() == Some("registrar") =>
         {
             let mut ordinary = transfer(selected, raw, state)?;
-            if migration_enabled {
+            if context.migration_enabled {
                 let mut correlated =
                     super::super::migration::interpret_base_registrar(selected, raw, state)?;
                 ordinary.append(&mut correlated);

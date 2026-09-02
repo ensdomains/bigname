@@ -25,10 +25,394 @@ sol! {
 }
 
 mod v1_registrar {
+    use super::*;
     use alloy_sol_types::sol;
 
     sol! {
         event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+        event BaseNameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
+        event BaseNameRenewed(uint256 indexed id, uint256 expires);
+    }
+
+    const CONTROLLER: &str = "0x0000000000000000000000000000000000000043";
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000044";
+
+    fn lifecycle_manifest() -> ManifestInput {
+        manifest_with_events(
+            80,
+            "ens",
+            "ens_v1_registrar_l1",
+            &[
+                (
+                    "NameRegistered",
+                    "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
+                    &["registrar"],
+                    &[
+                        "RegistrationGranted",
+                        "ExpiryChanged",
+                        "PermissionChanged",
+                        "SurfaceUnbound",
+                        "SurfaceBound",
+                        "AuthorityEpochChanged",
+                        "ResolverChanged",
+                        "RegistrationReleased",
+                    ],
+                ),
+                (
+                    "NameRenewed",
+                    "event NameRenewed(uint256 indexed id, uint256 expires)",
+                    &["registrar"],
+                    &[
+                        "RegistrationGranted",
+                        "RegistrationRenewed",
+                        "ExpiryChanged",
+                        "SurfaceUnbound",
+                        "SurfaceBound",
+                        "AuthorityEpochChanged",
+                        "ResolverChanged",
+                    ],
+                ),
+                (
+                    "NameRegistered",
+                    "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                    &["legacy_registrar_controller"],
+                    &["PreimageObserved"],
+                ),
+                (
+                    "NameRenewed",
+                    "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
+                    &["legacy_registrar_controller"],
+                    &["PreimageObserved"],
+                ),
+                (
+                    "Transfer",
+                    "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                    &["registrar"],
+                    &[
+                        "TokenControlTransferred",
+                        "PermissionChanged",
+                        "SurfaceUnbound",
+                        "SurfaceBound",
+                        "AuthorityEpochChanged",
+                        "ResolverChanged",
+                    ],
+                ),
+            ],
+        )
+    }
+
+    fn admissions() -> Vec<AddressAdmissionInput> {
+        let mut registrar = admission(80, "registrar");
+        registrar.address = CONTRACT.to_owned();
+        let mut controller = admission(80, "legacy_registrar_controller");
+        controller.address = CONTROLLER.to_owned();
+        controller.contract_instance_id = Uuid::from_u128(81);
+        vec![registrar, controller]
+    }
+
+    fn base_registration(label: &str, expiry: u64, log_index: i64) -> RawLogInput {
+        raw_at(
+            with_topic0(
+                BaseNameRegistered {
+                    id: U256::from_be_slice(keccak256(label.as_bytes()).as_slice()),
+                    owner: CONTRACT.parse().unwrap(),
+                    expires: U256::from(expiry),
+                }
+                .encode_log_data(),
+                keccak256(b"NameRegistered(uint256,address,uint256)"),
+            ),
+            1,
+            log_index,
+            CONTRACT,
+        )
+    }
+
+    fn controller_registration(label: &str, expiry: u64, log_index: i64) -> RawLogInput {
+        raw_at(
+            super::NameRegistered {
+                name: label.to_owned(),
+                label: keccak256(label.as_bytes()),
+                owner: CONTRACT.parse().unwrap(),
+                expires: U256::from(expiry),
+            }
+            .encode_log_data(),
+            1,
+            log_index,
+            CONTROLLER,
+        )
+    }
+
+    fn interpret(logs: Vec<RawLogInput>) -> anyhow::Result<BatchOutput> {
+        interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![lifecycle_manifest()],
+            discovery_rules: Vec::new(),
+            admissions: admissions(),
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: logs,
+        })
+    }
+
+    #[test]
+    fn base_registrar_registration_materializes_labelhash_only_lease_without_controller()
+    -> anyhow::Result<()> {
+        let output = interpret(vec![base_registration("numeric", 42, 0)])?;
+        let grant = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RegistrationGranted")
+            .expect("numeric BaseRegistrar registration must grant a lease");
+        assert_eq!(grant.raw_fact_ref["emitting_address"], CONTRACT);
+        assert_eq!(grant.after_state["surface_known"], false);
+        assert_eq!(grant.logical_name_id, None);
+        assert!(grant.resource_id.is_some());
+        assert!(
+            output.name_surfaces.is_empty(),
+            "plaintext is not fabricated"
+        );
+        assert!(
+            output.surface_bindings.is_empty(),
+            "plaintext is not known yet"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn controller_event_without_base_registrar_is_preimage_only() -> anyhow::Result<()> {
+        let output = interpret(vec![controller_registration("only", 99, 0)])?;
+        assert!(
+            output
+                .normalized_events
+                .iter()
+                .any(|event| event.event_kind == "PreimageObserved")
+        );
+        assert!(!output.normalized_events.iter().any(|event| matches!(
+            event.event_kind.as_str(),
+            "RegistrationGranted" | "RegistrationRenewed" | "ExpiryChanged"
+        )));
+        assert!(output.resources.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn controller_enrichment_dedupes_numeric_lifecycle_and_binds_existing_registrar()
+    -> anyhow::Result<()> {
+        let output = interpret(vec![
+            base_registration("paired", 42, 0),
+            controller_registration("paired", 999, 1),
+        ])?;
+        let grants = output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "RegistrationGranted")
+            .collect::<Vec<_>>();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].raw_fact_ref["emitting_address"], CONTRACT);
+        assert_eq!(grants[0].logical_name_id, None);
+        assert!(output.normalized_events.iter().any(|event| {
+            event.event_kind == "PreimageObserved" && event.logical_name_id.is_some()
+        }));
+        assert_eq!(output.surface_bindings.len(), 1);
+        assert_eq!(
+            output.surface_bindings[0].resource_id,
+            grants[0].resource_id.unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn base_registrar_expiry_wins_controller_payload_mismatch() -> anyhow::Result<()> {
+        let output = interpret(vec![
+            base_registration("mismatch", 42, 0),
+            controller_registration("mismatch", 999, 1),
+        ])?;
+        let expiries = output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "ExpiryChanged")
+            .map(|event| event.after_state["expiry"].as_i64())
+            .collect::<Vec<_>>();
+        assert_eq!(expiries, [Some(42)]);
+        Ok(())
+    }
+
+    #[test]
+    fn base_registrar_renewal_from_unlisted_controller_prevents_stale_release() -> anyhow::Result<()>
+    {
+        let mut first = interpret(vec![controller_registration("renewed", 10, 0)])?;
+        let renewal = raw_at(
+            with_topic0(
+                BaseNameRenewed {
+                    id: U256::from_be_slice(keccak256(b"renewed").as_slice()),
+                    expires: U256::from(20_000_000_u64),
+                }
+                .encode_log_data(),
+                keccak256(b"NameRenewed(uint256,uint256)"),
+            ),
+            2,
+            0,
+            CONTRACT,
+        );
+        let boundary = 10 + 90 * 24 * 60 * 60 + 1;
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![lifecycle_manifest()],
+            discovery_rules: Vec::new(),
+            admissions: admissions(),
+            prior_events: first
+                .normalized_events
+                .drain(..)
+                .map(|event| prior_event(&event))
+                .collect(),
+            blocks: vec![
+                RawBlockInput {
+                    chain_id: CHAIN.to_owned(),
+                    block_hash: "block-2".to_owned(),
+                    block_number: 2,
+                    block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(2),
+                    canonicality_state: "canonical".to_owned(),
+                },
+                RawBlockInput {
+                    chain_id: CHAIN.to_owned(),
+                    block_hash: format!("block-{boundary}"),
+                    block_number: boundary,
+                    block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(boundary),
+                    canonicality_state: "canonical".to_owned(),
+                },
+            ],
+            raw_logs: vec![renewal],
+        })?;
+        assert!(
+            !output
+                .normalized_events
+                .iter()
+                .any(|event| event.event_kind == "RegistrationReleased")
+        );
+        assert!(
+            output
+                .normalized_events
+                .iter()
+                .any(|event| event.event_kind == "RegistrationRenewed"
+                    && event.after_state["expiry"] == 20_000_000)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn base_registrar_anchor_reconciles_post_event_register_with_resolver_setup()
+    -> anyhow::Result<()> {
+        const OWNER: &str = "0x0000000000000000000000000000000000000055";
+        const RESOLVER: &str = "0x0000000000000000000000000000000000000066";
+        let label = keccak256(b"configured");
+        let node = super::common::namehash(&["configured".to_owned(), "eth".to_owned()]);
+        let parent = super::common::namehash(&["eth".to_owned()]).parse::<B256>()?;
+        let mut registry_admission = admission(82, "registry");
+        registry_admission.address = REGISTRY.to_owned();
+        registry_admission.contract_instance_id = Uuid::from_u128(82);
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![
+                lifecycle_manifest(),
+                manifest_with_events(
+                    82,
+                    "ens",
+                    "ens_v1_registry_l1",
+                    &[
+                        (
+                            "NewOwner",
+                            "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                            &["registry"],
+                            &["SubregistryChanged", "AuthorityTransferred"],
+                        ),
+                        (
+                            "NewResolver",
+                            "event NewResolver(bytes32 indexed node, address resolver)",
+                            &["registry"],
+                            &["ResolverChanged"],
+                        ),
+                    ],
+                ),
+            ],
+            discovery_rules: Vec::new(),
+            admissions: admissions()
+                .into_iter()
+                .chain([registry_admission])
+                .collect(),
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![
+                raw_at(
+                    with_topic0(
+                        BaseNameRegistered {
+                            id: U256::from_be_slice(label.as_slice()),
+                            owner: CONTROLLER.parse()?,
+                            expires: U256::from(42),
+                        }
+                        .encode_log_data(),
+                        keccak256(b"NameRegistered(uint256,address,uint256)"),
+                    ),
+                    1,
+                    0,
+                    CONTRACT,
+                ),
+                raw_at(
+                    super::v1_registry::NewOwner {
+                        node: parent,
+                        label,
+                        owner: OWNER.parse()?,
+                    }
+                    .encode_log_data(),
+                    1,
+                    1,
+                    REGISTRY,
+                ),
+                raw_at(
+                    super::v1_registry::NewResolver {
+                        node: node.parse()?,
+                        resolver: RESOLVER.parse()?,
+                    }
+                    .encode_log_data(),
+                    1,
+                    2,
+                    REGISTRY,
+                ),
+                raw_at(
+                    Transfer {
+                        from: CONTROLLER.parse()?,
+                        to: OWNER.parse()?,
+                        tokenId: U256::from_be_slice(label.as_slice()),
+                    }
+                    .encode_log_data(),
+                    1,
+                    3,
+                    CONTRACT,
+                ),
+                controller_registration("configured", 999, 4),
+            ],
+        })?;
+        let grants = output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "RegistrationGranted")
+            .collect::<Vec<_>>();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].raw_fact_ref["emitting_address"], CONTRACT);
+        assert_eq!(grants[0].after_state["expiry"], 42);
+        assert!(
+            output
+                .normalized_events
+                .iter()
+                .any(|event| event.event_kind == "ResolverChanged"
+                    && event.resource_id == grants[0].resource_id)
+        );
+        assert!(
+            output
+                .surface_bindings
+                .iter()
+                .any(|binding| binding.resource_id == grants[0].resource_id.unwrap())
+        );
+        Ok(())
     }
 }
 
@@ -2633,7 +3017,12 @@ fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow:
         super::catalog::Catalog::new(vec![manifest], Vec::new(), vec![admission(61, "registrar")])?;
     let selected = catalog.select(&raw)?.expect("selected registrar event");
     let mut live_state = super::state::State::new(vec![registry_prior.clone()], Vec::new());
-    let interpreted = super::protocol::interpret(&selected, &raw, &mut live_state, false)?;
+    let interpreted = super::protocol::interpret(
+        &selected,
+        &raw,
+        &mut live_state,
+        super::migration::RegistrarContext::default(),
+    )?;
     let grant = interpreted
         .events
         .into_iter()

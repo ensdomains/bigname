@@ -85,6 +85,8 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
          FROM project_events event
          JOIN project_name_authority authority
            ON authority.logical_name_id = event.logical_name_id
+           OR (event.logical_name_id IS NULL
+               AND event.resource_id = authority.selected_resource_id)
          WHERE (
                (
                    authority.unsupported_reason IS NULL
@@ -299,6 +301,11 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                )
            )
          ORDER BY event.normalized_event_id",
+        "UPDATE project_authority_events event
+         SET logical_name_id = authority.logical_name_id
+         FROM project_name_authority authority
+         WHERE event.logical_name_id IS NULL
+           AND event.resource_id = authority.selected_resource_id",
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
         "CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS

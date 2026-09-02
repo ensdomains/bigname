@@ -168,6 +168,11 @@ mandatory full Interpret and Project redos.
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
+An ENSv1 BaseRegistrar lifecycle event observed before its plaintext label has a null
+`logical_name_id` and a non-null registrar `resource_id`. Interpret emits no `NameSurface` for that event. A
+later `PreimageObserved` creates the surface and binds it to the registrar resource; the earlier
+lifecycle rows remain resource-keyed and immutable while Project can then attribute them to the name.
+
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
