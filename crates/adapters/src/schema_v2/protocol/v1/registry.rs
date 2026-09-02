@@ -149,7 +149,9 @@ pub(super) fn interpret(
     {
         return Ok(Interpreted::new());
     }
-    if selected.event.name == "NewOwner" && emitter_role == Some("registry") {
+    if matches!(selected.event.name.as_str(), "NewOwner" | "Transfer")
+        && emitter_role == Some("registry")
+    {
         state.mark_v1_migrated(&selected.source.namespace, &affected_node);
     }
     if let Some(role) = emitter_role {
