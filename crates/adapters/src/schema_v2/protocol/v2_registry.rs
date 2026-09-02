@@ -65,7 +65,6 @@ pub(super) fn interpret(
     }
     registry(selected, raw, state)
 }
-
 fn registry(
     selected: &Selected,
     raw: &RawLogInput,
@@ -292,7 +291,6 @@ fn registry(
     initial_output.append(&mut output);
     Ok(initial_output)
 }
-
 fn label_event(
     selected: &Selected,
     raw: &RawLogInput,
@@ -469,8 +467,6 @@ fn label_event(
             source_kind: format!("{}_label", selected.event.name),
             preimage_metadata: None,
         });
-        // Closures are arm-wide per logical name, so only a registration assert may clear the
-        // name's stale bindings; a reservation would close another holder's live binding.
         if registered {
             output.binding_closures.push(BindingClosureDraft {
                 logical_name_id: name.logical_name_id.clone(),
@@ -479,6 +475,9 @@ fn label_event(
         }
     }
     for (replaced_token, previous) in &replaced {
+        // Preserve the existing null role events and token_id for API readers and rebuilt read
+        // models.
+        // Retained-event replay skips these exact boundaries so it does not recreate the token.
         append_terminal_boundaries(
             &mut output,
             state,
