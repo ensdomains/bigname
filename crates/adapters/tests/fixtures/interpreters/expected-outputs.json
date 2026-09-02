@@ -396,6 +396,39 @@
           }
         },
         {
+          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:1:ResolverChanged:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
+          "event_kind": "ResolverChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 2,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+          "log_index": 1,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 1,
+            "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "resolver": null
+          },
+          "after_state": {
+            "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+            "resolver": "0x00000000000000000000000000000000000010cc"
+          }
+        },
+        {
           "event_identity": "ens_v1_unwrapped_authority:ResolverChanged:resolver:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:1",
           "namespace": "ens",
           "logical_name_id": "ens:alice.eth",
@@ -4215,6 +4248,97 @@
             "parent_node": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "source_event": "NewOwner",
             "tombstone": false
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:AuthorityTransferred:1",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
+          "event_kind": "AuthorityTransferred",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 180,
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+            "block_number": 180,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "owner": null,
+            "owner_getter": null
+          },
+          "after_state": {
+            "authority_key": "registry-only:ethereum-mainnet:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+            "authority_kind": "registry_only",
+            "owner": "0x0000000000000000000000000000000000002a22",
+            "owner_getter": "0x0000000000000000000000000000000000002a22"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:PermissionChanged:resource-grant:0x0000000000000000000000000000000000002a22:2",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
+          "event_kind": "PermissionChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 180,
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+            "block_number": 180,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "effective_powers": [],
+            "grant_source": null,
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000002a22",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "after_state": {
+            "effective_powers": [
+              "resource_control"
+            ],
+            "grant_source": {
+              "authority_key": "registry-only:ethereum-mainnet:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+              "authority_kind": "registry_only",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "AuthorityTransferred"
+            },
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000002a22",
+            "transfer_behavior": "replace_on_authority_change"
           }
         }
       ],

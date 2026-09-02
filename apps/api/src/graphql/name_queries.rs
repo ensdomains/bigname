@@ -31,7 +31,8 @@ pub struct PhaseGraphqlNameCountTarget {
 
 const SELECT_NAMES: &str = r#"
     SELECT logical_name_id, namespace, canonical_display_name, normalized_name,
-           namehash, surface_binding_id, resource_id, token_lineage_id,
+           namehash, surface_binding_id, resource_id, serving_resource_id,
+           token_lineage_id,
            binding_kind, declared_summary, provenance, chain_positions,
            canonicality_summary, manifest_version, last_recomputed_at,
            support_status, unsupported_reason, labelhash, token_id, owner,
@@ -248,7 +249,8 @@ fn push_filtered_names<'a>(
         r#"filtered_names AS (
         SELECT nc.logical_name_id, nc.namespace, nc.raw_name AS canonical_display_name,
                nc.raw_name AS normalized_name, nc.namehash,
-               nc.surface_binding_id, nc.resource_id, nc.token_lineage_id,
+               nc.surface_binding_id, nc.resource_id, nc.serving_resource_id,
+               nc.token_lineage_id,
                nc.binding_kind, nc.declared_summary, nc.provenance,
                nc.chain_positions, nc.canonicality_summary, nc.manifest_version,
                nc.last_recomputed_at, nc.support_status, nc.unsupported_reason,
@@ -462,6 +464,7 @@ fn decode_row(row: PgRow) -> Result<PhaseGraphqlNameListRow> {
         namehash: row.try_get("namehash")?,
         surface_binding_id: row.try_get("surface_binding_id")?,
         resource_id: row.try_get::<Option<Uuid>, _>("resource_id")?,
+        serving_resource_id: row.try_get("serving_resource_id")?,
         token_lineage_id: row.try_get("token_lineage_id")?,
         binding_kind,
         declared_summary: row.try_get("declared_summary")?,

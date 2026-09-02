@@ -278,7 +278,7 @@ mod tests {
             "CREATE TABLE bigname_phase.resources (resource_id uuid NOT NULL, chain_id text NOT NULL, block_hash text NOT NULL, canonicality_state bigname_phase.canonicality_state NOT NULL)",
             "CREATE TABLE bigname_phase.surface_bindings (surface_binding_id uuid NOT NULL, chain_id text NOT NULL, block_hash text NOT NULL, canonicality_state bigname_phase.canonicality_state NOT NULL, active_to timestamptz)",
             "CREATE TABLE bigname_phase.token_lineages (token_lineage_id uuid NOT NULL, chain_id text NOT NULL, block_hash text NOT NULL, canonicality_state bigname_phase.canonicality_state NOT NULL)",
-            "CREATE TABLE bigname_phase.name_current (namespace text NOT NULL, raw_name text NOT NULL, logical_name_id text NOT NULL, support_status text NOT NULL, surface_binding_id uuid, resource_id uuid, token_lineage_id uuid, provenance jsonb NOT NULL, canonicality_summary jsonb NOT NULL)",
+            "CREATE TABLE bigname_phase.name_current (namespace text NOT NULL, raw_name text NOT NULL, logical_name_id text NOT NULL, support_status text NOT NULL, surface_binding_id uuid, resource_id uuid, serving_resource_id uuid, token_lineage_id uuid, provenance jsonb NOT NULL, canonicality_summary jsonb NOT NULL)",
             "CREATE TABLE bigname_phase.address_names_current (address text NOT NULL, raw_name text NOT NULL, namespace text NOT NULL, relation text NOT NULL, logical_name_id text NOT NULL, support_status text NOT NULL, surface_binding_id uuid NOT NULL, resource_id uuid NOT NULL, token_lineage_id uuid, provenance jsonb NOT NULL, chain_positions jsonb NOT NULL, canonicality_summary jsonb NOT NULL)",
             "CREATE TABLE bigname_phase.resolver_current (chain_id text NOT NULL, resolver_address text NOT NULL, support_status text NOT NULL, chain_positions jsonb NOT NULL, canonicality_summary jsonb NOT NULL, provenance jsonb NOT NULL DEFAULT '{}'::jsonb, manifest_version bigint NOT NULL DEFAULT 1)",
             "CREATE TABLE bigname_phase.normalized_events (normalized_event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_identity text NOT NULL UNIQUE, namespace text NOT NULL, event_kind text NOT NULL, source_family text NOT NULL, manifest_version bigint NOT NULL, source_manifest_id bigint, chain_id text NOT NULL, block_number bigint, block_hash text, transaction_index bigint, log_index bigint, canonicality_state bigname_phase.canonicality_state NOT NULL, before_state jsonb NOT NULL DEFAULT '{}'::jsonb, after_state jsonb NOT NULL DEFAULT '{}'::jsonb, consumer_visibility text NOT NULL DEFAULT 'activated')",
@@ -326,7 +326,7 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO name_current VALUES
-                 ($1, $2, $3, $4, NULL, NULL, NULL,
+                 ($1, $2, $3, $4, NULL, NULL, NULL, NULL,
                   '{\"chain_id\":\"ethereum-mainnet\"}',
                   jsonb_build_object('state', 'canonical_lineage', 'target_block_hash', $5::text))",
         )

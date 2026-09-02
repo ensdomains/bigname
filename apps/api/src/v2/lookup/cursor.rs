@@ -307,6 +307,7 @@ mod tests {
                     labelhash: None,
                     labelhash_count: None,
                     resource_id: Some(Uuid::from_u128(0x5a0301)),
+                    serving_resource_id: None,
                     record_inventory_boundary_key: None,
                     declared_summary: serde_json::json!({}),
                     coverage: serde_json::json!({}),

@@ -197,7 +197,7 @@ async fn name_current_has_newer_projection_inputs(
     .bind(projected_block_number)
     .bind(selected_block_number)
     .bind(&row.logical_name_id)
-    .bind(row.resource_id)
+    .bind(row.record_serving_resource_id())
     .fetch_one(pool)
     .await
     .map_err(|error| {

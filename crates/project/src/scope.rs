@@ -9,6 +9,7 @@ mod classification;
 mod inventory;
 mod labels;
 mod primary;
+mod registry_resolver;
 mod resolver;
 mod resolver_dependents;
 mod retracted;
@@ -39,6 +40,8 @@ pub(crate) async fn initialize(
     seed_direct_scope(transaction, chain_id, window.from_block, window.to_block).await?;
     inventory::include_changed_node_record_dependents(transaction, chain_id).await?;
     labels::include_changed_children(transaction, chain_id).await?;
+    inventory::include_changed_record_consumers(transaction, chain_id, target.number).await?;
+    registry_resolver::include_parent_names(transaction, chain_id, target.number).await?;
     authority::include_changed_child_proofs(
         transaction,
         chain_id,
@@ -71,8 +74,6 @@ pub(crate) async fn initialize(
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
-    // Topology must consume names added by time boundaries and resolver binding closure before
-    // event-history staging begins.
     // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
     authority::include_topology_dependents(transaction, chain_id, target.number).await?;
@@ -184,7 +185,7 @@ async fn seed_direct_scope(
                     (event.before_state ->> 'node'),
                     (event.before_state ->> 'child_node')
          ) candidate(node)
-         WHERE event.event_kind = 'SubregistryChanged'
+         WHERE event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
            AND event.source_family IN (
                'ens_v1_registry_l1', 'basenames_base_registry'
            )
@@ -440,6 +441,7 @@ async fn close_binding_scope(
     target: &Marker,
 ) -> Result<()> {
     authority::include_latest_arm_resources(transaction, chain_id, target.number).await?;
+    resolver::include_registry_read_anchors(transaction, chain_id, target.number).await?;
     sqlx::query(
         "INSERT INTO project_scope_resources
          SELECT binding.resource_id

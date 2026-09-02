@@ -1296,6 +1296,13 @@ counter used by old-runtime destructive raw-log repair and backfill coverage.
 The schema remains in schema-migration history, but Stage B has no Rust writer or
 coverage consumer for this counter.
 
+<a id="getter-visible-owner"></a>
+**Getter-visible owner** — the registry owner address that an on-chain owner getter would return
+for a clean event word. It preserves the literal event word separately, but treats a current
+Solidity-registry emitter stored as its own owner as zero for control selection. Historical owner
+words that fail the existing masked-address check have no getter-visible owner.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+
 <a id="graphql-claimed-compatibility-surface"></a> **GraphQL claimed compatibility surface** — exact schema paths and response cases promised compatible with a pin.
 
 <a id="graphql-dispositioned-remainder"></a> **GraphQL dispositioned remainder** — differences outside the claim, owned as deferred work or extensions.
@@ -1785,6 +1792,11 @@ publication has completed and remains eligible for public reads. It is not the
 latest block reported by a provider. A GraphQL HTTP request selects this set
 once for all of its root fields and rechecks the Project publication before
 returning data.
+
+<a id="serving-resource"></a>
+**Serving resource** — the typed `resource_id` reference used to select resolver and record data
+when a name has no current control binding. It preserves event-derived read reachability only: it
+does not establish a registration, authority, address-to-name relation, or permission grant.
 
 ## Shadow
 

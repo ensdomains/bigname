@@ -15,7 +15,7 @@ const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 /// `Account!` fallback chain here so the resolver stays trivial.
 impl From<NameCurrentListRow> for Domain {
     fn from(row: NameCurrentListRow) -> Self {
-        let record_inventory_key = row.row.resource_id.map(|resource_id| {
+        let record_inventory_key = row.row.record_serving_resource_id().map(|resource_id| {
             let boundary = row
                 .row
                 .declared_summary

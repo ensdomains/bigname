@@ -15,6 +15,13 @@ pub struct AdapterSession {
     state: State,
 }
 
+#[cfg(test)]
+impl AdapterSession {
+    pub(super) fn has_v1_registry_authority(&self, namespace: &str, namehash: &str) -> bool {
+        self.state.has_v1_registry_authority(namespace, namehash)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterpreterStateValue {
     pub state_key: String,

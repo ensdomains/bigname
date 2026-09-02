@@ -251,6 +251,12 @@ coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
 in [`architecture.md`](architecture.md#identity-model).
+`name_current.resource_id` identifies the current control or registration resource. The nullable
+`name_current.serving_resource_id` identifies a separate, event-derived resolver and record-serving
+[serving resource](glossary.md#serving-resource) when no control binding is open. It is not a binding, registration,
+address relation, or permission authority. Resolver and record readers use
+`COALESCE(serving_resource_id, resource_id)`; control, relation, and permission builders use only
+`resource_id`.
 Its projection provenance stores the [source family](glossary.md#source-family)
 of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's
@@ -319,13 +325,20 @@ consumer-visible event set: ordinary rows and
 `consumer_visibility=activated` rows only. Candidate rows and
 `migration_event_associations` remain available to diagnostics. An association
 never removes or duplicates the independently admitted ordinary event it
-references. The
-visibility predicate is applied in storage selection before
-address-anchor derivation, selector construction, cursor validation, summary
-calculation, type filtering, keyset pagination, page-size limiting, or cursor
-construction, so candidate admission cannot broaden, shorten, or reorder a
-product page. Projection rows may supply readable names for result decoration,
-but the API does not synthesize history from current state.
+references. One V1 registry resolver log can have a registry-resource row for
+reads and a distinct control-resource row so both resource links survive
+replay. Product history returns the control-resource row once and suppresses the
+additional row carrying the registry resource link; raw diagnostics returns both normalized rows. Without
+a distinct control resource, the sole registry-resource row remains
+product-visible. Consumer visibility is applied before candidate evidence can
+contribute an address anchor and again when rows are selected. Name and resource
+anchors are constructed from readable bindings before row selection. Product
+duplicate suppression then runs before cursor validation, summary calculation,
+type filtering, keyset pagination, page-size limiting, or cursor construction,
+so neither candidate admission nor the extra resource link can broaden, shorten,
+or reorder a product page. Projection rows may supply readable names for result
+decoration, but the API does not synthesize history from current state.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
 
 For a slice-1 test re-walk that must not change product behavior at a fixed
 readable chain head, an outstanding product cursor backed by normalized-event
@@ -402,6 +415,10 @@ latest retained linked resolver event whose name has a readable canonical
 surface staged at the target, with fallback to an earlier linked event when a
 later event's name lacks such a surface. A selected zero-address resolver
 suppresses inventory rather than falling back to an older nonzero event. It
+remains resource-keyed when a registry-only name loses control: an event-linked nonzero registry
+resolver may keep that resource reachable through `name_current.serving_resource_id` while the
+control resource and binding stay null. This evidence is derived entirely from normalized events;
+Project and API serving perform no live registry or resolver read. It
 also records the selected resolver's record boundary, explicit gaps,
 unsupported families, and any retained indexed values. The record event need
 not carry that resource: Project normally joins its `logical_name_id` and
@@ -414,10 +431,17 @@ to its emitting resolver. A selected `ens_v2_registry_l1` or `ens_v2_root_l1`
 pointer may also join when its target resolver's final classification is
 supported `ens_v1_resolver_l1` from an applicable exact declaration and the
 classifying manifest's namespace matches the pointer's namespace. Incremental
-staging applies the same guarded exception. The sibling question for
-`basenames_base_resolver` records with no logical-name attribution and a
-Basenames pointer remains unresolved in
-[#621](https://github.com/ensdomains/bigname/issues/621). Pointer position is
+staging applies the same guarded exception. A `basenames_base_resolver` event
+with no logical-name attribution may join only when the selected pointer is
+`basenames_base_registry`, with the same chain, node-to-namehash, and resolver
+emitter match. Basenames keeps the current resolver by node, permits its
+registrar controller and reverse registrar to write independently of the node
+owner, and stores text by record version, node, and key.
+(upstream: .refs/basenames/src/L2/Registry.sol:L173-L180 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/L2Resolver.sol:L193-L199 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/ResolverBase.sol:L7-L24 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L7-L36 @ basenames@1809bbc)
+Pointer position is
 not a write-time lower bound: selecting a resolver exposes its retained
 pre-pointer writes, switching away hides them,
 and switching back restores them. The latest `RecordVersionChanged` from that
@@ -431,8 +455,8 @@ A known model limitation remains: if a resolver was selected only before the
 again afterward, Project has no linked resolver pointer for that name and does
 not serve its retained records.
 A resource-less record event cannot create a binding, and name and record reads
-expose the inventory only when the name's current readable `resource_id` selects
-it. Resolver-local events are accepted only under the manifest and
+expose the inventory only when the name's current readable control resource or
+`serving_resource_id` selects it. Resolver-local events are accepted only under the manifest and
 current-resolver rules documented in
 [`manifests.md`](manifests.md).
 
