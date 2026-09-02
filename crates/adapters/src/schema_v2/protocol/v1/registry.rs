@@ -691,7 +691,7 @@ pub(super) fn append_authority_transition(
     }
 }
 
-fn merge_observation(observation: &Value, fields: Value) -> Value {
+pub(super) fn merge_observation(observation: &Value, fields: Value) -> Value {
     let mut merged = observation.clone();
     merged
         .as_object_mut()

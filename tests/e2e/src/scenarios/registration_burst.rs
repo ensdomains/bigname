@@ -119,7 +119,7 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
 
     let forward_records: Vec<Value> = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
-         WHERE (logical_name_id = $2 OR namespace || ':' || after_state->>'node' = $2) \
+         WHERE (logical_name_id = $2 OR namespace || ':' || (after_state->>'node') = $2) \
          AND event_kind = 'RecordChanged' \
          AND source_family = 'ens_v1_resolver_l1' \
          AND transaction_hash = $1 AND canonicality_state = 'canonical'",
@@ -221,12 +221,12 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
     .await?;
     let records_by_resource: Vec<(String, i64)> = sqlx::query_as(
         "SELECT resource_id::text, count(*) FROM normalized_events \
-         WHERE event_kind = 'RecordChanged' AND logical_name_id = $2 \
+         WHERE event_kind = 'RecordChanged' AND resource_id::text = $2 \
          AND transaction_hash = $1 AND canonicality_state = 'canonical' \
          GROUP BY resource_id",
     )
     .bind(&registered.register_tx_hash)
-    .bind(&burst_id)
+    .bind(&current_resource)
     .fetch_all(&run.db.pool)
     .await?;
     assert_eq!(

@@ -30,7 +30,7 @@ fn event(
     registration: bool,
 ) -> anyhow::Result<Interpreted> {
     super::super::super::ensure_declared(selected, &["PreimageObserved"])?;
-    let (raw_label, explicit_labelhash, _) = decode::name(selected, raw)?;
+    let (raw_label, explicit_labelhash, observation) = decode::name(selected, raw)?;
     if keccak256(&raw_label) != explicit_labelhash {
         bail!(
             "{} label does not hash to its indexed label",
@@ -82,12 +82,15 @@ fn event(
         binding_kind: "declared_registry_path".to_owned(),
         authority_arm: super::super::authority_arm(&selected.source.namespace).to_owned(),
         source_kind: format!("{}_name", selected.event.name),
-        preimage_metadata: Some(serde_json::json!({
-            "raw_label_hex":hex::encode(&raw_label),
-            "decoded_label":decoded_label(&raw_label),
-            "labelhash":format!("{explicit_labelhash:#x}"),
-            "surface_known":true,
-        })),
+        preimage_metadata: Some(super::super::registry::merge_observation(
+            &observation,
+            serde_json::json!({
+                "raw_label_hex":hex::encode(&raw_label),
+                "decoded_label":decoded_label(&raw_label),
+                "labelhash":format!("{explicit_labelhash:#x}"),
+                "surface_known":true,
+            }),
+        )),
     });
     Ok(output)
 }
