@@ -2,13 +2,10 @@ mod expiry;
 mod registrar;
 mod topology;
 mod transfer;
-
-use alloy_primitives::{Address, U256, hex, keccak256};
-use alloy_sol_types::sol;
-use anyhow::{Context, bail};
-use serde_json::{Value, json};
-use uuid::Uuid;
-
+use super::{
+    BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, LabelDraft, NameDraft,
+    ResourceDraft, ShadowNameDraft, ensure_declared,
+};
 use crate::{
     evm_abi::{address_hex, decode_event_log, decode_event_log_data_as, hex_string, u256_word_hex},
     schema_v2::{
@@ -21,23 +18,22 @@ use crate::{
         state::{State, V2NameTransition, V2RawNameState, V2TokenState, v2_expiry_is_live},
     },
 };
-
-use super::{
-    BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, LabelDraft, NameDraft,
-    ResourceDraft, ShadowNameDraft, ensure_declared,
-};
+use alloy_primitives::{Address, U256, hex, keccak256};
+use alloy_sol_types::sol;
+use anyhow::{Context, bail};
+use serde_json::{Value, json};
 pub(in crate::schema_v2) use topology::boundary_reassertion;
 use topology::{
     append_resolver_discovery_closures, append_terminal_boundaries,
     append_token_discovery_closures, append_v2_name_transitions, discovery_observation_key,
 };
+use uuid::Uuid;
 pub(super) fn boundary_expiration(
     transition: V2NameTransition,
     released_at: i64,
 ) -> anyhow::Result<Interpreted> {
     topology::boundary_expiration(transition, released_at)
 }
-
 sol! {
     event RegistryCreated();
     event RawLabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, bytes label, address owner, uint64 expiry, address indexed sender);
@@ -54,7 +50,6 @@ sol! {
     event RawParentUpdated(address indexed parent, bytes label, address indexed sender);
     event Upgraded(address indexed implementation);
 }
-
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
@@ -132,7 +127,7 @@ fn registry(
                 event_state.clone(),
             );
             ensure_declared(selected, &["ExpiryChanged"])?;
-            if detached_revival.is_some() {
+            if after.registration.is_some() || detached_revival.is_some() {
                 ensure_declared(selected, &["RegistrationRenewed"])?;
             }
             let mut output = single_event(
@@ -662,3 +657,7 @@ fn single_event(
     });
     output
 }
+
+// Declaration-guard coverage stays beside this adapter.
+#[cfg(test)]
+mod tests;

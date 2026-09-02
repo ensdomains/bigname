@@ -8284,7 +8284,7 @@ fn ens_v2_expiry_extension_orders_the_old_unbind_before_the_new_binding() -> any
                 "ExpiryUpdated",
                 "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)",
                 &["registry"],
-                &["ExpiryChanged"],
+                &["ExpiryChanged", "RegistrationRenewed"],
             ),
         ],
     );
@@ -8691,7 +8691,7 @@ fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Resul
                 &["registry"],
                 &["ParentChanged"],
             ),
-            ("ExpiryUpdated", "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)", &["registry"], &["ExpiryChanged"]),
+            ("ExpiryUpdated", "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)", &["registry"], &["ExpiryChanged", "RegistrationRenewed"]),
         ],
     );
     let mut child_admission = admission(68, "registry");
