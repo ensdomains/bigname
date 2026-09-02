@@ -209,7 +209,7 @@ re-walk](glossary.md#re-derivation-boundary); never relabel the row in place.
 Changing only the provider endpoint is allowed because endpoints are not part
 of persisted source identity and will not trigger the runtime reset guard.
 
-Each chain must have exactly one non-bulk-import intake source that Live follows.
+Each chain must have exactly one block-provider intake source that Live follows; the Coinbase SQL historical source is not a block provider.
 Adding a second such source is not failover configuration: before configuring
 it, define how Live selects one source, because after the Ingest handoff
 Interpret fails closed rather than choosing between sources.
