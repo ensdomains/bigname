@@ -15,11 +15,17 @@ use super::{
     V2Error, load_current_name_row,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EmptyPermissionsSelection {
+    MissingOrUnsupportedNameAnchor,
+    SupersededNameRegistrationPair,
+}
+
 #[derive(Debug)]
 pub(super) struct ResolvedPermissionsFilter {
     pub(super) subject: Option<String>,
     pub(super) resource_id: Option<Uuid>,
-    pub(super) known_empty: bool,
+    pub(super) empty_selection: Option<EmptyPermissionsSelection>,
     pub(super) authority_context: AuthorityContext,
     pub(super) cursor_filters: BTreeMap<String, String>,
 }
@@ -98,8 +104,13 @@ pub(super) async fn resolve_permissions_filter(
 
     let namespace = inputs.namespace.clone();
     let resource_id = inputs.requested_resource_id.or(name_resource_id);
-    let known_empty =
-        superseded_pair || (inputs.name_filter.is_some() && name_resource_id.is_none());
+    let empty_selection = if superseded_pair {
+        Some(EmptyPermissionsSelection::SupersededNameRegistrationPair)
+    } else if inputs.name_filter.is_some() && name_resource_id.is_none() {
+        Some(EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor)
+    } else {
+        None
+    };
     let authority_context = if inputs.name_filter.is_some() {
         AuthorityContext::CurrentForName
     } else {
@@ -125,7 +136,7 @@ pub(super) async fn resolve_permissions_filter(
     Ok(ResolvedPermissionsFilter {
         subject: params.address.clone(),
         resource_id,
-        known_empty,
+        empty_selection,
         authority_context,
         cursor_filters,
     })

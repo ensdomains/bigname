@@ -122,8 +122,19 @@ token-approval, or resolver-delegation paths are not indexed produces
 summary instead produces `meta.completeness=unsupported` with
 `wrapper_holder_permissions_not_supported`. A missing or unrecognized summary
 produces `meta.completeness=partial` with `permission_support_unknown`, which
-takes precedence over both known limitations. An address-only permissions read
-is always at least `partial` with
+takes precedence over both known limitations.
+
+A supplied `name` that is missing or unrecognized, whose current name is marked
+unsupported, or that resolves to a current name not bound to a registration
+resource returns an empty result relative to that request with `meta.completeness=partial` and
+`meta.unsupported_reason=permission_support_unknown`. This establishes only
+that the API could not select a supported current registration; it does not
+establish that the name has no permission rows. A supplied current name paired
+with an explicitly different `registration_id` is instead a supported,
+proven-empty selection. Its empty page has neither `meta.completeness` nor
+`meta.unsupported_reason`.
+
+An address-only permissions read is always at least `partial` with
 `approval_and_delegation_permissions_not_supported`, including when it returns
 zero rows, because returned registrations cannot establish the request's full
 permission set.
