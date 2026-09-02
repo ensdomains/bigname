@@ -106,15 +106,37 @@ to the applicable entries below.
 > **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
 > **Since**: `2026-09-02`
 
-> **Graph Node collection-argument schema defaults are omitted locally** — Graph Node publishes collection arguments as
-> nullable `Int` values with `first = 100` and `skip = 0`, while bigname currently publishes the same nullable arguments
-> without schema defaults. The bigname resolver still applies page size `100` and offset `0` when callers omit them.
-> **Upstream**: Graph Node's generated collection arguments assign `skip` the default `0` and `first` the default `100`
-> (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact signature dispositions in the
-> GraphQL oracle `coverage.json`; task `#670/T2` owns publishing the defaults.
-> **Why**: preserving the current runtime page size avoids a behavior change in the capture-preparation change while the
-> entities machinery task aligns the introspected signature.
+> **Generated Domain pagination retains bigname's safety bounds** — Graph Node rejects a non-positive or over-limit
+> `first` and a negative or over-limit `skip`. Bigname's generated-style `domains` root instead returns an empty page for
+> non-positive `first`, caps positive `first` at `crate::v2::MAX_PAGE_SIZE`, treats negative `skip` as zero, and caps
+> positive `skip` at `1_000_000`.
+> **Upstream**: Graph Node accepts `first` only in `1..=max_first` and `skip` only in `0..=max_skip`, returning a range
+> argument error otherwise (upstream: .refs/graph_node/graphql/src/store/query.rs:L62-L84 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the generated root preserves the existing bounded bigname paging behavior while publishing Graph Node's
+> generated argument defaults.
+> **Since**: `2026-09-02`
+
+> **Generated Domain owner filters retain token-holder matching** — the partial `Domain_filter.owner` and `owner_in`
+> members use bigname's existing token-holder address relation, which can differ from the registry owner returned by
+> `Domain.owner`.
+> **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
+> ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L151-L158 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T3` owns the remaining filter
+> vocabulary and any later alignment.
+> **Why**: this T2 slice preserves the pre-existing owner-filter path for current consumers.
+> **Since**: `2026-09-02`
+
+> **Generated Domain `name_contains` retains ENS normalization** — bigname normalizes the supplied ENS fragment before
+> applying the stored-name predicate, so case variants that normalize identically can match even though the separate
+> `name_contains_nocase` member remains absent.
+> **Upstream**: Graph Node maps `contains` to SQL `LIKE` and `contains_nocase` to `ILIKE`
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1535 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T3` owns the remaining filter
+> vocabulary and any later alignment.
+> **Why**: this T2 slice preserves bigname's existing ENS-aware name filtering behavior.
 > **Since**: `2026-09-02`
 
 > **Direct Domain registration-date ordering is a local GraphQL extension** — bigname retains

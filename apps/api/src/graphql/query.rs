@@ -38,8 +38,8 @@ pub(crate) struct Query;
 #[Object]
 impl Query {
     /// `domain(id: ID!)` accepts either an ENS name string (for example `"alice.eth"`) or a
-    /// namehash. Resolve by name first, then fall back to the namehash, so callers do not have to
-    /// signal which id form they are sending.
+    /// namehash. Resolve by namehash first, then fall back to the name, so a hash-shaped ENS name
+    /// cannot shadow an entity ID and callers do not have to signal which id form they are sending.
     async fn domain(
         &self,
         ctx: &Context<'_>,
@@ -182,12 +182,12 @@ async fn resolve_domain(
     let state = ctx.data::<AppState>()?;
     let head = load_graphql_entity_head(ctx, block, subgraph_error, "domain").await?;
     let id = id.as_str();
-    let row = match load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, id)
+    let row = match load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, id)
         .await
         .map_err(|error| internal_error("domain", error))?
     {
         Some(row) => Some(row),
-        None => load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, id)
+        None => load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, id)
             .await
             .map_err(|error| internal_error("domain", error))?,
     };

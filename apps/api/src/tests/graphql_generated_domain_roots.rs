@@ -206,6 +206,54 @@ async fn graphql_generated_domains_apply_skip_first_and_direction() -> Result<()
 }
 
 #[tokio::test]
+async fn graphql_generated_domain_name_fallback_cannot_shadow_namehash() -> Result<()> {
+    const TARGET_NAME: &str = "namehash-target.eth";
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let target_namehash = bigname_lookup::ens_namehash_hex(TARGET_NAME)?;
+    let normalized = bigname_domain::normalization::normalize_name(&target_namehash)?;
+    assert_eq!(normalized.normalized_name, target_namehash);
+    let hash_shaped_namehash = bigname_lookup::ens_namehash_hex(&target_namehash)?;
+    assert_ne!(hash_shaped_namehash, target_namehash);
+    seed_identity_name(
+        &database,
+        &format!("ens:{target_namehash}"),
+        &target_namehash,
+        &target_namehash,
+        &hash_shaped_namehash,
+        Uuid::from_u128(0x670_2001),
+        Uuid::from_u128(0x670_2002),
+        Uuid::from_u128(0x670_2003),
+        GRAPHQL_OWNER,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        700,
+    )
+    .await?;
+    seed_identity_name(
+        &database,
+        "ens:namehash-target.eth",
+        TARGET_NAME,
+        TARGET_NAME,
+        &target_namehash,
+        Uuid::from_u128(0x670_2011),
+        Uuid::from_u128(0x670_2012),
+        Uuid::from_u128(0x670_2013),
+        GRAPHQL_OWNER,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        701,
+    )
+    .await?;
+    let payload = post_graphql(
+        database.app_state(),
+        "query Domain($id: ID!) { domain(id: $id) { name } }",
+        json!({"id": target_namehash}),
+    )
+    .await?;
+    assert_eq!(payload["data"]["domain"]["name"], json!(TARGET_NAME));
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn graphql_generated_domains_reject_t3_filter_members() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     for (query, variables, member) in [

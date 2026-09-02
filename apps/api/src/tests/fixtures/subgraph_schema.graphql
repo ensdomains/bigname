@@ -109,8 +109,8 @@ enum OrderDirection {
 type Query {
 	"""
 	`domain(id: ID!)` accepts either an ENS name string (for example `"alice.eth"`) or a
-	namehash. Resolve by name first, then fall back to the namehash, so callers do not have to
-	signal which id form they are sending.
+	namehash. Resolve by namehash first, then fall back to the name, so a hash-shaped ENS name
+	cannot shadow an entity ID and callers do not have to signal which id form they are sending.
 	"""
 	domain(id: ID!, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): Domain
 	"""

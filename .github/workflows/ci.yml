@@ -1147,7 +1147,7 @@ jobs:
 
       - name: Validate Manager operations against bigname schema
         run: |
-          # The generated-style Domain roots require two pinned Manager declaration migrations.
+          # The generated-style Domain roots require two pinned Manager declaration updates.
           # Assert that these are the only raw validation differences, then validate every
           # unchanged field selection through a temporary declaration overlay until that
           # coordination lands.

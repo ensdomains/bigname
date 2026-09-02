@@ -421,16 +421,19 @@ domains(
 `account`, `accounts`, `resolver`, and `resolvers` are the named second-PR
 boundary of `#670/T2`; this slice does not add them through adjacent root work.
 `Domain.id` is `ID!` and remains a JSON string. `domain(id:)` also retains a
-local runtime extension that accepts an ENS name string and falls back to a
-namehash lookup. A name cannot shadow an ID because an ENS name is never a
-32-byte hexadecimal namehash string. `Domain_filter.id` and
-`Domain_filter.id_in` match namehashes only.
+local runtime extension that accepts an ENS name string after attempting a
+namehash lookup. The namehash-first precedence prevents a hash-shaped ENS name
+from shadowing an entity ID. `Domain_filter.id` and `Domain_filter.id_in` match
+namehashes only.
 
 `Domain_filter` accepts exactly `id: ID`, `id_in: [ID!]`, `owner: String`,
 `owner_in: [String!]`, `name: String`, and `name_contains: String`. Supplied
 members combine with logical AND. A supplied empty `id_in` or `owner_in` list
-matches no rows. Every other captured upstream member is absent from the SDL,
-so GraphQL input validation rejects it instead of ignoring it at runtime.
+matches no rows. `owner` and `owner_in` preserve the existing token-holder
+relation filter, which can differ from the registry owner exposed by
+`Domain.owner`; `name` and `name_contains` preserve the existing ENS-aware name
+normalization. Every other captured upstream member is absent from the SDL, so
+GraphQL input validation rejects it instead of ignoring it at runtime.
 `DomainFilter` remains the separate input for the local `domainConnection`
 operation. In particular, `isMigrated` remains on `DomainFilter` and is not
 accepted by `Domain_filter`; task `#670/T10` remains outside this slice and is
@@ -445,7 +448,7 @@ Non-positive `first` returns an empty page, positive `first` is capped at
 `crate::v2::MAX_PAGE_SIZE`, negative `skip` becomes zero, and positive `skip`
 is capped at `1_000_000`.
 
-Manager's migration list therefore requires two operation declaration edits:
+The affected Manager operation set therefore requires two declaration edits:
 `$id: String!` becomes `$id: ID!`, and the `Domains.graphql` declaration
 `$where: DomainFilter!` becomes `$where: Domain_filter!`. A Manager runtime
 `where` value containing `isMigrated` fails GraphQL input coercion with an
