@@ -56,11 +56,6 @@ loc = 637
 justification = "Exact-name projection selects control authority and the independently retained resource for resolver reads in one row construction so an ownerless resolver cannot acquire a binding or registration; the file remains below the review threshold."
 
 [[files]]
-path = "crates/project/src/scope.rs"
-loc = 652
-justification = "Incremental scope closure keeps direct events, parent names, control resources, resources retained for resolver reads, resolvers, and permission subjects in one fixed-point operation so fresh and incremental publication cannot diverge; the file remains below the review threshold."
-
-[[files]]
 path = "crates/storage/src/record_inventory/snapshot_reads.rs"
 loc = 612
 justification = "Snapshot admission, anchor fallback, and canonical-lineage proof remain together; this slice ratchets the file below its base allowance without expanding its responsibilities."
