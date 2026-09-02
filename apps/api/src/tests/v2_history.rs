@@ -446,7 +446,15 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         )],
     )
     .await?;
-    seed_v2_history_blocks(&database, 121..=123).await?;
+    seed_v2_history_blocks(&database, 121..=124).await?;
+    let mut unmapped_surface_event = v2_history_event(
+        "registration-filter-unmapped-surface",
+        Some(logical_name_id),
+        None,
+        "RegistrarNameRegistered",
+        124,
+    );
+    unmapped_surface_event.source_family = "ens_v2_registrar_l1".to_owned();
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
@@ -471,6 +479,7 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
                 "RegistrationGranted",
                 123,
             ),
+            unmapped_surface_event,
         ],
     )
     .await?;
@@ -484,6 +493,14 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
     assert_eq!(history_types(rows), vec!["record", "registration"]);
     assert_eq!(rows[0]["registration_id"], Value::Null);
     assert_eq!(rows[1]["registration_id"], json!(resource_id.to_string()));
+
+    let first_page = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={resource_id}&page_size=1"),
+    )
+    .await?;
+    assert_eq!(history_types(first_page["data"].as_array().unwrap()), vec!["record"]);
+    assert_eq!(first_page["page"]["has_more"], json!(true));
 
     let storage_page = bigname_storage::load_event_history_page(
         &database.pool,
