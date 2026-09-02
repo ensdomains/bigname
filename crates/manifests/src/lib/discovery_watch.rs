@@ -316,24 +316,29 @@ pub fn subtract_intervals(
 ) -> Vec<DiscoveryWatchInterval> {
     let mut remaining = Vec::new();
     for desired in desired {
-        let mut cursor = desired.from;
+        let mut cursor = Some(desired.from);
         for covered in covered {
-            if covered.to < cursor || covered.from > desired.to {
+            let Some(current) = cursor else {
+                break;
+            };
+            if covered.to < current || covered.from > desired.to {
                 continue;
             }
-            if covered.from > cursor {
+            if covered.from > current {
                 remaining.push(DiscoveryWatchInterval {
-                    from: cursor,
+                    from: current,
                     to: covered.from - 1,
                 });
             }
             if covered.to >= desired.to {
-                cursor = desired.to.saturating_add(1);
+                cursor = None;
                 break;
             }
-            cursor = covered.to.saturating_add(1);
+            cursor = covered.to.checked_add(1);
         }
-        if cursor <= desired.to {
+        if let Some(cursor) = cursor
+            && cursor <= desired.to
+        {
             remaining.push(DiscoveryWatchInterval {
                 from: cursor,
                 to: desired.to,

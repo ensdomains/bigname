@@ -173,6 +173,121 @@ fn loads_manifest_declarations_abi_and_start_blocks() -> Result<()> {
 }
 
 #[test]
+fn repository_loader_rejects_discovery_rule_with_unknown_from_role() -> Result<()> {
+    let contents = manifest_contents().replacen(
+        "from_role = \"registry\"",
+        "from_role = \"missing_registry\"",
+        1,
+    );
+    let error = load_one(&contents).expect_err("unknown discovery-rule from_role must fail");
+    let message = format!("{error:#}");
+    for expected in [
+        "discovery_rules[0]",
+        "edge_kind=subregistry",
+        "from_role=missing_registry",
+        "v1.toml",
+        "unknown [[roots]].name / [[contracts]].role",
+    ] {
+        assert!(message.contains(expected), "unexpected error: {message}");
+    }
+    Ok(())
+}
+
+#[test]
+fn repository_loader_accepts_discovery_rule_from_declared_root() -> Result<()> {
+    let contents = manifest_contents().replacen(
+        "from_role = \"registry\"",
+        "from_role = \"RootRegistry\"",
+        1,
+    );
+    let repository = load_one(&contents)?;
+    assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+    Ok(())
+}
+
+#[test]
+fn repository_loader_rejects_registry_announcement_rule_outside_ens_v2_registry_family()
+-> Result<()> {
+    let test_dir = TestDir::new()?;
+    let contents = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v2_root_l1\"",
+            1,
+        )
+        .replacen(
+            "[[discovery_rules]]",
+            "[[abi.events]]\nname = \"RegistryCreated\"\nfragment = \"event RegistryCreated()\"\nemitter_roles = [\"registry\"]\nnormalized_events = []\nstatus = \"supported\"\n\n[[discovery_rules]]",
+            1,
+        )
+        .replacen(
+            "edge_kind = \"subregistry\"",
+            "edge_kind = \"registry_announcement\"",
+            1,
+        );
+    let path = test_dir.write_manifest("ens", "ens_v2_root_l1", "v1", &contents)?;
+    let error = load_repository(&test_dir.path)
+        .expect_err("registry announcement outside ens_v2_registry_l1 must fail");
+    let message = format!("{error:#}");
+    for expected in [
+        "discovery_rules[0]",
+        "edge_kind=registry_announcement",
+        "from_role=registry",
+        "source_family=ens_v2_root_l1",
+        "ens_v2_registry_l1",
+        path.to_str().context("temporary path is not UTF-8")?,
+    ] {
+        assert!(message.contains(expected), "unexpected error: {message}");
+    }
+    Ok(())
+}
+
+#[test]
+fn repository_loader_rejects_registry_announcement_rule_without_registry_created_event()
+-> Result<()> {
+    for registry_created_declaration in [
+        "",
+        "\n[[abi.events]]\nname = \"RegistryCreated\"\nfragment = \"event RegistryCreated(address registry)\"\nemitter_roles = [\"registry\"]\nnormalized_events = []\nstatus = \"supported\"\n",
+    ] {
+        let test_dir = TestDir::new()?;
+        let contents = manifest_contents()
+            .replacen(
+                "[[discovery_rules]]",
+                &format!("{registry_created_declaration}\n[[discovery_rules]]"),
+                1,
+            )
+            .replacen(
+                "edge_kind = \"subregistry\"",
+                "edge_kind = \"registry_announcement\"",
+                1,
+            );
+        let path = test_dir.write_manifest("ens", "ens_v2_registry_l1", "v1", &contents)?;
+        let error = load_repository(&test_dir.path)
+            .expect_err("registry announcement without RegistryCreated() must fail");
+        let message = format!("{error:#}");
+        for expected in [
+            "discovery_rules[0]",
+            "edge_kind=registry_announcement",
+            "from_role=registry",
+            "RegistryCreated()",
+            path.to_str().context("temporary path is not UTF-8")?,
+        ] {
+            assert!(message.contains(expected), "unexpected error: {message}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn subtract_intervals_fully_covered_max_ended_ranges_are_empty() {
+    for (from, to) in [(5, i64::MAX), (i64::MAX, i64::MAX)] {
+        let desired = [DiscoveryWatchInterval { from, to }];
+        let covered = [DiscoveryWatchInterval { from, to }];
+        assert_eq!(subtract_intervals(&desired, &covered), []);
+    }
+}
+
+#[test]
 fn resolver_implementation_validation_preserves_alloy_address_grammar() -> Result<()> {
     let unprefixed = manifest_contents().replacen(
         "0x00000000000000000000000000000000000000CC",
@@ -357,6 +472,11 @@ fn migration_wrapper_manifest_pair() -> (String, String) {
             "emitter_roles = [\"registry\"]",
             "emitter_roles = [\"name_wrapper\"]",
             1,
+        )
+        .replacen(
+            "from_role = \"registry\"",
+            "from_role = \"name_wrapper\"",
+            1,
         );
     let migration = manifest_contents()
         .replacen(
@@ -467,6 +587,11 @@ fn repository_loader_requires_coadmitted_name_wrapper_role() -> Result<()> {
             "emitter_roles = [\"name_wrapper\"]",
             "emitter_roles = [\"wrapper_contract\"]",
             1,
+        )
+        .replacen(
+            "from_role = \"name_wrapper\"",
+            "from_role = \"wrapper_contract\"",
+            1,
         );
     test_dir.write_manifest("ens", "ens_v1_wrapper_l1", "v1", &missing_role)?;
     test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &migration)?;
@@ -508,7 +633,8 @@ fn repository_loader_rejects_mismatched_migration_base_registrar_correlation() -
             "emitter_roles = [\"registry\"]",
             "emitter_roles = [\"registrar\"]",
             1,
-        );
+        )
+        .replacen("from_role = \"registry\"", "from_role = \"registrar\"", 1);
     test_dir.write_manifest("ens", "ens_v1_registrar_l1", "v1", &registrar)?;
     test_dir.write_manifest("ens", "ens_v2_migration_l1", "v1", &migration)?;
     load_repository(&test_dir.path).context("matching registrar correlation must load")?;
@@ -581,7 +707,8 @@ fn pre_502_dual_registrar_contract_roles_still_fail_attribution_guard() -> Resul
             "emitter_roles = [\"registry\"]",
             "emitter_roles = [\"registrar\"]",
             1,
-        );
+        )
+        .replacen("from_role = \"registry\"", "from_role = \"registrar\"", 1);
     let migration = manifest_contents()
         .replacen(
             "source_family = \"ens_v2_registry_l1\"",
