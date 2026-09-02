@@ -91,6 +91,8 @@ scripts/graphql-compat-oracle compare \
   --fixtures apps/api/src/tests/fixtures/graphql-oracle/v1 \
   --bigname-endpoint http://127.0.0.1:8000/graphql
 
+scripts/test-db -- cargo nextest run -p bigname-api -E 'test(/graphql_oracle/)'
+
 scripts/graphql-compat-oracle verify-fixtures --offline
 ```
 
