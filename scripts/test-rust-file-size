@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Self-tests for the Rust source-size classifier."""
+from __future__ import annotations
+
+import runpy
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CHECKER = runpy.run_path(str(REPO_ROOT / "scripts" / "check-rust-file-size"))
+
+
+def source_path(relative: str) -> Path:
+    return REPO_ROOT / relative
+
+
+def old_exclusion_reason(path: Path) -> str | None:
+    """Return the classifier result before source-embedded tests were recognized."""
+    parts = path.relative_to(REPO_ROOT).parts
+    if not parts:
+        return "empty path"
+
+    root = parts[0]
+    if root not in CHECKER["PRODUCTION_ROOTS"]:
+        return "outside apps/, crates/, and tools/"
+    if root == "crates" and len(parts) > 1 and parts[1] in CHECKER["EXCLUDED_CRATES"]:
+        return "test support crate"
+    if path.name == "build.rs":
+        return "build script"
+
+    for part in (part.lower() for part in parts):
+        if part in CHECKER["EXCLUDED_COMPONENTS"]:
+            return f"excluded path component: {part}"
+        if any(keyword in part for keyword in CHECKER["EXCLUDED_COMPONENT_KEYWORDS"]):
+            return f"excluded generated-style path component: {part}"
+
+    stem = path.stem.lower()
+    if stem in CHECKER["EXCLUDED_FILE_STEMS"]:
+        return f"excluded file stem: {stem}"
+    return None
+
+
+class RustFileSizeClassifierTests(unittest.TestCase):
+    def test_src_embedded_tests_suffix_is_excluded(self) -> None:
+        reason = CHECKER["exclusion_reason"](source_path("crates/demo/src/foo_tests.rs"))
+        self.assertEqual(reason, "source-embedded test module")
+
+    def test_similarly_named_production_file_is_not_excluded(self) -> None:
+        for relative in (
+            "crates/demo/src/foo_test.rs",
+            "crates/demo/src/contest.rs",
+            "crates/demo/src/latest.rs",
+            "crates/demo/src/contests/helper.rs",
+        ):
+            with self.subTest(relative=relative):
+                self.assertIsNone(CHECKER["exclusion_reason"](source_path(relative)))
+
+    def test_legacy_exact_test_stems_preserve_classification(self) -> None:
+        cases = {
+            "crates/demo/src/tests.rs": "excluded file stem: tests",
+            "crates/demo/tests/helper.rs": "excluded path component: tests",
+            "crates/test-support/src/helper.rs": "test support crate",
+        }
+        for relative, expected in cases.items():
+            with self.subTest(relative=relative):
+                self.assertEqual(
+                    CHECKER["exclusion_reason"](source_path(relative)), expected
+                )
+
+    def test_large_src_embedded_test_is_excluded_from_gate_errors(self) -> None:
+        relative = "crates/demo/src/large_tests.rs"
+        old_errors, _ = CHECKER["check_current_files"]({}, {relative: 601})
+        new_errors, _ = CHECKER["check_current_files"]({}, {})
+
+        self.assertTrue(old_errors)
+        self.assertEqual(new_errors, [])
+
+    def test_current_tree_gate_outcomes_are_unchanged(self) -> None:
+        current_paths = [path for path in CHECKER["rust_files"]() if path.exists()]
+        changed = {
+            path
+            for path in current_paths
+            if old_exclusion_reason(path) != CHECKER["exclusion_reason"](path)
+        }
+        self.assertTrue(changed)
+        self.assertTrue(all(path.stem.lower().endswith("_tests") for path in changed))
+
+        baseline, errors = CHECKER["load_baseline"](CHECKER["DEFAULT_BASELINE"])
+        self.assertEqual(errors, [])
+        old_current = {
+            CHECKER["rel"](path): CHECKER["line_count"](path)
+            for path in current_paths
+            if old_exclusion_reason(path) is None
+        }
+        new_current = {
+            CHECKER["rel"](path): CHECKER["line_count"](path)
+            for path in current_paths
+            if CHECKER["exclusion_reason"](path) is None
+        }
+        old_errors, old_warnings = CHECKER["check_current_files"](baseline, old_current)
+        new_errors, new_warnings = CHECKER["check_current_files"](baseline, new_current)
+        changed_names = {CHECKER["rel"](path) for path in changed}
+        expected_warnings = [
+            warning
+            for warning in old_warnings
+            if not any(warning.startswith(f"{name}:") for name in changed_names)
+        ]
+        expected_errors = [
+            error
+            for error in old_errors
+            if not any(error.startswith(f"{name}:") for name in changed_names)
+        ]
+        self.assertEqual(new_warnings, expected_warnings)
+        self.assertEqual(new_errors, expected_errors)
+        self.assertEqual(bool(new_errors), bool(expected_errors))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

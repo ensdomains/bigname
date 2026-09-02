@@ -61,6 +61,7 @@ const SEPOLIA: &str = "ethereum-sepolia";
 const CONTRACT: &str = "0x00000000000000000000000000000000000000aa";
 const MULTI_BATCH_VERIFY_TARGET: i64 = 131_073;
 const FIRST_VERIFY_BATCH_END: i64 = 131_071;
+const PHASE_COORDINATION_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 type FailedVerifyState = (String, Option<i64>, Option<i64>, Option<String>);
 
 #[derive(Clone, Default)]
@@ -751,6 +752,91 @@ async fn stopped_phase_recovery_refuses_a_genuinely_held_verify_lock() -> Result
 }
 
 #[tokio::test]
+async fn blocked_phase_lock_readiness_correlates_the_advisory_owner() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_correlated_lock_readiness").await?;
+    PhaseStore::new(scratch.pool().clone())
+        .initialize_chain(SEPOLIA)
+        .await?;
+    let mut blocked_row = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT phase_name FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify' FOR UPDATE",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(&mut *blocked_row)
+    .await?;
+    let deadline = tokio::time::Instant::now() + PHASE_COORDINATION_TEST_TIMEOUT;
+
+    let mut unrelated = scratch.pool().acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(9001, 9002)")
+        .execute(&mut *unrelated)
+        .await?;
+    let mut without_advisory = scratch.pool().acquire().await?;
+    let without_advisory_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *without_advisory)
+        .await?;
+    let without_advisory_task = tokio::spawn(async move {
+        sqlx::query(
+            "UPDATE chain_phase_state SET updated_at = now()
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+        )
+        .bind(SEPOLIA)
+        .execute(&mut *without_advisory)
+        .await
+    });
+    wait_for_backend_lock_wait_until(scratch.pool(), without_advisory_pid, deadline).await?;
+    assert_eq!(blocked_phase_lock_pid_once(scratch.pool()).await?, None);
+    let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+        .bind(without_advisory_pid)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert!(cancelled);
+    assert!(without_advisory_task.await?.is_err());
+
+    let mut owner = scratch.pool().acquire().await?;
+    let owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *owner)
+        .await?;
+    let lock_name = format!("phase-runner:{SEPOLIA}:verify");
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1::text, 0::bigint))")
+        .bind(&lock_name)
+        .execute(&mut *owner)
+        .await?;
+    let owner_task = tokio::spawn(async move {
+        let result = sqlx::query(
+            "UPDATE chain_phase_state SET updated_at = now()
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+        )
+        .bind(SEPOLIA)
+        .execute(&mut *owner)
+        .await;
+        (result, owner)
+    });
+    wait_for_backend_lock_wait_until(scratch.pool(), owner_pid, deadline).await?;
+    assert_eq!(
+        blocked_phase_lock_pid_once(scratch.pool()).await?,
+        Some(owner_pid)
+    );
+
+    blocked_row.rollback().await?;
+    let (owner_update, mut owner) = owner_task.await?;
+    owner_update?;
+    let unlocked: bool =
+        sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1::text, 0::bigint))")
+            .bind(lock_name)
+            .fetch_one(&mut *owner)
+            .await?;
+    assert!(unlocked);
+    let unrelated_unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock(9001, 9002)")
+        .fetch_one(&mut *unrelated)
+        .await?;
+    assert!(unrelated_unlocked);
+    drop(owner);
+    drop(unrelated);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn stopped_phase_recovery_stops_if_its_advisory_lock_connection_is_lost() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_stopped_recovery_lock_loss").await?;
     seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
@@ -777,39 +863,26 @@ async fn stopped_phase_recovery_stops_if_its_advisory_lock_connection_is_lost() 
     let live_calls = Arc::new(AtomicUsize::new(0));
     let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
     let chain = sepolia_chain_with_key("drpc-intake")?;
-    let mut run =
-        tokio::spawn(async move { runner.run_chain(&chain, CancellationToken::new()).await });
-    let lock_pid = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let pid: Option<i32> = sqlx::query_scalar(
-                "SELECT advisory.pid
-                 FROM pg_locks advisory
-                 WHERE advisory.locktype = 'advisory'
-                   AND advisory.granted
-                   AND advisory.database = (
-                       SELECT oid FROM pg_database WHERE datname = current_database()
-                   )
-                   AND EXISTS (
-                       SELECT 1 FROM pg_stat_activity activity
-                       WHERE activity.datname = current_database()
-                         AND activity.wait_event_type = 'Lock'
-                         AND activity.query LIKE '%UPDATE chain_phase_state%'
-                   )
-                 LIMIT 1",
-            )
-            .fetch_optional(scratch.pool())
-            .await?;
-            if let Some(pid) = pid {
-                return Ok::<i32, anyhow::Error>(pid);
-            }
-            tokio::task::yield_now().await;
+    let deadline = tokio::time::Instant::now() + PHASE_COORDINATION_TEST_TIMEOUT;
+    let mut run = tokio::spawn(async move {
+        match tokio::time::timeout_at(deadline, runner.run_chain(&chain, CancellationToken::new()))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(RunnerError::transient(
+                "stopped-phase recovery exceeded the test deadline",
+            )),
         }
-    })
-    .await??;
-    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
-        .bind(lock_pid)
-        .fetch_one(scratch.pool())
-        .await?;
+    });
+    let lock_pid = wait_for_blocked_phase_lock_pid_until(scratch.pool(), deadline).await?;
+    let terminated: bool = tokio::time::timeout_at(
+        deadline,
+        sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(lock_pid)
+            .fetch_one(scratch.pool()),
+    )
+    .await
+    .context("advisory-lock backend termination exceeded the test deadline")??;
     assert!(terminated);
 
     let stopped = tokio::time::timeout(Duration::from_millis(250), &mut run).await;
@@ -2752,16 +2825,27 @@ async fn mismatch_finishing_after_live_still_records_the_live_stop() -> Result<(
 
 #[tokio::test]
 async fn mismatch_finishing_after_live_error_remains_the_fatal_context() -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-
     let scratch = ScratchDatabase::create("production_verify_live_error_mismatch").await?;
     seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
     let gate = VerificationGate::default();
+    let live_gate = LiveFailureGate::default();
     let reference = Arc::new(FixtureReferences::gated(
         [reference_log(BASE, 2)],
         gate.clone(),
     ));
-    let runner = Arc::new(verifier_runner(&scratch, reference, Arc::new(FailingLivePhase)).await?);
+    let runner = Arc::new(
+        verifier_runner(
+            &scratch,
+            reference,
+            Arc::new(GatedFailingLivePhase {
+                gate: live_gate.clone(),
+            }),
+        )
+        .await?,
+    );
+    let verify_entered = gate.entered.notified();
+    let live_entered = live_gate.entered.notified();
+    let deadline = tokio::time::Instant::now() + PHASE_COORDINATION_TEST_TIMEOUT;
     let task = {
         let runner = Arc::clone(&runner);
         tokio::spawn(async move {
@@ -2771,16 +2855,21 @@ async fn mismatch_finishing_after_live_error_remains_the_fatal_context() -> Resu
         })
     };
 
-    tokio::time::timeout_at(deadline, gate.entered.notified())
+    tokio::time::timeout_at(deadline, verify_entered)
         .await
         .context("Verify did not reach its comparison gate")?;
-    tokio::time::timeout_at(
+    tokio::time::timeout_at(deadline, live_entered)
+        .await
+        .context("Live did not reach its failure gate")?;
+    live_gate.release.notify_one();
+    wait_for_phase_position_until(
+        scratch.pool(),
+        BASE,
+        PhaseName::Live.as_str(),
+        "failed",
         deadline,
-        wait_for_phase_position(scratch.pool(), BASE, PhaseName::Live, "failed", None),
     )
-    .await
-    .context("Live did not persist its fatal fixture error")??;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    .await?;
     gate.release.notify_one();
 
     let error = tokio::time::timeout_at(deadline, task)
@@ -4143,6 +4232,12 @@ struct VerificationGate {
     release: Arc<Notify>,
 }
 
+#[derive(Clone, Default)]
+struct LiveFailureGate {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
 #[derive(Default)]
 struct FixtureState {
     logs: BTreeMap<String, Vec<VerificationLog>>,
@@ -4660,15 +4755,21 @@ impl Phase for ResumingIngestPhase {
     }
 }
 
-struct FailingLivePhase;
+struct GatedFailingLivePhase {
+    gate: LiveFailureGate,
+}
 
-impl Phase for FailingLivePhase {
+impl Phase for GatedFailingLivePhase {
     fn name(&self) -> PhaseName {
         PhaseName::Live
     }
 
     fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
-        Box::pin(async { Err(RunnerError::data_integrity("fixture live failed first")) })
+        Box::pin(async {
+            self.gate.entered.notify_one();
+            self.gate.release.notified().await;
+            Err(RunnerError::data_integrity("fixture live failed first"))
+        })
     }
 }
 
@@ -5695,5 +5796,98 @@ async fn wait_for_phase_position(
         }
     })
     .await??;
+    Ok(())
+}
+
+async fn wait_for_phase_position_until(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    phase: &str,
+    expected: &str,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            let status: Option<String> = sqlx::query_scalar(
+                "SELECT phase_status FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = $2",
+            )
+            .bind(chain)
+            .bind(phase)
+            .fetch_optional(pool)
+            .await?;
+            if status.as_deref() == Some(expected) {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("{phase} did not reach {expected} before the test deadline"))??;
+    Ok(())
+}
+
+async fn blocked_phase_lock_pid_once(pool: &sqlx::PgPool) -> Result<Option<i32>> {
+    Ok(sqlx::query_scalar(
+        "SELECT advisory.pid
+         FROM pg_locks advisory
+         JOIN pg_stat_activity activity
+           ON activity.pid = advisory.pid
+         WHERE advisory.locktype = 'advisory'
+           AND advisory.granted
+           AND advisory.database = (
+               SELECT oid FROM pg_database WHERE datname = current_database()
+           )
+           AND activity.datname = current_database()
+           AND activity.wait_event_type = 'Lock'
+           AND activity.query LIKE 'UPDATE chain_phase_state%'
+         LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn wait_for_blocked_phase_lock_pid_until(
+    pool: &sqlx::PgPool,
+    deadline: tokio::time::Instant,
+) -> Result<i32> {
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            if let Some(pid) = blocked_phase_lock_pid_once(pool).await? {
+                return Ok::<_, anyhow::Error>(pid);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .context("phase-lock owner did not block before the test deadline")?
+}
+
+async fn wait_for_backend_lock_wait_until(
+    pool: &sqlx::PgPool,
+    pid: i32,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE pid = $1 AND datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE 'UPDATE chain_phase_state%'
+                 )",
+            )
+            .bind(pid)
+            .fetch_one(pool)
+            .await?;
+            if blocked {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .context("phase-state update did not block before the test deadline")??;
     Ok(())
 }

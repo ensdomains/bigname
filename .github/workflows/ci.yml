@@ -53,6 +53,9 @@ jobs:
       - name: cargo fmt (e2e workspace)
         run: cargo fmt --manifest-path tests/e2e/Cargo.toml -- --check
 
+      - name: Test Rust source size classifier
+        run: scripts/test-rust-file-size
+
       - name: Rust source size ratchet
         env:
           # merge_group.base_ref keeps the allowance ratchet enforced at the
@@ -67,6 +70,28 @@ jobs:
           else
             ./scripts/check-rust-file-size
           fi
+
+      - name: Prometheus rule fixtures parse with promtool
+        env:
+          PROMETHEUS_VERSION: 3.13.2
+          PROMETHEUS_SHA256: 0e8c4d46101bd025ea8265e377d2caabc57f488fc1be1c367f37db69ea41be6f
+        run: |
+          archive="$RUNNER_TEMP/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          install_dir="$RUNNER_TEMP/prometheus-${PROMETHEUS_VERSION}.linux-amd64"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          printf '%s  %s\n' "$PROMETHEUS_SHA256" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          promtool="$install_dir/promtool"
+          "$promtool" --version
+          "$promtool" --version | grep -F "version ${PROMETHEUS_VERSION}"
+          (
+            cd ops/monitoring/prometheus
+            "$promtool" check rules phase-runner-alerts.yml
+            "$promtool" check config phase-runner.yml
+            "$promtool" test rules phase-runner-alerts.test.yml
+          )
 
       - name: Install ripgrep
         run: |
