@@ -500,15 +500,15 @@ or `UPDATE` on
 `resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
 projection relations.
 
-After the phase schema exists, the schema owner provisions the dedicated login
-with these privileges (substitute
-database, role, and secret through the normal secret-management path):
-
 API startup tolerates a wholly absent phase schema so `/v2/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks the
 12 relations and two guarded function overloads required by verified lookup;
 if any are missing, the API refuses to start and its diagnostic names every
 missing identity.
+
+After the phase schema exists, the schema owner provisions the dedicated login
+with these privileges (substitute
+database, role, and secret through the normal secret-management path):
 
 ```sql
 CREATE ROLE bigname_api
@@ -523,6 +523,7 @@ GRANT SELECT ON TABLE
     bigname_phase.chain_phase_state,
     bigname_phase.service_heartbeats,
     bigname_phase.normalized_events,
+    bigname_phase.migration_event_associations,
     bigname_phase.name_current,
     bigname_phase.address_names_current,
     bigname_phase.children_current,

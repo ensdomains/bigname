@@ -5,6 +5,7 @@ use sqlx::{PgPool, Row};
 pub enum ApiLookupDdlKind {
     Relation,
     Function,
+    Type,
 }
 
 impl ApiLookupDdlKind {
@@ -12,6 +13,7 @@ impl ApiLookupDdlKind {
         match self {
             Self::Relation => "relation",
             Self::Function => "function",
+            Self::Type => "type",
         }
     }
 }
@@ -39,14 +41,24 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         WITH required(kind, identity) AS (
             VALUES
                 ('relation', 'bigname_phase.chain_heads'),
+                ('relation', 'bigname_phase.chain_header_audit'),
                 ('relation', 'bigname_phase.chain_lineage'),
                 ('relation', 'bigname_phase.chain_phase_state'),
+                ('relation', 'bigname_phase.normalized_events'),
+                ('relation', 'bigname_phase.migration_event_associations'),
                 ('relation', 'bigname_phase.name_current'),
+                ('relation', 'bigname_phase.address_names_current'),
+                ('relation', 'bigname_phase.children_current'),
+                ('relation', 'bigname_phase.permissions_current'),
+                ('relation', 'bigname_phase.permissions_current_resource_summary'),
+                ('relation', 'bigname_phase.primary_names_current'),
+                ('relation', 'bigname_phase.resolver_current'),
                 ('relation', 'bigname_phase.name_surfaces'),
                 ('relation', 'bigname_phase.resources'),
                 ('relation', 'bigname_phase.surface_bindings'),
                 ('relation', 'bigname_phase.token_lineages'),
                 ('relation', 'bigname_phase.record_inventory_current'),
+                ('relation', 'bigname_phase.service_heartbeats'),
                 ('relation', 'bigname_phase.manifest_versions'),
                 ('relation', 'bigname_phase.manifest_contract_instances'),
                 ('relation', 'bigname_phase.resolution_divergences'),
@@ -57,13 +69,15 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 (
                     'function',
                     'bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)'
-                )
+                ),
+                ('type', 'bigname_phase.canonicality_state')
         )
         SELECT kind, identity
         FROM required
         WHERE CASE kind
             WHEN 'relation' THEN to_regclass(identity) IS NULL
             WHEN 'function' THEN to_regprocedure(identity) IS NULL
+            WHEN 'type' THEN to_regtype(identity) IS NULL
         END
         ORDER BY kind, identity
         "#,
@@ -77,6 +91,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
             let kind = match row.try_get::<&str, _>("kind")? {
                 "relation" => ApiLookupDdlKind::Relation,
                 "function" => ApiLookupDdlKind::Function,
+                "type" => ApiLookupDdlKind::Type,
                 unexpected => {
                     return Err(anyhow::anyhow!(
                         "unexpected API lookup DDL kind {unexpected}"
