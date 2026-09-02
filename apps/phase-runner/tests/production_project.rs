@@ -17196,7 +17196,6 @@ async fn expiry_redo_does_not_rebuild_a_released_resource_linked_lifecycle() -> 
         json!({
             "source_event":"LabelUnregistered",
             "status":"released",
-            "expiry":20,
             "token_id":"0xlinked",
             "registry":"0xregistry",
             "registry_contract_instance_id":REGISTRY_INSTANCE
@@ -17579,7 +17578,6 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             json!({
                 "source_event":"LabelUnregistered",
                 "status":"released",
-                "expiry":500,
                 "token_id":"0xreleased",
                 "registry":"0xchildregistry",
                 "registry_contract_instance_id":CHILD_REGISTRY_INSTANCE
@@ -17597,8 +17595,6 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             "ens_v2_registry_l1",
             json!({
                 "source_event":"LabelUnregistered",
-                "status":"released",
-                "expiry":500,
                 "token_id":"0xformer",
                 "registry":"0xformerregistry",
                 "registry_contract_instance_id":FORMER_REGISTRY_INSTANCE
@@ -17655,8 +17651,6 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
                 "ens_v2_registry_l1",
                 json!({
                     "source_event":"LabelUnregistered",
-                    "status":"released",
-                    "expiry":90,
                     "token_id":"0xchild-released",
                     "registry":"0xchildregistry",
                     "registry_contract_instance_id":CHILD_REGISTRY_INSTANCE
@@ -17825,7 +17819,6 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
                 "RegistrationRenewed",
                 "ens_v2_root_l1",
                 json!({
-                    "status":"registered",
                     "expiry":expiry,
                     "token_id":"0xparent",
                     "registry":"0xrootregistry"
