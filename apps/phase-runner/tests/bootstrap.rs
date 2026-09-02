@@ -849,12 +849,12 @@ async fn expiry_root_handoff_matches_between_baseline_and_schema_migration() -> 
     .execute(migrated.pool())
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/20260902120000_project_redo_expiry_roots.sql"
+        "../../../migrations/20260902140000_project_redo_expiry_roots.sql"
     ))
     .execute(migrated.pool())
     .await?;
     sqlx::raw_sql(include_str!(
-        "../../../migrations/20260902130000_project_redo_expiry_resources.sql"
+        "../../../migrations/20260902150000_project_redo_expiry_resources.sql"
     ))
     .execute(migrated.pool())
     .await?;

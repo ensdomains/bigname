@@ -172,8 +172,8 @@ for migration_file in \
     "$ROOT/migrations/20260826120100_manifest_applied_change_count.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
-    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql" \
-    "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql"
+    "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
+    "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -322,10 +322,10 @@ for migration_file in \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
-    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql" \
-    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql" \
-    "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql" \
-    "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql"
+    "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
+    "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql" \
+    "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
+    "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -543,11 +543,11 @@ INSERT INTO normalized_events (
 DROP TABLE project_redo_expiry_roots;
 SQL
     sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql"
+        "$ROOT/migrations/20260902140000_project_redo_expiry_roots.sql"
     sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql"
+        "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql"
     sed "s/bigname_phase/$scratch_schema/g" \
-        "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql"
+        "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql"
     cat <<'SQL'
 DO $$
 DECLARE
