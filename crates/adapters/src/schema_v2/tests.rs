@@ -300,6 +300,7 @@ mod v1_registrar {
     }
 
     #[test]
+    #[rustfmt::skip]
     fn base_registrar_anchor_reconciles_post_event_register_with_resolver_setup()
     -> anyhow::Result<()> {
         const OWNER: &str = "0x0000000000000000000000000000000000000055";
@@ -331,6 +332,7 @@ mod v1_registrar {
                             &["registry"],
                             &["ResolverChanged"],
                         ),
+                        ("Transfer", "event Transfer(bytes32 indexed node, address owner)", &["registry"], &["AuthorityTransferred", "PermissionChanged"]),
                     ],
                 ),
             ],
@@ -342,6 +344,7 @@ mod v1_registrar {
             prior_events: Vec::new(),
             blocks: Vec::new(),
             raw_logs: vec![
+                raw_at(super::v1_registry::NewOwner { node: parent, label, owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY),
                 raw_at(
                     with_topic0(
                         BaseNameRegistered {
@@ -353,20 +356,10 @@ mod v1_registrar {
                         keccak256(b"NameRegistered(uint256,address,uint256)"),
                     ),
                     1,
-                    0,
+                    1,
                     CONTRACT,
                 ),
-                raw_at(
-                    super::v1_registry::NewOwner {
-                        node: parent,
-                        label,
-                        owner: OWNER.parse()?,
-                    }
-                    .encode_log_data(),
-                    1,
-                    1,
-                    REGISTRY,
-                ),
+                raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: OWNER.parse()? }.encode_log_data(), 1, 2, REGISTRY),
                 raw_at(
                     super::v1_registry::NewResolver {
                         node: node.parse()?,
@@ -374,7 +367,7 @@ mod v1_registrar {
                     }
                     .encode_log_data(),
                     1,
-                    2,
+                    3,
                     REGISTRY,
                 ),
                 raw_at(
@@ -385,10 +378,10 @@ mod v1_registrar {
                     }
                     .encode_log_data(),
                     1,
-                    3,
+                    4,
                     CONTRACT,
                 ),
-                controller_registration("configured", 999, 4),
+                controller_registration("configured", 999, 5),
             ],
         })?;
         let grants = output
@@ -399,19 +392,9 @@ mod v1_registrar {
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].raw_fact_ref["emitting_address"], CONTRACT);
         assert_eq!(grants[0].after_state["expiry"], 42);
-        assert!(
-            output
-                .normalized_events
-                .iter()
-                .any(|event| event.event_kind == "ResolverChanged"
-                    && event.resource_id == grants[0].resource_id)
-        );
-        assert!(
-            output
-                .surface_bindings
-                .iter()
-                .any(|binding| binding.resource_id == grants[0].resource_id.unwrap())
-        );
+        assert!(!output.normalized_events.iter().any(|event| event.event_kind == "PermissionChanged" && event.after_state["source_event"] == "NewOwner" && event.after_state["subject"] == CONTROLLER));
+        assert!(output.normalized_events.iter().any(|event| event.event_kind == "ResolverChanged" && event.resource_id == grants[0].resource_id));
+        assert!(output.surface_bindings.iter().any(|binding| binding.resource_id == grants[0].resource_id.unwrap()));
         Ok(())
     }
 }

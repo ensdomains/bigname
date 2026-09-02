@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use self::{
     event_index::{
-        EventFields, EventIndex, PermissionRevocation, Position, Registration, SourceEvent,
-        SourceFamily,
+        EventFields, EventIndex, PermissionRevocation, Position, Registration, RegistrationWindow,
+        SourceEvent, SourceFamily,
     },
     side_index::{BindingIndex, ClosureIndex},
 };
@@ -60,9 +60,10 @@ fn reconcile_registration(
         .filter(|index| {
             events.active[*index]
                 && events.fields[*index].family == SourceFamily::Registry
-                && events.fields[*index]
-                    .position
-                    .is_some_and(|position| position.2 < registration.log_index)
+                && events.fields[*index].position.is_some_and(|position| {
+                    registration.window == RegistrationWindow::WholeTransaction
+                        || position.2 < registration.log_index
+                })
         })
         .collect::<Vec<_>>();
     let pending_positions = pending
@@ -94,12 +95,26 @@ fn reconcile_registration(
             ))
         })
         .collect::<BTreeMap<_, _>>();
-    let last_owner_position = owner_positions.keys().next_back().copied();
+    let last_owner_position = pending
+        .iter()
+        .filter(|index| {
+            matches!(
+                events.fields[**index].source_event,
+                SourceEvent::NewOwner | SourceEvent::Transfer
+            )
+        })
+        .filter_map(|index| events.fields[*index].position)
+        .max();
+    let transient_owner = if registration.window == RegistrationWindow::WholeTransaction {
+        &registration.provisional_owner
+    } else {
+        &registration._emitter
+    };
     let transient_owner_positions = owner_positions
         .iter()
         .filter(|(position, owner)| {
             Some(**position) != last_owner_position
-                && *owner == &registration.emitter
+                && *owner == transient_owner
                 && events.candidates_at(**position).into_iter().any(|index| {
                     let fields = &events.fields[index];
                     events.active[index]
@@ -164,16 +179,18 @@ fn reconcile_registration(
         }
         let fields = &events.fields[index];
         let targets_registry = fields.family == SourceFamily::Registry
-            && fields
-                .position
-                .is_some_and(|position| position.2 < registration.log_index)
+            && fields.position.is_some_and(|position| {
+                registration.window == RegistrationWindow::WholeTransaction
+                    || position.2 < registration.log_index
+            })
             && target_candidates.binary_search(&index).is_ok();
         let targets_resolver = fields.family == SourceFamily::Resolver
             && fields
                 .resource_id
                 .is_none_or(|resource| stale_resources.contains(&resource))
             && fields.position.is_some_and(|position| {
-                position.2 < registration.log_index
+                (registration.window == RegistrationWindow::WholeTransaction
+                    || position.2 < registration.log_index)
                     // Resolver retargeting starts strictly after the first qualifying ownership
                     // setup, preserving records written before the incoming authority exists.
                     && first_ownership_log_index

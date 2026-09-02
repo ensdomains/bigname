@@ -30,6 +30,12 @@ pub(super) enum SourceEvent {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RegistrationWindow {
+    PriorLogsOnly,
+    WholeTransaction,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct EventFields {
     pub(super) position: Option<Position>,
@@ -105,7 +111,9 @@ pub(super) struct Registration {
     pub(super) resource_id: Uuid,
     pub(super) log_index: i64,
     pub(super) authority_key: Option<String>,
-    pub(super) emitter: String,
+    pub(super) _emitter: String,
+    pub(super) provisional_owner: String,
+    pub(super) window: RegistrationWindow,
     /// Chain position of the registration event; the block number scopes how far reconciliation
     /// may reach back for predecessor-epoch observations.
     pub(super) position: Position,
@@ -197,18 +205,18 @@ impl EventIndex {
                     event.event_identity,
                 );
                 registrant?;
+                let namehash = event.after_state["namehash"].as_str()?.to_ascii_lowercase();
                 Some(Registration {
                     key: TargetKey {
                         namespace: event.namespace.clone(),
                         block_hash: event.block_hash.clone()?,
                         transaction_hash: event.transaction_hash.clone()?,
-                        namehash: event
-                            .after_state
-                            .get("namehash")?
-                            .as_str()?
-                            .to_ascii_lowercase(),
+                        namehash: namehash.clone(),
                     },
-                    logical_name_id: event.logical_name_id.clone()?,
+                    logical_name_id: event
+                        .logical_name_id
+                        .clone()
+                        .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
                     resource_id: event.resource_id?,
                     log_index: event.log_index?,
                     authority_key: event
@@ -216,7 +224,13 @@ impl EventIndex {
                         .get("authority_key")
                         .and_then(Value::as_str)
                         .map(str::to_owned),
-                    emitter: emitter?.to_ascii_lowercase(),
+                    _emitter: emitter?.to_ascii_lowercase(),
+                    provisional_owner: registrant?.to_ascii_lowercase(),
+                    window: if event.after_state["registration_window"] == "whole_transaction" {
+                        RegistrationWindow::WholeTransaction
+                    } else {
+                        RegistrationWindow::PriorLogsOnly
+                    },
                     position: position?,
                 })
             })
