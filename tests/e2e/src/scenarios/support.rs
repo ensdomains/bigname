@@ -198,7 +198,9 @@ pub fn canonical_event_ready_sql(
         record_key.map(|key| format!(" AND after_state->>'record_key' = '{}'", quoted(key)));
     format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = '{logical_name_id}' \
+         WHERE (logical_name_id = '{logical_name_id}' \
+                OR namespace || ':' || lower(COALESCE(after_state->>'namehash', \
+                    after_state->>'child_node', after_state->>'node')) = '{logical_name_id}') \
          AND event_kind = '{event_kind}'{} \
          AND canonicality_state = 'canonical')",
         record_key.as_deref().unwrap_or_default()
@@ -484,8 +486,8 @@ mod tests {
     fn canonical_event_readiness_adds_only_requested_record_key() {
         assert_eq!(
             canonical_event_ready_sql("ens:o'hare.eth", "RecordChanged", Some("text:it's")),
-            "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE logical_name_id = \
-             'ens:0x28d7ef2fa333511772cc70752f8d9122e2150117f42fdd2bb6577eb89dc1d263' \
+            "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE (logical_name_id = \
+             'ens:0x28d7ef2fa333511772cc70752f8d9122e2150117f42fdd2bb6577eb89dc1d263' OR namespace || ':' || lower(COALESCE(after_state->>'namehash', after_state->>'child_node', after_state->>'node')) = 'ens:0x28d7ef2fa333511772cc70752f8d9122e2150117f42fdd2bb6577eb89dc1d263') \
              AND event_kind = 'RecordChanged' AND \
              after_state->>'record_key' = 'text:it''s' AND canonicality_state = 'canonical')"
         );

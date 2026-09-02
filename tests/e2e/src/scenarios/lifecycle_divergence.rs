@@ -68,7 +68,7 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
 
     let event_kinds: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT event_kind FROM normalized_events \
-         WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
+         WHERE (logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' OR after_state->>'namehash' = '0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74') \
          AND canonicality_state = 'canonical'",
     )
     .fetch_all(&run.db.pool)
@@ -86,7 +86,7 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
 
     let registrar_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events \
-         WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
+         WHERE (logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' OR after_state->>'namehash' = '0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74') \
          AND event_kind = 'RegistrationGranted' \
          AND canonicality_state = 'canonical'",
     )

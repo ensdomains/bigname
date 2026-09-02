@@ -69,7 +69,7 @@ pub(super) fn interpret_base_registrar(
             (controller(selected, raw, state, &mut output, false)?, None)
         }
         "NameRegistered(uint256,address,uint256)" => {
-            (name_registered(selected, raw, &mut output)?, None)
+            (name_registered(selected, raw, state, &mut output)?, None)
         }
         "NameRenewed(uint256,uint256)" => base_renewed(selected, raw, state, &mut output)?,
         "Transfer(address,address,uint256)" => (transfer(raw)?, None),
@@ -239,6 +239,7 @@ fn controller(
 fn name_registered(
     selected: &Selected,
     raw: &RawLogInput,
+    state: &State,
     output: &mut Interpreted,
 ) -> anyhow::Result<Value> {
     let event = decode_event_log::<NameRegistered>(
@@ -261,7 +262,9 @@ fn name_registered(
     });
     output.events.push(event_draft(
         "RegistrationReleased",
-        Some(logical_name_id.clone()),
+        state
+            .v1_surface_materialized(&selected.source.namespace, &namehash)
+            .then(|| logical_name_id.clone()),
         format!("RegistrationReleased:{}", u256_word_hex(event.id)),
         decoded.clone(),
         format!("graveyard-cleanup:{logical_name_id}"),
@@ -284,6 +287,7 @@ fn base_renewed(
     let labelhash = B256::from(event.id.to_be_bytes::<32>());
     let namehash = eth_namehash(labelhash);
     let logical_name_id = format!("{}:{namehash}", selected.source.namespace);
+    let surface_known = state.v1_surface_materialized(&selected.source.namespace, &namehash);
     let registrar_expiry = u64::try_from(event.expires).ok();
     let decoded = json!({
         "token_id":u256_word_hex(event.id),
@@ -327,7 +331,7 @@ fn base_renewed(
     for event_kind in ["RegistrationRenewed", "ExpiryChanged"] {
         output.events.push(event_draft(
             event_kind,
-            Some(logical_name_id.clone()),
+            surface_known.then(|| logical_name_id.clone()),
             format!("{event_kind}:{token_id}"),
             persisted.clone(),
             scope.clone(),

@@ -3230,6 +3230,7 @@ fn numeric_registrar_lifecycle_coexists_with_launch_bounded_migration() -> anyho
         event.source_family == "ens_v2_migration_l1"
             && event.event_kind == "RegistrationRenewed"
             && event.after_state["lifecycle_classification"] == "historical_renewal"
+            && event.logical_name_id.is_none()
     }));
     assert!(
         output.normalized_events.iter().any(|event| {
@@ -3301,7 +3302,8 @@ fn base_registrar_registration_distinguishes_user_lease_from_graveyard_cleanup()
             .normalized_events
             .iter()
             .any(|event| event.source_family == "ens_v2_migration_l1"
-                && event.after_state["lifecycle_classification"] == "graveyard_cleanup")
+                && event.after_state["lifecycle_classification"] == "graveyard_cleanup"
+                && event.logical_name_id.is_none())
     );
     Ok(())
 }

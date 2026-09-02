@@ -9,6 +9,7 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    stage::bind_resource_events(transaction).await?;
     stage::ownerless_registry(transaction).await?;
     sqlx::query(
         r#"

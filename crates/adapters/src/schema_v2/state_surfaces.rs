@@ -15,24 +15,17 @@ impl State {
         let logical_name_id = format!("{namespace}:{namehash}");
         self.v1_materialized_surfaces.insert(key.clone());
         self.remember_known_surface(logical_name_id.clone());
-        let registrar_resource = self.v1_registrars.get_mut(&key).map(|registrar| {
-            registrar.logical_name_id = logical_name_id.clone();
+        if let Some(registrar) = self.v1_registrars.get_mut(&key) {
             registrar.surface_known = true;
-            registrar.resource_id
-        });
-        if let Some(resource_id) = registrar_resource {
+            let resource_id = registrar.resource_id;
             if let Some(current) = self.v1_names.get_mut(&key)
                 && current.resource_id == resource_id
             {
-                current.logical_name_id = logical_name_id.clone();
                 current.surface_known = true;
                 self.active_resources
                     .insert(logical_name_id.clone(), resource_id);
             }
-            if let Some(authority) = self.v1_registry_authorities.get_mut(&key)
-                && authority.resource_id == resource_id
-            {
-                authority.logical_name_id = logical_name_id.clone();
+            if let Some(authority) = self.v1_registry_authorities.get_mut(&key) {
                 authority.surface_known = true;
             }
         }

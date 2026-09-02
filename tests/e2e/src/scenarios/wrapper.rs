@@ -202,7 +202,7 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     let registrar_expiry: i64 = sqlx::query_scalar(
         "SELECT (after_state->>'expiry')::BIGINT
          FROM normalized_events
-         WHERE logical_name_id = 'ens:0x669e8ea725c56427a7bca9ffaed126a8922a2b2baf4ed71a3fe74d871d0dd25b'
+         WHERE (logical_name_id = 'ens:0x669e8ea725c56427a7bca9ffaed126a8922a2b2baf4ed71a3fe74d871d0dd25b' OR after_state->>'namehash' = '0x669e8ea725c56427a7bca9ffaed126a8922a2b2baf4ed71a3fe74d871d0dd25b')
            AND event_kind = 'RegistrationGranted'
            AND canonicality_state = 'canonical'",
     )

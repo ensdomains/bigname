@@ -68,7 +68,7 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
             AND canonicality_state = 'canonical') \
          AND \
            (SELECT count(DISTINCT after_state->>'record_key') >= 2 FROM normalized_events \
-            WHERE logical_name_id = 'ens:0xff8b5f8209f6197db09fe13cdf9395c8ed39d5e0546c071e44a7d51ca50d1854' \
+            WHERE (logical_name_id = 'ens:0xff8b5f8209f6197db09fe13cdf9395c8ed39d5e0546c071e44a7d51ca50d1854' OR after_state->>'node' = '0xff8b5f8209f6197db09fe13cdf9395c8ed39d5e0546c071e44a7d51ca50d1854') \
             AND event_kind = 'RecordChanged' \
             AND after_state->>'record_key' IN ('addr:60', 'text:com.twitter') \
             AND transaction_hash = '{tx_hash}' \
@@ -103,7 +103,7 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
     let registration: Value = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
          WHERE logical_name_id = $2 \
-         AND event_kind = 'RegistrationGranted' \
+         AND event_kind = 'PreimageObserved' \
          AND source_family = 'ens_v1_registrar_l1' \
          AND transaction_hash = $1 AND canonicality_state = 'canonical'",
     )
@@ -119,7 +119,7 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
 
     let forward_records: Vec<Value> = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
-         WHERE logical_name_id = $2 \
+         WHERE (logical_name_id = $2 OR namespace || ':' || after_state->>'node' = $2) \
          AND event_kind = 'RecordChanged' \
          AND source_family = 'ens_v1_resolver_l1' \
          AND transaction_hash = $1 AND canonicality_state = 'canonical'",

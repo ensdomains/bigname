@@ -2,6 +2,23 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
+pub(super) async fn bind_resource_events(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE project_events event SET logical_name_id = binding.logical_name_id
+         FROM project_binding_candidates binding JOIN project_surfaces surface
+           ON surface.logical_name_id = binding.logical_name_id
+         WHERE event.logical_name_id IS NULL AND event.resource_id = binding.resource_id
+           AND lower(surface.namehash) = lower(COALESCE(event.after_state->>'namehash',
+               event.after_state->>'child_node', event.after_state->>'node'))",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to bind resource-keyed events", error))?;
+    Ok(())
+}
+
 pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
         "CREATE TEMP TABLE project_latest_registry_owner ON COMMIT DROP AS
@@ -314,8 +331,11 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                )
                OR (
                    authority.unsupported_reason = 'current_authority_not_projected'
-                   AND event.event_kind = 'ResolverChanged'
-                   AND event.resource_id IS NULL
+                   AND ((event.event_kind = 'ResolverChanged' AND event.resource_id IS NULL)
+                        OR (event.source_family = 'ens_v1_registrar_l1'
+                            AND event.event_kind IN ('RegistrationGranted',
+                                'RegistrationRenewed', 'RegistrationReleased',
+                                'ExpiryChanged', 'TokenControlTransferred')))
                )
            )
            AND (

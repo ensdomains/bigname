@@ -596,6 +596,11 @@ pub(super) fn append_authority_transition(
         });
     let Some(identity_name_id) = linked
         .or(previous)
+        .filter(|authority| {
+            authority_arm == "ens_v1"
+                || authority.surface_known
+                || authority.token_lineage_id.is_some()
+        })
         .map(|authority| authority.logical_name_id.clone())
     else {
         return;
