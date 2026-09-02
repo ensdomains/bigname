@@ -1296,6 +1296,15 @@ counter used by old-runtime destructive raw-log repair and backfill coverage.
 The schema remains in schema-migration history, but Stage B has no Rust writer or
 coverage consumer for this counter.
 
+<a id="graphql-claimed-compatibility-surface"></a> **GraphQL claimed compatibility surface** — exact schema paths and response cases promised compatible with a pin.
+
+<a id="graphql-dispositioned-remainder"></a> **GraphQL dispositioned remainder** — differences outside the claim, owned as deferred work or extensions.
+
+<a id="graphql-upstream-census"></a> **GraphQL upstream census** — one deployment's captured schema roots, types,
+fields, arguments, enums, interfaces, unions, and directive definitions, without claiming complete implementation.
+Directive repeatability is excluded at the [GraphQL compatibility oracle's schema-comparison
+boundary](graphql-compatibility-oracle.md#schema-comparison).
+
 ## Hash-pinned
 
 anchored to an exact block hash rather than a block number or

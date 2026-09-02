@@ -100,6 +100,36 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
+> **Graph Node directive repeatability is declared but not resolved** — deployment `QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ` at block 23,000,000 resolved `__Directive.isRepeatable` as null for each of its five directives, producing five non-null-field errors and null data. The same introspection without that field returned 113 types and no errors.
+> **Upstream**: the pinned Graph Node introspection schema declares `isRepeatable: Boolean!` (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L85 @ graph_node@aefe1737), but its directive-object resolver supplies only `name`, `description`, `locations`, and `args` (upstream: .refs/graph_node/graphql/src/introspection/resolver.rs:L252-L263 @ graph_node@aefe1737).
+> **Our rule**: `docs/graphql-compatibility-oracle.md` § Schema comparison omits directive repeatability from capture and comparison.
+> **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
+> **Since**: `2026-09-02`
+
+> **Graph Node collection-argument schema defaults are omitted locally** — Graph Node publishes collection arguments as
+> nullable `Int` values with `first = 100` and `skip = 0`, while bigname currently publishes the same nullable arguments
+> without schema defaults. The bigname resolver still applies page size `100` and offset `0` when callers omit them.
+> **Upstream**: Graph Node's generated collection arguments assign `skip` the default `0` and `first` the default `100`
+> (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact signature dispositions in the
+> GraphQL oracle `coverage.json`; task `#670/T2` owns publishing the defaults.
+> **Why**: preserving the current runtime page size avoids a behavior change in the capture-preparation change while the
+> entities machinery task aligns the introspected signature.
+> **Since**: `2026-09-02`
+
+> **Direct Domain registration-date ordering is a local GraphQL extension** — bigname retains
+> `Domain_orderBy.registrationDate` from bigname's earlier GraphQL schema. The generated upstream equivalent is the nested
+> `registration__registrationDate` value reached through `Domain.registration`.
+> **Upstream**: the ENS subgraph's `Domain` has a `registration` relation but no direct `registrationDate` field, while
+> `Registration` owns `registrationDate` (upstream: .refs/ens_subgraph/schema.graphql:L1-L46 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/schema.graphql:L184-L190 @ ens_subgraph@723f1b6). Graph Node generates sortable child
+> fields as `<parent>__<child>` (upstream: .refs/graph_node/graph/src/schema/api.rs:L531-L603 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact local extension in the GraphQL
+> oracle `coverage.json`; task `#670/T3` owns the order/filter vocabulary.
+> **Why**: retaining the direct value preserves bigname's existing GraphQL query surface without claiming that it is an
+> upstream `Domain_orderBy` value.
+> **Since**: `2026-09-02`
+
 > **Pre-surface-only ENSv1 resolver selection is not projected** — when a resolver was selected before bigname materialized a [name surface](glossary.md#surface-name-surface) and was never selected again afterward, bigname retains the record facts but has no linked current-resolver pointer and does not publish a record inventory for the name.
 > **Upstream**: ENSv1 reads the resolver stored for the node without requiring a later selection event `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)`, and its text resolver reads storage keyed by record version, node, and key `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Resolver and records and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.
@@ -113,7 +143,7 @@ to the applicable entries below.
 > **Since**: `2026-06-30`
 
 > **Graph Node query-execution narrowing on the compatibility GraphQL surface** — bigname exposes Graph Node's `Block_height`, `_meta`, and `_SubgraphErrorPolicy_` shapes, including Graph Node's `hash`-then-`number`-then-`number_gte` selector precedence and rejection of an empty block object, but currently executes entity reads only at a request-scoped [served head](glossary.md#served-head). Historical block numbers and hashes are rejected, and `subgraphError` is accepted without per-entity omission because the current name projections do not attribute indexing errors to individual entities. `_Meta_.deployment` identifies bigname's interpreter content rather than a Graph Node deployment, and `hasIndexingErrors` maps durable serving-readiness signals rather than Graph Node's stored non-fatal-error flag. On chains that require verification, the verification-floor check can transiently report `true` while healthy verification catches up after a batch.
-> **Upstream**: Graph Node parses hash, number, and minimum-number block constraints into distinct execution selectors `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L80-L100 @ graph_node@aefe1737)`. It defaults a missing `subgraphError` to `deny` and combines field policies for execution `(upstream: .refs/graph_node/graphql/src/execution/query.rs:L308-L329 @ graph_node@aefe1737)`. Its metadata resolver returns the deployment identifier and maps `hasIndexingErrors` from the deployment's non-fatal-error state `(upstream: .refs/graph_node/graphql/src/store/resolver.rs:L228-L245 @ graph_node@aefe1737)`.
+> **Upstream**: Graph Node represents hash, number, minimum-number, and latest constraints as distinct selectors `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L53-L70 @ graph_node@aefe1737)` and applies that precedence while rejecting an empty block object `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L80-L100 @ graph_node@aefe1737)`. A number-constrained `_meta` result has a null block hash `(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L36-L73 @ graph_node@aefe1737)`. It defaults a missing `subgraphError` to `deny` and combines field policies for execution `(upstream: .refs/graph_node/graphql/src/execution/query.rs:L308-L329 @ graph_node@aefe1737)`. Its metadata resolver returns the deployment identifier and maps `hasIndexingErrors` from the deployment's non-fatal-error state `(upstream: .refs/graph_node/graphql/src/store/resolver.rs:L228-L245 @ graph_node@aefe1737)`.
 > **Our rule**: `docs/architecture.md` § Subgraph-compatible GraphQL surface and `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Why**: the current phase projections provide one rebuildable served publication, not historical entity snapshots or per-entity indexing-error attribution. Using the existing served-head gate preserves every Manager field selection while adding the standard query vocabulary without introducing in-process filtering or fabricating error provenance.
 > **Since**: `2026-08-31`
