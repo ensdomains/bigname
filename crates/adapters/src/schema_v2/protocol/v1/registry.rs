@@ -1,4 +1,3 @@
-use alloy_primitives::{B256, keccak256};
 use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::{Value, json};
@@ -22,6 +21,8 @@ use crate::schema_v2::{
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
+mod node;
+use node::child_node;
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RegistryOwnerView {
     Authentic { owner: String },
@@ -812,11 +813,4 @@ fn append_authority_permissions(
             );
         }
     }
-}
-
-fn child_node(parent: B256, labelhash: B256) -> String {
-    let mut input = [0u8; 64];
-    input[..32].copy_from_slice(parent.as_slice());
-    input[32..].copy_from_slice(labelhash.as_slice());
-    format!("{:#x}", keccak256(input))
 }

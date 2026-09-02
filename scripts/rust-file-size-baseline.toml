@@ -37,8 +37,8 @@ justification = "Name-surface materialization distinguishes active from shadow V
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
-loc = 819
-justification = "Registry event decoding and its atomic control/read transition remain together so literal owner history, getter-visible ownership, resolver linkage, and emitted permissions cannot drift across separate event handlers; the file remains below the review threshold."
+loc = 816
+justification = "Registry event decoding and its atomic control/read transition remain together so literal owner history, getter-visible ownership, resolver linkage, and emitted permissions cannot drift across separate event handlers; only child-namehash derivation is isolated in a sibling module."
 
 [[files]]
 path = "crates/adapters/src/schema_v2/state.rs"
