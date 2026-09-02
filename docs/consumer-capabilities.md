@@ -430,10 +430,24 @@ namehashes only.
 `owner_in: [String!]`, `name: String`, and `name_contains: String`. Supplied
 members combine with logical AND. A supplied empty `id_in` or `owner_in` list
 matches no rows. `owner` and `owner_in` match the projected effective controller,
-which is the registry owner returned by `Domain.owner` when a registry ownership
-event has been projected. Names without a projected registry-owner event retain a
-T5-owned residual: the effective controller can fall back to a token holder or be
-absent while the served owner can fall back to the registrant or zero address.
+which agrees with `Domain.owner` when the latest projected registry-ownership event
+is an owner-bearing `AuthorityTransferred` to a non-zero address on a
+non-wrapper-authority name. Task `#670/T5` owns these remaining disagreement
+classes:
+
+- Wrapper-authority names serve the wrapper token holder through the registrant
+  fallback, while the effective controller is a registry-controller fold for
+  eligible wrapped or emancipated names and is absent for locked or in-grace names.
+- A zero or masked registry owner is served as the zero address, while the
+  address-name projection deliberately omits zero-address relations.
+- Without a projected registry-ownership event, the effective controller can fall
+  back to a token holder or be absent while the served owner falls back to a
+  registrant or the zero address.
+- A `PermissionChanged` event granting `resource_control` can set the effective
+  controller to its grantee, while served control ownership follows the latest
+  `AuthorityTransferred` or `AuthorityEpochChanged`; an epoch event without an
+  owner clears the served registry owner.
+
 `name` and `name_contains` preserve the existing ENS-aware name normalization.
 Every other captured upstream member is absent from the SDL, so GraphQL input
 validation rejects it instead of ignoring it at runtime.

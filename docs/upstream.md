@@ -140,18 +140,18 @@ to the applicable entries below.
 > **Since**: `2026-09-02`
 
 > **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
-> `owner_in` members use bigname's effective-controller relation. When a registry ownership event has been projected,
-> that relation is the registry owner returned by `Domain.owner`. Without such an event, a tokenized name's effective
-> controller can fall back to its token holder, while a name without token lineage has no effective-controller relation;
-> the served owner can instead fall back to a registrant or the zero address.
+> `owner_in` members use bigname's effective-controller relation. It agrees with `Domain.owner` when the latest projected
+> registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero address on a non-wrapper-authority
+> name. Task `#670/T5` owns four remaining disagreement classes: wrapper-authority names; zero or masked registry owners;
+> names without a projected registry-ownership event; and static-read `PermissionChanged` or owner-less
+> `AuthorityEpochChanged` state. `docs/consumer-capabilities.md` § GraphQL compatibility states each class explicitly.
 > **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
 > ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L151-L158 @ ens_subgraph@723f1b6).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the residual fallback
-> semantics for names without projected registry ownership.
-> **Why**: an equality filter must select the registry-owner value that the generated Domain object serves whenever that
-> ownership event is available, without confusing the registry owner with the registration-token holder.
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the four residual classes.
+> **Why**: the effective-controller and served-owner projections intentionally answer different authority questions in
+> those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
 > **Since**: `2026-09-02`
 
 > **Generated Domain `name_contains` retains ENS normalization** — bigname normalizes the supplied ENS fragment before
