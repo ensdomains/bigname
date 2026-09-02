@@ -209,6 +209,11 @@ re-walk](glossary.md#re-derivation-boundary); never relabel the row in place.
 Changing only the provider endpoint is allowed because endpoints are not part
 of persisted source identity and will not trigger the runtime reset guard.
 
+Each chain must have exactly one non-bulk-import intake source that Live follows.
+Adding a second such source is not failover configuration: before configuring
+it, define how Live selects one source, because after the Ingest handoff
+Interpret fails closed rather than choosing between sources.
+
 **Endpoint-rotation gate:** never reuse an endpoint that served intake during
 the retained walk as `verification-only`, even under a different key. The
 stronger level covers only facts retained since the last full source re-walk
@@ -319,6 +324,20 @@ requires readable lineage at every height through the effective redo end. That
 cursor coverage and lineage prove only the facts selected by the [watch
 plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded,
 not facts required by a later watch plan.
+
+The [manifest-authority marker](glossary.md#manifest-authority-marker) records
+the active authority set's fingerprint.
+The interpreter content hash and the manifest-authority fingerprint are independent deploy gates.
+The interpreter hash covers inputs that can change
+Interpret or Project output, including manifest `[[abi.events]]` declarations;
+when it changes, complete the full-history Interpret redo and the stamped
+Project redo before deploying the matching API.
+`read_features` can change the manifest-authority fingerprint while the interpreter content hash remains byte-identical.
+On an initialized chain, that authority change still blocks
+ordinary derived work until the exact token-attested full-range Interpret redo
+and downstream stamped Project redo complete; if it widened the watch plan,
+complete the stamped Ingest redo first.
+An unchanged interpreter hash therefore does not waive authority-transition re-derivation.
 
 Manifest synchronization records a [manifest-authority
 marker](glossary.md#manifest-authority-marker) when its authority changes. Every
