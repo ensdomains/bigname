@@ -181,11 +181,20 @@ Field ownership:
   serializes as `owner,manager,registrant` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
-  A name result classified as `registration_status=unregistered`, including an
-  ENSv2 reservation with no current owner evidence, omits `registration_id`,
-  `resolver`, and resolver-record fields even if identity attached to a resource
-  or record inventory was retained for audit. This intentionally differs from
-  ENSv2, which stores and returns a reservation resolver until expiry.
+  A name result classified as `registration_status=unregistered` always omits
+  `registration_id`. It also omits `resolver` and resolver-record fields unless
+  it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  That classified row serves its resolver without acquiring registration
+  identity or control. Indexed records are served when its serving resource has
+  inventory.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
+  An ownerless ENSv2 reservation does not meet this exception, even if identity
+  attached to a resource or record inventory was retained for audit. This
+  intentionally differs from ENSv2, which stores and returns a reservation
+  resolver until expiry.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
@@ -423,20 +432,32 @@ Field ownership:
   `namehash`, `status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
-  A row classified as `registration_status=unregistered`, including an ENSv2
-  reservation with no current owner evidence, omits `registration_id`,
-  `resolver`, and resolver-record fields even if identity attached to a resource
-  or record inventory was retained for audit. This intentionally differs from
-  ENSv2, which stores and returns a reservation resolver until expiry.
+  A row classified as `registration_status=unregistered` always omits
+  `registration_id`. It also omits `resolver` and resolver-record fields unless
+  it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  For that classified row, indexed name detail serves the resolver and records
+  present in its serving resource's inventory. `source=verified` executes lookup
+  through the surviving resolver when the ordinary lookup capability supports
+  it. Neither path acquires registration identity or control. An ownerless ENSv2
+  reservation does not meet this exception, even if identity attached to a
+  resource or record inventory was retained for audit. This intentionally
+  differs from ENSv2, which stores and returns a reservation resolver until
+  expiry.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   For `source=indexed`, a row classified as
   `current_authority_not_projected` remains `status=ok` for the identity and
   registration fields that can be served, but omits `resolver`; retained
   resolver-pointer evidence is not presented as current authority.
-  A registry-only V1 name whose [getter-visible owner](glossary.md#getter-visible-owner) is zero is instead supported and
-  unregistered. When a current event-linked nonzero registry resolver pointer survives, name
-  detail includes that resolver while registration and control fields remain absent.
+  An ownerless ENSv1 or Basenames registry row with a zero [getter-visible
+  owner](glossary.md#getter-visible-owner) is instead supported and unregistered.
+  When a current event-linked nonzero registry resolver pointer survives, name
+  detail includes that resolver while registration and control fields remain
+  absent.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -480,11 +501,19 @@ Field ownership:
   connect, DNS, TLS, connection-reset, and other transport
   failures abort the whole request with `500 internal_error`; they are not
   per-key stale answers and `source=auto` does not return a partial blend.
-  A name with no current registration, including an ownerless ENSv2
-  reservation, returns no declared resolver or retained record values and does
-  not execute verified lookup. `include=inventory` does not expose inventory
-  retained for a former or audit-only resource. This intentionally omits the
-  resolver that ENSv2 can store and return for an unexpired reservation.
+  A name with no current registration returns no declared resolver or retained
+  record values and does not execute verified lookup unless it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  That classified row serves its resolver and any records present in its serving
+  resource's inventory. Verified lookup runs through the surviving resolver
+  when the ordinary lookup capability supports it. An ownerless ENSv2
+  reservation does not meet this exception. `include=inventory` does not expose
+  inventory retained for a former or audit-only resource. This intentionally
+  omits the resolver that ENSv2 can store and return for an unexpired
+  reservation.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   Product records use product reason vocabulary: retained-selector misses use

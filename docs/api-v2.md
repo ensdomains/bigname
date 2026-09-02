@@ -269,8 +269,9 @@ Rules:
   is older than the newest `chain_heads` marker for that chain. The lookup
   engine returns both positions, and `meta.as_of`/`meta.as_of_token` expose
   those actual lookup positions rather than implying execution at the newer
-  marker. The engine independently requires its project phase to be at the
-  current readable authoritative head before executing. After the live calls it revalidates the
+  marker. The engine independently requires its [`project`
+  phase](architecture.md#intake-architecture) to be at the current readable
+  authoritative head before executing. After the live calls it revalidates the
   exact project generation, projected name topology, selected manifest
   declarations, and canonical positions. A concurrent replacement returns the
   existing `409 stale` response and performs no ledger mutation. `meta.as_of` is
@@ -325,14 +326,19 @@ Known-empty maps on detail records, such as `addresses` and `text_records`,
 serialize as `{}`; omission means the field is outside the requested field
 budget or unsupported by the served source.
 Rows classified as `registration_status=unregistered`, including ownerless
-ENSv2 reservations, have no current registration. Unless Project separately
-supplies an event-linked [serving resource](glossary.md#serving-resource) in
-`serving_resource_id`, product name detail and batch
-lookup therefore omit `registration_id`, resolver, and record fields; the
-records route exposes no resolver, record values, or audit-only inventory, and
-resolver `bound_names` omits the row. A supported ownerless ENSv1 or Basenames
-registry row may instead use that serving resource for resolver and record
-reads without acquiring registration identity or control. The ENSv2 rule is an intentional product
+ENSv2 reservations, have no current registration, so product name detail and
+batch lookup always omit `registration_id`. Resolver and record fields are also
+omitted, the records route exposes no resolver, record values, or audit-only
+inventory, and resolver `bound_names` omits the row unless it is
+an ownerless ENSv1 or Basenames registry row whose current registry resolver
+pointer is retained (a [serving resource](glossary.md#serving-resource)). That
+retained pointer permits resolver and record reads without acquiring registration
+identity or control. Indexed records require retained inventory;
+routes with source selection let verified and auto records follow the ordinary
+lookup capability, and resolver `bound_names` remains subject to the resolver
+family's binding-enumeration capability.
+See [registration status](#status-vocabulary) for the upstream basis.
+The ENSv2 rule is an intentional product
 narrowing: ENSv2 stores a nonzero resolver supplied for an ownerless
 reservation and returns it until expiry. (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
@@ -564,11 +570,31 @@ ADR 0006 rollout step 3 includes that read-layer work.
 
 ## Status Vocabulary
 
-`unregistered` describes the absence of current registration or control; it does not assert that
-resolver data is absent. A supported projected name may therefore have
-`registration_status=unregistered` while serving an event-linked resolver and its indexed or
-verified records. The internal reason `current_authority_not_projected` is reserved for authority
-selection that is unresolved or unsupported, not for a registry event stream that positively
+`unregistered` describes the absence of current registration or control; it
+does not assert that resolver data is absent. A supported row may therefore have
+`registration_status=unregistered` when it is
+an ownerless ENSv1 or Basenames registry row whose current registry resolver
+pointer is retained (a [serving resource](glossary.md#serving-resource)). It
+serves indexed records when retained inventory exists; routes with source
+selection can also serve verified records under the ordinary lookup capability.
+The current ENSv1 registry and the Basenames registry emit the supplied owner
+from `setOwner`.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L100-L103 @ basenames@1809bbc)
+Both map registry self-ownership to zero in `owner()`.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L165-L170 @ basenames@1809bbc)
+In both registries, the resolver write and read use the resolver field,
+separately from the owner field.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L7-L10 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L140 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L16-L22 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L132-L134 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L178-L180 @ basenames@1809bbc)
+The internal reason
+`current_authority_not_projected` is reserved for authority selection that is
+unresolved or unsupported, not for a registry event stream that positively
 proves current authority is absent.
 
 One result-status vocabulary is used everywhere except the `/v2/status` ops
