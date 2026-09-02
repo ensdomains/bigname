@@ -65,6 +65,9 @@ sol! {
         uint256 expires
     );
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
+    event NewResolver(bytes32 indexed node, address resolver);
+    event Transfer(bytes32 indexed node, address owner);
+    event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires);
     event ResolverUpdated(
         uint256 indexed tokenId,
         address indexed resolver,
@@ -1487,6 +1490,52 @@ async fn interpret_redo_replays_the_dependent_suffix_through_the_recorded_head()
         )
     );
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn pre_surface_resolver_materialization_matches_fresh_resume_and_redo() -> Result<()> {
+    let (fresh, fresh_snapshot) = live_materialization("fresh", false).await?;
+    let (resumed, resumed_snapshot) = live_materialization("resume", true).await?;
+
+    let redone = ScratchDatabase::create("pre_surface_pointer_redo").await?;
+    seed_pre_surface_pointer(redone.pool()).await?;
+    run_engine(
+        redone.pool(),
+        "ethereum-mainnet",
+        0,
+        2,
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    complete_interpret_state(&redone, 2).await?;
+    let raw_before = raw_log_digest(redone.pool()).await?;
+    let phases = PhaseSet::with_ingest_and_interpret(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(redone.pool().clone())),
+    )?;
+    PhaseRunner::new(
+        redone.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "pre-surface-pointer-redo",
+        test_timing(),
+    )?
+    .redo(
+        &chain_config("ethereum-mainnet")?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(2, 2)?,
+        CancellationToken::new(),
+    )
+    .await?;
+    let redo_snapshot = materialization_snapshot(redone.pool()).await?;
+    assert_eq!(fresh_snapshot, resumed_snapshot);
+    assert_eq!(fresh_snapshot, redo_snapshot);
+    assert_eq!(raw_before, raw_log_digest(redone.pool()).await?);
+    assert_eq!(fresh_snapshot["pointer_count"], 1);
+    assert_eq!(fresh_snapshot["binding_count"], 1);
+    fresh.cleanup().await?;
+    resumed.cleanup().await?;
+    redone.cleanup().await
 }
 
 #[tokio::test]
@@ -6062,6 +6111,159 @@ async fn run_engine(
     assert!(outcome.complete);
     assert_eq!(outcome.current, outcome.target);
     Ok(())
+}
+
+async fn seed_pre_surface_pointer(pool: &PgPool) -> Result<()> {
+    const CHAIN: &str = "ethereum-mainnet";
+    const REGISTRY_ADDRESS: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    const CONTROLLER: &str = "0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5";
+    let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/mainnet");
+    sync_schema_v2_repository(pool, &load_repository(profile)?).await?;
+    sqlx::query(
+        "WITH declarations AS (
+           UPDATE manifest_contract_instances SET start_block_number = 0
+           WHERE chain_id = $1 AND lower(declared_address) IN (lower($2), lower($3))
+           RETURNING contract_instance_id
+         )
+         UPDATE contract_instance_addresses SET active_from_block_number = 0
+         WHERE contract_instance_id IN (SELECT contract_instance_id FROM declarations)",
+    )
+    .bind(CHAIN)
+    .bind(REGISTRY_ADDRESS)
+    .bind(CONTROLLER)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "WITH blocks(block_number, emitter) AS (VALUES (0::bigint, $2), (1, $2), (2, $3)),
+         lineage AS (
+           INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state)
+           SELECT $1, $1 || '-block-' || block_number,
+                  CASE WHEN block_number > 0 THEN $1 || '-block-' || (block_number - 1) END,
+                  block_number, to_timestamp(block_number), 'canonical'::canonicality_state FROM blocks
+           RETURNING block_number
+         )
+         INSERT INTO raw_transactions (chain_id, block_hash, block_number, transaction_hash, transaction_index, from_address, to_address)
+         SELECT $1, $1 || '-block-' || blocks.block_number, blocks.block_number,
+                $1 || '-pointer-transaction-' || blocks.block_number, 0, $4, emitter
+         FROM blocks JOIN lineage USING (block_number)",
+    )
+    .bind(CHAIN)
+    .bind(REGISTRY_ADDRESS)
+    .bind(CONTROLLER)
+    .bind(SENDER)
+    .execute(pool)
+    .await?;
+    let node = raw_namehash(&[b"pointer", b"eth"]);
+    let facts = [
+        (
+            REGISTRY_ADDRESS,
+            NewResolver {
+                node,
+                resolver: DISCOVERED_RESOLVER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRY_ADDRESS,
+            Transfer {
+                node,
+                owner: REGISTRANT.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            CONTROLLER,
+            NameRenewed {
+                name: "pointer".into(),
+                label: keccak256(b"pointer"),
+                cost: U256::from(1),
+                expires: U256::from(1_000_000),
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (block, (emitter, fact)) in facts.into_iter().enumerate() {
+        let block = i64::try_from(block)?;
+        let transaction = format!("{CHAIN}-pointer-transaction-{block}");
+        insert_log_at(
+            pool,
+            CHAIN,
+            block,
+            &transaction,
+            0,
+            emitter,
+            fact.topics(),
+            fact.data.as_ref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn live_materialization(label: &str, split: bool) -> Result<(ScratchDatabase, Value)> {
+    let scratch = ScratchDatabase::create(&format!("pre_surface_pointer_{label}")).await?;
+    seed_pre_surface_pointer(scratch.pool()).await?;
+    run_engine(
+        scratch.pool(),
+        "ethereum-mainnet",
+        0,
+        if split { 1 } else { 2 },
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    if split {
+        run_engine(
+            scratch.pool(),
+            "ethereum-mainnet",
+            2,
+            2,
+            InterpretRunMode::Normal,
+        )
+        .await?;
+    }
+    complete_interpret_state(&scratch, 2).await?;
+    let snapshot = materialization_snapshot(scratch.pool()).await?;
+    Ok((scratch, snapshot))
+}
+
+async fn complete_interpret_state(scratch: &ScratchDatabase, head: i64) -> Result<()> {
+    PhaseStore::new(scratch.pool().clone())
+        .initialize_chain("ethereum-mainnet")
+        .await?;
+    seed_completed_phase_extent_at(
+        scratch.pool(),
+        "ethereum-mainnet",
+        head,
+        INTERPRETER_CONTENT_HASH,
+    )
+    .await
+}
+
+async fn materialization_snapshot(pool: &PgPool) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+           'normalized_events', (SELECT jsonb_agg(to_jsonb(row) - ARRAY['normalized_event_id','observed_at'] ORDER BY event_identity) FROM normalized_events row WHERE chain_id = 'ethereum-mainnet'),
+           'resources', (SELECT jsonb_agg(to_jsonb(row) - ARRAY['observed_at','inserted_at'] ORDER BY resource_id) FROM resources row WHERE chain_id = 'ethereum-mainnet'),
+           'name_surfaces', (SELECT jsonb_agg(to_jsonb(row) - ARRAY['observed_at','inserted_at'] ORDER BY logical_name_id) FROM name_surfaces row WHERE chain_id = 'ethereum-mainnet'),
+           'surface_bindings', (SELECT jsonb_agg(to_jsonb(row) - ARRAY['observed_at','inserted_at'] ORDER BY surface_binding_id) FROM surface_bindings row WHERE chain_id = 'ethereum-mainnet'),
+           'phase_state', (SELECT jsonb_agg(jsonb_build_object('phase',phase_name,'status',phase_status,'current',current_block_number,'target',target_block_number,'hash',input_content_hash,'redo',redo_in_progress) ORDER BY phase_name) FROM chain_phase_state WHERE chain_id = 'ethereum-mainnet' AND phase_name IN ('ingest','interpret')),
+           'project_inputs', (SELECT jsonb_agg(jsonb_build_object('event_identity',event_identity,'logical_name_id',logical_name_id,'resource_id',resource_id,'source_manifest_id',source_manifest_id,'after_state',after_state) ORDER BY event_identity) FROM normalized_events WHERE chain_id = 'ethereum-mainnet' AND event_kind = 'ResolverChanged'),
+           'pointer_count', (SELECT count(*) FROM normalized_events WHERE chain_id = 'ethereum-mainnet' AND event_kind = 'ResolverChanged' AND after_state ->> 'state_derived' = 'true'),
+           'binding_count', (SELECT count(*) FROM surface_bindings WHERE chain_id = 'ethereum-mainnet' AND active_to IS NULL)
+         )",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn raw_log_digest(pool: &PgPool) -> Result<(String, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT md5(jsonb_agg(to_jsonb(row) ORDER BY block_number, transaction_index, log_index)::text), count(*) FROM raw_logs row WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn readable_v2_expiries(pool: &PgPool, chain_id: &str) -> Result<Vec<(String, i64, String)>> {
