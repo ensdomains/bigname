@@ -416,6 +416,80 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
 }
 
 #[tokio::test]
+async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007140";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:registration-filter-history.eth";
+    let resource_id = Uuid::from_u128(0x7140);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "registration-filter-history.eth",
+        "registration-filter-history.eth",
+        "node:registration-filter-history.eth",
+        resource_id,
+        Uuid::from_u128(0x8140),
+        Uuid::from_u128(0x9140),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=122).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            v2_history_event(
+                "registration-filter-grant",
+                Some(logical_name_id),
+                Some(resource_id),
+                "RegistrationGranted",
+                121,
+            ),
+            v2_history_event(
+                "registration-filter-record",
+                Some(logical_name_id),
+                None,
+                "RecordChanged",
+                122,
+            ),
+        ],
+    )
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={resource_id}&page_size=20"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("product event rows");
+    assert_eq!(history_types(rows), vec!["record", "registration"]);
+    assert_eq!(rows[0]["registration_id"], Value::Null);
+    assert_eq!(rows[1]["registration_id"], json!(resource_id.to_string()));
+
+    let storage_page = bigname_storage::load_event_history_page(
+        &database.pool,
+        bigname_storage::EventHistoryFilter {
+            resource_id: Some(resource_id),
+            ..bigname_storage::EventHistoryFilter::default()
+        },
+        true,
+        None,
+        20,
+        bigname_storage::HistorySummaryMode::Count,
+        false,
+    )
+    .await?;
+    assert_eq!(storage_page.rows.len(), 2);
+    assert_eq!(
+        storage_page.summary.map(|summary| summary.total_count),
+        Some(2)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
     const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
     const ADDRESS: &str = "0x0000000000000000000000000000000000034930";
