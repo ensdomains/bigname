@@ -1048,22 +1048,35 @@ rows remain in the current-state table so losing-fork grants and losing-fork
 revocations both rebuild from surviving canonical history. Interpret re-walks
 retained raw facts; Project then rebuilds both state legs without a provider
 refetch. App-facing synthesis from those two state legs is deferred to the
-serving slice.
+follow-up serving change.
 
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
-permission coverage. Slice 1a retains that broad reason for every authority
-class; the serving slice owns any request-relative narrowing based on a proven
-registry-owner binding. `ensv1_wrapper_holder_permissions_not_projected`
+permission coverage. This interpretation-and-projection change retains that
+broad reason for every authority class; the follow-up serving change owns any
+request-relative narrowing based on a proven registry-owner binding.
+`ensv1_wrapper_holder_permissions_not_projected`
 remains a separate unsupported class. Readers reject inconsistent typed combinations and
 map an unrecognized persisted unsupported reason to unknown partial product
 coverage rather than treating it as wrapper support or returning an internal
-server error. The unchanged scoped ENSv1 and Basenames approval declarations
-already retain the required raw facts. The adapter-owned mapping changes their
-normalized-event semantics, so a retained database requires a full-history
-Interpret re-walk and Project rebuild under the rotated interpreter content
-hash; Fetch and Normalize do not rerun for this change.
+server error. The adapter-owned mapping requires a full-history Interpret
+re-walk and Project rebuild under the rotated interpreter content hash; Fetch
+and Normalize do not rerun only when retained raw facts cover the registry
+`ApprovalForAll` range required by the current [compiled watch
+plan](glossary.md#compiled-watch-plan). That range was declared by commit
+`b22bccee` on 2026-08-31 through
+[`ens_v1_registry_l1` manifest version 3](../manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml)
+on Ethereum Mainnet,
+[`ens_v1_registry_l1` manifest version 1](../manifests/sepolia/ethereum/ens/ens_v1_registry_l1/v1.toml)
+on Sepolia, and
+[`basenames_base_registry` manifest version 2](../manifests/mainnet/base/basenames/basenames_base_registry/v2.toml)
+on Base Mainnet. A retained database whose Ingest predates that declaration must
+have completed the retained-range Ingest redo; otherwise, the [re-derivation
+boundary](glossary.md#re-derivation-boundary) must include Fetch and Normalize
+for that range—operationally, an Ingest redo before Interpret and Project. A
+from-zero Ingest under the current compiled watch plan satisfies the
+precondition directly.
 
 ## Snapshot serving
 
