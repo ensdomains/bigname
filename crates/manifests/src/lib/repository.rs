@@ -15,8 +15,6 @@ use crate::model::RawSourceManifest;
 use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
-#[path = "repository/discovery_rules.rs"]
-mod discovery_rules;
 #[path = "repository/read_features.rs"]
 mod read_features;
 
@@ -410,7 +408,6 @@ fn validate_manifest_metadata(
     }
 
     validate_manifest_abi(manifest, path)?;
-    discovery_rules::validate(manifest, path)?;
 
     Ok(())
 }

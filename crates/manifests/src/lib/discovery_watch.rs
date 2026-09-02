@@ -194,6 +194,7 @@ pub async fn load_discovery_watch_coverage(
         JOIN contract_instance_addresses address
           ON address.contract_instance_id = declaration.contract_instance_id
          AND address.chain_id = declaration.chain_id
+         AND lower(address.address) = lower(declaration.declared_address)
         WHERE manifest.chain_id = $1
           AND manifest.rollout_status = 'active'
           AND compiled.entry -> 'emitter' ->> 'kind' = 'address'
