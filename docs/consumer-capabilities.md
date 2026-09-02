@@ -421,9 +421,10 @@ domains(
 `account`, `accounts`, `resolver`, and `resolvers` are the named second-PR
 boundary of `#670/T2`; this slice does not add them through adjacent root work.
 `Domain.id` is `ID!` and remains a JSON string. `domain(id:)` also retains a
-local runtime extension that accepts an ENS name string after attempting a
-namehash lookup. The namehash-first precedence prevents a hash-shaped ENS name
-from shadowing an entity ID. `Domain_filter.id` and `Domain_filter.id_in` match
+local runtime extension that accepts an ENS name string. A canonical `0x` plus
+64-hex input attempts namehash lookup before the name fallback, preventing a
+hash-shaped ENS name from shadowing an entity ID; every other input takes the
+direct name lookup path. `Domain_filter.id` and `Domain_filter.id_in` match
 namehashes only.
 
 `Domain_filter` accepts exactly `id: ID`, `id_in: [ID!]`, `owner: String`,

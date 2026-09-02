@@ -117,9 +117,9 @@ to the applicable entries below.
 > generated argument defaults.
 > **Since**: `2026-09-02`
 
-> **Generated Domain point lookup accepts an ENS name** — `domain(id:)` first treats the supplied `ID` as a namehash,
-> then locally extends the generated point lookup by normalizing an ENS name and looking up its namehash when the entity
-> ID does not match. Namehash precedence prevents a hash-shaped ENS name from shadowing an entity ID.
+> **Generated Domain point lookup accepts an ENS name** — `domain(id:)` treats only a canonical `0x` plus 64-hex input
+> as a namehash first, then falls back to the local ENS-name lookup if the entity ID does not match. Every other input
+> takes the direct name lookup path. Namehash precedence prevents a hash-shaped ENS name from shadowing an entity ID.
 > **Upstream**: the ENS subgraph defines `Domain.id` as the namehash
 > (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6), and Graph Node applies the supplied point ID
 > as an equality filter without a name fallback

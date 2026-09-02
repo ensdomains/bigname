@@ -490,15 +490,18 @@ async fn graphql_generated_domain_ordinary_name_uses_one_projection_query() -> R
         .max_connections(1)
         .connect_with(options)
         .await?;
-    sqlx::query(
-        "SELECT pg_stat_reset_single_table_counters(\
-         'bigname_phase.name_current'::regclass)",
-    )
-    .execute(&capture_pool)
-    .await?;
     sqlx::query("SET enable_seqscan = off")
         .execute(&capture_pool)
         .await?;
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(&capture_pool)
+        .await?;
+    let baseline_scans: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(idx_scan), 0)::BIGINT FROM pg_stat_user_indexes \
+         WHERE relid = 'bigname_phase.name_current'::regclass",
+    )
+    .fetch_one(&capture_pool)
+    .await?;
     let state = AppState::new_with_rpc_urls(
         capture_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),
@@ -516,13 +519,17 @@ async fn graphql_generated_domain_ordinary_name_uses_one_projection_query() -> R
     sqlx::query("SELECT pg_stat_force_next_flush()")
         .execute(&capture_pool)
         .await?;
-    let projection_queries: i64 = sqlx::query_scalar(
+    let final_scans: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(idx_scan), 0)::BIGINT FROM pg_stat_user_indexes \
          WHERE relid = 'bigname_phase.name_current'::regclass",
     )
     .fetch_one(&capture_pool)
     .await?;
-    assert_eq!(projection_queries, 1, "ordinary names need one projection lookup");
+    assert_eq!(
+        final_scans - baseline_scans,
+        1,
+        "ordinary names need one projection lookup"
+    );
 
     capture_pool.close().await;
     database.cleanup().await
