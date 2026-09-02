@@ -624,7 +624,7 @@ impl State {
             if expiry.checked_add(ENS_GRACE_PERIOD_SECS).is_some() {
                 break;
             }
-            due.push(self.v1_expiries.remove_max().unwrap().1);
+            self.v1_expiries.remove_max();
         }
         while let Some((expiry, _)) = self.v1_expiries.get_min() {
             if v1_registration_is_live(Some(*expiry), at_unix_timestamp) {
@@ -690,7 +690,7 @@ fn v1_registration_is_live(expiry: Option<i64>, at_unix_timestamp: i64) -> bool 
     expiry.is_none_or(|expiry| {
         expiry
             .checked_add(ENS_GRACE_PERIOD_SECS)
-            .is_some_and(|release| at_unix_timestamp <= release)
+            .is_none_or(|release| at_unix_timestamp <= release)
     })
 }
 

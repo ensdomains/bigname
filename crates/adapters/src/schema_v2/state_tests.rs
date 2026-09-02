@@ -175,6 +175,25 @@ fn v1_release_occurs_one_second_after_the_grace_boundary() {
     );
 }
 
+#[test]
+fn v1_expiry_overflow_is_never_released_and_does_not_block_finite_expiry() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    observe_registrar(&mut state, "overflow", Some(i64::MAX));
+    observe_registrar(&mut state, "finite", Some(1));
+
+    let releases = release_keys(state.settle_v1_releases(1 + super::ENS_GRACE_PERIOD_SECS + 1));
+
+    assert_eq!(releases, ["test:finite"]);
+    assert!(state.v1_registrars.contains_key("test:overflow"));
+    assert!(v1_registration_is_live(Some(i64::MAX), i64::MAX));
+    assert!(
+        !state
+            .v1_expiries
+            .iter()
+            .any(|(_, key)| key == "test:overflow")
+    );
+}
+
 fn assert_release_sequence(state: &mut State, timestamp: i64, step: usize) {
     let expected = naive_due_keys(state, timestamp);
     let actual = release_keys(state.settle_v1_releases(timestamp));
@@ -201,12 +220,23 @@ fn release_keys(releases: Vec<V1Release>) -> Vec<String> {
 }
 
 fn assert_expiry_index_is_derived(state: &State) {
-    let expected = state
+    let expected: OrdSet<(i64, String)> = state
         .v1_registrars
         .iter()
-        .filter_map(|(key, registrar)| registrar.expiry.map(|expiry| (expiry, key.clone())))
+        .filter_map(|(key, registrar)| {
+            registrar
+                .expiry
+                .filter(|expiry| expiry.checked_add(super::ENS_GRACE_PERIOD_SECS).is_some())
+                .map(|expiry| (expiry, key.clone()))
+        })
         .collect::<OrdSet<_>>();
-    assert_eq!(state.v1_expiries, expected);
+    let actual: OrdSet<(i64, String)> = state
+        .v1_expiries
+        .iter()
+        .filter(|(expiry, _)| expiry.checked_add(super::ENS_GRACE_PERIOD_SECS).is_some())
+        .map(|(expiry, key)| (*expiry, key.clone()))
+        .collect::<OrdSet<_>>();
+    assert_eq!(actual, expected);
 }
 
 fn observe_registrar(state: &mut State, namehash: &str, expiry: Option<i64>) {
