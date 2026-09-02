@@ -195,7 +195,9 @@ Field ownership:
   returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
-  `invalid_name`. Reverse misses return `status=ok` with an empty `records`
+  `invalid_name`. Name-only and exact-scope latest reads return retryable `409
+  stale` when the selected namespace is undergoing an Interpret redo. Reverse
+  misses return `status=ok` with an empty `records`
   array for the input. Lookup record-level reason values are mapped to product
   vocabulary before serialization; current values include `read_failed`,
   `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
@@ -1274,7 +1276,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   never a partial page. Explicit-namespace search likewise captures its
   request-scope metadata before reading the page and reloads it afterward; a
   head, completed publication generation, or readiness change returns `409
-  conflict` rather than attributing the page to a later position.
+  conflict` rather than attributing the page to a later position. An explicit
+  namespace returns retryable `409 stale` whenever an Interpret redo is among
+  the failed admission terms, including when the redo begins during the read.
+  A Project publication that becomes ready between admission reads with no
+  redo involved is instead a readiness change and returns `409 conflict`.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
   required; a missing or empty `q` returns `400 invalid_input`. The API treats
   `q` as an ENSIP-15 name fragment, normalizes it, and then applies the selected
@@ -1446,7 +1452,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   incremental publications; it may not be ahead, and a same-height target must
   match the selected hash. The projection-phase generation is revalidated after the
   read, and an invalid target or changed generation returns `409 stale`.
-- Status semantics: an otherwise valid current/latest resolver with no overview
+- Status semantics: only a request without `at` and with `finality=latest`
+  applies the latest served-head Interpret-redo check and returns retryable `409
+  stale` while its selected chain is undergoing a redo. Historical `at` reads
+  and requests with `finality=safe|finalized` retain their existing generation
+  validation without that redo check.
+- An otherwise valid current/latest resolver with no overview
   row returns `404 not_found`. For `at`, `safe`, or `finalized`, a missing
   current projection cannot prove historical absence and returns `409 stale`.
   Bound-name listings under `at`, `safe`, or `finalized` are drawn from

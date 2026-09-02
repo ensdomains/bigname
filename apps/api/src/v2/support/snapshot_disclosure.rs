@@ -1,5 +1,7 @@
 use super::*;
 
+#[cfg(test)]
+use crate::v2::search_public_namespace_read_test_hooks::{self as read_hooks, ReadHookPoint};
 use crate::v2::{AsOfCompleteness, Completeness, Meta, V2Result, api_error_to_v2, as_of_meta};
 
 const TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
@@ -9,6 +11,7 @@ pub(crate) struct ExplicitNamespaceRequestScope {
     meta: Meta,
     selected_heads: BTreeMap<String, Option<(i64, String)>>,
     project_generations: Option<BTreeMap<String, String>>,
+    interpret_redo_state: bigname_storage::SelectedInterpretRedoState,
 }
 
 pub(crate) fn request_scope_meta(scopes: &[RequestScopeSnapshot]) -> V2Result<Meta> {
@@ -91,9 +94,25 @@ pub(crate) async fn explicit_namespace_request_scope(
     let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
         .map_err(snapshot_selection_api_error)
         .map_err(api_error_to_v2)?;
-    let (selected, project_generations) =
+    let (selected, project_generations, interpret_redo_state) =
         match resolve_exact_name_snapshot_selection(&state.pool, &scope, &input).await {
             Ok(selected) => {
+                #[cfg(test)]
+                read_hooks::run_at(&state.pool, ReadHookPoint::AfterExplicitSelection).await?;
+                let chain_ids = selected
+                    .chain_positions
+                    .as_map()
+                    .values()
+                    .map(|position| position.chain_id.clone())
+                    .collect::<Vec<_>>();
+                let redo_state =
+                    bigname_storage::load_selected_interpret_redo_state(&state.pool, &chain_ids)
+                        .await
+                        .map_err(|_| {
+                            crate::v2::V2Error::internal_error(
+                                "failed to validate request-scope metadata",
+                            )
+                        })?;
                 let readable_generations =
                     load_selected_project_generations_for_read(&state.pool, &selected, true)
                         .await
@@ -105,16 +124,19 @@ pub(crate) async fn explicit_namespace_request_scope(
                 let project_generations = match readable_generations.as_ref() {
                     Some(_) => readable_generations.clone(),
                     None => {
-                        load_selected_project_generations_for_read(&state.pool, &selected, false)
-                            .await
-                            .map_err(|_| {
-                                crate::v2::V2Error::internal_error(
-                                    "failed to validate request-scope metadata",
-                                )
-                            })?
+                        load_unfenced_explicit_namespace_generations(
+                            &state.pool,
+                            &selected,
+                            &redo_state,
+                        )
+                        .await?
                     }
                 };
-                (readable_generations.map(|_| selected), project_generations)
+                (
+                    readable_generations.map(|_| selected),
+                    project_generations,
+                    redo_state,
+                )
             }
             Err(error)
                 if matches!(
@@ -122,7 +144,9 @@ pub(crate) async fn explicit_namespace_request_scope(
                     SnapshotSelectionErrorKind::Conflict | SnapshotSelectionErrorKind::Stale
                 ) =>
             {
-                (None, None)
+                let redo_state =
+                    load_explicit_namespace_interpret_redo_state(&state.pool, &scope).await?;
+                (None, None, redo_state)
             }
             Err(error) => return Err(api_error_to_v2(snapshot_selection_api_error(error))),
         };
@@ -130,7 +154,66 @@ pub(crate) async fn explicit_namespace_request_scope(
         meta: request_scope_meta(&[RequestScopeSnapshot { scope, selected }])?,
         selected_heads,
         project_generations,
+        interpret_redo_state,
     })
+}
+
+async fn load_explicit_namespace_interpret_redo_state(
+    pool: &PgPool,
+    scope: &SnapshotSelectionScope,
+) -> V2Result<bigname_storage::SelectedInterpretRedoState> {
+    let chain_ids = scope
+        .required_positions()
+        .iter()
+        .map(|position| position.chain_id.clone())
+        .collect::<Vec<_>>();
+    let redo_state = bigname_storage::load_selected_interpret_redo_state(pool, &chain_ids)
+        .await
+        .map_err(|_| {
+            crate::v2::V2Error::internal_error("failed to validate request-scope metadata")
+        })?;
+    match redo_state.changed_or_active(&redo_state) {
+        true => Err(crate::v2::V2Error::stale(
+            "served data is temporarily unavailable while Interpret redo is in progress",
+        )),
+        false => Ok(redo_state),
+    }
+}
+
+async fn load_unfenced_explicit_namespace_generations(
+    pool: &PgPool,
+    selected: &SelectedSnapshot,
+    expected_redo_state: &bigname_storage::SelectedInterpretRedoState,
+) -> V2Result<Option<BTreeMap<String, String>>> {
+    #[cfg(test)]
+    read_hooks::run_at(pool, ReadHookPoint::BeforeUnfencedGenerations).await?;
+    let generations = load_selected_project_generations_for_read(pool, selected, false)
+        .await
+        .map_err(|_| {
+            crate::v2::V2Error::internal_error("failed to validate request-scope metadata")
+        })?;
+    let chain_ids = selected
+        .chain_positions
+        .as_map()
+        .values()
+        .map(|position| position.chain_id.clone())
+        .collect::<Vec<_>>();
+    let current_redo_state = bigname_storage::load_selected_interpret_redo_state(pool, &chain_ids)
+        .await
+        .map_err(|_| {
+            crate::v2::V2Error::internal_error("failed to validate request-scope metadata")
+        })?;
+    if expected_redo_state.changed_or_active(&current_redo_state) {
+        return Err(crate::v2::V2Error::stale(
+            "served data is temporarily unavailable while Interpret redo is in progress",
+        ));
+    }
+    if generations.is_some() {
+        return Err(crate::v2::V2Error::conflict(
+            "search namespace readiness changed while the request was being read",
+        ));
+    }
+    Ok(None)
 }
 
 async fn request_scope_head_fingerprint(
@@ -159,6 +242,14 @@ pub(crate) async fn revalidate_explicit_namespace_request_scope(
     expected: ExplicitNamespaceRequestScope,
 ) -> V2Result<Meta> {
     let current = explicit_namespace_request_scope(state, namespace).await?;
+    if expected
+        .interpret_redo_state
+        .changed_or_active(&current.interpret_redo_state)
+    {
+        return Err(crate::v2::V2Error::stale(
+            "served data is temporarily unavailable while Interpret redo is in progress",
+        ));
+    }
     if current != expected {
         return Err(crate::v2::V2Error::conflict(
             "search namespace position changed while the request was being read",

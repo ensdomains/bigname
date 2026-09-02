@@ -526,13 +526,15 @@ Explicit-namespace search captures its request-scope metadata before reading
 the page and reloads it afterward. A head, completed publication generation, or
 readiness change returns the same retryable `409 conflict` instead of
 attributing the page to a position selected after the rows were read.
+Publication becoming ready between admission reads is such a readiness change,
+not evidence of an Interpret redo.
 Their namespace-omitted cursors bind that derived namespace list and fail closed if it
 changes. Search with an explicit recognized `namespace` bypasses public
-namespace derivation and reads that namespace's current rows without a
-deployment-readiness gate, including the Interpret redo check, preserving the
-pre-derivation behavior. Name-only lookup likewise keeps its existing name
-snapshot selection and does not derive the public set; only address inputs
-invoke public reverse derivation.
+namespace derivation. It still requires the selected namespace's
+`redo_in_progress` value to be false and returns `409 stale` while an Interpret
+redo is active. Name-only lookup likewise keeps its existing name snapshot
+selection and does not derive the public set; only address inputs invoke public
+reverse derivation.
 The chains accounted for by `meta.as_of` and `meta.as_of_completeness` are
 selected by the namespace parameter and input kinds, not by the namespaces
 eligible to serve rows or the rows returned. An explicit namespace does not
@@ -648,6 +650,11 @@ the selected position; a target at the same height must have the same hash. The
 selected `chain_heads` rows and completed schema-v2 projection generations must
 remain unchanged across the read. An ahead, same-height wrong-hash, or
 publication-generation mismatch returns `409 stale`.
+Name-only and exact-scope lookup, explicit-namespace search, and resolver reads
+without `at` at `finality=latest` apply the same `redo_in_progress` readiness
+check and return `409 stale`. Historical resolver reads selected with `at` and
+resolver reads at `finality=safe|finalized` retain their existing generation
+validation without that redo check.
 
 `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
 does not accept `at` or `finality`; when a served head is available, its

@@ -68,6 +68,7 @@ pub use history::{
     load_name_history_head, load_name_history_page, load_resource_history,
     load_resource_history_page, revalidate_interpret_redo_fence,
 };
+pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 pub use identity::{
     NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
     ens_v2_registry_resource_id, load_name_surface, load_name_surface_including_noncanonical,

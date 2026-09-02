@@ -120,7 +120,7 @@ async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor
 }
 
 #[tokio::test]
-async fn v2_lookup_name_only_inputs_bypass_public_derivation_and_interpret_redo_fence()
+async fn v2_lookup_name_only_refuses_while_interpret_redo_is_in_progress()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_lookup_base_head(&database).await?;
@@ -167,11 +167,9 @@ async fn v2_lookup_name_only_inputs_bypass_public_derivation_and_interpret_redo_
         .await?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
-    assert_eq!(payload["data"][0]["status"], json!("not_found"));
-    assert!(payload["meta"]["as_of"].get("8453").is_some());
-    assert!(payload["meta"]["as_of"].get("1").is_none());
-    assert!(payload["meta"].get("as_of_completeness").is_none());
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert!(payload.get("data").is_none());
 
     database.cleanup().await
 }
@@ -256,7 +254,7 @@ async fn v2_lookup_bare_reverse_returns_conflict_when_every_public_namespace_is_
 }
 
 #[tokio::test]
-async fn v2_lookup_mixed_batch_keeps_reverse_suppression_disclosed() -> Result<()> {
+async fn v2_lookup_exact_scope_fallback_refuses_while_interpret_redo_is_in_progress() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
@@ -288,33 +286,9 @@ async fn v2_lookup_mixed_batch_keeps_reverse_suppression_disclosed() -> Result<(
     .await?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
-    assert_eq!(lookup_record_names(&payload), vec!["alice.eth", "bob.eth"]);
-    assert_eq!(payload["data"][1]["status"], json!("not_found"));
-    assert!(payload["meta"]["as_of"]["1"].is_object());
-    assert!(payload["meta"]["as_of"].get("8453").is_none());
-    assert_eq!(
-        payload["meta"]["as_of_completeness"]["8453"],
-        json!({
-            "completeness": "unsupported",
-            "unsupported_reason": "temporarily_unavailable"
-        })
-    );
-    let token = payload["meta"]["as_of_token"]
-        .as_str()
-        .expect("mixed lookup must include an as_of_token");
-    let bigname_storage::SnapshotAt::ResolvedPositions(positions) =
-        crate::v2::decode_at_token(token).expect("mixed lookup token must decode")
-    else {
-        panic!("mixed lookup token must contain resolved positions");
-    };
-    assert!(
-        positions
-            .as_map()
-            .values()
-            .any(|position| position.chain_id == "base-mainnet"),
-        "the token must retain the suppressed chain position used by the forward input"
-    );
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert!(payload.get("data").is_none());
 
     database.cleanup().await
 }

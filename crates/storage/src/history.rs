@@ -28,6 +28,7 @@ pub use redo::{
     InterpretRedoFence, InterpretRedoInProgress, capture_interpret_redo_fence,
     revalidate_interpret_redo_fence,
 };
+pub use redo::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 
 /// Anchor selection for normalized-event history reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

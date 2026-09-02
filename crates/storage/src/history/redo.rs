@@ -15,6 +15,17 @@ impl std::error::Error for InterpretRedoInProgress {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterpretRedoFence(Vec<(String, i64)>);
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectedInterpretRedoState(Vec<(String, i64, bool)>);
+
+impl SelectedInterpretRedoState {
+    pub fn changed_or_active(&self, current: &Self) -> bool {
+        self != current
+            || self.0.iter().any(|(_, _, active)| *active)
+            || current.0.iter().any(|(_, _, active)| *active)
+    }
+}
+
 pub async fn capture_interpret_redo_fence(pool: &PgPool) -> Result<InterpretRedoFence> {
     let mut transaction = pool
         .begin()
@@ -51,6 +62,23 @@ pub async fn revalidate_interpret_redo_fence(
         return Err(InterpretRedoInProgress.into());
     }
     Ok(())
+}
+
+pub async fn load_selected_interpret_redo_state(
+    pool: &PgPool,
+    chain_ids: &[String],
+) -> Result<SelectedInterpretRedoState> {
+    Ok(SelectedInterpretRedoState(
+        sqlx::query_as(
+            "SELECT chain_id, redo_attempt_generation, redo_in_progress
+             FROM bigname_phase.chain_phase_state
+             WHERE phase_name = 'interpret' AND chain_id = ANY($1)
+             ORDER BY chain_id",
+        )
+        .bind(chain_ids)
+        .fetch_all(pool)
+        .await?,
+    ))
 }
 
 pub(super) async fn ensure_interpret_not_redo(connection: &mut PgConnection) -> Result<()> {
