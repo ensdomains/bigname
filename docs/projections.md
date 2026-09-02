@@ -450,10 +450,18 @@ follows the registry resolver lookup
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
 and the resolver's version-, node-, and key-scoped text storage
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
-A known model limitation remains: if a resolver was selected only before the
-[name surface](glossary.md#surface-name-surface) existed and was never selected
-again afterward, Project has no linked resolver pointer for that name and does
-not serve its retained records.
+When the first active ENSv1 [name surface](glossary.md#surface-name-surface) is
+materialized, Interpret links the latest replayed nonzero registry resolver to
+the current registry-only authority resource. If getter-visible registry
+ownership is explicitly zero, Interpret instead links that resolver to the
+retained registry [serving resource](glossary.md#serving-resource) without
+creating control. A latest zero-address
+resolver selection suppresses this materialization pointer rather than reviving
+an older nonzero selection. The original raw-derived normalized row remains
+immutable; the linked pointer is an additive
+[state-derived normalized event](glossary.md#state-derived-normalized-event) at
+the surface-materializing renewal. Record attribution remains node-keyed and
+provider-free.
 A resource-less record event cannot create a binding, and name and record reads
 expose the inventory only when the name's current readable control resource or
 `serving_resource_id` selects it. Resolver-local events are accepted only under the manifest and

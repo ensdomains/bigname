@@ -1413,6 +1413,13 @@ event kinds which update one logical value stream. For example, registrar
 grants, renewals, releases, and reservations share the `registration` facet;
 permission grants and revocations share the `permission` facet.
 
+<a id="state-derived-normalized-event"></a>
+## State-derived normalized event
+
+an additive normalized event emitted at a later raw position from deterministic
+interpreter state, retaining the manifest provenance of the state being
+surfaced and never requiring a provider read.
+
 <a id="logical-discovery-edge-identity"></a>
 ## Logical discovery-edge identity (`logical_edge_identity`)
 

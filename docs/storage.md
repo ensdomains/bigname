@@ -775,6 +775,16 @@ resume marker and current block anchors in the write transaction. A concurrent
 reorg therefore cannot publish interpretation derived from an unreadable
 branch.
 
+An ENSv1 surface-materializing renewal may emit an additive
+[state-derived normalized event](glossary.md#state-derived-normalized-event).
+Its `source_manifest_id` comes from the retained registry authority or registry
+state used for serving, while its block, transaction, log, canonicality, and
+`raw_fact_ref` come from the renewal that materializes the surface. It retains
+the existing `ens_v1_unwrapped_authority` derivation kind and is distinguished
+by `after_state.state_derived=true`. The earlier pre-surface
+`ResolverChanged` remains null-linked and immutable. This behavior requires no
+`normalized_events` check change or schema-migration.
+
 ### Interpret process memory
 
 `normalized_events` is the working store for each [interpreter state

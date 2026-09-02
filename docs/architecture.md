@@ -956,6 +956,22 @@ kind. A `PreimageObserved` row produced by a block-boundary survivor
 reassertion instead uses `raw_block_preimage_observation`, matching its
 `raw_fact_ref.kind = raw_block` source.
 
+### State-derived normalized events
+
+Replayed interpreter state may supply identity linkage that was unavailable
+when an earlier raw event was interpreted. A later raw event that makes the
+identity surface active may therefore trigger an additive
+[state-derived normalized event](glossary.md#state-derived-normalized-event).
+The additive event takes its source family and manifest identifier from the
+remembered state, while its block, transaction, log, timestamp, canonicality,
+and raw-fact provenance come from the later triggering event. It does not
+mutate or replace the earlier normalized fact and requires no provider read.
+
+Fresh, restored, resumed, and redo interpretation over the same retained input
+must emit identical state-derived output. Within one raw position, Interpret
+orders the selected source's ordinary events first, then state-derived sourced
+events, the block-boundary output, and finally identity and preimage output.
+
 Normalized events are schema-v2 interpreter transitions. Interpretation loads
 canonical raw facts in chain order. Persisted normalized events are the working
 store for per-key before/after state; the process carries protocol state and a
