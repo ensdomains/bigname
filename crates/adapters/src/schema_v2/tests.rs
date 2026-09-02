@@ -13408,14 +13408,6 @@ fn declared_approval_grants_revocations_and_clears_are_decode_only() -> anyhow::
     let owner = CONTRACT.parse::<Address>()?;
     let operator = "0x0000000000000000000000000000000000000043".parse::<Address>()?;
     let zero = Address::ZERO;
-    let approval_for_all = [true, false].map(|approved| {
-        approvals::ApprovalForAll {
-            owner,
-            operator,
-            approved,
-        }
-        .encode_log_data()
-    });
     let approval = [operator, zero].map(|approved| {
         approvals::Approval {
             owner,
@@ -13434,20 +13426,6 @@ fn declared_approval_grants_revocations_and_clears_are_decode_only() -> anyhow::
         .encode_log_data()
     });
     let cases = [
-        (
-            "ens_v1_registry_l1",
-            "registry",
-            "ApprovalForAll",
-            "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
-            approval_for_all.as_slice(),
-        ),
-        (
-            "basenames_base_registry",
-            "registry",
-            "ApprovalForAll",
-            "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
-            approval_for_all.as_slice(),
-        ),
         (
             "ens_v1_registrar_l1",
             "registrar",
@@ -13509,6 +13487,58 @@ fn declared_approval_grants_revocations_and_clears_are_decode_only() -> anyhow::
             BatchOutput::default(),
             "{source_family} {name} must not mutate interpretation state"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn registry_approval_for_all_emits_account_permission_state() -> anyhow::Result<()> {
+    let owner = CONTRACT.parse::<Address>()?;
+    let operator = "0x0000000000000000000000000000000000000043".parse::<Address>()?;
+    for (manifest_id, source_family, namespace) in [
+        (111, "ens_v1_registry_l1", "ens"),
+        (112, "basenames_base_registry", "basenames"),
+    ] {
+        let logs = [true, false].map(|approved| {
+            raw(approvals::ApprovalForAll {
+                owner,
+                operator,
+                approved,
+            }
+            .encode_log_data())
+        });
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest_with_events(
+                manifest_id,
+                namespace,
+                source_family,
+                &[(
+                    "ApprovalForAll",
+                    "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)",
+                    &["registry"],
+                    &[],
+                )],
+            )],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(manifest_id, "registry")],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: logs.into_iter().collect(),
+        })?;
+        assert_eq!(output.normalized_events.len(), 2);
+        let grant = &output.normalized_events[0];
+        let revoke = &output.normalized_events[1];
+        assert_eq!(grant.event_kind, "AccountPermissionChanged");
+        assert_eq!(grant.derivation_kind, "standard_approval");
+        assert!(grant.logical_name_id.is_none() && grant.resource_id.is_none());
+        assert_eq!(
+            grant.after_state["effective_powers"],
+            json!(["registry_control"])
+        );
+        assert_eq!(revoke.before_state["approved"], json!(true));
+        assert_eq!(revoke.after_state["approved"], json!(false));
+        assert_eq!(revoke.after_state["effective_powers"], json!([]));
     }
     Ok(())
 }

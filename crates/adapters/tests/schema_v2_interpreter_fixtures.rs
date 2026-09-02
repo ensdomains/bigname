@@ -61,6 +61,7 @@ enum Runner {
     EnsV2Permissions,
     EnsV2Resolver,
     EnsV2Registrar,
+    StandardApproval,
 }
 
 #[derive(Clone, Deserialize)]
@@ -179,6 +180,7 @@ fn runner_for_derivation(derivation: &str) -> Option<Runner> {
         "ens_v2_permissions" => Some(Runner::EnsV2Permissions),
         "ens_v2_resolver" => Some(Runner::EnsV2Resolver),
         "ens_v2_registrar" => Some(Runner::EnsV2Registrar),
+        "standard_approval" => Some(Runner::StandardApproval),
         _ => None,
     }
 }
