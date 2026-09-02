@@ -4,6 +4,46 @@ const OLD_CANDIDATE_INTERPRETER_HASH: &str =
     "keccak256:e6204544522d7693363416c514984e9c2291979292794f002a8757ec4d964a0d";
 
 #[tokio::test]
+async fn semantic_end_state_keeps_surface_deactivated_at() -> TestResult {
+    let database = database("interpret_semantic_surface_deactivation").await?;
+    install_stage_capture(database.pool()).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ('semantic-deactivation', 'deactivated-block', 42,
+                 '2026-08-19 12:34:56+00'::timestamptz, 'canonical')",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces
+             (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+              labelhashes, normalizer_version, visibility_state, deactivation_reason,
+              deactivated_at, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('ens:deactivated-surface', 'ens', 'deactivated-surface',
+                 ARRAY['deactivated-surface'], ''::bytea, 'deactivated-surface',
+                 ARRAY['deactivated-labelhash'], 'test', 'shadow', 'normalization_failed',
+                 '2026-08-19 12:34:56+00'::timestamptz, 'semantic-deactivation',
+                 'deactivated-block', 42, 'canonical')",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let snapshot = semantic_end_state(database.pool()).await?;
+    let surfaces = snapshot
+        .iter()
+        .find_map(|(table, rows)| (table == "name_surfaces").then_some(rows))
+        .expect("name_surfaces semantic snapshot");
+    assert_eq!(
+        surfaces[0]["deactivated_at"],
+        serde_json::json!("2026-08-19T12:34:56+00:00")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn fresh_activation_and_candidate_state_redo_publish_identical_end_state() -> TestResult {
     let fresh = database("interpret_activation_fresh_equivalence").await?;
     let redo = database("interpret_activation_redo_equivalence").await?;
@@ -297,7 +337,7 @@ pub(super) async fn semantic_end_state(
              FROM (
                  SELECT {row} {generated}
                         - 'observed_at' - 'inserted_at' - 'last_recomputed_at'
-                        - 'deactivated_at' AS row
+                        AS row
                  FROM {table} value
              ) semantic"
         );
@@ -341,7 +381,6 @@ fn remove_generated_event_ids(value: &mut serde_json::Value) {
             object.remove("observed_at");
             object.remove("inserted_at");
             object.remove("last_recomputed_at");
-            object.remove("deactivated_at");
             for value in object.values_mut() {
                 remove_generated_event_ids(value);
             }
