@@ -3532,7 +3532,7 @@ fn address_name_current_row(
     let chain_id = chain_id_for_namespace(namespace);
     let chain_slot = chain_slot_for_namespace(namespace);
     bigname_storage::AddressNameCurrentRow {
-        address: address.to_owned(),
+        address: address.to_ascii_lowercase(),
         logical_name_id: logical_name_id.to_owned(),
         relation,
         namespace: namespace.to_owned(),

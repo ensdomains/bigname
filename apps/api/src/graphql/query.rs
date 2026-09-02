@@ -38,8 +38,9 @@ pub(crate) struct Query;
 #[Object]
 impl Query {
     /// `domain(id: ID!)` accepts either an ENS name string (for example `"alice.eth"`) or a
-    /// namehash. Resolve by namehash first, then fall back to the name, so a hash-shaped ENS name
-    /// cannot shadow an entity ID and callers do not have to signal which id form they are sending.
+    /// namehash. Canonical hash-shaped values resolve by namehash first, then fall back to the name,
+    /// so a hash-shaped ENS name cannot shadow an entity ID. Ordinary names take the direct name
+    /// lookup path.
     async fn domain(
         &self,
         ctx: &Context<'_>,
@@ -182,14 +183,20 @@ async fn resolve_domain(
     let state = ctx.data::<AppState>()?;
     let head = load_graphql_entity_head(ctx, block, subgraph_error, "domain").await?;
     let id = id.as_str();
-    let row = match load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, id)
-        .await
-        .map_err(|error| internal_error("domain", error))?
-    {
-        Some(row) => Some(row),
-        None => load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, id)
+    let row = if is_canonical_namehash(id) {
+        match load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, id)
             .await
-            .map_err(|error| internal_error("domain", error))?,
+            .map_err(|error| internal_error("domain", error))?
+        {
+            Some(row) => Some(row),
+            None => load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, id)
+                .await
+                .map_err(|error| internal_error("domain", error))?,
+        }
+    } else {
+        load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, id)
+            .await
+            .map_err(|error| internal_error("domain", error))?
     };
     if let Some(row) = row.as_ref() {
         require_rows_at_head(std::slice::from_ref(row), head.as_ref(), "domain")?;
@@ -200,6 +207,12 @@ async fn resolve_domain(
         domain.served_head = head;
         domain
     }))
+}
+
+fn is_canonical_namehash(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn generated_domain_sort(

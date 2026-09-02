@@ -246,6 +246,9 @@ fn push_filtered_names<'a>(
             address.relation,
             NameCurrentAddressRelationFilter::Relation(AddressNameRelation::EffectiveController)
         );
+        // Effective-controller writers store lowercase addresses, so this path can use the
+        // leading address column of the phase table's primary key. Legacy relations retain the
+        // lower(address) expression-index path.
         let address_column = if indexed_address_column {
             "anc.address"
         } else {
