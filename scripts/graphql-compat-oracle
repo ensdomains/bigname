@@ -185,14 +185,14 @@ def capture(args):
     if token and token in template:
         raise ValueError("endpoint template contains the supplied credential")
     variables = {"block": {"number": args.block_number}}
-    introspection = request(endpoint, INTROSPECTION, {}, "OracleIntrospection")
-    schema = introspection["data"].get("__schema")
-    if not isinstance(schema, dict) or not isinstance(schema.get("types"), list):
-        raise ValueError("upstream introspection data is missing")
     meta_payload = request(endpoint, META, variables, "OracleMeta")
     meta = observed_meta(meta_payload, args.block_number)
     if not isinstance(meta.get("deployment"), str) or not meta["deployment"]:
         raise ValueError("upstream _meta.deployment is required to identify the capture")
+    introspection = request(endpoint, INTROSPECTION, {}, "OracleIntrospection")
+    schema = introspection["data"].get("__schema")
+    if not isinstance(schema, dict) or not isinstance(schema.get("types"), list):
+        raise ValueError("upstream introspection data is missing")
     point_vars = {**variables, "id": args.domain_id}
     point = request(endpoint, POINT, point_vars, "OracleDomain")
     observed_meta(point, args.block_number)
@@ -205,6 +205,9 @@ def capture(args):
     observed_meta(filtered, args.block_number)
     if filtered["data"].get("domains") != [domain]:
         raise ValueError("name filter must identify exactly the point Domain")
+    final_meta = observed_meta(request(endpoint, META, variables, "OracleMeta"), args.block_number)
+    if final_meta.get("deployment") != meta["deployment"] or final_meta["block"] != meta["block"]:
+        raise ValueError("upstream deployment identity changed during capture")
     output = Path(args.output)
     coverage = output / "coverage.json"
     if not coverage.is_file():

@@ -10,9 +10,14 @@ const ORACLE_INTROSPECTION: &str = r#"query OracleIntrospection {
   types { kind name interfaces { name } possibleTypes { name } fields(includeDeprecated: true) {
     name isDeprecated type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }
     args(includeDeprecated: true) { name defaultValue isDeprecated type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } }
-  } inputFields { name defaultValue isDeprecated type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } }
+  } inputFields(includeDeprecated: true) { name defaultValue isDeprecated type { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } }
   enumValues(includeDeprecated: true) { name isDeprecated } } }
 }"#;
+
+#[test]
+fn graphql_oracle_local_introspection_includes_deprecated_input_fields() {
+    assert!(ORACLE_INTROSPECTION.contains("inputFields(includeDeprecated: true)"));
+}
 
 fn oracle_root() -> OraclePathBuf {
     OraclePath::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/fixtures/graphql-oracle/v1")
