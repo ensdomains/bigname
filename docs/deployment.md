@@ -514,6 +514,7 @@ GRANT SELECT ON TABLE
     bigname_phase.chain_phase_state,
     bigname_phase.service_heartbeats,
     bigname_phase.normalized_events,
+    bigname_phase.migration_event_associations,
     bigname_phase.name_current,
     bigname_phase.address_names_current,
     bigname_phase.children_current,

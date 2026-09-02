@@ -17,7 +17,9 @@ nothing to do with ENS's protocol migration.
 
 ---
 
-**Absence-aware replay** — a replay that is allowed to treat "not re-derived
+## Absence-aware replay
+
+a replay that is allowed to treat "not re-derived
 this pass" as "no longer true" and deactivate stale state. The license is
 scope-relative: a replay may infer absence only where it saw complete retained
 history for the scope it covers — the whole source, or a bounded target such as
@@ -27,18 +29,25 @@ completeness over the scope. Without completeness — a block-limited pass, or a
 pass over rotated history before that recovery — a replay updates only what it
 touches and never infers deletion from omission.
 
-**Admission** — the act of authorizing an input. A contract, event, or data
+## Admission
+
+the act of authorizing an input. A contract, event, or data
 source is *admitted* when a manifest declares it or a discovery rule reaches it
 from a declared root; only admitted inputs can produce normalized events or
 public coverage. Cross-reference: allowlisting.
 
-**Admission epoch** (discovery-admission epoch) — a schema-migration-era per-chain
+<a id="admission-epoch"></a>
+## Admission epoch (discovery-admission epoch)
+
+a schema-migration-era per-chain
 counter used to fence old-runtime watch-plan reconciliation. The table remains
 in immutable schema-migration history, but Stage B manifest synchronization and
 interpretation have no Rust writer or consumer for this counter; phase locks,
 content hashes, and explicit redo state now fence derived work.
 
-**Anchor** — the concrete object a stable identity is pinned to. An *authority
+## Anchor
+
+the concrete object a stable identity is pinned to. An *authority
 anchor* is the registry entry, registrar lease
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L10 @ ens_v1@91c966f),
 wrapper position
@@ -49,7 +58,10 @@ behind a `resource_id`; the id survives changes within one anchor and rotates
 when authority moves to a different anchor. An *observation anchor* is the
 exact chain/block identity a stored row was observed at.
 
-**Authority epoch** (`authority_epoch`) — the interval during which one
+<a id="authority-epoch"></a>
+## Authority epoch (`authority_epoch`)
+
+the interval during which one
 protocol arm supplies every current field for one logical name. For `ens`
 names the selected `authority_arm` is `ens_v1` or `ens_v2`; `basenames`
 authority lives in the registry/registrar/resolver system on Base
@@ -65,7 +77,9 @@ normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
 
-**Authority proof** — the evidence that selects an authority epoch before any
+## Authority proof
+
+the evidence that selects an authority epoch before any
 current field is chosen. For an ENSv1→ENSv2 boundary it is the activated
 `MigrationApplied` event that Interpret already matched one-to-one with a
 validated [migration authority transition](#migration-authority-transition);
@@ -80,12 +94,16 @@ child epoch, later topology or manifest changes do not erase it. That child proo
 events, reservations, event recency, binding UUID order, and `active_from`
 order are not authority proof.
 
-**Backfill coverage fact** — a schema-migration-era record that asserted one completed
+## Backfill coverage fact
+
+a schema-migration-era record that asserted one completed
 old-runtime backfill job fetched all matching logs over one block interval.
 The tables remain in schema-migration history, but the Stage B runtime has no writer,
 repair path, or checkpoint-promotion consumer for these records.
 
-**Batch grid** — the partition of one interpret walk into consecutive physical
+## Batch grid
+
+the partition of one interpret walk into consecutive physical
 batches (today 500-block ranges). Grids never split a block: the block is the
 atomic unit every grid loads. Where the boundaries fall is an execution
 detail, not an input to interpretation — surviving identity rows, discovery
@@ -109,14 +127,17 @@ replay](storage.md#interpretation-replay).
 
 Issue #411 enforces the role-dependent contract below; five-field descriptors remain compatible and default to `both`.
 
-<a id="source-role"></a>
-**Source role** — whether a configured provider may serve `intake`, is
+## Source role
+
+whether a configured provider may serve `intake`, is
 `verification-only`, or may serve `both`. Intake-capable sources receive
 cursors and feed Ingest and Live; only verification-only sources can earn an
 independent [verification level](#verification-level). Role tokens are exact;
 `verification_only` is not an alias for `verification-only`.
 
-**Stored-history verification** — the read-only phase that validates a chain's
+## Stored-history verification
+
+the read-only phase that validates a chain's
 stored extent through a finalized block and, when the chain has an independent
 reference, compares canonical selected raw logs with it. Base uses dRPC to
 cross-check the Coinbase-loaded history and cannot extend that independent
@@ -128,8 +149,9 @@ configured, and otherwise records provider trust without comparing intake with i
 only its block extent, trust level, and any fatal mismatch in phase state. It
 does not write coverage attestations or repair raw data.
 
-<a id="verification-level"></a>
-**Verification level** — the source-bounded trust label for a chain's stored
+## Verification level
+
+the source-bounded trust label for a chain's stored
 history through its reported verification extent: `quick_synced` is
 provider-trusted bootstrap data, `cross_checked` matched an independent
 provider, and `node_checked` matched a local node. The live-follow block is a
@@ -143,32 +165,44 @@ scan starts from the durable ingest extent. If it resumes through a reference
 with a different level, the completed extent retains the weaker level rather
 than upgrading the already-checked prefix.
 
-**Canonicality** — whether a stored fact belongs to the chain branch currently
+## Canonicality
+
+whether a stored fact belongs to the chain branch currently
 accepted as real, and how final that acceptance is. States: `observed` (seen,
 unproven), `canonical`, `safe`, `finalized` (standard Ethereum finality tags),
 and `orphaned` (on a losing branch; kept for audit, excluded from reads).
 
-**Capability promotion** ("graduation") — the deliberate, doc-first act of
+## Capability promotion ("graduation")
+
+the deliberate, doc-first act of
 moving a capability from `shadow`/`unsupported` to publicly `supported`.
 Nothing else promotes a capability: backfill completion, conformance passes,
 and manifest presence are necessary evidence, never the promotion itself.
 
-**Checkpoint promotion** — advancing a chain's stored canonical/safe/finalized
+## Checkpoint promotion
+
+advancing a chain's stored canonical/safe/finalized
 markers after proving block lineage and fetch coverage. Distinct from
 capability promotion above; avoid bare "promotion" where the two could be
 confused.
 
-**Claim anchor** — the `primary_names_current` row for an exact
+## Claim anchor
+
+the `primary_names_current` row for an exact
 (address, coin type, namespace) tuple. It is the only lookup and invalidation
 key for persisted primary-name claims; presence of the row never widens what
 claim sources are trusted.
 
-**Closure** — everything an interpreter's state depends on. A *closure
+## Closure
+
+everything an interpreter's state depends on. A *closure
 boundary* is the earliest block from which replaying that state is
 deterministic. The deleted old runtime called its cross-family operation a
 *full-closure replay*; Stage B uses explicit interpret redo state instead.
 
-**Compiled watch plan** — the non-authorable snapshot stored inside each
+## Compiled watch plan
+
+the non-authorable snapshot stored inside each
 manifest payload as `_bigname_compiled_watch`. It records the emitter scope,
 event topic, and inclusive start block compiled by the binary that admitted the
 manifest. Manifest synchronization decodes the prior snapshot instead of
@@ -178,7 +212,9 @@ dimension must remain represented in a backward-decodable format; an
 incompatible decode stops synchronization rather than accepting coverage whose
 meaning the binary cannot establish.
 
-**Companion rows** — the same-transaction raw context rows demanded for a
+## Companion rows
+
+the same-transaction raw context rows demanded for a
 family-selected log (emitter watched under a source family, block inside that
 entry's active window, topic0 in the family's manifest ABI): the transaction,
 its receipt, and the emitter's code observation. Replay must see the same
@@ -187,12 +223,17 @@ companions for family-selected logs ("companion checks"). Same-transaction
 sibling logs are retained as replay context too, but they are never required to
 produce companions of their own.
 
-**Consumer-replacement claim** — the assertion that bigname can replace a
+## Consumer-replacement claim
+
+the assertion that bigname can replace a
 specific consumer's existing indexer for a capability. It requires documented
 routes, fixtures, and conformance evidence, and is never implied by coverage,
 backfill, or manifest state.
 
-**Contract instance** (`contract_instance_id`) — the stable identity of a
+<a id="contract-instance"></a>
+## Contract instance (`contract_instance_id`)
+
+the stable identity of a
 watched contract. Addresses are time-ranged attributes of an instance, a proxy
 keeps its instance across implementation changes, and re-admitting an old
 address through a manifest declaration or an observation after its prior
@@ -200,24 +241,33 @@ retirement boundary reuses its instance. An observation creates a bounded
 active range when none exists, or backdates an existing later active range no
 earlier than the greatest preceding address range's close plus one.
 
-**Coverage frontier** (stored-lineage coverage frontier) — a schema-migration-era,
+## Coverage frontier (stored-lineage coverage frontier)
+
+a schema-migration-era,
 revision-checked old-runtime proof of which watched block intervals had
 complete log-fetch coverage. Its tables remain in schema-migration history, but its
 Rust writers, readers, and checkpoint-promotion path were deleted in Stage B.
 
-**Current-authority fanout** — a product collection deriving its membership and
+## Current-authority fanout
+
+a product collection deriving its membership and
 current fields from the one exact-name authority already selected for the name,
 instead of ranking that name's cross-era ENSv1 and ENSv2 events again per
 collection.
 
-**Current-for-name authority context** (`current_for_name`) — the marker on a
+<a id="current-for-name-authority-context"></a>
+## Current-for-name authority context (`current_for_name`)
+
+the marker on a
 permission row admitted because a `name` filter selected that name's current
 registration. It is the counterpart of the
 [resource audit context](#resource-audit-context): `current_for_name` states
 that the row is the requested name's current authority, while `resource_audit`
 makes no current-name claim.
 
-**Declared vs verified** — *declared* state is what protocol-side observation
+## Declared vs verified
+
+*declared* state is what protocol-side observation
 says: indexed onchain events, plus the documented hydration of event-silent
 contracts from pinned calls (see Hydration, Event-silent). *Verified* state is
 what actually executing resolution (e.g. through the ENS Universal Resolver)
@@ -226,18 +276,25 @@ them and persists only a direct-answer disagreement in the
 [resolution divergence ledger](#resolution-divergence-ledger). The two are
 never merged; `mode`/`source` selects which a route returns.
 
-**Deployment epoch** (`deployment_epoch`) — the manifest label naming which
+<a id="deployment-epoch"></a>
+## Deployment epoch (`deployment_epoch`)
+
+the manifest label naming which
 protocol deployment generation a source family belongs to (for example
 `ens_v2_sepolia_post_audit`), so facts from different deployments of the same
 protocol never mix silently.
 
-**Deployment profile** — the single manifest tree a runtime loads
+## Deployment profile
+
+the single manifest tree a runtime loads
 (`manifests/mainnet/` or `manifests/sepolia/`), which fixes its chains and
 admitted contracts. One runtime, one profile. "Profile" also means resolver
 profile, exact-name profile, or the `/v2/lookup` `profile=` parameter; always
 qualify which one is meant.
 
-**Derivation kind** — the persisted string naming which adapter pipeline
+## Derivation kind
+
+the persisted string naming which adapter pipeline
 produced a normalized event (for example `ens_v1_unwrapped_authority`,
 `ens_v2_registry_resource_surface`, `raw_log_preimage_observation`, or
 `raw_block_preimage_observation`). These are stored identifiers: define, never
@@ -245,7 +302,9 @@ rename. "Unwrapped authority" is a historical name kept because it is a stored
 identifier: that pipeline derives ownership and control for ENSv1 and Basenames
 names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 
-**Discovery graph / discovery edge** — the time-versioned indexability and
+## Discovery graph / discovery edge
+
+the time-versioned indexability and
 relationship graph that extends the manifest-declared contract graph. The
 schema-v2 baseline constrains an edge's kind to five values: `resolver`,
 `subregistry`, `proxy_implementation`, `registry_announcement`, and
@@ -255,8 +314,9 @@ announcement admits an ENSv2 registry independently of parent reachability,
 while a subregistry edge records parent-child reachability without admitting
 its target.
 
-<a id="discovery-watch-admission-snapshot"></a>
-**Discovery-watch admission snapshot** — Interpret-owned coordination state
+## Discovery-watch admission snapshot
+
+Interpret-owned coordination state
 that records the last acknowledged normalized union of concrete
 discovery-derived address/topic intervals for one chain, active
 manifest-authority fingerprint, and lineage-orphaning epoch. It lets a replayed
@@ -265,7 +325,9 @@ same discovery coverage being restaged. It is not evidence that raw facts were
 fetched and is not a second redo queue; `chain_phase_state` remains the sole
 work and redo authority.
 
-**Discovery-rule widening and narrowing** — manifest-synchronization
+## Discovery-rule widening and narrowing
+
+manifest-synchronization
 classifications for address-admitting `resolver` and `registry_announcement`
 discovery rules and their emitting declarations. Widening adds a rule or
 emitter, adds the first emitter to a rule that previously matched no
@@ -350,12 +412,15 @@ retained coverage without a reproducible desired rule, while a
 loudly and recoverably on `ResolverUpdated`; an empty rebuild can likewise
 clear the preceding invalidation first.
 
-<a id="durable-composite-cursor"></a>
-**Durable composite cursor** — the persisted resume position used to decide
+## Durable composite cursor
+
+the persisted resume position used to decide
 whether a phase advanced. It includes block number and hash and, for Ingest,
 the sorted per-source resume fields needed to distinguish real source progress.
 
-**Migration edge** (`migration`) — the fifth discovery edge kind. It is
+## Migration edge (`migration`)
+
+the fifth discovery edge kind. It is
 [reserved surface](#reserved-surface): the schema-v2 baseline accepts the
 value, and three manifest views explicitly exclude it from watch-plan,
 resolver-profile, and code-hash-drift reasoning, but no adapter writes one. Why
@@ -365,7 +430,9 @@ topology is tracked. Note that the older `public` schema built from
 `migrations/` puts no constraint on the column at all, so this five-value list
 describes the schema-v2 baseline rather than every row that has ever existed.
 
-**Registry announcement edge** (`registry_announcement`) — an ENSv2 discovery
+## Registry announcement edge (`registry_announcement`)
+
+an ENSv2 discovery
 edge created when a contract emits `RegistryCreated()`. It makes the emitting
 registry indexable from that event position. It does not assert parent-child
 reachability or attach the registry to a name. `SubregistryUpdated` supplies
@@ -377,7 +444,9 @@ consumer-visibility provenance. The association never turns indexability itself
 into name authority.
 (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64)
 
-**Event-silent** — a contract that changes relevant state without emitting a
+## Event-silent
+
+a contract that changes relevant state without emitting a
 usable event (for example a legacy reverse resolver whose `name` value changes
 with no log
 (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6)
@@ -387,14 +456,18 @@ from logs. Retained direct-call observations do not carry the changed state —
 the stored transaction shape does not decode which node was touched — they
 only trigger hydration to recheck.
 
-**Emitter-role-independent event** — a manifest ABI event whose adapter behavior and output do
+## Emitter-role-independent event
+
+a manifest ABI event whose adapter behavior and output do
 not depend on which admitted contract role selected the event. Selection may clear that role only
 for the finite `(source_family, event)` list documented in
 [Manifest authoring](manifests.md#admission-selection-for-addresses-with-multiple-declared-roles);
 events outside that list must declare `emitter_roles`, except for the documented ENSv2 registry
 announcement case.
 
-**Emancipated NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label
+## Emancipated NameWrapper state
+
+bigname's ENSv1 NameWrapper lifecycle label
 for a currently wrapped name where `PARENT_CANNOT_CONTROL` is burned and
 `CANNOT_UNWRAP` is not. The parent can no longer replace or modify the wrapped
 child, while the wrapped owner can still unwrap it. NameWrapper rejects parent
@@ -425,7 +498,9 @@ remains separately governed by `CANNOT_APPROVE` until wrapper expiry.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f)
 
-**Expiry-effective NameWrapper fuse word** — the uint32 fuse value that
+## Expiry-effective NameWrapper fuse word
+
+the uint32 fuse value that
 NameWrapper's `getData` read returns at the served block timestamp, rather than
 the expiry-unadjusted value retained in normalized events. That normalized value
 is interpreted state: on an unexpired rewrap, it includes the retained
@@ -448,7 +523,9 @@ normalized value.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L856 @ ens_v1@91c966f)
 
-**ENSv1→ENSv2 migration** — the on-chain move of an existing ENS name from the
+## ENSv1→ENSv2 migration
+
+the on-chain move of an existing ENS name from the
 ENSv1 contracts to the ENSv2 registries. It happens entirely on one chain, it
 is per-name rather than a global state copy, and it is driven by a token
 transfer: the holder sends the name's ENSv1 token (the registrar ERC-721, or
@@ -471,7 +548,9 @@ the fixed contracts and event shapes described in
 mixed-history ownership remains capability-gated separately. Distinct from
 bigname's own *schema-migration* history; see the note at the top of this file.
 
-**Migration authority transition** (`MigrationAuthorityTransition`) —
+<a id="migration-authority-transition"></a>
+## Migration authority transition (`MigrationAuthorityTransition`)
+
 Interpret's validated operation associated with an activated
 [migration boundary](#migration-boundary) for changing one exact logical name
 from an `ens_v1` predecessor binding to a concrete `ens_v2` successor binding.
@@ -483,7 +562,10 @@ allowed to cross those `authority_arm` values. The transition and its activated
 already-validated successor, position, and correlation ID without correlating
 raw ENSv1→ENSv2 migration evidence again.
 
-**Migration boundary** (ENSv1→ENSv2 authority boundary) — the
+<a id="migration-boundary"></a>
+## Migration boundary (ENSv1→ENSv2 authority boundary)
+
+the
 `MigrationApplied` normalized event records the position at which one logical
 name can stop taking current registration and control from ENSv1 and start
 taking them from its ENSv2 resource. The correlator first derives it as a
@@ -546,13 +628,17 @@ separate predecessor rule under
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L835 @ ens_v1@91c966f)
 
-**Migration expiry jump** — the change in current `expires_at` at an activated
+## Migration expiry jump
+
+the change in current `expires_at` at an activated
 [migration boundary](#migration-boundary). Interpretation uses the expiry
 emitted by the successful ENSv2 registration directly; it does not infer a
 duration, grace period, or ENSv1-to-ENSv2 delta. Correlated renewal rows retain
 their separately emitted ENSv1, bridge, and ENSv2 expiry values.
 
-**Migration correlation group** — a deterministic set of raw evidence and
+## Migration correlation group
+
+a deterministic set of raw evidence and
 derived effects for one operation admitted through the ENSv1→ENSv2 migration
 family. Per-name `correlation_kind` values are `authority_transition`,
 `synchronized_renewal`, `graveyard_cleanup`, and
@@ -585,7 +671,9 @@ referenced group is activated. A name-independent controller event has one
 `controller_configuration` ID. No event is duplicated or arbitrarily assigned
 to one name. Unrelated facts in the same transaction do not join the set.
 
-**Complete group** — a [migration correlation
+## Complete group
+
+a [migration correlation
 group](#migration-correlation-group) whose path-specific evidence and derived
 rows are fully assembled before visibility is decided. An authority-boundary
 group has exactly one self-sufficient `MigrationApplied`, one
@@ -629,7 +717,9 @@ acceptance-test inputs, but production makes only that activated Project
 publication. Other chains retain independent
 publication decisions.
 
-**Premigration reservation** — the pre-launch step that writes every existing
+## Premigration reservation
+
+the pre-launch step that writes every existing
 `.eth` second-level name into the new ENSv2 `.eth` registry as a placeholder
 before anyone migrates. In ENSv1→ENSv2 migration discussions, an **ENSv2
 reservation** means this placeholder. A batch tool registers each label with owner
@@ -680,7 +770,9 @@ bind the name. Reserved entries are not registrations.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L632-L650 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L11-L17 @ ens_v2@a971bd64)
 
-**Emitted expiry** — an expiry timestamp decoded directly from the event that
+## Emitted expiry
+
+an expiry timestamp decoded directly from the event that
 writes or reports it. For ENSv1→ENSv2 migration, bigname stores the independent
 values emitted by `LabelReserved`, `LabelRegistered`, `ExpiryUpdated`, the
 ENSv1 BaseRegistrar `NameRenewed`, and the applicable registrar `NameRenewed`.
@@ -693,7 +785,9 @@ copies the stored expiry when a claim passes zero, and emits every renewal's
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2_sepolia_20260629@ccaeb58)
 
-**Migration controller** — an ENSv2 contract that accepts a transferred ENSv1
+## Migration controller
+
+an ENSv2 contract that accepts a transferred ENSv1
 token and performs that name's migration. There are two, split by whether the
 name can still be unwrapped: "locked" means the `CANNOT_UNWRAP` fuse is burned
 (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L76 @ ens_v2@a971bd64),
@@ -745,7 +839,9 @@ and it has its own mainnet deployment artifact
 so harness or manifest tooling that keys contracts by artifact basename across
 both pins will resolve the wrong one.
 
-**Migration registry** (`WrapperRegistry`) — the ENSv2 registry contract
+## Migration registry (`WrapperRegistry`)
+
+the ENSv2 registry contract
 deployed for one specific migrated **locked** name, to hold that name's
 children. Only the locked branch of migration creates one: whichever contract
 receives the transfer deploys a proxy through `VerifiableFactory.deployProxy`
@@ -799,7 +895,9 @@ itself
 That is what separates a child migration from an ordinary registration made by
 the parent's owner, which names an ordinary account as `sender`.
 
-**Child migration boundary** — the [migration boundary](#migration-boundary)
+## Child migration boundary
+
+the [migration boundary](#migration-boundary)
 derived for a direct child of an already-migrated name. No migration controller
 is involved: the parent's own
 [migration registry](#migration-registry-wrapperregistry) receives the ENSv1
@@ -888,7 +986,9 @@ Production and Interpret's explicit test seam admit
 resolve it only against the child's recorded cleanup; neither path falls back
 to the second-level predecessor rule.
 
-**Migratable child** — a child of an already-migrated name whose label its
+## Migratable child
+
+a child of an already-migrated name whose label its
 parent's [migration registry](#migration-registry-wrapperregistry) will not let
 anyone register
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L173 @ ens_v2@a971bd64),
@@ -981,7 +1081,9 @@ owner is zeroed — condition 3 above failing — which is what releases the
 label
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L306 @ ens_v2@a971bd64).
 
-**Mixed-authority tree** — a name tree in which an ancestor registration is
+## Mixed-authority tree
+
+a name tree in which an ancestor registration is
 authoritative in ENSv2 while an unmigrated child's control and records remain
 authoritative in ENSv1. This is a durable state, not an incomplete transaction:
 the parent's migration registry blocks ordinary ENSv2 registration for the
@@ -997,7 +1099,9 @@ protection
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L296 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L306 @ ens_v2@a971bd64).
 
-**ENSv1 husk** — the residual ENSv1 registry and token state left after the
+## ENSv1 husk
+
+the residual ENSv1 registry and token state left after the
 corresponding ENSv2 registration becomes authoritative. It is not a second live
 registration. An unwrapped `.eth` name leaves the ENSv1 registry and registrar
 token with the [Graveyard](#graveyard)
@@ -1009,7 +1113,9 @@ moves only its ERC-1155 token to the Graveyard
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58).
 See [Graveyard state](#graveyard-state) for those terminal shapes.
 
-**Graveyard state** — an [ENSv1 husk](#ensv1-husk) whose terminal token or
+## Graveyard state
+
+an [ENSv1 husk](#ensv1-husk) whose terminal token or
 registry position is held by the [Graveyard](#graveyard). This bigname term is
 not the `Graveyard.State` implementation enum
 (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L31 @ ens_v2@a971bd64).
@@ -1026,13 +1132,17 @@ The locked path transfers the wrapper ERC-1155 while NameWrapper remains the
 registry owner
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2_sepolia_20260629@ccaeb58).
 
-**Wrapper terminal state** — the retained historical NameWrapper state after a
+## Wrapper terminal state
+
+the retained historical NameWrapper state after a
 complete `locked_wrapped` or `locked_child` migration. The selected ENSv1
 predecessor closes once, while the wrapper token remains parked in the Graveyard
 with its fuses and historical holder facts retained. It is neither a current
 binding nor permission to reopen another ENSv1 predecessor.
 
-**Graveyard** — the ENSv2 contract that holds the [ENSv1 husk](#ensv1-husk) of
+## Graveyard
+
+the ENSv2 contract that holds the [ENSv1 husk](#ensv1-husk) of
 every migrated name. **What it receives, and what is left behind, differs by
 migration path**, and an ENSv1 adapter that assumes one shape will expect the
 wrong events and the wrong terminal state:
@@ -1087,7 +1197,10 @@ expiry at `uint64` max minus the ENSv1 grace period
 which surfaces as an ENSv1 `NameRegistered` naming the Graveyard as registrant
 with an absurdly distant expiry.
 
-**Graveyard cleanup** (`graveyard_cleanup`) — the historical classification for
+<a id="graveyard-cleanup"></a>
+## Graveyard cleanup (`graveyard_cleanup`)
+
+the historical classification for
 that BaseRegistrar `NameRegistered` only when both terminal conditions are
 present: the declared Graveyard is the holder and the emitted expiry is exactly
 `uint64` maximum minus the ENSv1 BaseRegistrar grace period. It is retained as
@@ -1099,7 +1212,9 @@ lease deadline.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L154 @ ens_v1@91c966f)
 
-**ETHRenewerV1** — the only renewal path left for a name that was
+## ETHRenewerV1
+
+the only renewal path left for a name that was
 [premigrated](#premigration-reservation) but has not migrated. The deployment
 script's activation sequence revokes every ENSv1 registration path as a
 registrar controller
@@ -1123,7 +1238,10 @@ registrar controller and removing it again within the same call
 Any code that treats the ENSv1 controller set as static, or `ControllerAdded`
 as a rare governance event, is wrong once this is live.
 
-**Synchronized renewal** (`synchronized_renewal`) — one renewal operation whose
+<a id="synchronized-renewal"></a>
+## Synchronized renewal (`synchronized_renewal`)
+
+one renewal operation whose
 separate ENSv2 registry, ENSv1 BaseRegistrar, and renewal-bridge emissions remain
 separate normalized facts, retaining resource anchors only when derivable. The
 adapter correlates those facts per name but does not synthesize a transaction-level
@@ -1133,14 +1251,19 @@ its own `NameRenewed` with the ENSv2 `newExpiry`.
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2_sepolia_20260629@ccaeb58)
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132-L148 @ ens_v2_sepolia_20260629@ccaeb58)
 
-**Historical renewal** (`historical_renewal`) — a launch-bounded ENSv1
+<a id="historical-renewal"></a>
+## Historical renewal (`historical_renewal`)
+
+a launch-bounded ENSv1
 BaseRegistrar renewal that is not part of a synchronized renewal group. Its
 emitted expiry remains candidate historical evidence, but the observation does
 not materialize a resource, token lineage, authority transition, or surface
 binding. This preserves a post-ENSv1→ENSv2 migration ENSv1 arm without treating it as
 current authority.
 
-**v1 fallback resolver** (`ENSV1Resolver`, exposed as `V1_RESOLVER`) — the
+## v1 fallback resolver (`ENSV1Resolver`, exposed as `V1_RESOLVER`)
+
+the
 ENSv2-side resolver that answers by reading ENSv1. It looks the name up in the
 ENSv1 registry
 (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L40 @ ens_v2@a971bd64)
@@ -1158,33 +1281,44 @@ Its effect is that a name resolves correctly through the ENSv2 tree while ENSv1
 is still its authority, so attributing which version served a resolution is
 time-dependent and cannot be read off the resolver pointer alone.
 
-**Exact-name profile** (`exact_name_profile`) — the per-manifest capability
+## Exact-name profile (`exact_name_profile`)
+
+the per-manifest capability
 flag that, when `supported`, makes declared exact-name reads authoritative for
 that deployment profile. Today the only family whose active manifest carries
 `supported` is the ENSv2 Sepolia registrar; the flag also exists in `shadow`
 elsewhere (for example the mainnet ENSv1 registrar). It promotes nothing else.
 
-**Generation** (raw-log retention generation) — a schema-migration-era per-chain
+## Generation (raw-log retention generation)
+
+a schema-migration-era per-chain
 counter used by old-runtime destructive raw-log repair and backfill coverage.
 The schema remains in schema-migration history, but Stage B has no Rust writer or
 coverage consumer for this counter.
 
-**Hash-pinned** — anchored to an exact block hash rather than a block number or
+## Hash-pinned
+
+anchored to an exact block hash rather than a block number or
 `latest` tag, so a chain reorganization cannot silently change what was read.
 
-**Hydration** — a projection-owned repair pass that fills current-state values
+## Hydration
+
+a projection-owned repair pass that fills current-state values
 by making hash-pinned RPC calls (for example legacy reverse-resolver names or
 missing text values). Hydration writes only projection rows: no normalized
 events, verified output, reusable outcomes, or execution traces. Verified
 lookup always reads the newly selected projection state and executes for that
 request.
 
-**Input revision** (raw-log input revision) — a schema-migration-era per-chain counter
+## Input revision (raw-log input revision)
+
+a schema-migration-era per-chain counter
 used by the old runtime's raw-log mutation fence and replay caches. Its Rust
 writer and consumers were deleted before the legacy schema was dropped.
 
-<a id="intake-only-event"></a>
-**Intake-only event** — a manifest-declared event whose empty
+## Intake-only event
+
+a manifest-declared event whose empty
 `normalized_events` list promises raw-log intake and ABI validation without a
 normalized event or permission-state change. This is a closed, typed adapter
 capability rather than a general bypass for declarations with empty output.
@@ -1192,7 +1326,9 @@ When its watch policy is address-scoped, only contract roles named by that
 event declaration contribute watched addresses and historical intervals;
 discovered emitters and all-emitter watches do not inherit it.
 
-**Interpreter content hash** — the build-time identifier for checked-in inputs
+## Interpreter content hash
+
+the build-time identifier for checked-in inputs
 that can change Interpret or Project output. Derived phase state records this
 hash, and a binary with a different value must re-walk the complete retained
 range before normal derived writes continue. It covers interpreter, projection,
@@ -1201,37 +1337,51 @@ dependency inputs as detailed under [interpretation
 replay](storage.md#interpretation-replay). It is not an Ethereum contract
 bytecode hash.
 
-**Interpreter session** — the in-process state carried between consecutive
+## Interpreter session
+
+the in-process state carried between consecutive
 physical Interpret batches for one chain (`AdapterSession` in code). It holds
 protocol topology and current authority needed by the next batch, plus a
 bounded cache of persisted event values. It is disposable: a cold restore
 rebuilds it from readable `normalized_events` rows.
 
-**Interpreter state key** — the opaque string an adapter derives for one
+## Interpreter state key
+
+the opaque string an adapter derives for one
 before/after state stream. It combines the ENS namespace, source family, name
 or resource identity, [state facet](#state-facet), and source-specific scope.
 The exact key is stored in each current normalized event so a cache miss can
 retrieve the latest readable `after_state` for that stream without replaying an
 event range.
 
-**Block-revision evidence floor** — the schema-migration-era lower bound used by the
+## Block-revision evidence floor
+
+the schema-migration-era lower bound used by the
 old runtime's raw-log revision evidence. Its tables remain historical; the
 Stage B runtime no longer computes or consumes this floor.
 
-**Latest-only** — semantics where only the current value is observable and
+## Latest-only
+
+semantics where only the current value is observable and
 history cannot be reconstructed reliably (for example event-silent reverse
 resolver state).
 
-**Lease** — (1) an ENS registrar registration with an expiry (standard ENS
+## Lease
+
+(1) an ENS registrar registration with an expiry (standard ENS
 usage)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L10 @ ens_v1@91c966f).
 
-**Lineage mutation revision** — a schema-migration-era per-chain counter and evidence
+## Lineage mutation revision
+
+a schema-migration-era per-chain counter and evidence
 trail used by old-runtime stored-lineage coverage and adapter checkpoint reuse.
 The migration-owned database objects remain, but their Rust consumers were
 deleted in Stage B.
 
-**Lineage orphaning epoch** — the per-chain counter on the current head row
+## Lineage orphaning epoch
+
+the per-chain counter on the current head row
 that increases whenever head publication moves previously readable blocks to
 `orphaned`. Interpretation uses an unchanged value to reuse an interpreter
 session. A changed value discards that session and rebuilds it from readable
@@ -1240,18 +1390,25 @@ transaction, fencing lineage changes between the input snapshot, any bounded
 state-cache reload, and the final write even if the same block hashes become
 readable again.
 
-**State facet** — the part of an interpreter state key that groups normalized
+## State facet
+
+the part of an interpreter state key that groups normalized
 event kinds which update one logical value stream. For example, registrar
 grants, renewals, releases, and reservations share the `registration` facet;
 permission grants and revocations share the `permission` facet.
 
-**Logical discovery-edge identity** (`logical_edge_identity`) — the
+<a id="logical-discovery-edge-identity"></a>
+## Logical discovery-edge identity (`logical_edge_identity`)
+
+the
 rebuild-stable Keccak-256 identity of one fact-derived discovery-edge epoch. It
 uses semantic manifest and edge fields plus the observation position, never a
 sequence-assigned database ID. The exact tuple, encoding, domain separator, and
 rendering are defined in [ADR 0002](adrs/0002-surface-resource-identity.md#discovery-edge-observation-identity).
 
-**Locked NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
+## Locked NameWrapper state
+
+bigname's ENSv1 NameWrapper lifecycle label for
 a currently wrapped name where `CANNOT_UNWRAP` is burned. NameWrapper rejects
 unwrap when that fuse is effective. Burning an owner-controlled fuse requires
 `PARENT_CANNOT_CONTROL` and `CANNOT_UNWRAP` together, so locked implies
@@ -1277,7 +1434,9 @@ transfer powers before the later wrapper expiry.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
 
-**Manifest-authority marker** — a
+## Manifest-authority marker
+
+a
 `manifest-authority:<authority-fingerprint>:<invalidation-token>` value that
 manifest synchronization records in a derived phase's input-hash field when
 the active manifest authority changes, a persisted admission-floor repair
@@ -1296,7 +1455,9 @@ discharge its marker, the operator must complete any stamped Ingest redo, then
 attest with the current token. Finite cursors and readable lineage both prove
 only the watch plan active when facts were loaded.
 
-**Non-name form** — a string a route puts in a name-typed field for a label
+## Non-name form
+
+a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its
 labelhash without proving the label, so some children have no name to serve;
 rather than omit the row or return null, the read composes a readable stand-in.
@@ -1314,7 +1475,9 @@ a caller distinguishing rows should use `namehash` and `labelhash`, not the
 served text. A non-name form is not addressable and may not be fed back into a
 name-shaped route.
 
-**Normalized event** — the current-interpretation-epoch record of one semantic
+## Normalized event
+
+the current-interpretation-epoch record of one semantic
 protocol transition, carrying identity, provenance, optional chain position,
 and before/after state. Normal forward interpretation appends events. For a
 block-anchored, chain-derived event, canonical readability comes from its
@@ -1326,9 +1489,11 @@ their row-local finalized state because they have no chain observation anchor
 and are not reorg-addressable. Durable raw facts and competing chain lineage,
 not superseded normalized events, are the permanent audit trail for chain
 events. The current event stream is what projections consume. See the [reorg
-and redo boundary](storage.md#reorg-and-redo-boundary).
+and redo boundary](storage.md#canonicality-and-reorgs).
 
-**Persisted Ingest coverage** — the normalized, continuous union of usable
+## Persisted Ingest coverage
+
+the normalized, continuous union of usable
 address epochs for one compiled-watch chain, source family, address, and event
 topic after applying the declaration start to each epoch. Manifest
 synchronization accepts a newly widened direct-address promise only when this
@@ -1336,13 +1501,17 @@ union covers every block from the promised start through an open-ended final
 interval. It refuses the first leading gap, internal gap, or finite tail unless
 the desired all-emitter watch already covers the same topic.
 
-**Persisted address floor** — the earliest block stored on the shared active
+## Persisted address floor
+
+the earliest block stored on the shared active
 interval for one chain address. Refreshing a declaration keeps the lower bound
 already recorded for that active interval. Ingest separately combines that
 shared bound with each declaration's own start when it builds the effective
 watch range.
 
-**Path class / support class** — the classification of a resolution's shape
+## Path class / support class
+
+the classification of a resolution's shape
 that decides which verified answers are publicly supported. Direct, alias-only,
 wildcard-derived, and transport-assisted are the classes most relevant to
 refusal semantics, not a closed list: the docs also classify shapes such as
@@ -1350,7 +1519,9 @@ ancestor-selected, linked-subregistry, CCIP-participating, transport-free, and
 offchain-gateway. A class is "frozen": fixed at admission and re-derived from
 stored inputs before any outcome persists as supported.
 
-**Plain-events redo** — the bounded interpret-redo model in which normalized
+## Plain-events redo
+
+the bounded interpret-redo model in which normalized
 events carry no revision or supersession history. A reorg leaves losing event
 rows physically present but unreadable through their orphaned lineage until
 required redo starts; redo then deletes and re-derives its selected range from
@@ -1358,8 +1529,9 @@ readable raw facts. Durable raw facts and competing chain lineage preserve the
 audit trail instead of accumulating stale normalized derivations across
 interpreter versions.
 
-<a id="redo-marker-scope"></a>
-**Redo-marker scope** — a phase redo marker authorizes one exact chain, phase,
+## Redo-marker scope
+
+a phase redo marker authorizes one exact chain, phase,
 and block range. It carries no logical-name or authority-arm selector. Separately,
 Interpret's normalized `PreimageObserved` replay evidence records the exact
 logical name and authority arm plus the replacement binding that stays closed
@@ -1371,7 +1543,9 @@ or changes neither input. The phase runner owns validation of the durable phase
 marker and its range. Interpret validates only the normalized replay evidence
 and rejects malformed, wrong-arm, wrong-name, or wrong-binding evidence.
 
-**Preimage observation / label preimage** — learning the human-readable string
+## Preimage observation / label preimage
+
+learning the human-readable string
 behind a name or label hash, from an event, a retained name surface, or a
 rainbow-table import. Every preimage is proof-checked: the stored labelhash is
 the keccak256 of the raw label bytes, and a candidate that does not re-hash to
@@ -1381,21 +1555,44 @@ may serve as a name — see [non-name form](#non-name-form) for what serves when
 it may not. A preimage improves display only; it never
 creates ownership, resolver, record, or primary-name truth.
 
-**Projection** — a disposable read-model table whose serving fields are rebuilt
+## Projection
+
+a disposable read-model table whose event-derived serving fields are rebuilt
 deterministically from canonical facts and normalized events (standard
 event-sourcing usage); resource-keyed rows additionally require the event's
-resource to resolve to a canonical identity row at rebuild time. A projection
-table may carry explicitly documented Project-owned maintenance fields that
-readers never select and that an affected row rebuild clears. The schema-v2
-Project phase is the only projection writer.
+resource to resolve to a canonical identity row at rebuild time. Documented
+[hydration](#hydration) is a separate, hash-pinned provider overlay on that
+deterministic baseline, not an input to deterministic replay.
+The closed set of Project-owned maintenance fields is `last_recomputed_at` on
+every projection
+table except `primary_names_current`; `inserted_at` on `name_current`,
+`children_current`, `permissions_current`, `record_inventory_current`,
+`resolver_current`, and `address_names_current`; and
+`reverse_hydration_attempted_block_number`,
+`reverse_hydration_attempted_block_hash`, and
+`reverse_hydration_attempt_ordinal` on `primary_names_current`. The Project
+publication transaction clock supplies both timestamp fields through database
+defaults; record hydration also advances `last_recomputed_at` from its
+publication transaction clock. Reverse-name hydration supplies its three
+selection fields from the revalidated hydration head and the Project-owned
+attempt-order sequence. These fields are not part of the serving shape, API and
+history consumers never receive them, and rebuilding an affected row clears
+their earlier values. The [projection rules](projections.md#rules) govern every
+other column, including serving fields and storage-only keys or retained
+evidence. The schema-v2 Project phase is the only projection writer.
 
-**Projection generation** — one Project run that derives and publishes the
+## Projection generation
+
+one Project run that derives and publishes the
 affected projection set for a target block in a single transaction. Always
 qualify it: the bare word *generation* is taken by the schema-migration-era
 [raw-log retention generation](#generation-raw-log-retention-generation), which
 is unrelated.
 
-**Projection generation failure** (`project_generation_failures`) — the
+<a id="projection-generation-failure"></a>
+## Projection generation failure (`project_generation_failures`)
+
+the
 append-only diagnostic row the phase runner appends when a projection-blocking
 invariant aborts a projection generation before publication. The generation
 transaction rolls back and publishes nothing; the evidence is then written in a
@@ -1408,7 +1605,10 @@ an orphaned block hash stays resolvable through lineage, which is how a stale
 row is told apart from a live one. Operator diagnostics read this table; product
 routes do not.
 
-**Raw facts** — the stored record of what was observed on chain: selected
+<a id="raw-fact"></a>
+## Raw facts
+
+the stored record of what was observed on chain: selected
 logs and the transaction/receipt fields needed to decode them. Their content is
 append-only, edited only by explicit, documented corrections;
 `canonicality_state` is mutable operational state — ordinary reorg repair
@@ -1416,7 +1616,9 @@ reclassifies a losing branch's rows as `orphaned` without touching content.
 Provider responses used by hydration or request-scoped lookup are not raw
 facts.
 
-**Readable / read-safe** — a row whose canonicality is `canonical`, `safe`, or
+## Readable / read-safe
+
+a row whose canonicality is `canonical`, `safe`, or
 `finalized`. `observed` and `orphaned` rows are excluded from public reads and
 kept as audit input; internal invalidation and reorg-repair machinery still
 consumes them. Readability is a statement about block canonicality only, not
@@ -1425,8 +1627,9 @@ and routes that additionally require supported rows say so. `POST /v2/lookup`
 reverse address results are one such route
 ([api-v2.md](api-v2.md#cursors-and-pagination)).
 
-<a id="re-derivation-boundary"></a>
-**Re-derivation boundary** — a planned point when the indexed dataset is rebuilt
+## Re-derivation boundary
+
+a planned point when the indexed dataset is rebuilt
 from raw chain data, starting at block zero or a documented lower bound, because
 interpretation semantics changed. The [interpreter content
 hash](#interpreter-content-hash) names the generation of interpretation
@@ -1442,7 +1645,9 @@ means that complete Ingest, Interpret, and Project sequence; it is not an
 Interpret-only replay. Production Verify follows Project publication and gates
 readiness and traffic, not the already committed Project rows.
 
-**Reserved surface** — a schema value, enum variant, or documented field that
+## Reserved surface
+
+a schema value, enum variant, or documented field that
 the system accepts and can render but that no code path ever produces. It
 exists because some earlier design allocated it, and removing it would cost a
 schema-migration or an API-contract change for no behavioral gain. Reserved
@@ -1453,7 +1658,9 @@ should say so where it is documented, so a reader does not mistake it for
 coverage. Don't add fixtures or exemplars that make reserved surface look
 produced.
 
-**Resolver profile** — a declared resolver classification. ENSv1 and
+## Resolver profile
+
+a declared resolver classification. ENSv1 and
 Basenames use an exact resolver-address declaration; ENSv2 requires the
 proxy's latest canonical ERC-1967 `Upgraded` event to name a declared
 implementation. Classification permits supported projection of retained
@@ -1461,13 +1668,17 @@ canonical normalized observations, but does not assert exhaustive history or
 event-to-call parity. Unknown or mismatched resolvers are explicitly
 unsupported. See [source manifests](manifests.md#required-fields).
 
-**Resolver read feature** — a manifest-authorized, implementation-sensitive
+## Resolver read feature
+
+a manifest-authorized, implementation-sensitive
 resolver getter behavior that Project copies into the current resolver
 classification and then into record-inventory read rules. It authorizes a
 deterministic indexed read from projected records; it does not create record
 events, synthetic selectors, or reusable provider results.
 
-**Resolution divergence ledger** — the schema-v2 audit table whose active rows
+## Resolution divergence ledger
+
+the schema-v2 audit table whose active rows
 record only when a direct, hash-pinned resolution answer disagrees with the
 indexed exact-or-derived record answer used for comparison. It is not a result cache:
 agreement creates no divergence but may clear a matching active row, wildcard
@@ -1479,14 +1690,20 @@ ancestor-resolver answer as a comparison. A serving-path mutation succeeds only
 while the compared projection row and its canonical block lineage remain
 unchanged.
 
-**Resource** (backing resource, `resource_id`) — the authority object behind a
+<a id="resource"></a>
+## Resource (backing resource, `resource_id`)
+
+the authority object behind a
 name: a registry entry, registrar lease, wrapper position, or ENSv2 EAC
 resource
 (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L39 @ ens_v2@a971bd64).
 Permissions and control history key to the resource, never to the name string
 or token id.
 
-**Resource audit context** (`resource_audit`) — a resource-keyed read that
+<a id="resource-audit-context"></a>
+## Resource audit context (`resource_audit`)
+
+a resource-keyed read that
 shows retained permissions or history without claiming that the resource is
 the logical name's selected current authority. An explicit registration or
 resource lookup and an address-filtered permission row use this context; an
@@ -1494,7 +1711,9 @@ optional display name does not turn them into current-name results. Superseded
 ENSv1 resources remain queryable in resource audit context after ENSv2 becomes
 authoritative.
 
-**Released v2 authority** — the authority tombstone left when an
+## Released v2 authority
+
+the authority tombstone left when an
 ENSv2-authoritative registration is released or unregistered. Its current
 registration lifecycle is unregistered, but its authority epoch remains
 `ens_v2`; retained or later ENSv1 facts are history and cannot restore current
@@ -1511,16 +1730,22 @@ not retroactively validate a non-qualifying release. A release that does not
 qualify leaves no tombstone: the name resolves to explicit
 `current_authority_not_projected`.
 
-**Retained-history proof** — a schema-migration-era ENSv2 tuple (retention generation,
+## Retained-history proof
+
+a schema-migration-era ENSv2 tuple (retention generation,
 discovery-admission epoch, proven-through block) used by the deleted
 full-closure replay. Its SQL history remains, but Stage B has no Rust writer or
 consumer for this proof.
 
-**Rewind horizon** — the earliest chain position reorg repair might need to
+## Rewind horizon
+
+the earliest chain position reorg repair might need to
 rewind to. Compaction and pruning must never delete data needed at or behind
 it.
 
-**Run shape** — how one interpret walk executes over its input: fresh (from
+## Run shape
+
+how one interpret walk executes over its input: fresh (from
 the start of the chain), incremental (continuing from retained prior events),
 or resumed (continuing from a persisted progress marker after an interruption,
 including an interrupted redo's persisted intermediate state).
@@ -1543,36 +1768,50 @@ in as an ignored collision probe). See [interpretation
 replay](storage.md#interpretation-replay).
 
 <a id="served-head"></a>
-**Served head** — the current set of chain positions whose matching Project
+## Served head
+
+the current set of chain positions whose matching Project
 publication has completed and remains eligible for public reads. It is not the
 latest block reported by a provider. A GraphQL HTTP request selects this set
 once for all of its root fields and rechecks the Project publication before
 returning data.
 
-**Shadow** — (1) manifest rollout/capability value: facts may be interpreted
+## Shadow
+
+(1) manifest rollout/capability value: facts may be interpreted
 but general public reads are not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing
 responses during a migration (the identity route's `profile=shadow`).
 
-**Sidecar** — a retired legacy companion-table pattern that precomputed
+## Sidecar
+
+a retired legacy companion-table pattern that precomputed
 reverse-identity counts and feed rows with database triggers. Those tables were
 operational summaries, never protocol truth, and were removed with the old
 schema. See the superseded ADR 0005.
 
-**Source family** — a named group of contracts on one chain that owns one slice
+## Source family
+
+a named group of contracts on one chain that owns one slice
 of protocol authority (for example `ens_v1_registrar_l1`). The unit of manifest
 admission, capability ownership, replay coverage, and provenance attribution.
 
-**Surface (name surface)** — an on-chain name identity
+<a id="surface-binding"></a>
+## Surface (name surface)
+
+an on-chain name identity
 (`logical_name_id = namespace:namehash`), distinct from whatever authority
 currently backs it. Raw labels and their normalization flags are observations,
 not identity; display names are derived when read, following the audit's
-[normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity).
+[normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
 A **surface binding** is the time-ranged record of which resource backed a
 surface when. Surfaces survive re-registration; resources rotate.
 
 
-**Token lineage** (`token_lineage_id`) — the continuity of tokenized ownership
+<a id="token-lineage"></a>
+## Token lineage (`token_lineage_id`)
+
+the continuity of tokenized ownership
 across token-id changes (for example ENSv2 token regeneration, where a role
 change burns and mints a replacement token while leaving the resource unchanged
 (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@a971bd64)
@@ -1583,7 +1822,9 @@ still-live lease — resumes that anchor's prior lineage, but not after release
 or across mismatched holder/controller authority: a name that fully lapses and
 is re-registered mints a new lineage.
 
-**Transport** — in `/v2/lookup` topology, the field describing a resolution
+## Transport
+
+in `/v2/lookup` topology, the field describing a resolution
 that was served across a chain boundary: `{source_chain_id, target_chain_id,
 contract_address, latest_event_kind}`, all `null` when no chain boundary was
 crossed. The only path that populates it is Basenames, whose names live on Base
@@ -1598,7 +1839,9 @@ Do not confuse this with network transport failures: a provider's DNS, TLS, or
 connection error aborts a request before persistence. There is no `transport`
 discovery edge kind.
 
-**Universal Resolver ancestor discovery** — the request-scoped ENS Mainnet
+## Universal Resolver ancestor discovery
+
+the request-scoped ENS Mainnet
 records path for a projected name whose exact registry resolver is null. When
 the name has no projected alias, linked-subregistry, wildcard, or cross-chain
 transport path, bigname calls the manifest-admitted Universal Resolver at the
@@ -1609,17 +1852,23 @@ resolver
 This path does not turn the ancestor into the name's declared exact resolver
 and has no live/indexed comparison.
 
-**Verified lookup** — request-scoped resolution or primary-name verification
+## Verified lookup
+
+request-scoped resolution or primary-name verification
 that calls admitted contracts at the selected block identity. It creates no
 durable execution trace or reusable outcome. Its only possible durable output
 is the guarded resolution divergence ledger for an eligible direct
 live/indexed comparison.
 
-**Walking skeleton** — the standard XP term for a minimal end-to-end path
+## Walking skeleton
+
+the standard XP term for a minimal end-to-end path
 proving all layers connect. In this repo it names the first e2e scenario
 (`register_eth_name`); prefer "the first end-to-end scenario" in prose.
 
-**Watch plan / watched tuple** — the materialized set of (source family,
+## Watch plan / watched tuple
+
+the materialized set of (source family,
 emitter scope, event signature, active block range) targets derived from
 manifest declarations plus indexability-producing discovery edges. An emitter
 scope may be one declared address, every discovered address in a source family
@@ -1631,15 +1880,18 @@ ENSv2 subregistry edges, do not add targets. A *watched tuple* is one such
 entry; its *watched window* is the active block range. Addresses are derived
 watch targets, never the durable identity.
 
-<a id="work-bearing-batch"></a>
-**Work-bearing batch** — a successfully persisted phase batch that reports
+## Work-bearing batch
+
+a successfully persisted phase batch that reports
 completed indexing or repair work, excluding idle polls, empty completions,
 caught-up Live polls that report no movement from the starting durable cursor,
 and completed-phase revalidation. A one-shot repair's non-progress counters are
 process-local and are scrapeable only while that redo process has a reachable
 metrics listener; its durable redo state remains in PostgreSQL.
 
-**Wrapped NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
+## Wrapped NameWrapper state
+
+bigname's ENSv1 NameWrapper lifecycle label for
 a name whose wrapper token has a nonzero owner and whose registry owner is the
 NameWrapper, while neither `PARENT_CANNOT_CONTROL` nor `CANNOT_UNWRAP` provides
 protection. The parent can still modify or reclaim the name, and the wrapped
