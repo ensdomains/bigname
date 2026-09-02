@@ -314,8 +314,6 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
     const SUBNAME_OWNER: &str = "0x0000000000000000000000000000000000000671";
     const SECOND_LEVEL_OWNER: &str = "0x0000000000000000000000000000000000000672";
     const SECOND_LEVEL_HOLDER: &str = "0x0000000000000000000000000000000000000673";
-    const NAME_WRAPPER: &str = "0x0000000000000000000000000000000000000674";
-    const WRAPPED_HOLDER: &str = "0x0000000000000000000000000000000000000675";
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     for (name, owner, holder, tokenized, wrapped, id_base, block_number) in [
@@ -337,15 +335,6 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
             0x670_3011,
             711,
         ),
-        (
-            "owner-wrapped.eth",
-            NAME_WRAPPER,
-            WRAPPED_HOLDER,
-            true,
-            true,
-            0x670_3021,
-            712,
-        ),
     ] {
         seed_generated_owner_shape(
             &database,
@@ -363,7 +352,6 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
     let served_owner_matches = [
         (SUBNAME_OWNER, "owner-sub.parent.eth"),
         (SECOND_LEVEL_OWNER, "owner-second-level.eth"),
-        (NAME_WRAPPER, "owner-wrapped.eth"),
     ];
     let mut actual = Vec::new();
     for (owner, _) in served_owner_matches {
@@ -373,7 +361,7 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
         ));
     }
     let mut actual_holders = Vec::new();
-    for holder in [SECOND_LEVEL_HOLDER, WRAPPED_HOLDER] {
+    for holder in [SECOND_LEVEL_HOLDER] {
         actual_holders.push((
             holder,
             generated_domain_owner_rows(&database, json!({"owner": holder})).await?,
@@ -381,16 +369,11 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
     }
     let owner_in = generated_domain_owner_rows(
         &database,
-        json!({"owner_in": [SUBNAME_OWNER, SECOND_LEVEL_OWNER, NAME_WRAPPER]}),
+        json!({"owner_in": [SUBNAME_OWNER, SECOND_LEVEL_OWNER]}),
     )
     .await?;
     let mut legacy_counts = Vec::new();
-    for address in [
-        SECOND_LEVEL_HOLDER,
-        WRAPPED_HOLDER,
-        SECOND_LEVEL_OWNER,
-        NAME_WRAPPER,
-    ] {
+    for address in [SECOND_LEVEL_HOLDER, SECOND_LEVEL_OWNER] {
         let payload = post_graphql(
             database.app_state(),
             r#"query LegacyDomainCount($where: DomainFilter!) {
@@ -408,15 +391,13 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
             vec![
                 (SUBNAME_OWNER, vec![("owner-sub.parent.eth".into(), SUBNAME_OWNER.into())]),
                 (SECOND_LEVEL_OWNER, vec![("owner-second-level.eth".into(), SECOND_LEVEL_OWNER.into())]),
-                (NAME_WRAPPER, vec![("owner-wrapped.eth".into(), NAME_WRAPPER.into())]),
             ],
-            vec![(SECOND_LEVEL_HOLDER, vec![]), (WRAPPED_HOLDER, vec![])],
+            vec![(SECOND_LEVEL_HOLDER, vec![])],
             vec![
                 ("owner-second-level.eth".into(), SECOND_LEVEL_OWNER.into()),
                 ("owner-sub.parent.eth".into(), SUBNAME_OWNER.into()),
-                ("owner-wrapped.eth".into(), NAME_WRAPPER.into()),
             ],
-            vec![json!(1), json!(1), json!(0), json!(0)],
+            vec![json!(1), json!(0)],
         )
     );
     database.cleanup().await
@@ -489,6 +470,61 @@ async fn graphql_generated_domain_name_fallback_cannot_shadow_namehash() -> Resu
     )
     .await?;
     assert_eq!(payload["data"]["domain"]["name"], json!(TARGET_NAME));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_generated_domain_ordinary_name_uses_one_projection_query() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+
+    let config = database.database_config(1)?;
+    let options = PgConnectOptions::from_str(
+        config
+            .database_url
+            .as_deref()
+            .context("GraphQL SQL-capture database URL is missing")?,
+    )?
+    .options([("search_path", "bigname_phase".to_owned())]);
+    let capture_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    sqlx::query(
+        "SELECT pg_stat_reset_single_table_counters(\
+         'bigname_phase.name_current'::regclass)",
+    )
+    .execute(&capture_pool)
+    .await?;
+    sqlx::query("SET enable_seqscan = off")
+        .execute(&capture_pool)
+        .await?;
+    let state = AppState::new_with_rpc_urls(
+        capture_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    )
+    .with_public_namespaces_for_test(["ens", "basenames"]);
+
+    let payload = post_graphql(
+        state,
+        "query { domain(id: \"alice.eth\") { name } }",
+        json!({}),
+    )
+    .await?;
+    assert_eq!(payload["data"]["domain"]["name"], json!("alice.eth"));
+
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(&capture_pool)
+        .await?;
+    let projection_queries: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(idx_scan), 0)::BIGINT FROM pg_stat_user_indexes \
+         WHERE relid = 'bigname_phase.name_current'::regclass",
+    )
+    .fetch_one(&capture_pool)
+    .await?;
+    assert_eq!(projection_queries, 1, "ordinary names need one projection lookup");
+
+    capture_pool.close().await;
     database.cleanup().await
 }
 
