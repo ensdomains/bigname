@@ -216,9 +216,9 @@ async fn seed_names(
           AND ((expiry.expiry > affected.prior_seconds
                 AND expiry.expiry <= affected.target_seconds)
                OR EXISTS (SELECT 1 FROM registration_events changed
-                           WHERE changed.logical_name_id = lifecycle.logical_name_id
-                             AND changed.lifecycle_key = lifecycle.lifecycle_key
-                             AND changed.block_number BETWEEN $2 AND $3))
+                             WHERE changed.logical_name_id = lifecycle.logical_name_id
+                               AND changed.lifecycle_key = lifecycle.lifecycle_key
+                             AND changed.block_number >= $2))
         ON CONFLICT DO NOTHING
         "#,
     )
