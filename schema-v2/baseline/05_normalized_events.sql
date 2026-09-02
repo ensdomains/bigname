@@ -174,11 +174,14 @@ CREATE TABLE IF NOT EXISTS project_redo_expiry_roots (
     chain_id text NOT NULL,
     event_identity text NOT NULL,
     block_number bigint NOT NULL,
-    logical_name_id text NOT NULL,
+    logical_name_id text,
     recorded_at timestamptz NOT NULL DEFAULT now(),
+    resource_id uuid,
     PRIMARY KEY (chain_id, event_identity),
     CHECK (block_number >= 0),
-    CHECK (btrim(logical_name_id) <> '')
+    CHECK (btrim(logical_name_id) <> ''),
+    CONSTRAINT project_redo_expiry_roots_scope_check
+        CHECK (logical_name_id IS NOT NULL OR resource_id IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS project_redo_expiry_roots_range_idx
@@ -601,7 +604,7 @@ COMMENT ON COLUMN project_redo_resolver_evidence.recorded_at IS
     'This time records the Interpret redo that first captured the event for the pending Project repair.';
 
 COMMENT ON TABLE project_redo_expiry_roots IS
-    'Interpret preserves logical names from deleted state-derived ENSv2 path-expiry releases here until Project follows their surviving canonical subregistry edges and publishes the redo.';
+    'Interpret preserves logical names or permission resources from deleted state-derived ENSv2 path-expiry releases here until Project publishes a covering redo.';
 COMMENT ON COLUMN project_redo_expiry_roots.chain_id IS
     'This value identifies the chain whose Interpret redo replaced the event range.';
 COMMENT ON COLUMN project_redo_expiry_roots.event_identity IS
@@ -609,9 +612,11 @@ COMMENT ON COLUMN project_redo_expiry_roots.event_identity IS
 COMMENT ON COLUMN project_redo_expiry_roots.block_number IS
     'This value anchors the removed path-expiry release in the active redo range.';
 COMMENT ON COLUMN project_redo_expiry_roots.logical_name_id IS
-    'This value seeds bounded traversal from the name whose deleted path-expiry release removed descendant projections.';
+    'When present, this value seeds bounded traversal from the name whose deleted path-expiry release removed descendant projections.';
+COMMENT ON COLUMN project_redo_expiry_roots.resource_id IS
+    'When present, this value identifies the permission resource whose deleted path-expiry release must seed Project redo.';
 COMMENT ON COLUMN project_redo_expiry_roots.recorded_at IS
-    'This time records the Interpret redo that first captured the path-expiry logical name for pending Project repair.';
+    'This time records the Interpret redo that first captured the path-expiry release for pending Project repair.';
 
 COMMENT ON TABLE migration_event_associations IS
     'This table records candidate ENSv1→ENSv2 migration meaning attached to independently admitted events and retains old-fork evidence after normalized-event redo cleanup.';

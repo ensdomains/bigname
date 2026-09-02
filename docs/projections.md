@@ -81,11 +81,13 @@ before publication. Candidate events and events whose block is no longer on
 readable canonical lineage never contribute builder input or ordinary topology
 expansion. A Project-only redo may run before Interpret replaces the affected
 range; in that narrow case, a retained orphaned, state-derived ENSv2 path-expiry
-release seeds its logical name as an [expiry root](glossary.md#expiry-root) after
-the earlier publication deleted its descendants. In the standard pipeline,
-Interpret copies that same root identity to `project_redo_expiry_roots` before
-deleting the release, preserves it across retries, and Project consumes it with
-the corresponding publication. This handoff is necessary because the deleted
+release directly seeds its available logical-name and permission-resource
+identifiers. A logical name becomes an [expiry root](glossary.md#expiry-root)
+after the earlier publication deleted its descendants. In the standard
+pipeline, Interpret copies those same identifiers to
+`project_redo_expiry_roots` before deleting the release and preserves the first
+copy across retries. Project consumes it when a publication covers the recorded
+release block. This handoff is necessary because the deleted
 descendant projections and Project's transaction-local binding selection leave
 no other durable citation from which to recover the ancestor. Project also
 selects a still-live ENSv2 lifecycle whose expiry crossed the displaced branch's
@@ -337,10 +339,16 @@ belongs to the same `resource_id`. Whether the release named a surface does not
 participate: a same-resource renewal revives retained grants even while another
 token remains the current holder of that name. Unregistering an owned entry and
 later registering it use a new versioned resource, so a renewal on that new
-resource cannot match the old resource's release or grants; releasing an
-owner-zero reservation can instead preserve both versions and reuse its
-resource. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L206 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @ ens_v2@a971bd64)
+resource cannot match the old resource's release or grants. Registering a
+non-expired owner-zero reservation does not enter the owner-burn branch, so
+neither version counter advances. ENSv2 constructs the permission resource from
+`eacVersionId`, so the registration reuses the reservation's resource ID.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29-L34
+@ ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L632-L645 @
+ens_v2@a971bd64)
 This is the
 resource-lifecycle form of the [ENSv2 expired-role projection
 narrowing](upstream.md#known-divergences). The retirement citation therefore
@@ -498,9 +506,12 @@ queue, apply cursor, replay-version fence, general-purpose durable staging,
 replay marker, dead-letter queue, or cache invalidation side effect. Two narrow
 handoffs preserve input that would otherwise disappear before Project can
 select its redo scope: `project_redo_resolver_evidence` retains resolver and
-permission-resource references, while `project_redo_expiry_roots` retains only
-logical names from state-derived ENSv2 path-expiry releases. Neither table is
-serving data, and Project consumes each row with the corresponding publication.
+permission-resource references, while `project_redo_expiry_roots` retains
+logical names and permission resources from state-derived ENSv2 path-expiry
+releases. Neither table is serving data. Project consumes a row only when its
+publication range covers the recorded block; an operator redo ending below an
+already recorded Project head can therefore leave later rows for a covering
+redo or full rebuild.
 
 `phase-runner rewind` selects an exact stored readable ancestor, marks the
 displaced suffix orphaned through normal head publication, and stamps downstream
@@ -525,8 +536,9 @@ new truth family.
 
 - Interpret and adapters emit identity, discovery, and normalized events.
   Interpret also preserves the pre-delete resolver references and state-derived
-  ENSv2 path-expiry logical names needed for the next Project redo or normal
-  catch-up; these are replay coordination, not projection writes.
+  ENSv2 path-expiry logical names or permission resources needed for a covering
+  Project redo or normal catch-up; these are replay coordination, not projection
+  writes.
 - Project reads canonical interpreted input and owns every projection write.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not

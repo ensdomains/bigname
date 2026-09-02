@@ -428,6 +428,94 @@ async fn contested_name_renewal_revives_losing_resource_permissions() -> Result<
 }
 
 #[tokio::test]
+async fn another_resources_flagged_renewal_does_not_revive_permissions() -> Result<()> {
+    let (database, pool) = database("v2_expiry_other_resource_not_revival").await?;
+    seed_formerly_named_flag_only_renewal(&pool).await?;
+    sqlx::query(
+        "INSERT INTO token_lineages (
+             token_lineage_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1::uuid, $2, $3, 100, 'canonical')",
+    )
+    .bind(GENERIC_LINEAGE)
+    .bind(CHAIN)
+    .bind(hash(100))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, token_lineage_id, chain_id, block_hash, block_number,
+             canonicality_state
+         ) VALUES ($1::uuid, $2::uuid, $3, $4, 100, 'canonical')",
+    )
+    .bind(GENERIC_RESOURCE)
+    .bind(GENERIC_LINEAGE)
+    .bind(CHAIN)
+    .bind(hash(100))
+    .execute(&pool)
+    .await?;
+    event(
+        &pool,
+        MAIN,
+        Some(GENERIC_RESOURCE),
+        100,
+        Some(3),
+        "PermissionChanged",
+        json!({
+            "subject":SUBJECT,
+            "scope":{"kind":"resource"},
+            "effective_powers":["resource_control"],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"retain"
+        }),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events SET resource_id = $2::uuid
+         WHERE resource_id = $1::uuid AND event_kind = 'RegistrationRenewed'",
+    )
+    .bind(RESOURCE)
+    .bind(GENERIC_RESOURCE)
+    .execute(&pool)
+    .await?;
+
+    run(&pool, 102, None).await?;
+
+    let resource_a: (i64, Value) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM permissions_current WHERE resource_id = $1::uuid),
+                provenance
+         FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(resource_a.0, 0, "resource A's retirement did not stand");
+    assert!(
+        resource_a.1.get("expiry_retirement_event_id").is_some(),
+        "resource A lost its expiry-retirement citation"
+    );
+    let (renewal_id, resource_b_provenance): (i64, Value) = sqlx::query_as(
+        "SELECT renewal.normalized_event_id, permission.provenance
+         FROM normalized_events renewal
+         JOIN permissions_current permission ON permission.resource_id = renewal.resource_id
+         WHERE renewal.resource_id = $1::uuid
+           AND renewal.event_kind = 'RegistrationRenewed'",
+    )
+    .bind(GENERIC_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        !resource_b_provenance["normalized_event_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(renewal_id))),
+        "resource B's flagged renewal was treated as a revival without its own prior release"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 #[rustfmt::skip]
 async fn explicit_v2_release_does_not_retire_effective_permissions() -> Result<()> {
     let (incremental_db, incremental) = database("v2_expiry_explicit_release_incremental").await?; seed_formerly_named_flag_only_renewal(&incremental).await?;

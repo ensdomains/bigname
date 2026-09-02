@@ -18,7 +18,7 @@ pub(super) async fn seed(
     )
     .await?;
     seed_children(transaction, chain_id).await?;
-    seed_resources(transaction, chain_id).await?;
+    seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_resolvers(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_primary(transaction, chain_id).await?;
     Ok(())
@@ -167,7 +167,12 @@ async fn seed_children(transaction: &mut Transaction<'_, Postgres>, chain_id: &s
     Ok(())
 }
 
-async fn seed_resources(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) -> Result<()> {
+async fn seed_resources(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<()> {
     sqlx::query(
         r#"
         WITH citations AS (
@@ -203,6 +208,30 @@ async fn seed_resources(transaction: &mut Transaction<'_, Postgres>, chain_id: &
                 (row.provenance ->> 'expiry_retirement_event_id')
             ) citation(event_id)
             WHERE row.provenance ->> 'chain_id' = $1
+            UNION ALL
+            SELECT root.resource_id, NULL::text, true
+            FROM project_redo_expiry_roots root
+            WHERE root.chain_id = $1
+              AND root.block_number BETWEEN $2 AND $3
+              AND root.resource_id IS NOT NULL
+            UNION ALL
+            SELECT event.resource_id, NULL::text, true
+            FROM normalized_events event
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = event.chain_id
+             AND lineage.block_hash = event.block_hash
+             AND lineage.block_number = event.block_number
+            WHERE event.chain_id = $1
+              AND event.block_number BETWEEN $2 AND $3
+              AND event.resource_id IS NOT NULL
+              AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+              AND event.event_kind = 'RegistrationReleased'
+              AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+              AND event.after_state ->> 'derived_from' = 'interpreter_state'
+              AND event.after_state ->> 'terminal_reason' =
+                  'registry_name_binding_expired'
+              AND (event.canonicality_state = 'orphaned'
+                   OR lineage.canonicality_state = 'orphaned')
         )
         INSERT INTO project_scope_resources
         SELECT DISTINCT citation.resource_id
@@ -228,6 +257,8 @@ async fn seed_resources(transaction: &mut Transaction<'_, Postgres>, chain_id: &
         "#,
     )
     .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to retain retracted resource scope", error))?;

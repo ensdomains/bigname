@@ -18444,6 +18444,134 @@ async fn expiry_release_redo_restores_deleted_permissions_like_fresh_rebuild() -
 }
 
 #[tokio::test]
+async fn expiry_release_subrange_redo_removes_revival_only_provenance_like_fresh_rebuild()
+-> Result<()> {
+    let incremental = ScratchDatabase::create("project_expiry_revival_subrange_redo").await?;
+    let fresh = ScratchDatabase::create("project_expiry_revival_subrange_redo_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_expiry_revival_subrange_fixture(pool).await?;
+    }
+    run_project(
+        incremental.pool(),
+        EXPIRY_REDO_CHAIN,
+        None,
+        RunMode::Normal,
+        0,
+        3,
+    )
+    .await?;
+    let revived: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1")
+            .bind(Uuid::parse_str(EXPIRY_REDO_RESOURCE)?)
+            .fetch_one(incremental.pool())
+            .await?;
+    assert_eq!(revived, 1, "fixture must revive the retired permission");
+
+    sqlx::query(
+        "INSERT INTO project_redo_expiry_roots (
+             chain_id, event_identity, block_number, logical_name_id, resource_id
+         )
+         SELECT chain_id, event_identity, block_number, logical_name_id, resource_id
+         FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 2
+           AND event_kind = 'RegistrationReleased'",
+    )
+    .bind(EXPIRY_REDO_CHAIN)
+    .execute(incremental.pool())
+    .await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND block_number = 2
+               AND event_kind = 'RegistrationReleased'",
+        )
+        .bind(EXPIRY_REDO_CHAIN)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(
+        incremental.pool(),
+        EXPIRY_REDO_CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(EXPIRY_REDO_CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(fresh.pool(), EXPIRY_REDO_CHAIN, None, RunMode::Normal, 0, 3).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    let incremental_snapshot =
+        summary_only_permission_snapshot(incremental.pool(), EXPIRY_REDO_RESOURCE).await?;
+    let fresh_snapshot =
+        summary_only_permission_snapshot(fresh.pool(), EXPIRY_REDO_RESOURCE).await?;
+    assert_eq!(fresh_snapshot.0.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        incremental_snapshot, fresh_snapshot,
+        "subrange redo retained revival-only permission provenance after its release was retracted"
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
+async fn project_only_subrange_redo_scopes_resource_only_orphaned_expiry_release() -> Result<()> {
+    let incremental = ScratchDatabase::create("project_expiry_resource_only_project_redo").await?;
+    let fresh = ScratchDatabase::create("project_expiry_resource_only_project_redo_fresh").await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        seed_expiry_revival_subrange_fixture(pool).await?;
+    }
+    run_project(
+        incremental.pool(),
+        EXPIRY_REDO_CHAIN,
+        None,
+        RunMode::Normal,
+        0,
+        3,
+    )
+    .await?;
+    for pool in [incremental.pool(), fresh.pool()] {
+        sqlx::query(
+            "UPDATE normalized_events SET canonicality_state = 'orphaned'
+             WHERE chain_id = $1
+               AND raw_fact_ref ->> 'fixture' = 'expiry-redo-release'",
+        )
+        .bind(EXPIRY_REDO_CHAIN)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(
+        incremental.pool(),
+        EXPIRY_REDO_CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(EXPIRY_REDO_CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(fresh.pool(), EXPIRY_REDO_CHAIN, None, RunMode::Normal, 0, 3).await?;
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(fresh.pool()).await?;
+    assert_eq!(
+        summary_only_permission_snapshot(incremental.pool(), EXPIRY_REDO_RESOURCE).await?,
+        summary_only_permission_snapshot(fresh.pool(), EXPIRY_REDO_RESOURCE).await?,
+        "Project-only redo did not rebuild the resource from its orphaned expiry release"
+    );
+
+    incremental.cleanup().await?;
+    fresh.cleanup().await
+}
+
+#[tokio::test]
 async fn expiry_release_redo_restores_ownerless_reservation_like_fresh_rebuild() -> Result<()> {
     const CHAIN: &str = "project-ownerless-expiry-redo";
     const NAME: &str = "ens:0x8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d";
@@ -18748,6 +18876,65 @@ const EXPIRY_REDO_NAME: &str =
     "ens:0x8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b";
 const EXPIRY_REDO_RESOURCE: &str = "00000000-0000-0000-0000-0000000008b1";
 const EXPIRY_REDO_BINDING: &str = "00000000-0000-0000-0000-0000000008b2";
+const EXPIRY_REDO_CURRENT_RESOURCE: &str = "00000000-0000-0000-0000-0000000008c1";
+const EXPIRY_REDO_CURRENT_BINDING: &str = "00000000-0000-0000-0000-0000000008c2";
+
+async fn seed_expiry_revival_subrange_fixture(pool: &PgPool) -> Result<()> {
+    seed_expiry_release_redo_fixture(pool).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET logical_name_id = NULL
+         WHERE chain_id = $1 AND raw_fact_ref ->> 'fixture' = 'expiry-redo-release'",
+    )
+    .bind(EXPIRY_REDO_CHAIN)
+    .execute(pool)
+    .await?;
+    insert_classifier_resource_and_binding(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        EXPIRY_REDO_NAME,
+        "ens_v2",
+        Uuid::parse_str(EXPIRY_REDO_CURRENT_RESOURCE)?,
+        Uuid::parse_str(EXPIRY_REDO_CURRENT_BINDING)?,
+        3,
+    )
+    .await?;
+    insert_event(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        3,
+        Some(EXPIRY_REDO_NAME),
+        Some(EXPIRY_REDO_CURRENT_RESOURCE),
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({
+            "source_event":"TokenResource",
+            "status":"registered",
+            "expiry":4_000_000_000_u64,
+            "token_id":"0x02"
+        }),
+        json!({"fixture":"expiry-redo-current-holder"}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        EXPIRY_REDO_CHAIN,
+        3,
+        Some(EXPIRY_REDO_NAME),
+        Some(EXPIRY_REDO_RESOURCE),
+        "RegistrationRenewed",
+        "ens_v2_registry_l1",
+        json!({
+            "source_event":"ExpiryUpdated",
+            "status":"registered",
+            "expiry":4_000_000_000_u64,
+            "token_id":"0x01",
+            "revived_from_expiry":true
+        }),
+        json!({"fixture":"expiry-redo-later-revival"}),
+    )
+    .await?;
+    Ok(())
+}
 
 async fn seed_expiry_release_redo_fixture(pool: &PgPool) -> Result<()> {
     seed_lineage(pool, EXPIRY_REDO_CHAIN, 3).await?;

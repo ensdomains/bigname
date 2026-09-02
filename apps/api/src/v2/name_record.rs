@@ -44,9 +44,7 @@ use values::{
     object_field, response_chain_id,
 };
 pub(crate) use wrapper::wrapper_metadata;
-
 pub(crate) struct NameRecordQueryParams;
-
 impl QueryParamAllowlist for NameRecordQueryParams {
     const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source"];
 }
@@ -157,19 +155,23 @@ pub(crate) async fn get_name_record(
         )
     })?;
 
-    let record_inventory = load_name_record_inventory(
-        &state.pool,
-        &row,
-        &selected_snapshot,
-        include_resolution_auxiliary,
-    )
-    .await
-    .map_err(|error| {
-        api_error_to_v2_for_resource(
-            snapshot_selection_api_error(error),
-            SnapshotReadResource::Name,
+    let record_inventory = if row_has_current_registration(&row) {
+        load_name_record_inventory(
+            &state.pool,
+            &row,
+            &selected_snapshot,
+            include_resolution_auxiliary,
         )
-    })?;
+        .await
+        .map_err(|error| {
+            api_error_to_v2_for_resource(
+                snapshot_selection_api_error(error),
+                SnapshotReadResource::Name,
+            )
+        })?
+    } else {
+        None
+    };
     let chain_id = response_chain_id(&selected_snapshot);
     let record = verified::build_name_record_for_source(
         &state,

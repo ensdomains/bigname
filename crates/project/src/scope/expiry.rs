@@ -12,7 +12,9 @@ pub(super) async fn include_retracted_roots(
         "INSERT INTO project_scope_expiry_names
          SELECT DISTINCT logical_name_id
          FROM project_redo_expiry_roots
-         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+         WHERE chain_id = $1
+           AND block_number BETWEEN $2 AND $3
+           AND logical_name_id IS NOT NULL
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)

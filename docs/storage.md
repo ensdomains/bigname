@@ -161,7 +161,7 @@ mandatory full Interpret and Project redos.
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
-| `project_redo_expiry_roots` | Interpret, then Project consumption | Logical names from state-derived ENSv2 path-expiry releases preserved before Interpret deletes a redo range; bounded descendant-replay coordination only, never serving data. |
+| `project_redo_expiry_roots` | Interpret, then Project consumption | Logical names or permission resources from state-derived ENSv2 path-expiry releases preserved before Interpret deletes a redo range; bounded projection-redo coordination only, never serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
@@ -971,9 +971,14 @@ queue, general-purpose durable replay stage tables, apply cursors, dead-letter
 queue, database session version stamp, or worker heartbeat. The two narrow replay
 handoffs contain pre-delete input rather than staged projection rows:
 `project_redo_resolver_evidence` retains resolver and permission-resource
-references, and `project_redo_expiry_roots` retains logical names whose deleted
-path-expiry releases must seed bounded descendant traversal. Project consumes
-each row in the matching redo or later normal catch-up publication.
+references, and `project_redo_expiry_roots` retains the available logical-name
+or permission-resource identifiers whose deleted path-expiry releases must seed
+a bounded rebuild.
+Project consumes a row when a publication covers its recorded block. The normal
+Interpret-to-Project pipeline does so immediately; if an operator runs an
+Interpret redo whose requested Project endpoint is below the already recorded
+Project head, rows above that endpoint remain until a covering Project redo or
+full rebuild.
 
 Consumer slice 2E adds one diagnostic exception to durable staging, not to
 projection ownership. A post-reconciliation dual-current invariant makes the
@@ -1038,7 +1043,15 @@ permission rows without removing its partial-coverage summary. A later
 `RegistrationRenewed` marked as a revival readmits retained grants when the same
 resource has an earlier path-expiry release, regardless of whether that release
 named a surface. A grant or reservation also readmits the resource. A new
-versioned resource receives grants only from its own permission events.
+versioned resource receives grants only from its own permission events. An
+owner-zero reservation is different: registration keeps both version counters,
+including `eacVersionId`, so it reuses the reservation's permission resource ID.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29-L34
+@ ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L632-L645 @
+ens_v2@a971bd64)
 
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.

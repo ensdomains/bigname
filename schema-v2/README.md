@@ -62,16 +62,18 @@ authorize this table.
 
 Before deleting normalized rows for a bounded redo, Interpret copies the
 `PermissionChanged`, `ResolverChanged`, and `AliasChanged` references needed by
-Project into `project_redo_resolver_evidence`. It separately copies logical
-names from state-derived ENSv2 path-expiry releases into
+Project into `project_redo_resolver_evidence`. It separately copies the available
+logical-name or permission-resource identifiers from state-derived ENSv2
+path-expiry releases into
 `project_redo_expiry_roots`, because an earlier expiry publication may already
 have deleted every descendant projection that cited the ancestor. Project uses
 these small handoffs to select resolver rows, affected permission resources, and
 bounded descendant scope, then deletes the handoff rows inside its publication
 transaction. Interpret preserves the first copy across a restarted redo, so a
 retry cannot replace the original deleted suffix with only the prefix that has
-already been re-derived. If Project is behind the Interpret redo target, its
-later normal catch-up consumes the rows above the earlier Project head. Both
+already been re-derived. Project consumes a row only when its publication covers
+the recorded block; a redo endpoint below an existing Project head can leave
+later rows until a covering redo or full rebuild. Both
 tables are redo coordination, not event history or serving state; raw facts and
 re-derived `normalized_events` remain the replay authority.
 

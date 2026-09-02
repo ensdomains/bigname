@@ -1238,6 +1238,51 @@ async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Re
 }
 
 #[tokio::test]
+async fn v2_get_name_skips_stale_inventory_for_released_tombstone() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(
+        &database,
+        |row| {
+            row.declared_summary["registration"]["status"] = json!("released");
+            row.declared_summary["registration"]["released_at"] =
+                json!("2026-06-14T00:00:00Z");
+        },
+        |_, _, _| {},
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.record_inventory_current
+         SET chain_positions = jsonb_build_object(
+                 'block_number', 21000003,
+                 'block_hash', '0xrejected-inventory-target',
+                 'target_block_number', 21000003,
+                 'target_block_hash', '0xrejected-inventory-target'
+             ),
+             canonicality_summary = jsonb_build_object(
+                 'state', 'canonical_lineage',
+                 'target_block_number', 21000003,
+                 'target_block_hash', '0xrejected-inventory-target'
+             )
+         WHERE resource_id = $1",
+    )
+    .bind(Uuid::from_u128(0x2200))
+    .execute(&database.pool)
+    .await?;
+
+    let payload = v2_name_record_payload_for_database(&database, "/v2/names/Alice.eth").await?;
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("registration_status"), Some(&json!("released")));
+    assert!(data.get("resolver").is_none());
+    assert!(data.get("addresses").is_none());
+    assert!(data.get("text_records").is_none());
+    assert!(data.get("content_hash").is_none());
+    assert!(data.get("primary_address").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_withholds_expired_resource_identity_and_inventory_for_reservation() -> Result<()>
 {
     // Model a reservation-selected row with inventory retained for the expired

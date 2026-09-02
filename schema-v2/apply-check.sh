@@ -172,7 +172,8 @@ for migration_file in \
     "$ROOT/migrations/20260826120100_manifest_applied_change_count.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
-    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql"
+    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql" \
+    "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -322,7 +323,9 @@ for migration_file in \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
     "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql" \
-    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql"
+    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql" \
+    "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql" \
+    "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -523,9 +526,9 @@ WHERE event_identity = 'redo-handoff-upgrade-sentinel';
 SQL
 } | run_psql
 
-# Exercise the initialized pre-change schema branch for the bounded logical-name
-# handoff. Existing normalized events must survive while the schema-migration
-# adds the table, its closed checks, and its range index.
+# Exercise the initialized pre-change schema branch for the bounded path-expiry
+# handoff. Existing normalized events must survive while the schema-migrations
+# add the table and then extend its scope to permission resources.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -541,15 +544,21 @@ DROP TABLE project_redo_expiry_roots;
 SQL
     sed "s/bigname_phase/$scratch_schema/g" \
         "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql"
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql"
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260902130000_project_redo_expiry_resources.sql"
     cat <<'SQL'
 DO $$
 DECLARE
     constraint_count bigint;
     index_is_ready boolean;
+    logical_name_is_nullable boolean;
+    resource_id_is_nullable boolean;
 BEGIN
     IF to_regclass(current_schema() || '.project_redo_expiry_roots') IS NULL THEN
         RAISE EXCEPTION
-            'initialized-schema upgrade did not create path-expiry name handoff';
+            'initialized-schema upgrade did not create path-expiry handoff';
     END IF;
 
     SELECT count(*)
@@ -557,10 +566,32 @@ BEGIN
     FROM pg_constraint constraint_row
     WHERE constraint_row.conrelid = 'project_redo_expiry_roots'::regclass
       AND constraint_row.contype IN ('p', 'c');
-    IF constraint_count <> 3 THEN
+    IF constraint_count <> 4 THEN
         RAISE EXCEPTION
-            'initialized-schema path-expiry name handoff has % required constraints, expected 3',
+            'initialized-schema path-expiry handoff has % required constraints, expected 4',
             constraint_count;
+    END IF;
+
+    SELECT is_nullable = 'YES'
+    INTO logical_name_is_nullable
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'project_redo_expiry_roots'
+      AND column_name = 'logical_name_id';
+    IF logical_name_is_nullable IS DISTINCT FROM true THEN
+        RAISE EXCEPTION
+            'initialized-schema path-expiry logical name is not nullable';
+    END IF;
+
+    SELECT is_nullable = 'YES'
+    INTO resource_id_is_nullable
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'project_redo_expiry_roots'
+      AND column_name = 'resource_id';
+    IF resource_id_is_nullable IS DISTINCT FROM true THEN
+        RAISE EXCEPTION
+            'initialized-schema path-expiry resource is absent or not nullable';
     END IF;
 
     SELECT index_state.indisvalid
@@ -576,7 +607,7 @@ BEGIN
       AND index_relation.relname = 'project_redo_expiry_roots_range_idx';
     IF index_is_ready IS DISTINCT FROM true THEN
         RAISE EXCEPTION
-            'initialized-schema path-expiry name handoff index is not ready';
+            'initialized-schema path-expiry handoff index is not ready';
     END IF;
 
     IF NOT EXISTS (
@@ -584,7 +615,7 @@ BEGIN
         WHERE event_identity = 'expiry-redo-handoff-upgrade-sentinel'
     ) THEN
         RAISE EXCEPTION
-            'initialized-schema path-expiry name handoff changed normalized data';
+            'initialized-schema path-expiry handoff changed normalized data';
     END IF;
 END
 $$;

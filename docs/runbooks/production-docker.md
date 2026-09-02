@@ -164,10 +164,12 @@ schema-migration to perform either first build against a populated production
 The release containing
 `20260902120000_project_redo_expiry_roots.sql` adds the bounded
 Interpret-to-Project handoff for logical names from deleted state-derived ENSv2
-path-expiry releases. Apply that schema-migration in step 4 before deploying the
-new binary. Before starting any Project process, confirm both the handoff table
-and its range index exist and that the index is ready and valid with the query
-below.
+path-expiry releases. The follow-up
+`20260902130000_project_redo_expiry_resources.sql` admits resource-only releases
+and records the resource identifier when available. Apply both schema-migrations
+in step 4 before deploying the new binary. Before starting any Project process,
+confirm the handoff table, nullable identifier columns, and range index exist and
+that the index is ready and valid with the query below.
 
 ```sql
 SELECT
@@ -186,6 +188,22 @@ SELECT
 SELECT
     to_regclass('bigname_phase.project_redo_expiry_roots') IS NOT NULL
         AS expiry_redo_handoff_exists,
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'bigname_phase'
+          AND table_name = 'project_redo_expiry_roots'
+          AND column_name = 'logical_name_id'
+          AND is_nullable = 'YES'
+    ) AS expiry_redo_logical_name_nullable,
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'bigname_phase'
+          AND table_name = 'project_redo_expiry_roots'
+          AND column_name = 'resource_id'
+          AND is_nullable = 'YES'
+    ) AS expiry_redo_resource_available,
     EXISTS (
         SELECT 1
         FROM pg_class index_relation
