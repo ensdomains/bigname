@@ -359,7 +359,7 @@ async fn registrar_reveal_projection(split: bool) -> Result<((String, i64, Strin
     sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 8, 'canonical')")
         .bind(OWNERLESS_RESOURCE).bind(CHAIN).bind(block_hash(8)).execute(&pool).await?;
     for (kind, index) in [("RegistrationGranted", 1), ("ExpiryChanged", 2)] {
-        seed_normalized_event(&pool, &format!("fixture:surface-less-{kind}"), None, Some(OWNERLESS_RESOURCE), kind, "ens_v1_registrar_l1", 8, index, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:fixture","registrant":CONTROL_OWNER,"expiry":4242}), json!({})).await?;
+        seed_normalized_event(&pool, &format!("fixture:surface-less-{kind}"), None, Some(OWNERLESS_RESOURCE), kind, "ens_v1_registrar_l1", 8, index, json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:fixture","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH}), json!({})).await?;
     }
     if split { run_project(&pool, 8, 8, None).await?; }
     seed_surface(&pool, OWNERLESS_NAMEHASH, "revealed.eth", OWNERLESS_RESOURCE, OWNERLESS_BINDING).await?;
