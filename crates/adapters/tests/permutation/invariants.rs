@@ -100,6 +100,7 @@ impl IdentityReferences {
                 && !self
                     .surfaces
                     .contains(&(event.chain_id.clone(), logical.clone()))
+                && event.resource_id.is_none()
             {
                 bail!(
                     "{context}: event {} references unknown name surface {logical}",

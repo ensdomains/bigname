@@ -3,7 +3,7 @@ use alloy_sol_types::SolEvent;
 
 use super::{
     events::{
-        V1LegacyController, V1RegistrarToken, V1Registry, V1Resolver, V1Reverse,
+        V1BaseRegistrar, V1LegacyController, V1RegistrarToken, V1Registry, V1Resolver, V1Reverse,
         V1UnwrappedController, V1WrappedController, V1Wrapper,
     },
     names::{child_node, dns_encode, labelhash, namehash, reverse_labels},
@@ -476,7 +476,7 @@ fn registration(
     stage: u8,
 ) -> Action {
     let expires = U256::from(u64::try_from(expires).expect("expiry fits u64"));
-    let emissions = match path {
+    let mut emissions = match path {
         RegistrationPath::Legacy => vec![
             emission(
                 wires.registry,
@@ -560,6 +560,23 @@ fn registration(
             ),
         ],
     };
+    let registrar_owner = if path == RegistrationPath::Wrapped {
+        wrapper
+    } else {
+        registrant
+    };
+    emissions.insert(
+        0,
+        emission(
+            wires.registrar,
+            V1BaseRegistrar::NameRegistered {
+                id: U256::from_be_bytes(hash.0),
+                owner: registrar_owner,
+                expires,
+            }
+            .encode_log_data(),
+        ),
+    );
     action(format!("{label}:register-{path:?}"), stage, emissions)
 }
 
@@ -571,7 +588,7 @@ fn renewal(
     expires: i64,
 ) -> Action {
     let expires = U256::from(u64::try_from(expires).expect("expiry fits u64"));
-    let emission = match path {
+    let controller = match path {
         RegistrationPath::Unwrapped => emission(
             wires.unwrapped_controller,
             V1UnwrappedController::NameRenewed {
@@ -607,7 +624,21 @@ fn renewal(
             .encode_log_data(),
         ),
     };
-    action(format!("{label}:renew"), stage::WRITE, vec![emission])
+    action(
+        format!("{label}:renew"),
+        stage::WRITE,
+        vec![
+            emission(
+                wires.registrar,
+                V1BaseRegistrar::NameRenewed {
+                    id: U256::from_be_bytes(hash.0),
+                    expires,
+                }
+                .encode_log_data(),
+            ),
+            controller,
+        ],
+    )
 }
 
 fn subnode(

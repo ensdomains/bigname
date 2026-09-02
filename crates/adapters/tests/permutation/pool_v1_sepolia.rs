@@ -2,7 +2,7 @@ use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolEvent;
 
 use super::{
-    events::{V1RegistrarToken, V1Registry, V1Resolver, V1Wrapper},
+    events::{V1BaseRegistrar, V1RegistrarToken, V1Registry, V1Resolver, V1Wrapper},
     names::{dns_encode, labelhash, namehash},
     scenario::{Action, Dimensions, action, emission, stage},
     world::Wiring,
@@ -42,15 +42,26 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         actions.push(action(
             format!("{label}:registry-setup"),
             stage::REGISTER,
-            vec![emission(
-                registry,
-                V1Registry::NewOwner {
-                    node: eth_node,
-                    label: hash,
-                    owner: wrapper_address,
-                }
-                .encode_log_data(),
-            )],
+            vec![
+                emission(
+                    registrar,
+                    V1BaseRegistrar::NameRegistered {
+                        id: U256::from_be_bytes(hash.0),
+                        owner: wrapper_address,
+                        expires: U256::from(expiry),
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
+                    registry,
+                    V1Registry::NewOwner {
+                        node: eth_node,
+                        label: hash,
+                        owner: wrapper_address,
+                    }
+                    .encode_log_data(),
+                ),
+            ],
         ));
         actions.push(action(
             format!("{label}:wrap"),

@@ -70,6 +70,20 @@
         "block_number": 15504055,
         "transaction_hash": "0xce18f592ef68bc7e83323a21fae663572cca3011f59907f514e5e96bd80cc9e7",
         "transaction_index": 40,
+        "log_index": 100,
+        "emitting_address": "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85",
+        "topics": [
+          "0x9b87a00e30f1ac65d898f070f8a3488fe60517182d0a2098e1b4b93a54aa9bd6",
+          "0x52882124921cf68fc2f44eced602af312cb8a2ef8c4f8df59d5a8fbc7861d369"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000006321e43c"
+      },
+      {
+        "chain": "ethereum-mainnet",
+        "block_hash": "0x11e70bab4f9b74d3165e082545cf07423774bfee75e9ccb101318b061148b3d9",
+        "block_number": 15504055,
+        "transaction_hash": "0xce18f592ef68bc7e83323a21fae663572cca3011f59907f514e5e96bd80cc9e7",
+        "transaction_index": 40,
         "log_index": 101,
         "emitting_address": "0x283af0b28c62c092c9727f1ee09c02ca627eb7f5",
         "topics": [
@@ -146,6 +160,21 @@
         "transaction_hash": "0xd3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
         "transaction_index": 0,
         "log_index": 1,
+        "emitting_address": "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85",
+        "topics": [
+          "0xb3d987963d01b2f68493b4bdb130988f157ea43070d4ad840fee0466ed9370d9",
+          "0x52882124921cf68fc2f44eced602af312cb8a2ef8c4f8df59d5a8fbc7861d369",
+          "0x0000000000000000000000002222222222222222222222222222222222222222"
+        ],
+        "data": "0x00000000000000000000000000000000000000000000000000000000713fb300"
+      },
+      {
+        "chain": "ethereum-mainnet",
+        "block_hash": "0x0bbb11cf23443b094e4587e50d3c973d4beffa005869980f5a0e69b5c4b3a889",
+        "block_number": 16176355,
+        "transaction_hash": "0xd3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+        "transaction_index": 0,
+        "log_index": 2,
         "emitting_address": "0x283af0b28c62c092c9727f1ee09c02ca627eb7f5",
         "topics": [
           "0xca6abbe9d7f11422cb6ca7629fbf6fe9efb1c621f71ce8f02b9f2a230097404f",
@@ -155,7 +184,7 @@
         "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000ef0396e8215f0d00000000000000000000000000000000000000000000000000000000713fb30000000000000000000000000000000000000000000000000000000000000000037075790000000000000000000000000000000000000000000000000000000000"
       }
     ],
-    "synthetic_logs": "The two logs in transaction 0xd3d3... are hand-built, not production: a registry Transfer and a legacy-controller NameRegistered placed in the release block. A real registration also emits the registrar's ERC721 Transfer and a registry NewOwner in that transaction (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f); they are omitted because the defect needs only a registry-family event at (block, 0, 0) with a log index below the registration's. Every other log, block hash and timestamp is production."
+    "synthetic_logs": "The three logs in transaction 0xd3d3... are hand-built: a registry Transfer, the authoritative numeric BaseRegistrar NameRegistered, and the legacy-controller plaintext NameRegistered. The reduced transaction omits the registrar ERC721 Transfer and registry NewOwner emitted by a full registration flow (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f). Every other log, block hash and timestamp is production."
   },
   "batches": [
     {
