@@ -1,5 +1,18 @@
 use sqlx::{Postgres, QueryBuilder};
 
+pub(super) fn push_product_event_kind_predicate(builder: &mut QueryBuilder<'_, Postgres>) {
+    builder.push(
+        "ne.event_kind IN (
+            'RegistrationGranted', 'LabelRegistered', 'RegistrationRenewed',
+            'RegistrationReleased', 'ExpiryChanged', 'TokenControlTransferred',
+            'AuthorityTransferred', 'AuthorityEpochChanged', 'ResolverChanged',
+            'RecordChanged', 'RecordVersionChanged', 'ReverseChanged',
+            'PermissionChanged', 'PermissionScopeChanged', 'RolesChanged',
+            'EACRolesChanged'
+        )",
+    );
+}
+
 pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
         r#"

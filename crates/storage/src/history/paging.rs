@@ -6,7 +6,7 @@ use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryPage, HistorySummaryMode,
     InvalidHistoryCursor,
     decoders::decode_history_event,
-    registration_identity::push_product_registration_id,
+    registration_identity::{push_product_event_kind_predicate, push_product_registration_id},
     selectors::HistorySelector,
     source::{push_history_canonicality_filter, push_history_source_with_visibility},
     summary::load_history_summary,
@@ -306,11 +306,13 @@ pub(super) fn push_history_filters<'a>(
     }
 
     if let Some(registration_id) = filter.registration_id.as_ref() {
-        builder.push(" AND (ne.resource_id IS NULL OR ");
+        builder.push(" AND ((ne.resource_id IS NULL AND ");
+        push_product_event_kind_predicate(builder);
+        builder.push(") OR (");
         push_product_registration_id(builder);
         builder.push(" = ");
         builder.push_bind(registration_id);
-        builder.push(")");
+        builder.push("))");
     }
 
     if !filter.event_kinds.is_empty() {
