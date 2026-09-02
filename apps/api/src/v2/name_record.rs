@@ -36,12 +36,13 @@ mod wrapper;
 
 use inventory::load_name_record_inventory;
 pub(super) use values::{
-    chain_id_from_positions, has_current_registration, json_string_at_paths, network_from_parts,
+    chain_id_from_positions, declared_token_id, has_current_registration,
+    identity_declared_token_id, json_string_at_paths, network_from_parts,
     row_has_current_registration, string_field, value_to_string,
 };
 use values::{
-    json_address_at_paths, json_chain_id, json_timestamp_at_paths, json_value_present, network,
-    object_field, response_chain_id,
+    has_name_binding, json_address_at_paths, json_chain_id, json_timestamp_at_paths,
+    json_value_present, network, object_field, response_chain_id,
 };
 pub(crate) use wrapper::wrapper_metadata;
 pub(crate) struct NameRecordQueryParams;
@@ -421,79 +422,6 @@ pub(super) fn declared_expires_at(summary: &Value) -> Option<String> {
             &["control", "expiry"],
         ],
     )
-}
-
-fn has_name_binding(row: &NameCurrentRow) -> bool {
-    row.surface_binding_id.is_some() || row.resource_id.is_some() || row.binding_kind.is_some()
-}
-
-pub(super) fn declared_token_id(row: &NameCurrentRow) -> Option<String> {
-    declared_token_id_from_parts(
-        &row.declared_summary,
-        &row.namespace,
-        &row.normalized_name,
-        None,
-    )
-}
-
-pub(super) fn identity_declared_token_id(
-    row: &bigname_storage::IdentityNameCurrentRow,
-) -> Option<String> {
-    row.resource_id?;
-    let labelhash = row.labelhash.as_deref().filter(|value| {
-        row.labelhash_count
-            .is_none_or(|label_count| label_count == 2)
-            && !value.trim().is_empty()
-    });
-    declared_token_id_from_parts(
-        &row.declared_summary,
-        &row.namespace,
-        &row.normalized_name,
-        labelhash,
-    )
-}
-
-fn declared_token_id_from_parts(
-    summary: &Value,
-    namespace: &str,
-    normalized_name: &str,
-    labelhash: Option<&str>,
-) -> Option<String> {
-    json_string_at_paths(
-        summary,
-        &[
-            &["authority", "token_id"],
-            &["registration", "token_id"],
-            &["registration", "upstream_resource"],
-            &["control", "token_id"],
-        ],
-    )
-    .or_else(|| eth_2ld_labelhash_token_id(namespace, normalized_name, labelhash))
-}
-
-fn eth_2ld_labelhash_token_id(
-    namespace: &str,
-    normalized_name: &str,
-    labelhash: Option<&str>,
-) -> Option<String> {
-    if namespace != "ens" {
-        return None;
-    }
-    let mut labels = normalized_name.split('.');
-    let label = labels.next()?;
-    if labels.next() != Some("eth") || labels.next().is_some() || label.trim().is_empty() {
-        return None;
-    }
-    let labelhash = labelhash.map(str::to_owned).unwrap_or_else(|| {
-        format!(
-            "0x{}",
-            alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
-        )
-    });
-    let hex = labelhash.strip_prefix("0x").unwrap_or(&labelhash);
-    alloy_primitives::U256::from_str_radix(hex, 16)
-        .ok()
-        .map(|value| value.to_string())
 }
 
 fn chain_positions_created_at(chain_positions: &Value) -> Option<String> {
