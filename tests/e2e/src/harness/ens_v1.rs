@@ -10,6 +10,7 @@ use super::rpc::{RpcClient, TxReceipt};
 // Call fragments match the pinned upstream sources:
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L39 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L45 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L47 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L112 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L23 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f)
@@ -28,6 +29,7 @@ use super::rpc::{RpcClient, TxReceipt};
 // (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L22 @ ens_v1@91c966f)
 sol! {
     function setSubnodeOwner(bytes32 node, bytes32 label, address owner) external returns (bytes32);
+    function setOwner(bytes32 node, address owner) external;
     function owner(bytes32 node) external view returns (address);
     function setResolver(bytes32 node, address resolver) external;
     function setApprovalForAll(address operator, bool approved) external;
@@ -692,6 +694,28 @@ pub async fn set_resolver(
         &setResolverCall {
             node: namehash(name),
             resolver,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+/// Set the registry owner for an existing node. This is used by ownerless-read
+/// scenarios that must preserve resolver state while removing registry control.
+pub async fn set_registry_owner(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    name: &str,
+    owner: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.registry.address,
+        &setOwnerCall {
+            node: namehash(name),
+            owner,
         }
         .abi_encode(),
     )
