@@ -270,6 +270,10 @@ in [`architecture.md`](architecture.md#identity-model).
 For ENSv2, a selected binding's non-terminal lifecycle remains the exact-name
 registration until it becomes terminal, even if another lifecycle has a later
 grant or reservation event.
+After it becomes terminal, `name_current` prefers another surviving lifecycle;
+if all lifecycles are terminal, it prefers the selected binding's terminal
+event over a later terminal event from another lifecycle, then prefers the
+greater block number and, within one block, the normalized event stored later.
 `name_current.resource_id` identifies the current control or registration resource. The nullable
 `name_current.serving_resource_id` identifies a separate, event-derived resolver and record-serving
 [serving resource](glossary.md#serving-resource) when no control binding is open. It is not a binding, registration,

@@ -677,10 +677,14 @@ async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()>
     .await?;
     let updated = sqlx::query(
         "UPDATE record_inventory_current inventory
-         SET chain_positions = jsonb_set(
-             jsonb_set(inventory.chain_positions, '{block_hash}',
-                       '\"0xorphaned-audit-inventory\"'),
-             '{target_block_hash}', '\"0xorphaned-audit-inventory\"')
+         SET chain_positions = inventory.chain_positions || jsonb_build_object(
+             'target_block_number', 39,
+             'target_block_hash', '0xorphaned-audit-inventory'
+         ),
+         canonicality_summary = inventory.canonicality_summary || jsonb_build_object(
+             'target_block_number', 39,
+             'target_block_hash', '0xorphaned-audit-inventory'
+         )
          FROM name_current name
          WHERE name.resource_id = inventory.resource_id
            AND name.raw_name = 'reserved.eth'",
