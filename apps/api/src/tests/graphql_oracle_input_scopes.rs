@@ -60,13 +60,44 @@ fn graphql_oracle_input_scope_does_not_own_siblings() {
 #[test]
 fn graphql_oracle_rejects_stale_duplicate_unknown_and_wildcard_input_scopes() {
     let (upstream, local) = partial_domain_filter_surfaces();
-    for scopes in [
-        vec!["input:Domain_filter.id"],
-        vec!["input:Domain_filter.id_not", "input:Domain_filter.id_not"],
-        vec!["input:Domain_filter.missing"],
-        vec!["input:Domain_filter.*"],
+    for (scopes, expected) in [
+        (
+            vec![
+                "input:Domain_filter.id_not",
+                "input:Domain_filter.owner",
+                "input:Domain_filter.id",
+            ],
+            "stale upstream disposition: input:Domain_filter.id",
+        ),
+        (
+            vec![
+                "input:Domain_filter.id_not",
+                "input:Domain_filter.owner",
+                "input:Domain_filter.id_not",
+            ],
+            "duplicate conflicting disposition: input:Domain_filter.id_not",
+        ),
+        (
+            vec![
+                "input:Domain_filter.id_not",
+                "input:Domain_filter.owner",
+                "input:Domain_filter.missing",
+            ],
+            "stale upstream disposition: input:Domain_filter.missing",
+        ),
+        (
+            vec![
+                "input:Domain_filter.id_not",
+                "input:Domain_filter.owner",
+                "input:Domain_filter.*",
+            ],
+            "overbroad disposition: input:Domain_filter.*",
+        ),
     ] {
-        assert!(apply_oracle_coverage(&upstream, &local, &exact_input_coverage(&scopes)).is_err());
+        let error = apply_oracle_coverage(&upstream, &local, &exact_input_coverage(&scopes))
+            .expect_err("invalid exact-input scope unexpectedly passed")
+            .to_string();
+        assert!(error.contains(expected), "{error}");
     }
 }
 

@@ -118,6 +118,117 @@ async fn generated_domain_names(database: &TestDatabase, where_value: Value) -> 
         .collect())
 }
 
+async fn generated_domain_owner_rows(
+    database: &TestDatabase,
+    where_value: Value,
+) -> Result<Vec<(String, String)>> {
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: Domain_filter!) {
+            domains(where: $where, orderBy: name) { name owner { id } }
+        }"#,
+        json!({"where": where_value}),
+    )
+    .await?;
+    payload["data"]["domains"]
+        .as_array()
+        .context("domains array")?
+        .iter()
+        .map(|row| {
+            Ok((
+                row["name"].as_str().context("domain name")?.to_owned(),
+                row["owner"]["id"]
+                    .as_str()
+                    .context("domain owner id")?
+                    .to_owned(),
+            ))
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_generated_owner_shape(
+    database: &TestDatabase,
+    name: &str,
+    registry_owner: &str,
+    token_holder: &str,
+    tokenized: bool,
+    wrapped: bool,
+    id_base: u128,
+    block_number: i64,
+) -> Result<()> {
+    let namehash = bigname_lookup::ens_namehash_hex(name)?;
+    let resource_id = Uuid::from_u128(id_base);
+    let token_lineage_id = Uuid::from_u128(id_base + 1);
+    let surface_binding_id = Uuid::from_u128(id_base + 2);
+    seed_identity_name(
+        database,
+        &format!("ens:{name}"),
+        name,
+        name,
+        &namehash,
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+        token_holder,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        block_number,
+    )
+    .await?;
+
+    let mut summary = json!({
+        "registration": {
+            "status": "active",
+            "authority_kind": "registrar",
+            "registrant": token_holder,
+            "expiry": 1_900_000_000_i64,
+            "created_at": 1_700_000_000_i64,
+        },
+        "control": {
+            "registry_owner": registry_owner,
+            "registrant": token_holder,
+            "expiry": 1_900_000_000_i64,
+        }
+    });
+    if wrapped {
+        summary["wrapper_state"] = json!("wrapped");
+    }
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = $1,
+             token_lineage_id = CASE WHEN $2 THEN token_lineage_id ELSE NULL END
+         WHERE raw_name = $3",
+    )
+    .bind(summary)
+    .bind(tokenized)
+    .bind(name)
+    .execute(&database.lookup_pool)
+    .await?;
+    if !tokenized {
+        sqlx::query("DELETE FROM bigname_phase.address_names_current WHERE raw_name = $1")
+            .bind(name)
+            .execute(&database.lookup_pool)
+            .await?;
+    }
+    upsert_phase_address_names_current_rows(
+        &database.lookup_pool,
+        &[address_name_current_row(
+            registry_owner,
+            &format!("ens:{name}"),
+            bigname_storage::AddressNameRelation::EffectiveController,
+            name,
+            name,
+            &namehash,
+            surface_binding_id,
+            resource_id,
+            tokenized.then_some(token_lineage_id),
+            block_number,
+        )],
+    )
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn graphql_generated_domains_default_to_first_100_ids_from_zero() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -180,6 +291,101 @@ async fn graphql_generated_domains_apply_id_and_current_filters() -> Result<()> 
     ] {
         assert_eq!(generated_domain_names(&database, filter).await?, expected);
     }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> {
+    const SUBNAME_OWNER: &str = "0x0000000000000000000000000000000000000671";
+    const SECOND_LEVEL_OWNER: &str = "0x0000000000000000000000000000000000000672";
+    const SECOND_LEVEL_HOLDER: &str = "0x0000000000000000000000000000000000000673";
+    const NAME_WRAPPER: &str = "0x0000000000000000000000000000000000000674";
+    const WRAPPED_HOLDER: &str = "0x0000000000000000000000000000000000000675";
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    for (name, owner, holder, tokenized, wrapped, id_base, block_number) in [
+        (
+            "owner-sub.parent.eth",
+            SUBNAME_OWNER,
+            SUBNAME_OWNER,
+            false,
+            false,
+            0x670_3001,
+            710,
+        ),
+        (
+            "owner-second-level.eth",
+            SECOND_LEVEL_OWNER,
+            SECOND_LEVEL_HOLDER,
+            true,
+            false,
+            0x670_3011,
+            711,
+        ),
+        (
+            "owner-wrapped.eth",
+            NAME_WRAPPER,
+            WRAPPED_HOLDER,
+            true,
+            true,
+            0x670_3021,
+            712,
+        ),
+    ] {
+        seed_generated_owner_shape(
+            &database,
+            name,
+            owner,
+            holder,
+            tokenized,
+            wrapped,
+            id_base,
+            block_number,
+        )
+        .await?;
+    }
+
+    let served_owner_matches = [
+        (SUBNAME_OWNER, "owner-sub.parent.eth"),
+        (SECOND_LEVEL_OWNER, "owner-second-level.eth"),
+        (NAME_WRAPPER, "owner-wrapped.eth"),
+    ];
+    let mut actual = Vec::new();
+    for (owner, _) in served_owner_matches {
+        actual.push((
+            owner,
+            generated_domain_owner_rows(&database, json!({"owner": owner})).await?,
+        ));
+    }
+    let mut actual_holders = Vec::new();
+    for holder in [SECOND_LEVEL_HOLDER, WRAPPED_HOLDER] {
+        actual_holders.push((
+            holder,
+            generated_domain_owner_rows(&database, json!({"owner": holder})).await?,
+        ));
+    }
+    let owner_in = generated_domain_owner_rows(
+        &database,
+        json!({"owner_in": [SUBNAME_OWNER, SECOND_LEVEL_OWNER, NAME_WRAPPER]}),
+    )
+    .await?;
+
+    assert_eq!(
+        (actual, actual_holders, owner_in),
+        (
+            vec![
+                (SUBNAME_OWNER, vec![("owner-sub.parent.eth".into(), SUBNAME_OWNER.into())]),
+                (SECOND_LEVEL_OWNER, vec![("owner-second-level.eth".into(), SECOND_LEVEL_OWNER.into())]),
+                (NAME_WRAPPER, vec![("owner-wrapped.eth".into(), NAME_WRAPPER.into())]),
+            ],
+            vec![(SECOND_LEVEL_HOLDER, vec![]), (WRAPPED_HOLDER, vec![])],
+            vec![
+                ("owner-second-level.eth".into(), SECOND_LEVEL_OWNER.into()),
+                ("owner-sub.parent.eth".into(), SUBNAME_OWNER.into()),
+                ("owner-wrapped.eth".into(), NAME_WRAPPER.into()),
+            ],
+        )
+    );
     database.cleanup().await
 }
 
