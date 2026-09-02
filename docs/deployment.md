@@ -337,10 +337,13 @@ On an initialized chain, that authority change still blocks
 ordinary derived work until the exact token-attested full-range Interpret redo
 and downstream stamped Project redo complete; if it widened the watch plan,
 complete the stamped Ingest redo first.
-The [cross-chain `basenames_execution`
-exception](manifests.md#discovery-admission) re-derives only the Base Project
-phase after its active Ethereum Mainnet authority changes: complete the stamped
-Project redo on `base-mainnet`; there is no Base Interpret redo.
+When the active Ethereum Mainnet `basenames_execution` authority changes,
+Ethereum Mainnet follows the rule above and, in addition, the Base Project phase
+is invalidated on its own ([cross-chain
+exception](manifests.md#discovery-admission)): complete an explicit full-range
+Project redo on `base-mainnet` (the runner prints the required range); it needs
+no stamp, no attestation token, and no Base Interpret redo, and it does not
+appear in the pending-redo listing.
 An unchanged interpreter hash therefore does not waive authority-transition re-derivation.
 
 Manifest synchronization records a [manifest-authority
