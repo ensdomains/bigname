@@ -28,8 +28,114 @@ fn read_oracle_json(path: impl AsRef<OraclePath>) -> Result<Value> {
     Ok(serde_json::from_slice(&oracle_fs::read(path)?)?)
 }
 
+fn oracle_sha256(input: &[u8]) -> String {
+    const ROUND: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut state = [
+        0x6a09e667_u32,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut padded = input.to_vec();
+    let bit_len = (padded.len() as u64) * 8;
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+    for chunk in padded.chunks_exact(64) {
+        let mut words = [0_u32; 64];
+        for (word, bytes) in words.iter_mut().zip(chunk.chunks_exact(4)) {
+            *word = u32::from_be_bytes(bytes.try_into().expect("four-byte SHA-256 word"));
+        }
+        for index in 16..64 {
+            let s0 = words[index - 15].rotate_right(7)
+                ^ words[index - 15].rotate_right(18)
+                ^ (words[index - 15] >> 3);
+            let s1 = words[index - 2].rotate_right(17)
+                ^ words[index - 2].rotate_right(19)
+                ^ (words[index - 2] >> 10);
+            words[index] = words[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(words[index - 7])
+                .wrapping_add(s1);
+        }
+        let mut work = state;
+        for (constant, word) in ROUND.into_iter().zip(words) {
+            let choose = (work[4] & work[5]) ^ (!work[4] & work[6]);
+            let majority = (work[0] & work[1]) ^ (work[0] & work[2]) ^ (work[1] & work[2]);
+            let sum0 = work[0].rotate_right(2)
+                ^ work[0].rotate_right(13)
+                ^ work[0].rotate_right(22);
+            let sum1 = work[4].rotate_right(6)
+                ^ work[4].rotate_right(11)
+                ^ work[4].rotate_right(25);
+            let first = work[7]
+                .wrapping_add(sum1)
+                .wrapping_add(choose)
+                .wrapping_add(constant)
+                .wrapping_add(word);
+            let second = sum0.wrapping_add(majority);
+            work.copy_within(0..7, 1);
+            work[4] = work[4].wrapping_add(first);
+            work[0] = first.wrapping_add(second);
+        }
+        for (value, addition) in state.iter_mut().zip(work) {
+            *value = value.wrapping_add(addition);
+        }
+    }
+    hex::encode(
+        state
+            .into_iter()
+            .flat_map(u32::to_be_bytes)
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn graphql_oracle_sha256_is_self_contained() {
+    assert_eq!(
+        oracle_sha256(b"{}\n"),
+        "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    );
+}
+
+fn verify_coverage_sha256(root: &OraclePath, manifest: &Value) -> Result<()> {
+    let actual = oracle_sha256(&oracle_fs::read(root.join("coverage.json"))?);
+    let expected = manifest["coverage_sha256"]
+        .as_str()
+        .context("manifest coverage_sha256")?;
+    anyhow::ensure!(
+        actual == expected,
+        "coverage_sha256 mismatch: manifest has {expected}, coverage.json has {actual}"
+    );
+    Ok(())
+}
+
 fn verify_oracle_integrity() -> Result<Value> {
     let workspace = OraclePath::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = read_oracle_json(oracle_root().join("manifest.json"))?;
+    anyhow::ensure!(
+        manifest["fixture_format_version"] == json!(1),
+        "unsupported fixture format; upgrade the oracle runner"
+    );
+    verify_coverage_sha256(&oracle_root(), &manifest)?;
     let output = OracleCommand::new(workspace.join("scripts/graphql-compat-oracle"))
         .args(["verify-fixtures", "--offline", "--fixtures"])
         .arg(oracle_root())
@@ -39,11 +145,6 @@ fn verify_oracle_integrity() -> Result<Value> {
         output.status.success(),
         "fixture integrity failed before query execution: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    let manifest = read_oracle_json(oracle_root().join("manifest.json"))?;
-    anyhow::ensure!(
-        manifest["fixture_format_version"] == json!(1),
-        "unsupported fixture format; upgrade the oracle runner"
     );
     Ok(manifest)
 }
@@ -78,6 +179,24 @@ fn graphql_oracle_rejects_provisional_fixture_without_local_escape() -> Result<(
         "rejection did not name the operator refresh procedure: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
+}
+
+#[test]
+fn graphql_oracle_rejects_mismatched_manifest_coverage_digest() -> Result<()> {
+    let fixtures = std::env::temp_dir().join(format!(
+        "bigname-graphql-oracle-coverage-digest-{}-{}",
+        std::process::id(),
+        NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    oracle_fs::create_dir_all(&fixtures)?;
+    oracle_fs::write(fixtures.join("coverage.json"), b"{}\n")?;
+    let manifest = json!({"coverage_sha256": "0000000000000000000000000000000000000000000000000000000000000000"});
+    let error = verify_coverage_sha256(&fixtures, &manifest)
+        .expect_err("mismatched coverage_sha256 was accepted")
+        .to_string();
+    oracle_fs::remove_dir_all(fixtures)?;
+    assert!(error.contains("coverage_sha256 mismatch"));
     Ok(())
 }
 
@@ -268,6 +387,7 @@ fn oracle_field_is_deferred(
     let return_type_path = format!("type:{return_type}");
     known.contains_key(return_type)
         && !claimed.contains(&return_type_path)
+        && upstream_only.contains(&return_type_path)
         && upstream[&return_type_path]["kind"] == json!("OBJECT")
         && upstream.contains_key(&format!("field:{return_type}.id"))
 }
@@ -525,6 +645,14 @@ async fn run_oracle_cases(kind: &str) -> Result<()> {
     let manifest = verify_oracle_integrity()?;
     let root = oracle_root();
     let coverage = read_oracle_json(root.join("coverage.json"))?;
+    assert_eq!(
+        coverage["known_upstream_types"]
+            .as_object()
+            .context("known_upstream_types")?
+            .len(),
+        113,
+        "live fixture coverage census changed"
+    );
     let upstream: OracleMap<String, Value> =
         serde_json::from_value(read_oracle_json(root.join("upstream/schema-surface.json"))?)?;
     let database = TestDatabase::new_migrated().await?;
@@ -749,6 +877,26 @@ fn assert_oracle_field_ownership_rules() {
     assert!(claimed_return_error
         .contains("unowned upstream-only path: field:Query.futureDomains"));
 
+    let locally_served_return_coverage = json!({
+        "claimed_paths": [],
+        "schema_signature_differences": [],
+        "upstream_only": [],
+        "local_extensions": [],
+        "known_upstream_types": {
+            "Domain": {"owner":"#1", "docs":"x"},
+            "Query": {"owner":"#2", "docs":"x"}
+        }
+    });
+    let locally_served_return_error = apply_oracle_coverage(
+        &claimed_return_upstream,
+        &claimed_return_local,
+        &locally_served_return_coverage,
+    )
+    .expect_err("locally served return type auto-owned an upstream-only Query field")
+    .to_string();
+    assert!(locally_served_return_error
+        .contains("unowned upstream-only path: field:Query.futureDomains"));
+
     let claimed_domain = OracleMap::from([
         ("type:Domain".into(), json!({"kind":"OBJECT"})),
         ("field:Domain.future".into(), json!({"type":"String"})),
@@ -772,6 +920,44 @@ fn assert_oracle_field_ownership_rules() {
     assert!(
         apply_oracle_coverage(&claimed_domain, &claimed_local, &type_wide_coverage).is_err()
     );
+}
+
+#[tokio::test]
+async fn graphql_oracle_claims_deny_and_matches_the_default_policy() -> Result<()> {
+    let root = oracle_root();
+    let coverage = read_oracle_json(root.join("coverage.json"))?;
+    assert!(
+        coverage["claimed_paths"]
+            .as_array()
+            .context("claimed_paths")?
+            .iter()
+            .any(|path| path == "enum:_SubgraphErrorPolicy_.deny"),
+        "deny is not an exact claimed path"
+    );
+    let manifest = verify_oracle_integrity()?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_oracle_fixture(&database, &load_oracle_seed(&root, &manifest)?).await?;
+    let variables = read_oracle_json(
+        root.join("entities/domain/entity-by-id/variables.json"),
+    )?;
+    let default_policy = post_graphql(
+        database.app_state(),
+        r#"query OracleDefaultPolicy($id: ID!, $block: Block_height!) {
+            domain(id: $id, block: $block) { id }
+        }"#,
+        variables.clone(),
+    )
+    .await?;
+    let deny_policy = post_graphql(
+        database.app_state(),
+        r#"query OracleDenyPolicy($id: ID!, $block: Block_height!) {
+            domain(id: $id, block: $block, subgraphError: deny) { id }
+        }"#,
+        variables,
+    )
+    .await?;
+    assert_eq!(deny_policy, default_policy);
+    database.cleanup().await
 }
 
 fn assert_oracle_argument_ownership_rules() {

@@ -443,7 +443,9 @@ future capability work may add database-backed historical execution, but no
 serving path filters current rows in memory. The endpoint accepts the `subgraphError`
 argument and emits the graph-node default without changing the existing
 Manager response path. The served-head eligibility gate remains authoritative;
-per-entity `allow`/`deny` behavior belongs to future entity capabilities that can
+the [GraphQL claimed compatibility surface](glossary.md#graphql-claimed-compatibility-surface) includes both
+`_SubgraphErrorPolicy_` values, and explicit `deny` behaves the same as omitting the argument. Per-entity `allow`/`deny`
+behavior belongs to future entity capabilities that can
 define it without inventing in-process filtering.
 
 `_meta(block:)` reports the served head used by entity reads, including its
