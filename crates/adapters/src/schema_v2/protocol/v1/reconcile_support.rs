@@ -61,9 +61,6 @@ fn reconcile_registration(
         output.normalized_events[registration.event_index].after_state["registry_migrated"] =
             serde_json::Value::Bool(true);
     }
-    if registration.window == RegistrationWindow::WholeTransaction && registration.surface_known {
-        return;
-    }
     let registrar_owner = target_candidates
         .iter()
         .filter_map(|index| {
@@ -113,7 +110,15 @@ fn reconcile_registration(
     let eligible = |fields: &EventFields| {
         fields.position.is_some_and(|position| {
             if registration.window == RegistrationWindow::WholeTransaction {
-                !fields.named && divergence_start.is_none_or(|start| position < start)
+                let named_pre_anchor_setup = fields.named
+                    && fields.family == SourceFamily::Registry
+                    && matches!(
+                        fields.source_event,
+                        SourceEvent::NewOwner | SourceEvent::Transfer
+                    )
+                    && position < registration.position;
+                (!fields.named || named_pre_anchor_setup)
+                    && divergence_start.is_none_or(|start| position < start)
             } else {
                 position.2 < registration.log_index
             }

@@ -469,6 +469,43 @@ mod v1_registrar {
 
     #[test]
     #[rustfmt::skip]
+    fn known_surface_reregistration_attributes_pre_anchor_setup_to_successor_registrar() -> anyhow::Result<()> {
+        let label = "known-reregistration"; let labelhash = keccak256(label.as_bytes()); let parent = super::common::namehash(&["eth".to_owned()]);
+        let release_block = 2 + 90 * 24 * 60 * 60 + 1;
+        let first = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: vec![lifecycle_manifest(), registry_manifest()], discovery_rules: vec![], admissions: admissions().into_iter().chain([registry_admission()]).collect(), prior_events: vec![], blocks: vec![RawBlockInput { chain_id: CHAIN.to_owned(), block_hash: "block-1".to_owned(), block_number: 1, block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1), canonicality_state: "canonical".to_owned() }, RawBlockInput { chain_id: CHAIN.to_owned(), block_hash: format!("block-{release_block}"), block_number: release_block, block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(release_block), canonicality_state: "canonical".to_owned() }], raw_logs: vec![base_registration(label, 2, 0), controller_registration(label, 2, 1)] })?;
+        assert!(first.normalized_events.iter().any(|event| event.event_kind == "RegistrationReleased"));
+        let reregistration_block = release_block + 1;
+        let numeric = with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTRACT.parse()?, expires: U256::from(release_block + 100) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)"));
+        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: vec![lifecycle_manifest(), registry_manifest()], discovery_rules: vec![], admissions: admissions().into_iter().chain([registry_admission()]).collect(), prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTRACT.parse()? }.encode_log_data(), reregistration_block, 0, REGISTRY), raw_at(numeric, reregistration_block, 1, CONTRACT)] })?;
+        let grant = output.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").expect("successor registration grant");
+        let successor = grant.resource_id.expect("successor registrar resource");
+        let setup = output.normalized_events.iter().filter(|event| event.log_index == Some(0) && event.resource_id.is_some()).collect::<Vec<_>>();
+        assert!(!setup.is_empty(), "pre-anchor registry setup must survive reconciliation");
+        assert!(setup.iter().all(|event| event.resource_id == Some(successor)), "known-surface setup was not attributed to the successor registrar: {setup:#?}");
+        assert!(output.resources.iter().any(|resource| resource.resource_id == successor && resource.token_lineage_id.is_some()), "successor registrar resource must mint token lineage");
+        let retained = output.resources.iter().filter(|resource| resource.resource_id != successor && resource.token_lineage_id.is_none()).collect::<Vec<_>>();
+        assert_eq!(retained.len(), 1, "the superseded registry-only resource remains materialized once: {:#?}", output.resources);
+        assert_eq!(retained[0].block_number, reregistration_block, "the registry-only resource stays anchored at its first derivation block");
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn known_surface_later_transaction_new_owner_is_not_attributed_to_registrar() -> anyhow::Result<()> {
+        const DIVERGED: &str = "0x0000000000000000000000000000000000000077";
+        let label = "known-later-owner"; let labelhash = keccak256(label.as_bytes()); let parent = super::common::namehash(&["eth".to_owned()]);
+        let first = interpret(vec![base_registration(label, 42, 0), controller_registration(label, 42, 1)])?;
+        let numeric = with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTRACT.parse()?, expires: U256::from(84) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)"));
+        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: vec![lifecycle_manifest(), registry_manifest()], discovery_rules: vec![], admissions: admissions().into_iter().chain([registry_admission()]).collect(), prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: vec![raw_at_transaction(numeric, 2, 0, 0, CONTRACT), raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: DIVERGED.parse()? }.encode_log_data(), 2, 1, 0, REGISTRY)] })?;
+        let registrar = output.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").and_then(|event| event.resource_id).expect("successor registrar resource");
+        let later = output.normalized_events.iter().find(|event| event.after_state["source_event"] == "NewOwner" && event.after_state["owner"] == DIVERGED && event.resource_id.is_some()).expect("later registry owner event");
+        assert_eq!(later.after_state["authority_kind"], "registry_only");
+        assert_ne!(later.resource_id, Some(registrar), "a later transaction must not be attributed to the registration");
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
     fn whole_transaction_reconciliation_preserves_post_registration_registry_divergence() -> anyhow::Result<()> {
         const DIVERGED: &str = "0x0000000000000000000000000000000000000077";
         let label = "reclaimed"; let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
