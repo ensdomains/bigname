@@ -127,27 +127,48 @@ outcomes, or durable traces.
 
 - Every row carries stable identity, provenance, manifest version, support, and
   chain-position or target-publication context.
-- Review every projection-builder change for replacement-row inputs: each value
-  must come from the current batch's staged normalized events, from
-  interpretation- and manifest-owned authority tables (identity rows, discovery
-  edges, contract instance addresses, the specifically admitted
-  [`migration_discovery_associations`](glossary.md#migration-correlation-group)
-  evidence described below,
-  [verified label preimages](glossary.md#preimage-observation--label-preimage),
-  and staged manifest state — inputs to projection, not projection rows), from
-  the Project
-  request's target context (chain, target block number and hash, and the
-  `chain_lineage` timestamp of that target block, written as publication
-  context), from `chain_lineage` context resolved deterministically from those
-  inputs — at a staged event's own chain position (source-event times such as
-  registration, creation, and last-change), or by timestamp alignment selecting
-  another chain's latest canonical-family block at or before an input timestamp
-  (auxiliary-chain positions such as a declared registry path's execution-chain
-  context) — or from a field deliberately stored for later reuse. A live projection-table read is allowed
-  only to obtain such a stored reuse field when the query proves the row is
-  outside the affected scope and merges staged replacements for affected rows,
-  or for explicit existing-row-only carry-forward. It must never use a row that
-  may also be rebuilt in the batch.
+- Every projection-row value other than the closed set of
+  [Project-owned maintenance fields](glossary.md#projection) is subject to the
+  input source enumeration below. This includes every [serving
+  field](glossary.md#projection) — a value a consumer can read through the API
+  or history — and every storage-only row key or retained evidence field. The
+  maintenance fields are `last_recomputed_at`, `inserted_at`,
+  `reverse_hydration_attempted_block_number`,
+  `reverse_hydration_attempted_block_hash`, and
+  `reverse_hydration_attempt_ordinal`; the glossary defines their exact table
+  scope and value sources. Only the maintenance fields are outside the input
+  source enumeration below.
+- Review every projection-builder and hydration change for non-maintenance
+  inputs. Each serving field or storage-only builder field written to a
+  replacement row or by hydration must be a contract-defined literal or take
+  all of its inputs only from one or more of these exhaustive input classes:
+  - the current batch's staged normalized events;
+  - interpretation- and manifest-owned authority tables: identity rows,
+    discovery edges, contract instance addresses, the specifically admitted
+    [`migration_discovery_associations`](glossary.md#migration-correlation-group)
+    evidence described below,
+    [verified label preimages](glossary.md#preimage-observation--label-preimage),
+    and staged manifest state — inputs to projection, not projection rows;
+  - the Project request's target context: chain, target block number and hash,
+    and the `chain_lineage` timestamp of that target block, written as
+    publication context;
+  - `chain_lineage` context resolved at any otherwise-admitted input's stored
+    chain position, including a staged event's own position, for times such as
+    registration, creation, and last change;
+  - timestamp alignment that selects another chain's latest canonical-family
+    block at or before an input timestamp, for auxiliary-chain positions such as
+    a declared registry path's execution-chain context;
+  - a replacement row already staged in the same batch and derived only from
+    these inputs;
+  - a field deliberately stored for later reuse; or
+  - the provider result and revalidated canonical-head context used by the
+    documented Project [hydration](glossary.md#hydration) paths.
+  A new non-maintenance input class requires this rule to change with the
+  builder that introduces it. For replacement-row construction, a live
+  projection-table read is allowed only to obtain a stored reuse field when the
+  query proves the row is outside the affected scope and merges staged
+  replacements for affected rows, or for explicit existing-row-only
+  carry-forward. It must never use a row that may also be rebuilt in the batch.
 - Exact-name reads resolve snapshot selection first, then join only rows
   admitted at those positions.
 - A row published at an earlier target may serve a later selected head when the

@@ -1557,13 +1557,29 @@ creates ownership, resolver, record, or primary-name truth.
 
 ## Projection
 
-a disposable read-model table whose serving fields are rebuilt
+a disposable read-model table whose event-derived serving fields are rebuilt
 deterministically from canonical facts and normalized events (standard
 event-sourcing usage); resource-keyed rows additionally require the event's
-resource to resolve to a canonical identity row at rebuild time. A projection
-table may carry explicitly documented Project-owned maintenance fields that
-readers never select and that an affected row rebuild clears. The schema-v2
-Project phase is the only projection writer.
+resource to resolve to a canonical identity row at rebuild time. Documented
+[hydration](#hydration) is a separate, hash-pinned provider overlay on that
+deterministic baseline, not an input to deterministic replay.
+The closed set of Project-owned maintenance fields is `last_recomputed_at` on
+every projection
+table except `primary_names_current`; `inserted_at` on `name_current`,
+`children_current`, `permissions_current`, `record_inventory_current`,
+`resolver_current`, and `address_names_current`; and
+`reverse_hydration_attempted_block_number`,
+`reverse_hydration_attempted_block_hash`, and
+`reverse_hydration_attempt_ordinal` on `primary_names_current`. The Project
+publication transaction clock supplies both timestamp fields through database
+defaults; record hydration also advances `last_recomputed_at` from its
+publication transaction clock. Reverse-name hydration supplies its three
+selection fields from the revalidated hydration head and the Project-owned
+attempt-order sequence. These fields are not part of the serving shape, API and
+history consumers never receive them, and rebuilding an affected row clears
+their earlier values. The [projection rules](projections.md#rules) govern every
+other column, including serving fields and storage-only keys or retained
+evidence. The schema-v2 Project phase is the only projection writer.
 
 ## Projection generation
 

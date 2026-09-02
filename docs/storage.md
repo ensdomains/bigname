@@ -996,7 +996,9 @@ Projection rows carry:
 - manifest and source-family evidence;
 - support status and an explicit unsupported reason when applicable;
 - canonical chain-position or target-publication evidence; and
-- the last recomputation time.
+- the [Project-owned maintenance fields](glossary.md#projection) defined for
+  that family. `primary_names_current` carries rolling hydration-selection
+  fields rather than a last-recomputation time.
 
 An unchanged row may retain an earlier publication target when a later Project
 run does not affect its scope. Serving admission therefore accepts targets at
