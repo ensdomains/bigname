@@ -88,20 +88,16 @@ pub(super) async fn build(
                  )) = pointer.resolver_address
             WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
             UNION ALL
-            -- ENSv1 and Basenames read the registry's current resolver and then read node-keyed
-            -- resolver storage, independent of write time.
+            -- ENSv1 reads the registry's current resolver and then reads node-keyed resolver
+            -- storage, independent of write time.
             -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)
-            -- (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
-            -- (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L17-L23 @ basenames@1809bbc)
             SELECT pointer.resource_id AS attributed_resource_id, event.*
             FROM pointers pointer
             JOIN project_events event
-             ON event.chain_id = $1
+              ON event.chain_id = $1
              AND event.logical_name_id IS NULL
-             AND event.source_family IN (
-                 'ens_v1_resolver_l1', 'basenames_base_resolver'
-             )
+             AND event.source_family = 'ens_v1_resolver_l1'
              AND lower(event.after_state ->> 'node') = pointer.namehash
              AND lower(COALESCE(
                     NULLIF(event.after_state ->> 'resolver', ''),
@@ -111,8 +107,7 @@ pub(super) async fn build(
               AND pointer.pointer_source_family IN (
                   'ens_v1_registry_l1',
                   'ens_v1_registrar_l1',
-                  'ens_v1_wrapper_l1',
-                  'basenames_base_registry'
+                  'ens_v1_wrapper_l1'
               )
             UNION ALL
             -- The guarded ENSv2-origin exception uses the exact declaration already selected by

@@ -91,13 +91,10 @@ pub(super) async fn include_changed_record_consumers(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    // ENSv1 and Basenames resolver writes may carry only the node and resolver emitter: the
-    // record events identify the name solely by its node hash, with the resolver as the emitting
-    // address.
+    // ENSv1 resolver writes may carry only the node and resolver emitter: the record events
+    // identify the name solely by its node hash, with the resolver as the emitting address.
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5-L10 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f)
-    // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/ITextResolver.sol:L4-L10 @ basenames@1809bbc)
-    // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/IAddrResolver.sol:L7-L8 @ basenames@1809bbc)
     // Match those facts to
     // the previously published inventory's exact name surface so a record-only live window
     // rebuilds the consuming name and resource without expanding every name on a shared resolver.
@@ -128,9 +125,7 @@ pub(super) async fn include_changed_record_consumers(
                    event.logical_name_id = surface.logical_name_id
                    OR (
                        event.logical_name_id IS NULL
-                       AND event.source_family IN (
-                           'ens_v1_resolver_l1', 'basenames_base_resolver'
-                       )
+                       AND event.source_family = 'ens_v1_resolver_l1'
                        AND lower(event.after_state ->> 'node') =
                            lower(surface.namehash)
                    )

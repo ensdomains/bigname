@@ -286,8 +286,7 @@ async fn create_scoped_event_ids(
                   event.source_family IN (
                       'ens_v1_registry_l1',
                       'ens_v1_registrar_l1',
-                      'ens_v1_wrapper_l1',
-                      'basenames_base_registry'
+                      'ens_v1_wrapper_l1'
                   ) OR (
                       event.source_family IN (
                           'ens_v2_registry_l1', 'ens_v2_root_l1'
@@ -304,8 +303,7 @@ async fn create_scoped_event_ids(
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized') AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         ) pointer USING (logical_name_id)
         JOIN normalized_events record ON record.chain_id = $1 AND record.logical_name_id IS NULL
-         AND record.source_family IN ('ens_v1_resolver_l1', 'basenames_base_resolver')
-         AND lower(record.after_state ->> 'node') = lower(surface.namehash)
+         AND record.source_family = 'ens_v1_resolver_l1' AND lower(record.after_state ->> 'node') = lower(surface.namehash)
          AND lower(COALESCE(NULLIF(record.after_state ->> 'resolver', ''),
              NULLIF(record.raw_fact_ref ->> 'emitting_address', ''))) = pointer.resolver_address
         JOIN chain_lineage record_lineage ON record_lineage.chain_id = record.chain_id
