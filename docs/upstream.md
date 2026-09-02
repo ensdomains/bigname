@@ -106,15 +106,72 @@ to the applicable entries below.
 > **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
 > **Since**: `2026-09-02`
 
-> **Graph Node collection-argument schema defaults are omitted locally** — Graph Node publishes collection arguments as
-> nullable `Int` values with `first = 100` and `skip = 0`, while bigname currently publishes the same nullable arguments
-> without schema defaults. The bigname resolver still applies page size `100` and offset `0` when callers omit them.
-> **Upstream**: Graph Node's generated collection arguments assign `skip` the default `0` and `first` the default `100`
-> (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact signature dispositions in the
-> GraphQL oracle `coverage.json`; task `#670/T2` owns publishing the defaults.
-> **Why**: preserving the current runtime page size avoids a behavior change in the capture-preparation change while the
-> entities machinery task aligns the introspected signature.
+> **Generated Domain pagination retains bigname's safety bounds** — Graph Node rejects a non-positive or over-limit
+> `first` and a negative or over-limit `skip`. Bigname's generated-style `domains` root instead returns an empty page for
+> non-positive `first`, caps positive `first` at `200`, treats negative `skip` as zero, and caps
+> positive `skip` at `1_000_000`.
+> **Upstream**: Graph Node accepts `first` only in `1..=max_first` and `skip` only in `0..=max_skip`, returning a range
+> argument error otherwise (upstream: .refs/graph_node/graphql/src/store/query.rs:L62-L84 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the generated root preserves the existing bounded bigname paging behavior while publishing Graph Node's
+> generated argument defaults.
+> **Since**: `2026-09-02`
+
+> **Generated Domain point lookup accepts an ENS name** — `domain(id:)` treats only a canonical `0x` plus 64-hex input
+> as a namehash first, then falls back to the local ENS-name lookup if the entity ID does not match. Every other input
+> takes the direct name lookup path. Namehash precedence prevents a hash-shaped ENS name from shadowing an entity ID.
+> **Upstream**: the ENS subgraph defines `Domain.id` as the namehash
+> (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6), and Graph Node applies the supplied point ID
+> as an equality filter without a name fallback
+> (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the local extension preserves bigname's existing name-string lookup convenience while keeping generated
+> namehash IDs authoritative.
+> **Since**: `2026-09-02`
+
+> **Generated Domain exact-name filtering uses ENS namehash equality** — `Domain_filter.name` normalizes the supplied ENS
+> name and matches its namehash rather than comparing the stored human-readable name bytes directly.
+> **Upstream**: Graph Node maps an equality filter to direct entity-field equality
+> (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe1737), while the ENS subgraph declares
+> the human-readable `Domain.name` separately from the namehash `Domain.id`
+> (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/architecture.md` and `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the existing Manager-facing name semantics treat normalization-equivalent spellings as the same ENS name.
+> **Since**: `2026-09-02`
+
+> **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
+> `owner_in` members use bigname's effective-controller relation. The effective controller agrees with `Domain.owner`
+> when the latest projected registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero address on
+> a non-wrapper-authority name and no later resource-scoped `PermissionChanged` event exists on the selected resource.
+> A zero registry owner is served as the zero address; a masked owner word is served as the registrant fallback, or the
+> zero address when there is none. In both cases the address-name projection drops the row, so the filter selects nothing.
+> Task `#670/T5` owns four remaining disagreement classes: wrapper-authority names; the zero or masked case just described;
+> names without a projected registry-ownership event; and resource-scoped `PermissionChanged` events granting or revoking
+> `resource_control`, or an owner-less `AuthorityEpochChanged` emitted on release. A resource-scoped `PermissionChanged`
+> granting `resource_control` makes its grantee the effective controller, while one revoking the current controller's
+> `resource_control` clears the current controller. The effective controller is then absent when the name has no registrar
+> [token lineage](glossary.md#token-lineage), or falls back to the token holder or registrant otherwise; served control
+> ownership is unchanged by either `PermissionChanged`. A release can also co-emit an owner-less `AuthorityEpochChanged`,
+> which clears the served registry owner so `Domain.owner` falls back to the registrant or zero address, while the epoch
+> event is excluded from the effective-controller fold and the release's `resource_control` grant keeps the registry owner
+> there. `docs/consumer-capabilities.md` § GraphQL compatibility states each class explicitly.
+> **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
+> ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L151-L158 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the four residual classes.
+> **Why**: the effective-controller and served-owner projections intentionally answer different authority questions in
+> those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
+> **Since**: `2026-09-02`
+
+> **Generated Domain `name_contains` retains ENS normalization** — bigname normalizes the supplied ENS fragment before
+> applying the stored-name predicate, so case variants that normalize identically can match even though the separate
+> `name_contains_nocase` member remains absent.
+> **Upstream**: Graph Node maps `contains` to SQL `LIKE` and `contains_nocase` to `ILIKE`
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1535 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T3` owns the remaining filter
+> vocabulary and any later alignment.
+> **Why**: this T2 slice preserves bigname's existing ENS-aware name filtering behavior.
 > **Since**: `2026-09-02`
 
 > **Direct Domain registration-date ordering is a local GraphQL extension** — bigname retains

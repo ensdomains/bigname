@@ -22,6 +22,14 @@ v2. Its retained matchers are:
   [committed SDL fixture](../apps/api/src/tests/fixtures/subgraph_schema.graphql),
   separate from the REST contract.
 
+Deploying a GraphQL schema change is coordinated with the Manager operation
+declarations described in
+[`consumer-capabilities.md`](consumer-capabilities.md#graphql-compatibility).
+The compatibility CI job pins any known declaration-only mismatch exactly and
+validates the complete operation set against a temporary declaration overlay;
+that overlay is review evidence, not a substitute for updating Manager before
+the schema is deployed.
+
 The binary serves `/v2`, but Caddy does not yet admit it. Therefore no REST
 surface is publicly reachable between this deletion and the maintainer-gated
 C3 edge flip. GraphQL remains the only usable API request through this edge.

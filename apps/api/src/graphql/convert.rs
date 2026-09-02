@@ -1,3 +1,4 @@
+use async_graphql::ID;
 use bigname_storage::NameCurrentListRow;
 use serde_json::Value;
 
@@ -27,7 +28,7 @@ impl From<NameCurrentListRow> for Domain {
             .or_else(|| non_empty(row.registrant))
             .unwrap_or_else(|| ZERO_ADDRESS.to_owned());
         Self {
-            id: row.row.namehash,
+            id: ID(row.row.namehash),
             name: Some(row.row.canonical_display_name),
             normalized_name: Some(row.row.normalized_name),
             token_id: non_empty(row.token_id),

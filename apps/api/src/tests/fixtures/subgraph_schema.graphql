@@ -32,7 +32,7 @@ input Block_height {
 scalar Bytes
 
 type Domain {
-	id: String!
+	id: ID!
 	name: String
 	normalizedName: String
 	tokenId: String
@@ -71,6 +71,18 @@ input DomainFilter {
 }
 
 """
+Generated-style partial `Domain_filter` for `Query.domains`.
+"""
+input Domain_filter {
+	id: ID
+	id_in: [ID!]
+	owner: String
+	owner_in: [String!]
+	name: String
+	name_contains: String
+}
+
+"""
 Subgraph `Domain_orderBy`. The underscore + lowercase-`o` type name and the lowercase-camel
 value names are set explicitly rather than relying on async-graphql's default
 SCREAMING_SNAKE_CASE rename.
@@ -79,8 +91,7 @@ enum Domain_orderBy {
 	createdAt
 	expiryDate
 	"""
-	No storage sort column; declared for compatibility and mapped to a degenerate (name) sort in
-	the resolver.
+	Entity ID order uses the namehash bytes rendered as lowercase hexadecimal text.
 	"""
 	id
 	name
@@ -98,14 +109,15 @@ enum OrderDirection {
 type Query {
 	"""
 	`domain(id: ID!)` accepts either an ENS name string (for example `"alice.eth"`) or a
-	namehash. Resolve by name first, then fall back to the namehash, so callers do not have to
-	signal which id form they are sending.
+	namehash. Canonical hash-shaped values resolve by namehash first, then fall back to the name,
+	so a hash-shaped ENS name cannot shadow an entity ID. Ordinary names take the direct name
+	lookup path.
 	"""
 	domain(id: ID!, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): Domain
 	"""
-	`domains(where, first, skip, orderBy, orderDirection)` — offset-paged list.
+	Generated-style offset-paged Domain list.
 	"""
-	domains(where: DomainFilter, first: Int, skip: Int, orderBy: Domain_orderBy, orderDirection: OrderDirection, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): [Domain!]!
+	domains(skip: Int = 0, first: Int = 100, orderBy: Domain_orderBy, orderDirection: OrderDirection, where: Domain_filter, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): [Domain!]!
 	"""
 	`registrationConnection(first: 0, where) { totalCount }` — backs `OwnedNamesCount`.
 	"""

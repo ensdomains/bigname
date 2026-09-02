@@ -19,12 +19,15 @@ def inp(name, fields): return {"kind": "INPUT_OBJECT", "name": name, "fields": N
 def enum(name, values): return {"kind": "ENUM", "name": name, "fields": None, "inputFields": None, "enumValues": [{"name": value, "isDeprecated": False} for value in values], "possibleTypes": None}
 
 S=lambda name: named(name); O=lambda name: named(name,"OBJECT"); I=lambda name: named(name,"INPUT_OBJECT"); E=lambda name: named(name,"ENUM")
+captured_surface=json.loads((root/"apps/api/src/tests/fixtures/graphql-oracle/v1/upstream/schema-surface.json").read_text())
+domain_filter_members=sorted(path.removeprefix("input:Domain_filter.") for path in captured_surface if path.startswith("input:Domain_filter."))
+domain_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID"))),"owner":S("String"),"owner_in":lst(nn(S("String"))),"name":S("String"),"name_contains":S("String")}
 types = [{"kind":"SCALAR","name":name,"fields":None,"inputFields":None,"enumValues":None,"possibleTypes":None} for name in ("String","Boolean","Int","Float","ID","BigInt","Bytes")]
 types += [
  obj("Account", [field("id", nn(S("ID"))),field("domains",nn(lst(nn(O("Domain"))))),field("registrations",nn(lst(nn(O("Registration"))))),field("wrappedDomains",nn(lst(nn(O("WrappedDomain")))))]),
  inp("Block_height", [input_field("hash",S("Bytes")),input_field("number",S("Int")),input_field("number_gte",S("Int"))]),
  obj("Domain", [field("createdAt",nn(S("BigInt"))),field("events",nn(lst(nn(O("DomainEvent"))))),field("expiryDate",S("BigInt")),field("id",nn(S("ID"))),field("isMigrated",nn(S("Boolean"))),field("labelName",S("String")),field("labelhash",S("Bytes")),field("name",S("String")),field("owner",nn(O("Account"))),field("parent",O("Domain")),field("registrant",O("Account")),field("registration",O("Registration")),field("resolvedAddress",O("Account")),field("resolver",O("Resolver")),field("subdomainCount",nn(S("Int"))),field("subdomains",nn(lst(nn(O("Domain"))))),field("ttl",S("BigInt")),field("wrappedDomain",O("WrappedDomain")),field("wrappedOwner",O("Account"))]),
- inp("Domain_filter", [input_field("id",S("ID")),input_field("isMigrated",S("Boolean")),input_field("name",S("String")),input_field("name_contains",S("String")),input_field("owner",S("String")),input_field("owner_in",lst(nn(S("String"))))]),
+ inp("Domain_filter", [input_field(name,domain_filter_types.get(name,S("String"))) for name in domain_filter_members]),
  enum("Domain_orderBy", ["createdAt","expiryDate","id","name"]), enum("OrderDirection",["asc","desc"]),
  obj("Resolver",[field("addr",O("Account")),field("address",nn(S("Bytes"))),field("coinTypes",lst(nn(S("BigInt")))),field("contentHash",S("Bytes")),field("domain",nn(O("Domain"))),field("events",nn(lst(nn(O("ResolverEvent"))))),field("id",nn(S("ID"))),field("texts",lst(nn(S("String"))))]),
  obj("Transfer",[field("id",nn(S("ID"))),field("domain",nn(O("Domain")))]),
@@ -117,7 +120,9 @@ def run_capture(path,mode="ok",block=414,extra=None,ok=True,selected_domain=doma
 def tree(path): return {p.relative_to(path):p.read_bytes() for p in path.rglob("*") if p.is_file()}
 def resign(path,relative):
  manifest=json.loads((path/"manifest.json").read_text()); data=(path/relative).read_bytes()
- if relative=="coverage.json": manifest["coverage_sha256"]=hashlib.sha256(data).hexdigest()
+ if relative=="coverage.json":
+  manifest["coverage_sha256"]=hashlib.sha256(data).hexdigest()
+  next(item for item in manifest["artifacts"] if item["path"]==relative)["sha256"]=manifest["coverage_sha256"]
  else:
   for item in manifest["artifacts"]:
    if item["path"]==relative: item["sha256"]=hashlib.sha256(data).hexdigest()
@@ -160,6 +165,7 @@ with tempfile.TemporaryDirectory() as temporary:
  edited=temp/"edited"; shutil.copytree(first,edited); (edited/"entities/domain/entity-by-id/upstream-response.json").write_bytes(b"{}\n"); verify(edited,False)
  manual_coverage=temp/"manual-coverage"; shutil.copytree(first,manual_coverage); coverage=json.loads((manual_coverage/"coverage.json").read_text()); coverage["local_extensions"][0]["docs"]="manual-coverage"; (manual_coverage/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(manual_coverage,"coverage.json"); result=verify(manual_coverage); assert "captured artifact digests valid; manual coverage valid" in result.stdout
  mismatched_coverage_digest=temp/"mismatched-coverage-digest"; shutil.copytree(first,mismatched_coverage_digest); manifest=json.loads((mismatched_coverage_digest/"manifest.json").read_text()); manifest["coverage_sha256"]="0"*64; (mismatched_coverage_digest/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); result=verify(mismatched_coverage_digest,False); assert "coverage_sha256 mismatch" in result.stderr
+ mismatched_coverage_artifact=temp/"mismatched-coverage-artifact"; shutil.copytree(first,mismatched_coverage_artifact); manifest=json.loads((mismatched_coverage_artifact/"manifest.json").read_text()); next(entry for entry in manifest["artifacts"] if entry["path"]=="coverage.json")["sha256"]="0"*64; (mismatched_coverage_artifact/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); result=verify(mismatched_coverage_artifact,False); assert "coverage.json artifact digest differs from coverage_sha256" in result.stderr
  invalid_claims=temp/"invalid-claims"; shutil.copytree(first,invalid_claims); coverage=json.loads((invalid_claims/"coverage.json").read_text()); coverage["claimed_paths"].append(None); (invalid_claims/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(invalid_claims,"coverage.json"); verify(invalid_claims,False)
  duplicate_claims=temp/"duplicate-claims"; shutil.copytree(first,duplicate_claims); coverage=json.loads((duplicate_claims/"coverage.json").read_text()); coverage["claimed_paths"].append(coverage["claimed_paths"][0]); (duplicate_claims/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(duplicate_claims,"coverage.json"); verify(duplicate_claims,False)
  stale_scope=temp/"stale-scope"; shutil.copytree(first,stale_scope); coverage=json.loads((stale_scope/"coverage.json").read_text()); coverage["upstream_only"].append({"scope":"field:Domain.missing","status":"deferred","owner":"#1","docs":"x"}); (stale_scope/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_scope,"coverage.json"); verify(stale_scope,False)
@@ -187,6 +193,6 @@ with tempfile.TemporaryDirectory() as temporary:
   os.environ["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"; module.verify(first)
  finally:
   os.environ.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None); socket.socket=original
- print("graphql compatibility oracle tool tests: 54 passed (oracle request headers; null-repeatability capture; 113-type coverage census; captured-upstream coverage validation; coverage digest validation; claimed-path validation; logging surface disposition)")
+ print("graphql compatibility oracle tool tests: 55 passed (oracle request headers; null-repeatability capture; 113-type coverage census; captured-upstream coverage validation; coverage digest validation; claimed-path validation; logging surface disposition)")
 server.shutdown()
 PY

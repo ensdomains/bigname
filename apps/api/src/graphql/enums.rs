@@ -10,8 +10,7 @@ pub(crate) enum DomainOrderBy {
     CreatedAt,
     #[graphql(name = "expiryDate")]
     ExpiryDate,
-    /// No storage sort column; declared for compatibility and mapped to a degenerate (name) sort in
-    /// the resolver.
+    /// Entity ID order uses the namehash bytes rendered as lowercase hexadecimal text.
     #[graphql(name = "id")]
     Id,
     #[graphql(name = "name")]
