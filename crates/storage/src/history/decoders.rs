@@ -25,6 +25,7 @@ pub(super) fn decode_history_event(row: PgRow) -> Result<HistoryEvent> {
         namespace: crate::sql_row::get(&row, "namespace")?,
         logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
         resource_id: crate::sql_row::get(&row, "resource_id")?,
+        registration_id: crate::sql_row::get(&row, "registration_id")?,
         event_kind: crate::sql_row::get(&row, "event_kind")?,
         source_family: crate::sql_row::get(&row, "source_family")?,
         manifest_version: crate::sql_row::get(&row, "manifest_version")?,

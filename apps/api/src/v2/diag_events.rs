@@ -247,6 +247,7 @@ mod tests {
             namespace: "ens".to_owned(),
             logical_name_id: Some("ens:alice.eth".to_owned()),
             resource_id: Some(Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()),
+            registration_id: Some(Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()),
             event_kind: "SurfaceBound".to_owned(),
             source_family: "ens_v1_registry_l1".to_owned(),
             manifest_version: 7,

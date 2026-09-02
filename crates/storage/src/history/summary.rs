@@ -4,7 +4,9 @@ use sqlx::{PgConnection, Postgres, QueryBuilder};
 
 use super::{
     EventHistoryReadFilter, HistoryChainPositionSample, HistorySummary, HistorySummaryMode,
-    paging::{push_history_filters, push_history_order_terms},
+    paging::{
+        push_history_filters, push_history_order_terms, push_product_history_duplicate_filter,
+    },
     source::push_history_source,
 };
 
@@ -48,6 +50,7 @@ async fn load_history_total_count(
     );
     push_history_source(&mut builder, false);
     push_history_filters(&mut builder, filter, canonical_only);
+    push_product_history_duplicate_filter(&mut builder);
 
     let total_count = builder
         .build_query_scalar::<i64>()
@@ -107,6 +110,7 @@ async fn load_history_full_summary(
     );
     push_history_source(&mut builder, false);
     push_history_filters(&mut builder, filter, canonical_only);
+    push_product_history_duplicate_filter(&mut builder);
 
     let row = builder
         .build()
@@ -155,6 +159,7 @@ async fn load_history_chain_position_samples(
         "#,
     );
     push_history_filters(&mut builder, filter, canonical_only);
+    push_product_history_duplicate_filter(&mut builder);
     builder.push(
         r#"
         ORDER BY

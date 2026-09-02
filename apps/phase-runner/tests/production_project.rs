@@ -27,7 +27,7 @@ use bigname_project::{
     RunMode,
 };
 use bigname_storage::{
-    NameCurrentRow, READABLE_REVERSE_IDENTITY_CTES, SurfaceBindingKind,
+    NameCurrentRow, READABLE_REVERSE_IDENTITY_CTES, record_version_boundary_storage_key,
     resolution_verified_support_boundary,
 };
 use phase_runner::{
@@ -1245,7 +1245,10 @@ async fn record_version_boundary_excludes_prior_records_and_keeps_later_records(
     )
     .fetch_one(scratch.pool())
     .await?;
-    assert!(inventory.0.starts_with("ens:0xalice:"));
+    assert_eq!(
+        inventory.0,
+        record_version_boundary_storage_key(&inventory.1, Uuid::parse_str(RESOURCE)?)?
+    );
     assert_eq!(
         inventory.1["event_kind"],
         Value::String("RecordVersionChanged".into())
@@ -2116,19 +2119,9 @@ async fn basenames_projection_retains_execution_admission_and_both_chain_positio
     seed_basenames_project_fixture(scratch.pool()).await?;
     run_project(scratch.pool(), BASE_CHAIN, None, RunMode::Normal, 0, 2).await?;
 
-    let projected = sqlx::query(
-        "SELECT surface_binding_id, resource_id, token_lineage_id,
-                declared_summary, provenance, chain_positions,
-                canonicality_summary, manifest_version, last_recomputed_at
-         FROM name_current
-         WHERE logical_name_id = 'basenames:0xalice-base'",
-    )
-    .fetch_one(scratch.pool())
-    .await?;
-    let provenance: Value = projected.try_get("provenance")?;
-    let chain_positions: Value = projected.try_get("chain_positions")?;
+    let row = load_name_current_row(scratch.pool(), "basenames:0xalice-base").await?;
     assert!(
-        provenance["manifest_versions"]
+        row.provenance["manifest_versions"]
             .as_array()
             .is_some_and(|versions| versions.iter().any(|version| {
                 version["source_family"] == "basenames_execution"
@@ -2137,7 +2130,7 @@ async fn basenames_projection_retains_execution_admission_and_both_chain_positio
                     && version["deployment_epoch"] == "basenames_v1"
             }))
     );
-    assert!(chain_positions.as_object().is_some_and(|positions| {
+    assert!(row.chain_positions.as_object().is_some_and(|positions| {
         positions
             .values()
             .any(|position| position["chain_id"] == BASE_CHAIN)
@@ -2146,32 +2139,117 @@ async fn basenames_projection_retains_execution_admission_and_both_chain_positio
                 .any(|position| position["chain_id"] == ETHEREUM_CHAIN)
     }));
 
-    let declared_summary: Value = projected.try_get("declared_summary")?;
     assert_eq!(
-        declared_summary["topology"]["transport"]["contract_address"], BASENAMES_L1_RESOLVER,
+        row.declared_summary["topology"]["transport"]["contract_address"], BASENAMES_L1_RESOLVER,
         "Project must publish the domain serializer's lowercase transport address"
     );
-    let row = NameCurrentRow {
-        logical_name_id: "basenames:0xalice-base".into(),
-        namespace: "basenames".into(),
-        canonical_display_name: "alice.base.eth".into(),
-        normalized_name: "alice.base.eth".into(),
-        namehash: "0xalice-base".into(),
-        surface_binding_id: projected.try_get("surface_binding_id")?,
-        resource_id: projected.try_get("resource_id")?,
-        token_lineage_id: projected.try_get("token_lineage_id")?,
-        binding_kind: Some(SurfaceBindingKind::DeclaredRegistryPath),
-        coverage: declared_summary["coverage"].clone(),
-        declared_summary,
-        provenance,
-        chain_positions,
-        canonicality_summary: projected.try_get("canonicality_summary")?,
-        manifest_version: projected.try_get("manifest_version")?,
-        last_recomputed_at: projected.try_get("last_recomputed_at")?,
-    };
     assert!(
         resolution_verified_support_boundary(&row, None).is_some(),
         "projected Basenames rows must remain inside the retained verified-resolution support class"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn basenames_ownerless_serving_retains_verified_transport_support() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_basenames_ownerless").await?;
+    seed_basenames_project_fixture(scratch.pool()).await?;
+    sqlx::query("UPDATE surface_bindings SET active_to = to_timestamp(3)")
+        .execute(scratch.pool())
+        .await?;
+    insert_namespaced_event(
+        scratch.pool(),
+        "basenames",
+        BASE_CHAIN,
+        3,
+        Some("basenames:0xalice-base"),
+        Some(BASENAMES_RESOURCE),
+        "AuthorityTransferred",
+        "basenames_base_registry",
+        1,
+        json!({
+            "owner":"0x0000000000000000000000000000000000000000",
+            "owner_getter":"0x0000000000000000000000000000000000000000",
+            "owner_getter_reason":"literal_zero"
+        }),
+        json!({"emitting_address":"0x4200000000000000000000000000000000000002"}),
+    )
+    .await?;
+    run_project(scratch.pool(), BASE_CHAIN, None, RunMode::Normal, 0, 3).await?;
+
+    let row = load_name_current_row(scratch.pool(), "basenames:0xalice-base").await?;
+    assert_eq!(row.resource_id, None);
+    assert_eq!(row.surface_binding_id, None);
+    assert_eq!(row.binding_kind, None);
+    assert_eq!(row.declared_summary["topology"]["registry_path"], json!([]));
+    assert_eq!(
+        row.serving_resource_id,
+        Some(Uuid::parse_str(BASENAMES_RESOURCE)?)
+    );
+    assert!(
+        resolution_verified_support_boundary(&row, None).is_some(),
+        "ownerless Basenames serving must retain execution manifest provenance, both chain positions, and transport topology: {row:?}"
+    );
+
+    insert_namespaced_event(
+        scratch.pool(),
+        "basenames",
+        BASE_CHAIN,
+        4,
+        None,
+        None,
+        "RecordVersionChanged",
+        "basenames_base_resolver",
+        1,
+        json!({"node":"0xalice-base", "record_version":"1"}),
+        json!({"emitting_address":BASENAMES_RESOLVER}),
+    )
+    .await?;
+    insert_namespaced_event(
+        scratch.pool(),
+        "basenames",
+        BASE_CHAIN,
+        4,
+        None,
+        None,
+        "RecordChanged",
+        "basenames_base_resolver",
+        1,
+        json!({
+            "node":"0xalice-base",
+            "record_family":"text",
+            "record_key":"text:description",
+            "selector_key":"description",
+            "value":"readable after version"
+        }),
+        json!({"emitting_address":BASENAMES_RESOLVER}),
+    )
+    .await?;
+    run_project(
+        scratch.pool(),
+        BASE_CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(BASE_CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    let (inventory_boundary, inventory_value): (Value, String) = sqlx::query_as(
+        "SELECT record_version_boundary, entries -> 0 ->> 'value'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(BASENAMES_RESOURCE)?)
+    .fetch_one(scratch.pool())
+    .await?;
+    let row = load_name_current_row(scratch.pool(), "basenames:0xalice-base").await?;
+    assert_eq!(inventory_value, "readable after version");
+    assert_eq!(
+        row.declared_summary["topology"]["version_boundaries"]["record_version_boundary"],
+        inventory_boundary,
+        "verified Basenames lookup requires topology and inventory to select the same record boundary"
     );
     scratch.cleanup().await
 }
@@ -13326,11 +13404,17 @@ async fn assert_registrar_transfer_matches_full_rebuild(
 
     normalize_projection_clocks(incremental.pool()).await?;
     normalize_projection_clocks(full.pool()).await?;
-    assert_eq!(
-        serving_table_snapshot(incremental.pool()).await?,
-        serving_table_snapshot(full.pool()).await?,
-        "registrar-transfer incremental tick diverged from a full rebuild"
-    );
+    let incremental_snapshot = serving_table_snapshot(incremental.pool()).await?;
+    let full_snapshot = serving_table_snapshot(full.pool()).await?;
+    for ((incremental_table, incremental_rows), (full_table, full_rows)) in
+        incremental_snapshot.iter().zip(full_snapshot.iter())
+    {
+        assert_eq!(incremental_table, full_table);
+        assert_eq!(
+            incremental_rows, full_rows,
+            "registrar-transfer incremental {incremental_table} diverged from a full rebuild"
+        );
+    }
 
     incremental.cleanup().await?;
     full.cleanup().await
@@ -17253,6 +17337,39 @@ async fn seed_basenames_project_fixture(pool: &PgPool) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+async fn load_name_current_row(pool: &PgPool, logical_name_id: &str) -> Result<NameCurrentRow> {
+    let projected = sqlx::query(
+        "SELECT namespace, raw_name, namehash, surface_binding_id, resource_id,
+                serving_resource_id, token_lineage_id, binding_kind, declared_summary,
+                provenance, chain_positions, canonicality_summary, manifest_version,
+                last_recomputed_at
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    let declared_summary: Value = projected.try_get("declared_summary")?;
+    Ok(NameCurrentRow {
+        logical_name_id: logical_name_id.into(),
+        namespace: projected.try_get("namespace")?,
+        canonical_display_name: projected.try_get("raw_name")?,
+        normalized_name: projected.try_get("raw_name")?,
+        namehash: projected.try_get("namehash")?,
+        surface_binding_id: projected.try_get("surface_binding_id")?,
+        resource_id: projected.try_get("resource_id")?,
+        serving_resource_id: projected.try_get("serving_resource_id")?,
+        token_lineage_id: projected.try_get("token_lineage_id")?,
+        binding_kind: projected.try_get("binding_kind")?,
+        coverage: declared_summary["coverage"].clone(),
+        declared_summary,
+        provenance: projected.try_get("provenance")?,
+        chain_positions: projected.try_get("chain_positions")?,
+        canonicality_summary: projected.try_get("canonicality_summary")?,
+        manifest_version: projected.try_get("manifest_version")?,
+        last_recomputed_at: projected.try_get("last_recomputed_at")?,
+    })
 }
 
 async fn extend_narrow_final_equivalence_fixture(pool: &PgPool) -> Result<()> {

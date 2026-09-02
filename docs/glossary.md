@@ -1296,6 +1296,22 @@ counter used by old-runtime destructive raw-log repair and backfill coverage.
 The schema remains in schema-migration history, but Stage B has no Rust writer or
 coverage consumer for this counter.
 
+<a id="getter-visible-owner"></a>
+**Getter-visible owner** — the registry owner address that an on-chain owner getter would return
+for a clean event word. It preserves the literal event word separately, but treats a current
+Solidity-registry emitter stored as its own owner as zero for control selection. Historical owner
+words that fail the existing masked-address check have no getter-visible owner.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+
+<a id="graphql-claimed-compatibility-surface"></a> **GraphQL claimed compatibility surface** — exact schema paths and response cases promised compatible with a pin.
+
+<a id="graphql-dispositioned-remainder"></a> **GraphQL dispositioned remainder** — differences outside the claim, owned as deferred work or extensions.
+
+<a id="graphql-upstream-census"></a> **GraphQL upstream census** — one deployment's captured schema roots, types,
+fields, arguments, enums, interfaces, unions, and directive definitions, without claiming complete implementation.
+Directive repeatability is excluded at the [GraphQL compatibility oracle's schema-comparison
+boundary](graphql-compatibility-oracle.md#schema-comparison).
+
 ## Hash-pinned
 
 anchored to an exact block hash rather than a block number or
@@ -1711,6 +1727,7 @@ optional display name does not turn them into current-name results. Superseded
 ENSv1 resources remain queryable in resource audit context after ENSv2 becomes
 authoritative.
 
+<a id="released-v2-authority"></a>
 ## Released v2 authority
 
 the authority tombstone left when an
@@ -1776,6 +1793,11 @@ latest block reported by a provider. A GraphQL HTTP request selects this set
 once for all of its root fields and rechecks the Project publication before
 returning data.
 
+<a id="serving-resource"></a>
+**Serving resource** — the typed `resource_id` reference used to select resolver and record data
+when a name has no current control binding. It preserves event-derived read reachability only: it
+does not establish a registration, authority, address-to-name relation, or permission grant.
+
 ## Shadow
 
 (1) manifest rollout/capability value: facts may be interpreted
@@ -1797,6 +1819,7 @@ of protocol authority (for example `ens_v1_registrar_l1`). The unit of manifest
 admission, capability ownership, replay coverage, and provenance attribution.
 
 <a id="surface-binding"></a>
+<a id="surface-name-surface"></a>
 ## Surface (name surface)
 
 an on-chain name identity

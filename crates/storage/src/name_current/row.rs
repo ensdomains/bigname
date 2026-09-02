@@ -16,6 +16,7 @@ pub struct NameCurrentRow {
     pub namehash: String,
     pub surface_binding_id: Option<Uuid>,
     pub resource_id: Option<Uuid>,
+    pub serving_resource_id: Option<Uuid>,
     pub token_lineage_id: Option<Uuid>,
     pub binding_kind: Option<SurfaceBindingKind>,
     pub declared_summary: Value,
@@ -28,6 +29,10 @@ pub struct NameCurrentRow {
 }
 
 impl NameCurrentRow {
+    pub fn record_serving_resource_id(&self) -> Option<Uuid> {
+        self.serving_resource_id.or(self.resource_id)
+    }
+
     /// Load current exact-name projection rows keyed by logical name identity.
     ///
     /// Missing rows are omitted. Duplicate requested ids collapse into one map entry, and map
@@ -52,6 +57,7 @@ pub(super) fn decode_name_current_row(row: PgRow) -> Result<NameCurrentRow> {
         namehash: crate::sql_row::get(&row, "namehash")?,
         surface_binding_id: crate::sql_row::get(&row, "surface_binding_id")?,
         resource_id: crate::sql_row::get(&row, "resource_id")?,
+        serving_resource_id: crate::sql_row::get(&row, "serving_resource_id")?,
         token_lineage_id: crate::sql_row::get(&row, "token_lineage_id")?,
         binding_kind,
         declared_summary: crate::sql_row::get(&row, "declared_summary")?,

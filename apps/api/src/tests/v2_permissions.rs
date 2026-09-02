@@ -72,6 +72,8 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     )
     .await?;
     assert_eq!(paired["data"], json!([]));
+    assert!(paired["meta"].get("completeness").is_none());
+    assert!(paired["meta"].get("unsupported_reason").is_none());
 
     // Anti-vacuity: the same superseded registration is still readable as a resource audit.
     let audited = v2_permissions_payload_for_database(
@@ -162,6 +164,23 @@ async fn v2_get_permissions_empties_a_name_filter_the_projection_does_not_suppor
     let payload =
         v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
     assert_eq!(payload["data"], json!([]));
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
+
+    sqlx::query("UPDATE bigname_phase.name_current SET surface_binding_id = NULL, resource_id = NULL, token_lineage_id = NULL, binding_kind = NULL, support_status = 'supported', unsupported_reason = NULL WHERE raw_name = 'perms.eth'")
+        .execute(&database.pool)
+        .await?;
+    let unbound =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert_eq!(unbound["data"], json!([]));
+    assert_eq!(unbound["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        unbound["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -566,6 +585,32 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     assert_eq!(by_missing_name["data"], json!([]));
     assert_eq!(by_missing_name["page"]["has_more"], json!(false));
     assert_eq!(by_missing_name["page"]["next_cursor"], Value::Null);
+    assert_eq!(
+        by_missing_name["meta"]["completeness"],
+        json!("partial")
+    );
+    assert_eq!(
+        by_missing_name["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
+
+    let by_missing_name_and_registration = v2_permissions_payload_for_database(
+        &database,
+        &format!(
+            "/v2/permissions?name=missing.eth&registration_id={}",
+            v2_permissions_current_resource_id()
+        ),
+    )
+    .await?;
+    assert_eq!(by_missing_name_and_registration["data"], json!([]));
+    assert_eq!(
+        by_missing_name_and_registration["meta"]["completeness"],
+        json!("partial")
+    );
+    assert_eq!(
+        by_missing_name_and_registration["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
 
     database.cleanup().await?;
     Ok(())

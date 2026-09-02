@@ -71,7 +71,10 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                    END AS decoded_label,
                    lower(event.after_state ->> 'child_node') AS namehash,
                    lower(event.after_state ->> 'labelhash') AS labelhash,
-                   lower(event.after_state ->> 'owner') AS owner,
+                   lower(COALESCE(
+                       ownership.owner_getter,
+                       event.after_state ->> 'owner_getter', event.after_state ->> 'owner'
+                   )) AS owner,
                    NULL::text AS registrant,
                    event.normalized_event_id,
                    event.event_identity,
@@ -96,9 +99,23 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
             LEFT JOIN label_preimages preimage
               ON lower(preimage.labelhash) =
                  lower(event.after_state ->> 'labelhash')
+            LEFT JOIN project_latest_registry_owner ownership
+              ON ownership.logical_name_id = event.namespace || ':' ||
+                 lower(event.after_state ->> 'child_node')
             WHERE event.current_rank = 1
-              AND lower(COALESCE(event.after_state ->> 'owner', '')) NOT IN (
-                  '', '0x0000000000000000000000000000000000000000'
+              AND (
+                  lower(COALESCE(
+                      ownership.owner_getter, event.after_state ->> 'owner_getter',
+                      event.after_state ->> 'owner', ''
+                  )) NOT IN (
+                      '', '0x0000000000000000000000000000000000000000'
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM project_name_serving serving
+                      WHERE serving.logical_name_id =
+                            event.namespace || ':' ||
+                            lower(event.after_state ->> 'child_node')
+                  )
               )
         ),
         ranked_v2_subregistries AS (

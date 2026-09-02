@@ -42,15 +42,16 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
     );
     assert!(
         data.iter()
-            .any(|row| row["type"] == json!("record") && row.get("registration_id").is_none()),
-        "surface-only rows must omit registration_id"
+            .any(|row| row["type"] == json!("record")
+                && row.get("registration_id") == Some(&Value::Null)),
+        "surface-only rows must return a null registration_id"
     );
     assert!(
         data.iter().any(|row| {
             row["block_number"] == json!(105)
                 && row["transaction_hash"] == json!("0xtx105")
                 && row["type"] == json!("authority")
-                && row.get("registration_id").is_none()
+                && row.get("registration_id") == Some(&Value::Null)
         }),
         "AuthorityEpochChanged must surface as an authority history row"
     );
@@ -66,6 +67,461 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007120";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:resolver-history.eth";
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "resolver-history.eth",
+        "resolver-history.eth",
+        "node:resolver-history.eth",
+        Uuid::from_u128(0x7120),
+        Uuid::from_u128(0x8120),
+        Uuid::from_u128(0x9120),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=121).await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            Uuid::from_u128(0x7121),
+            None,
+            "0xresolver-history-resource",
+            81,
+        )],
+    )
+    .await?;
+
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            v2_history_event(
+                "ens_v1_unwrapped_authority:2:ethereum-mainnet:block:tx:0:ResolverChanged:0",
+                Some(logical_name_id),
+                Some(Uuid::from_u128(0x7120)),
+                "ResolverChanged",
+                121,
+            ),
+            v2_history_event(
+                "ens_v1_unwrapped_authority:2:ethereum-mainnet:block:tx:0:ResolverChanged:registry-read:0x00000000000000000000000000000000000000aa",
+                Some(logical_name_id),
+                Some(Uuid::from_u128(0x7121)),
+                "ResolverChanged",
+                121,
+            ),
+        ],
+    )
+    .await?;
+
+    for route in [
+        "/v2/names/resolver-history.eth/history?scope=both&page_size=20",
+        "/v2/names/resolver-history.eth/history?scope=registration&page_size=20",
+        "/v2/events?name=resolver-history.eth&page_size=20",
+        "/v2/events?registration_id=00000000-0000-0000-0000-000000007120&page_size=20",
+        "/v2/addresses/0x0000000000000000000000000000000000007120/history?relation=manager&page_size=20",
+    ] {
+        let payload = v2_history_payload_for_database(&database, route).await?;
+        let rows = payload["data"].as_array().expect("history data");
+        assert_eq!(rows.len(), 1, "{route}: {rows:?}");
+        assert_eq!(rows[0]["type"], json!("resolver"), "{route}");
+        assert_eq!(
+            rows[0]["registration_id"],
+            json!(Uuid::from_u128(0x7120).to_string()),
+            "{route}"
+        );
+    }
+
+    let diagnostics = v2_history_payload_for_database(
+        &database,
+        "/v2/diagnostics/events?name=resolver-history.eth&page_size=20",
+    )
+    .await?;
+    let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic events");
+    assert_eq!(diagnostic_rows.len(), 2, "{diagnostic_rows:?}");
+    assert!(diagnostic_rows.iter().any(|row| {
+        row["event_identity"]
+            .as_str()
+            .is_some_and(|identity| identity.contains(":ResolverChanged:registry-read:"))
+    }));
+
+    let diagnostic_first = v2_history_payload_for_database(
+        &database,
+        "/v2/diagnostics/events?name=resolver-history.eth&page_size=1",
+    )
+    .await?;
+    let diagnostic_cursor = diagnostic_first["page"]["next_cursor"]
+        .as_str()
+        .expect("diagnostic cursor after the control-resource row");
+    assert!(diagnostic_first["data"][0]["event_identity"]
+        .as_str()
+        .is_some_and(|identity| identity.contains(":ResolverChanged:registry-read:")));
+    let diagnostic_second = v2_history_payload_for_database(
+        &database,
+        &format!(
+            "/v2/diagnostics/events?name=resolver-history.eth&page_size=1&cursor={diagnostic_cursor}"
+        ),
+    )
+    .await?;
+    assert_eq!(diagnostic_second["data"].as_array().map(Vec::len), Some(1));
+    assert!(!diagnostic_second["data"][0]["event_identity"]
+        .as_str()
+        .is_some_and(|identity| identity.contains(":ResolverChanged:registry-read:")));
+
+    let product_page = bigname_storage::load_name_history_page(
+        &database.pool,
+        logical_name_id,
+        &[Uuid::from_u128(0x7120), Uuid::from_u128(0x7121)],
+        bigname_storage::HistoryScope::Both,
+        true,
+        None,
+        20,
+        bigname_storage::HistorySummaryMode::Count,
+    )
+    .await?;
+    assert_eq!(product_page.rows.len(), 1);
+    assert_eq!(
+        product_page.summary.map(|summary| summary.total_count),
+        Some(1)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_registry_history_registration_identity_uses_event_position() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007122";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:event-position-history.eth";
+    let resource_id = Uuid::from_u128(0x7122);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "event-position-history.eth",
+        "event-position-history.eth",
+        "node:event-position-history.eth",
+        resource_id,
+        Uuid::from_u128(0x8122),
+        Uuid::from_u128(0x9122),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=121).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings
+         SET active_from = to_timestamp(1700000121) + interval '1 microsecond',
+             active_to = to_timestamp(1700000121) + interval '3 microseconds'
+         WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::from_u128(0x9122))
+    .execute(&database.pool)
+    .await?;
+
+    let mut before = v2_history_event(
+        "registry-resolver-before-binding",
+        Some(logical_name_id),
+        Some(resource_id),
+        "ResolverChanged",
+        121,
+    );
+    before.source_family = "ens_v1_registry_l1".to_owned();
+    before.log_index = Some(0);
+    let mut during = v2_history_event(
+        "registry-resolver-during-binding",
+        Some(logical_name_id),
+        Some(resource_id),
+        "ResolverChanged",
+        121,
+    );
+    during.source_family = "ens_v1_registry_l1".to_owned();
+    during.log_index = Some(2);
+    let mut after = v2_history_event(
+        "registry-resolver-after-binding",
+        Some(logical_name_id),
+        Some(resource_id),
+        "ResolverChanged",
+        121,
+    );
+    after.source_family = "ens_v1_registry_l1".to_owned();
+    after.log_index = Some(4);
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[before, during, after],
+    )
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v2/events?name=event-position-history.eth&page_size=20",
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("product history rows");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[0]["log_index"], json!(4));
+    assert_eq!(rows[0]["registration_id"], Value::Null);
+    assert_eq!(rows[1]["log_index"], json!(2));
+    assert_eq!(rows[1]["registration_id"], json!(resource_id.to_string()));
+    assert_eq!(rows[2]["log_index"], json!(0));
+    assert_eq!(rows[2]["registration_id"], Value::Null);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007130";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:ownerless-history.eth";
+    let control_resource_id = Uuid::from_u128(0x7130);
+    let read_resource_id = Uuid::from_u128(0x7131);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "ownerless-history.eth",
+        "ownerless-history.eth",
+        "node:ownerless-history.eth",
+        control_resource_id,
+        Uuid::from_u128(0x8130),
+        Uuid::from_u128(0x9130),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            read_resource_id,
+            None,
+            "0xownerless-history-resource",
+            81,
+        )],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET serving_resource_id = $2,
+             surface_binding_id = NULL,
+             resource_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL,
+             declared_summary = jsonb_build_object(
+                 'registration', jsonb_build_object('status', 'unregistered'),
+                 'control', jsonb_build_object('status', 'unregistered')
+             )
+         WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .bind(read_resource_id)
+    .execute(&database.pool)
+    .await?;
+    seed_v2_history_blocks(&database, 121..=122).await?;
+    let mut authority = v2_history_event(
+        "ownerless-registry-authority",
+        Some(logical_name_id),
+        Some(read_resource_id),
+        "AuthorityTransferred",
+        121,
+    );
+    authority.source_family = "ens_v1_registry_l1".to_owned();
+    authority.after_state = json!({
+        "node": "node:ownerless-history.eth",
+        "owner": "0x0000000000000000000000000000000000000000",
+        "owner_getter": "0x0000000000000000000000000000000000000000",
+        "owner_getter_reason": "literal_zero",
+        "authority_kind": null
+    });
+    let mut epoch = v2_history_event(
+        "ownerless-registry-authority-epoch",
+        Some(logical_name_id),
+        Some(read_resource_id),
+        "AuthorityEpochChanged",
+        121,
+    );
+    epoch.source_family = "ens_v1_registry_l1".to_owned();
+    epoch.after_state = json!({
+        "node": "node:ownerless-history.eth",
+        "owner": "0x0000000000000000000000000000000000000000",
+        "owner_getter": "0x0000000000000000000000000000000000000000",
+        "owner_getter_reason": "literal_zero",
+        "authority_kind": null
+    });
+    let mut resolver = v2_history_event(
+        "ownerless-registry-resolver",
+        Some(logical_name_id),
+        Some(read_resource_id),
+        "ResolverChanged",
+        122,
+    );
+    resolver.source_family = "ens_v1_registry_l1".to_owned();
+    resolver.after_state = json!({
+        "node": "node:ownerless-history.eth",
+        "resolver": "0x00000000000000000000000000000000000000aa"
+    });
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[authority, epoch, resolver],
+    )
+    .await?;
+
+    for route in [
+        "/v2/names/ownerless-history.eth/history?scope=both&page_size=20",
+        "/v2/events?name=ownerless-history.eth&page_size=20",
+    ] {
+        let payload = v2_history_payload_for_database(&database, route).await?;
+        let rows = payload["data"].as_array().expect("product history rows");
+        assert_eq!(rows.len(), 3, "{route}: {rows:?}");
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["type"] == json!("authority"))
+                .count(),
+            2,
+            "{route}: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.get("registration_id") == Some(&Value::Null)),
+            "{route} exposed the read-only registry resource as a registration: {rows:?}"
+        );
+    }
+
+    let filtered = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={read_resource_id}&page_size=20"),
+    )
+    .await?;
+    assert_eq!(filtered["data"], json!([]));
+
+    let diagnostics = v2_history_payload_for_database(
+        &database,
+        "/v2/diagnostics/events?name=ownerless-history.eth&page_size=20",
+    )
+    .await?;
+    let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic rows");
+    assert_eq!(diagnostic_rows.len(), 3);
+    assert!(diagnostic_rows.iter().all(|row| {
+        row["registration_id"] == json!(read_resource_id.to_string())
+    }));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()> {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000007140";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:registration-filter-history.eth";
+    let resource_id = Uuid::from_u128(0x7140);
+    let later_resource_id = Uuid::from_u128(0x7141);
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "registration-filter-history.eth",
+        "registration-filter-history.eth",
+        "node:registration-filter-history.eth",
+        resource_id,
+        Uuid::from_u128(0x8140),
+        Uuid::from_u128(0x9140),
+        ADDRESS,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            later_resource_id,
+            None,
+            "0xregistration-filter-later-resource",
+            81,
+        )],
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=124).await?;
+    let mut unmapped_surface_event = v2_history_event(
+        "registration-filter-unmapped-surface",
+        Some(logical_name_id),
+        None,
+        "RegistrarNameRegistered",
+        124,
+    );
+    unmapped_surface_event.source_family = "ens_v2_registrar_l1".to_owned();
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            v2_history_event(
+                "registration-filter-grant",
+                Some(logical_name_id),
+                Some(resource_id),
+                "RegistrationGranted",
+                121,
+            ),
+            v2_history_event(
+                "registration-filter-record",
+                Some(logical_name_id),
+                None,
+                "RecordChanged",
+                122,
+            ),
+            v2_history_event(
+                "registration-filter-later-grant",
+                Some(logical_name_id),
+                Some(later_resource_id),
+                "RegistrationGranted",
+                123,
+            ),
+            unmapped_surface_event,
+        ],
+    )
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={resource_id}&page_size=20"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("product event rows");
+    assert_eq!(history_types(rows), vec!["record", "registration"]);
+    assert_eq!(rows[0]["registration_id"], Value::Null);
+    assert_eq!(rows[1]["registration_id"], json!(resource_id.to_string()));
+
+    let first_page = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/events?registration_id={resource_id}&page_size=1"),
+    )
+    .await?;
+    assert_eq!(history_types(first_page["data"].as_array().unwrap()), vec!["record"]);
+    assert_eq!(first_page["page"]["has_more"], json!(true));
+
+    let storage_page = bigname_storage::load_event_history_page(
+        &database.pool,
+        bigname_storage::EventHistoryFilter {
+            resource_id: Some(resource_id),
+            ..bigname_storage::EventHistoryFilter::default()
+        },
+        true,
+        None,
+        20,
+        bigname_storage::HistorySummaryMode::Count,
+        false,
+    )
+    .await?;
+    assert_eq!(storage_page.rows.len(), 2);
+    assert_eq!(
+        storage_page.summary.map(|summary| summary.total_count),
+        Some(2)
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

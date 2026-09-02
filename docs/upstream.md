@@ -100,6 +100,41 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
+> **Graph Node directive repeatability is declared but not resolved** — deployment `QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ` at block 23,000,000 resolved `__Directive.isRepeatable` as null for each of its five directives, producing five non-null-field errors and null data. The same introspection without that field returned 113 types and no errors.
+> **Upstream**: the pinned Graph Node introspection schema declares `isRepeatable: Boolean!` (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L85 @ graph_node@aefe1737), but its directive-object resolver supplies only `name`, `description`, `locations`, and `args` (upstream: .refs/graph_node/graphql/src/introspection/resolver.rs:L252-L263 @ graph_node@aefe1737).
+> **Our rule**: `docs/graphql-compatibility-oracle.md` § Schema comparison omits directive repeatability from capture and comparison.
+> **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
+> **Since**: `2026-09-02`
+
+> **Graph Node collection-argument schema defaults are omitted locally** — Graph Node publishes collection arguments as
+> nullable `Int` values with `first = 100` and `skip = 0`, while bigname currently publishes the same nullable arguments
+> without schema defaults. The bigname resolver still applies page size `100` and offset `0` when callers omit them.
+> **Upstream**: Graph Node's generated collection arguments assign `skip` the default `0` and `first` the default `100`
+> (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact signature dispositions in the
+> GraphQL oracle `coverage.json`; task `#670/T2` owns publishing the defaults.
+> **Why**: preserving the current runtime page size avoids a behavior change in the capture-preparation change while the
+> entities machinery task aligns the introspected signature.
+> **Since**: `2026-09-02`
+
+> **Direct Domain registration-date ordering is a local GraphQL extension** — bigname retains
+> `Domain_orderBy.registrationDate` from bigname's earlier GraphQL schema. The generated upstream equivalent is the nested
+> `registration__registrationDate` value reached through `Domain.registration`.
+> **Upstream**: the ENS subgraph's `Domain` has a `registration` relation but no direct `registrationDate` field, while
+> `Registration` owns `registrationDate` (upstream: .refs/ens_subgraph/schema.graphql:L1-L46 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/schema.graphql:L184-L190 @ ens_subgraph@723f1b6). Graph Node generates sortable child
+> fields as `<parent>__<child>` (upstream: .refs/graph_node/graph/src/schema/api.rs:L531-L603 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact local extension in the GraphQL
+> oracle `coverage.json`; task `#670/T3` owns the order/filter vocabulary.
+> **Why**: retaining the direct value preserves bigname's existing GraphQL query surface without claiming that it is an
+> upstream `Domain_orderBy` value.
+> **Since**: `2026-09-02`
+
+> **ENSv1 and Basenames ownerless registry reads use event-linked reachability** — registry owner events retain their literal owner word as history, while control uses the [getter-visible owner](glossary.md#getter-visible-owner). In the current ENS Solidity registry and Basenames, a literal zero word and the emitting registry's own address are control-equivalent, but neither clears an independently selected resolver. ENSv1 emits the literal owner argument, maps current-registry self storage to getter zero, stores the resolver separately, and its fallback writes current-registry self when asked to store zero `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L67-L68 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L81-L82 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L141 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L170-L172 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)`. The admitted 2017 mainnet LLL registry instead returns its stored owner word unchanged, and the fallback delegates to that getter when the current registry has no record, so an owner equal to that emitter remains authentic `(upstream: .refs/ens_v1_lll/contracts/ENS.lll:L65-L66 @ ens_v1_lll@7e377df)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L29-L34 @ ens_v1@91c966f)`. The similarly named Sepolia legacy deployment uses the Solidity registry artifact and therefore retains the Solidity self-to-zero getter rule `(upstream: .refs/ens_v1/deploy/registry/00_deploy_registry.ts:L14-L19 @ ens_v1@91c966f)` `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)`. Basenames emits the literal owner arguments, maps registry-self to getter zero, and stores owner and resolver independently `(upstream: .refs/basenames/src/L2/Registry.sol:L100-L134 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L165-L180 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L2/Registry.sol:L214-L216 @ basenames@1809bbc)`.
+> **Our rule**: Getter-visible zero ends only registry-direct control. A current nonzero resolver pointer already linked by a post-surface registry event remains readable, and a later post-surface resolver event can restore that read path without opening a binding. Direct-child enumeration requires either live control or that nonzero event-linked resolver; fallback `recordExists` alone is not enough.
+> **Narrowing**: A resolver selected only before the name surface and never repeated remains unlinked and unserved under the separate pre-surface divergence below; this change does not synthesize that pointer.
+> **Since**: `2026-08-27`
+
 > **Pre-surface-only ENSv1 resolver selection is not projected** — when a resolver was selected before bigname materialized a [name surface](glossary.md#surface-name-surface) and was never selected again afterward, bigname retains the record facts but has no linked current-resolver pointer and does not publish a record inventory for the name.
 > **Upstream**: ENSv1 reads the resolver stored for the node without requiring a later selection event `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)`, and its text resolver reads storage keyed by record version, node, and key `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Resolver and records and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.
@@ -113,7 +148,7 @@ to the applicable entries below.
 > **Since**: `2026-06-30`
 
 > **Graph Node query-execution narrowing on the compatibility GraphQL surface** — bigname exposes Graph Node's `Block_height`, `_meta`, and `_SubgraphErrorPolicy_` shapes, including Graph Node's `hash`-then-`number`-then-`number_gte` selector precedence and rejection of an empty block object, but currently executes entity reads only at a request-scoped [served head](glossary.md#served-head). Historical block numbers and hashes are rejected, and `subgraphError` is accepted without per-entity omission because the current name projections do not attribute indexing errors to individual entities. `_Meta_.deployment` identifies bigname's interpreter content rather than a Graph Node deployment, and `hasIndexingErrors` maps durable serving-readiness signals rather than Graph Node's stored non-fatal-error flag. On chains that require verification, the verification-floor check can transiently report `true` while healthy verification catches up after a batch.
-> **Upstream**: Graph Node parses hash, number, and minimum-number block constraints into distinct execution selectors `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L80-L100 @ graph_node@aefe1737)`. It defaults a missing `subgraphError` to `deny` and combines field policies for execution `(upstream: .refs/graph_node/graphql/src/execution/query.rs:L308-L329 @ graph_node@aefe1737)`. Its metadata resolver returns the deployment identifier and maps `hasIndexingErrors` from the deployment's non-fatal-error state `(upstream: .refs/graph_node/graphql/src/store/resolver.rs:L228-L245 @ graph_node@aefe1737)`.
+> **Upstream**: Graph Node represents hash, number, minimum-number, and latest constraints as distinct selectors `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L53-L70 @ graph_node@aefe1737)` and applies that precedence while rejecting an empty block object `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L80-L100 @ graph_node@aefe1737)`. A number-constrained `_meta` result has a null block hash `(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L36-L73 @ graph_node@aefe1737)`. It defaults a missing `subgraphError` to `deny` and combines field policies for execution `(upstream: .refs/graph_node/graphql/src/execution/query.rs:L308-L329 @ graph_node@aefe1737)`. Its metadata resolver returns the deployment identifier and maps `hasIndexingErrors` from the deployment's non-fatal-error state `(upstream: .refs/graph_node/graphql/src/store/resolver.rs:L228-L245 @ graph_node@aefe1737)`.
 > **Our rule**: `docs/architecture.md` § Subgraph-compatible GraphQL surface and `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Why**: the current phase projections provide one rebuildable served publication, not historical entity snapshots or per-entity indexing-error attribution. Using the existing served-head gate preserves every Manager field selection while adding the standard query vocabulary without introducing in-process filtering or fabricating error provenance.
 > **Since**: `2026-08-31`
@@ -149,6 +184,13 @@ to the applicable entries below.
 > **Our rule**: `docs/api-v2.md` § Record-key grammar, `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`, and `docs/execution.md` § Resolver-record lookup.
 > **Why**: bigname's API and lookup path use textual selector keys across route parsing and sort/dedupe. The `u64` boundary keeps that selector identity canonical and fail-closed until a wider coin-type representation is deliberately designed.
 > **Since**: `2026-06-12`
+
+<a id="ens-verified-resolution-ccip-read-non-following"></a>
+> **ENS verified-resolution CCIP-Read non-following** — for ENS record resolution, bigname does not follow EIP-3668 `OffchainLookup` continuations through the records route / resolver-record lookup. The affected selector is returned as explicit `unsupported` with reason `offchain_lookup_required`; no gateway request is made. The forward check in ENS/60 primary-name verification is outside this divergence because it follows the resolver-supplied gateway URLs from the EIP-3668 `OffchainLookup` `urls` field; see `docs/api-v2.md` § Error Model.
+> **Upstream**: ENSv1's Universal Resolver passes configured batch gateways into a forward-resolution path whose caller is expected to enable EIP-3668 `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L81-L110 @ ens_v1@91c966f)`. Its CCIP reader propagates resolver `OffchainLookup` data, including the supplied URLs and callback data `(upstream: .refs/ens_v1/contracts/ccipRead/CCIPReader.sol:L44-L88 @ ens_v1@91c966f)`, and the batch path routes outstanding offchain requests through its gateway set `(upstream: .refs/ens_v1/contracts/ccipRead/CCIPBatcher.sol:L70-L125 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/execution.md` § Resolver-record lookup and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.
+> **Why**: the admitted ENS verified record-resolution path is fail-closed over direct/on-chain execution. Gateway continuation is outside that record support slice, so bigname reports the explicit unsupported reason instead of following transport or treating the outcome as a missing record.
+> **Since**: `2026-04-18`
 
 > **Basenames verified/explain public support narrowing** — bigname narrows the upstream Basenames L1Resolver and CCIP entrypoint into one first public support class instead of publishing every upstream-reachable non-`base.eth` path immediately.
 > **Upstream**: `(upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)` `(upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)` `(upstream: .refs/basenames/README.md:L71 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc)` `(upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)`

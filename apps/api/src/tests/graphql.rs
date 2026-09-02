@@ -2154,6 +2154,62 @@ async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> 
 }
 
 #[tokio::test]
+async fn graphql_ownerless_domain_resolver_uses_serving_resource_inventory() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    seed_alice_record_inventory(&database).await?;
+
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET serving_resource_id = resource_id,
+            resource_id = NULL,
+            surface_binding_id = NULL,
+            token_lineage_id = NULL,
+            binding_kind = NULL,
+            declared_summary = jsonb_set(
+                jsonb_set(
+                    declared_summary,
+                    '{registration}',
+                    '{"status":"unregistered"}'::jsonb
+                ),
+                '{control}',
+                '{}'::jsonb
+            )
+        WHERE logical_name_id = 'ens:alice.eth'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query Domain($id: String!) {
+            domain(id: $id) {
+                resolver { address texts contentHash addresses { coinType address } }
+            }
+        }"#,
+        json!({ "id": "alice.eth" }),
+    )
+    .await?;
+
+    let resolver = &payload["data"]["domain"]["resolver"];
+    assert_eq!(resolver["address"], json!(GRAPHQL_RESOLVER));
+    assert_eq!(resolver["texts"], json!(["avatar", "url"]));
+    assert_eq!(resolver["contentHash"], json!("0xe30101701220aabbccdd"));
+    assert_eq!(
+        resolver["addresses"],
+        json!([
+            { "coinType": 2_147_483_658u32, "address": "0x00000000000000000000000000000000000000bb" },
+            { "coinType": 60, "address": "0x00000000000000000000000000000000000000aa" },
+        ])
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn graphql_domain_resolver_serves_sepolia_records_via_anchor_fallback() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_erin_sepolia_record_fixture(&database).await?;

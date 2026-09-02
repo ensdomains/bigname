@@ -9,6 +9,7 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    stage::ownerless_registry(transaction).await?;
     sqlx::query(
         r#"
         CREATE TEMP TABLE project_name_authority ON COMMIT DROP AS
@@ -595,44 +596,43 @@ pub(super) async fn build(
         )
         SELECT selected.logical_name_id, selected.selected_authority_arm,
                selected.selected_resource_id, selected.selected_binding_id,
-               jsonb_strip_nulls(jsonb_build_object(
-                   'block_number', selected.selected_epoch_block_number,
-                   'transaction_index', selected.selected_epoch_transaction_index,
-                   'log_index', selected.selected_epoch_log_index
-               )) AS authority_epoch_start_position,
-               selected.proof_kind AS authority_proof_kind,
-               selected.proof_event_id AS authority_proof_event_id,
-               selected.proof_event_identity AS authority_proof_event_identity,
-               selected.transition_id AS authority_transition_id,
-               CASE lifecycle.event_kind
-                   WHEN 'RegistrationReleased' THEN 'unregistered'
-                   WHEN 'RegistrationReserved' THEN 'reserved'
-                   WHEN 'RegistrationGranted' THEN 'registered'
-                   WHEN 'RegistrationRenewed' THEN 'registered'
-                   ELSE CASE
-                       WHEN selected.selected_binding_id IS NULL THEN 'unregistered'
-                       ELSE 'registered'
-                   END
+               (ownerless.logical_name_id IS NOT NULL AND selected.selected_binding_id IS NULL
+                AND NOT (selected.has_ens_v1 AND selected.has_ens_v2)) AS known_ownerless_registry,
+               ownerless.resource_id AS ownerless_registry_resource_id, ownerless.owner_getter_reason,
+               jsonb_strip_nulls(jsonb_build_object('block_number',
+                   selected.selected_epoch_block_number, 'transaction_index',
+                   selected.selected_epoch_transaction_index, 'log_index',
+                   selected.selected_epoch_log_index)) AS authority_epoch_start_position,
+               selected.proof_kind AS authority_proof_kind, selected.proof_event_id AS authority_proof_event_id,
+               selected.proof_event_identity AS authority_proof_event_identity, selected.transition_id AS authority_transition_id,
+               CASE
+                   WHEN lifecycle.event_kind = 'RegistrationReleased' THEN 'unregistered'
+                   WHEN lifecycle.event_kind = 'RegistrationReserved' THEN 'reserved'
+                   WHEN lifecycle.event_kind IN ('RegistrationGranted', 'RegistrationRenewed')
+                       THEN 'registered'
+                   WHEN selected.selected_binding_id IS NULL THEN 'unregistered'
+                   ELSE 'registered'
                END AS lifecycle_state,
                CASE
-                   WHEN selected.selected_authority_arm IS NULL
-                    AND selected.has_ens_v1 AND selected.has_ens_v2
+                   WHEN selected.selected_authority_arm IS NULL AND selected.has_ens_v1 AND selected.has_ens_v2
                     AND selected.deployment_profile = 'sepolia'
                        THEN 'independent_ens_deployments_overlap'
-                   WHEN selected.selected_authority_arm IS NULL
-                    AND selected.has_ens_v1 AND selected.has_ens_v2
+                   WHEN selected.selected_authority_arm IS NULL AND selected.has_ens_v1 AND selected.has_ens_v2
                        THEN 'conflicting_current_ens_authority'
-                   WHEN selected.selected_binding_id IS NULL
-                       THEN 'current_authority_not_projected'
+                   WHEN ownerless.logical_name_id IS NOT NULL AND NOT (
+                        selected.has_ens_v1 AND selected.has_ens_v2
+                    )
+                    AND selected.selected_binding_id IS NULL
+                       THEN NULL
+                   WHEN selected.selected_binding_id IS NULL THEN 'current_authority_not_projected'
                END AS unsupported_reason,
                selected.deployment_profile,
-               jsonb_strip_nulls(jsonb_build_object(
-                   'authority_arm', selected.selected_authority_arm,
-                   'binding_kind', selected.selected_binding_kind,
-                   'resource_id', selected.selected_resource_id,
-                   'surface_binding_id', selected.selected_binding_id
-               )) AS resource_authority_context
+               jsonb_strip_nulls(jsonb_build_object('authority_arm',
+                   selected.selected_authority_arm, 'binding_kind', selected.selected_binding_kind,
+                   'resource_id', selected.selected_resource_id, 'surface_binding_id',
+                   selected.selected_binding_id)) AS resource_authority_context
         FROM selected
+        LEFT JOIN project_latest_registry_owner ownerless USING (logical_name_id)
         LEFT JOIN LATERAL (
             SELECT event.event_kind
             FROM project_events event

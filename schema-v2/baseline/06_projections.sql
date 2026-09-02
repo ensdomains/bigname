@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS name_current (
         REFERENCES surface_bindings (surface_binding_id),
     resource_id uuid
         REFERENCES resources (resource_id),
+    serving_resource_id uuid
+        REFERENCES resources (resource_id),
     token_lineage_id uuid
         REFERENCES token_lineages (token_lineage_id),
     binding_kind text,
@@ -84,6 +86,10 @@ CREATE INDEX IF NOT EXISTS name_current_lookup_idx
 CREATE INDEX IF NOT EXISTS name_current_resource_idx
     ON name_current (resource_id)
     WHERE resource_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS name_current_serving_resource_idx
+    ON name_current (serving_resource_id)
+    WHERE serving_resource_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS name_current_resolver_idx
     ON name_current (
@@ -530,6 +536,8 @@ COMMENT ON COLUMN name_current.surface_binding_id IS
     'This value identifies the current name-to-authority link.';
 COMMENT ON COLUMN name_current.resource_id IS
     'This value identifies the current authority object.';
+COMMENT ON COLUMN name_current.serving_resource_id IS
+    'This event-derived resource is used for resolver and record serving. It does not establish a current authority, registration, or surface binding.';
 COMMENT ON COLUMN name_current.token_lineage_id IS
     'This value identifies the current token history.';
 COMMENT ON COLUMN name_current.binding_kind IS

@@ -2,6 +2,75 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
+pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query(
+        "CREATE TEMP TABLE project_latest_registry_owner ON COMMIT DROP AS
+         SELECT latest.logical_name_id, latest.resource_id, latest.owner_getter,
+                latest.owner_getter_reason
+         FROM (
+             SELECT DISTINCT ON (COALESCE(
+                        event.logical_name_id,
+                        linked.logical_name_id,
+                        surface.logical_name_id
+                    ))
+                    COALESCE(
+                        event.logical_name_id,
+                        linked.logical_name_id,
+                        surface.logical_name_id
+                    ) AS logical_name_id,
+                    event.resource_id,
+                    event.after_state ->> 'owner_getter' AS owner_getter,
+                    event.after_state ->> 'owner_getter_reason' AS owner_getter_reason
+             FROM project_events event
+             LEFT JOIN LATERAL (
+                 SELECT candidate.logical_name_id
+                 FROM project_events candidate
+                 WHERE event.logical_name_id IS NULL
+                   AND candidate.logical_name_id IS NOT NULL
+                   AND candidate.resource_id = event.resource_id
+                   AND candidate.source_family = event.source_family
+                 ORDER BY candidate.block_number DESC NULLS LAST,
+                          candidate.transaction_index DESC NULLS LAST,
+                          candidate.log_index DESC NULLS LAST,
+                          candidate.event_identity DESC
+                 LIMIT 1
+             ) linked ON TRUE
+             LEFT JOIN project_surfaces surface
+               ON event.logical_name_id IS NULL
+              AND surface.namespace = event.namespace
+              AND surface.visibility_state = 'active'
+              AND lower(surface.namehash) = lower(COALESCE(
+                      NULLIF(event.after_state ->> 'child_node', ''),
+                      NULLIF(event.after_state ->> 'node', '')
+                  ))
+             WHERE event.event_kind = 'AuthorityTransferred'
+               AND event.source_family IN (
+                   'ens_v1_registry_l1', 'basenames_base_registry'
+               )
+               AND COALESCE(
+                       event.logical_name_id,
+                       linked.logical_name_id,
+                       surface.logical_name_id
+                   ) IS NOT NULL
+             ORDER BY COALESCE(
+                          event.logical_name_id,
+                          linked.logical_name_id,
+                          surface.logical_name_id
+                      ),
+                      event.block_number DESC NULLS LAST,
+                      event.transaction_index DESC NULLS LAST,
+                      event.log_index DESC NULLS LAST,
+                      event.event_identity DESC
+         ) latest
+         WHERE latest.owner_getter =
+               '0x0000000000000000000000000000000000000000'",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to stage ownerless registry names", error))?;
+    Ok(())
+}
+
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
         "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
@@ -232,6 +301,44 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
          ORDER BY event.normalized_event_id",
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
+        "CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS
+         SELECT authority.logical_name_id,
+                pointer.resource_id AS serving_resource_id,
+                pointer.chain_id AS resolver_chain_id,
+                lower(pointer.after_state ->> 'resolver') AS resolver_address,
+                pointer.normalized_event_id AS pointer_event_id,
+                pointer.event_identity AS pointer_event_identity,
+                pointer.block_number AS pointer_block_number,
+                pointer.transaction_index AS pointer_transaction_index,
+                pointer.log_index AS pointer_log_index,
+                'retained_registry_resolver_pointer'::text AS read_reachability_basis,
+                authority.owner_getter_reason
+         FROM project_name_authority authority
+         JOIN LATERAL (
+             SELECT event.*
+             FROM project_events event
+             WHERE event.logical_name_id = authority.logical_name_id
+               AND event.event_kind = 'ResolverChanged'
+               AND event.source_family IN (
+                   'ens_v1_registry_l1', 'basenames_base_registry'
+               )
+               AND event.resource_id = authority.ownerless_registry_resource_id
+             ORDER BY event.block_number DESC NULLS LAST,
+                      event.transaction_index DESC NULLS LAST,
+                      event.log_index DESC NULLS LAST,
+                      event.event_identity DESC
+             LIMIT 1
+         ) pointer ON TRUE
+         JOIN project_resources resource
+           ON resource.resource_id = pointer.resource_id
+          AND resource.token_lineage_id IS NULL
+         WHERE authority.known_ownerless_registry
+           AND NULLIF(lower(pointer.after_state ->> 'resolver'), '') IS NOT NULL
+           AND lower(pointer.after_state ->> 'resolver') <>
+               '0x0000000000000000000000000000000000000000'",
+        "CREATE UNIQUE INDEX ON project_name_serving (logical_name_id)",
+        "CREATE INDEX ON project_name_serving (serving_resource_id)",
+        "CREATE INDEX ON project_name_serving (resolver_chain_id, resolver_address)",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)

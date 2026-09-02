@@ -473,6 +473,25 @@ CREATE INDEX IF NOT EXISTS normalized_events_ens_v1_record_node_resolver_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX IF NOT EXISTS normalized_events_basenames_record_node_resolver_idx
+    ON normalized_events (
+        chain_id,
+        lower(after_state ->> 'node'),
+        lower(COALESCE(
+            NULLIF(after_state ->> 'resolver', ''),
+            NULLIF(raw_fact_ref ->> 'emitting_address', '')
+        )),
+        block_number,
+        transaction_index,
+        log_index,
+        normalized_event_id
+    )
+    WHERE logical_name_id IS NULL
+      AND source_family = 'basenames_base_resolver'
+      AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_resolver_alias_history_idx
     ON normalized_events (
         chain_id,

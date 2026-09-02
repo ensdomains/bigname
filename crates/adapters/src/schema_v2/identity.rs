@@ -244,9 +244,6 @@ pub(super) fn materialize(
     let mut represented = BTreeSet::<Vec<u8>>::new();
     for name in &interpreted.names {
         let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
-        if v1_surface {
-            state.observe_v1_surface(&selected.source.namespace, &name.namehash);
-        }
         let flags = name
             .labels
             .iter()
@@ -261,6 +258,13 @@ pub(super) fn materialize(
             })
             .collect::<Vec<_>>();
         let active = errors.is_empty();
+        if v1_surface {
+            if active {
+                state.observe_v1_active_surface(&selected.source.namespace, &name.namehash);
+            } else {
+                state.observe_v1_surface(&selected.source.namespace, &name.namehash);
+            }
+        }
         let labelhashes = name
             .labels
             .iter()

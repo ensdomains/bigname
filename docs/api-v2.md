@@ -122,8 +122,19 @@ token-approval, or resolver-delegation paths are not indexed produces
 summary instead produces `meta.completeness=unsupported` with
 `wrapper_holder_permissions_not_supported`. A missing or unrecognized summary
 produces `meta.completeness=partial` with `permission_support_unknown`, which
-takes precedence over both known limitations. An address-only permissions read
-is always at least `partial` with
+takes precedence over both known limitations.
+
+A supplied `name` that is missing or unrecognized, whose current name is marked
+unsupported, or that resolves to a current name not bound to a registration
+resource returns an empty result relative to that request with `meta.completeness=partial` and
+`meta.unsupported_reason=permission_support_unknown`. This establishes only
+that the API could not select a supported current registration; it does not
+establish that the name has no permission rows. A supplied current name paired
+with an explicitly different `registration_id` is instead a supported,
+proven-empty selection. Its empty page has neither `meta.completeness` nor
+`meta.unsupported_reason`.
+
+An address-only permissions read is always at least `partial` with
 `approval_and_delegation_permissions_not_supported`, including when it returns
 zero rows, because returned registrations cannot establish the request's full
 permission set.
@@ -548,6 +559,13 @@ Snapshot-pinned reads require the ADR 0003 slice-3 snapshot-service enabler;
 ADR 0006 rollout step 3 includes that read-layer work.
 
 ## Status Vocabulary
+
+`unregistered` describes the absence of current registration or control; it does not assert that
+resolver data is absent. A supported projected name may therefore have
+`registration_status=unregistered` while serving an event-linked resolver and its indexed or
+verified records. The internal reason `current_authority_not_projected` is reserved for authority
+selection that is unresolved or unsupported, not for a registry event stream that positively
+proves current authority is absent.
 
 One result-status vocabulary is used everywhere except the `/v2/status` ops
 route:

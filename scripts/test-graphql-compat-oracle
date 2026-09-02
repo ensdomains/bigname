@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+exec python3 - "$repo_root" "$@" <<'PY'
+import hashlib, importlib.util, importlib.machinery, json, os, pathlib, re, shutil, subprocess, sys, tempfile, threading, urllib.error, urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+root = pathlib.Path(sys.argv[1]); tool = root / "scripts/graphql-compat-oracle"
+coverage_source = root / "apps/api/src/tests/fixtures/graphql-oracle/v1/coverage.json"
+domain_id = "0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9"
+
+def named(name, kind="SCALAR"): return {"kind": kind, "name": name, "ofType": None}
+def nn(value): return {"kind": "NON_NULL", "name": None, "ofType": value}
+def lst(value): return {"kind": "LIST", "name": None, "ofType": value}
+def field(name, typ, args=()): return {"name": name, "isDeprecated": False, "type": typ, "args": [input_field(*arg) for arg in args]}
+def input_field(name, typ, default=None): return {"name": name, "defaultValue": default, "isDeprecated": False, "type": typ}
+def obj(name, fields): return {"kind": "OBJECT", "name": name, "fields": fields, "inputFields": None, "enumValues": None, "possibleTypes": None}
+def inp(name, fields): return {"kind": "INPUT_OBJECT", "name": name, "fields": None, "inputFields": fields, "enumValues": None, "possibleTypes": None}
+def enum(name, values): return {"kind": "ENUM", "name": name, "fields": None, "inputFields": None, "enumValues": [{"name": value, "isDeprecated": False} for value in values], "possibleTypes": None}
+
+S=lambda name: named(name); O=lambda name: named(name,"OBJECT"); I=lambda name: named(name,"INPUT_OBJECT"); E=lambda name: named(name,"ENUM")
+types = [{"kind":"SCALAR","name":name,"fields":None,"inputFields":None,"enumValues":None,"possibleTypes":None} for name in ("String","Boolean","Int","Float","ID","BigInt","Bytes")]
+types += [
+ obj("Account", [field("id", nn(S("ID"))),field("domains",nn(lst(nn(O("Domain"))))),field("registrations",nn(lst(nn(O("Registration"))))),field("wrappedDomains",nn(lst(nn(O("WrappedDomain")))))]),
+ inp("Block_height", [input_field("hash",S("Bytes")),input_field("number",S("Int")),input_field("number_gte",S("Int"))]),
+ obj("Domain", [field("createdAt",nn(S("BigInt"))),field("events",nn(lst(nn(O("DomainEvent"))))),field("expiryDate",S("BigInt")),field("id",nn(S("ID"))),field("isMigrated",nn(S("Boolean"))),field("labelName",S("String")),field("labelhash",S("Bytes")),field("name",S("String")),field("owner",nn(O("Account"))),field("parent",O("Domain")),field("registrant",O("Account")),field("registration",O("Registration")),field("resolvedAddress",O("Account")),field("resolver",O("Resolver")),field("subdomainCount",nn(S("Int"))),field("subdomains",nn(lst(nn(O("Domain"))))),field("ttl",S("BigInt")),field("wrappedDomain",O("WrappedDomain")),field("wrappedOwner",O("Account"))]),
+ inp("Domain_filter", [input_field("id",S("ID")),input_field("isMigrated",S("Boolean")),input_field("name",S("String")),input_field("name_contains",S("String")),input_field("owner",S("String")),input_field("owner_in",lst(nn(S("String"))))]),
+ enum("Domain_orderBy", ["createdAt","expiryDate","id","name"]), enum("OrderDirection",["asc","desc"]),
+ obj("Resolver",[field("addr",O("Account")),field("address",nn(S("Bytes"))),field("coinTypes",lst(nn(S("BigInt")))),field("contentHash",S("Bytes")),field("domain",nn(O("Domain"))),field("events",nn(lst(nn(O("ResolverEvent"))))),field("id",nn(S("ID"))),field("texts",lst(nn(S("String"))))]),
+ obj("Transfer",[field("id",nn(S("ID"))),field("domain",nn(O("Domain")))]),
+ obj("_Block_",[field("hash",S("Bytes")),field("number",nn(S("Int"))),field("parentHash",S("Bytes")),field("timestamp",S("Int"))]),
+ obj("_Meta_",[field("block",nn(O("_Block_"))),field("deployment",nn(S("String"))),field("hasIndexingErrors",nn(S("Boolean")))]), enum("_SubgraphErrorPolicy_",["allow","deny"]),
+ # Graph Node injects its pinned logging schema into subgraph schemas. (upstream: .refs/graph_node/graph/src/schema/api.rs:L447-L464 @ graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/schema/logs.graphql:L5-L70 @ graph_node@aefe1737)
+ enum("LogLevel",["CRITICAL","ERROR","WARNING","INFO","DEBUG"]),
+ obj("_LogArgument_",[field("key",nn(S("String"))),field("value",nn(S("String")))]),
+ obj("_LogMeta_",[field("module",nn(S("String"))),field("line",nn(S("Int"))),field("column",nn(S("Int")))]),
+ obj("_Log_",[field("id",nn(S("String"))),field("subgraphId",nn(S("String"))),field("timestamp",nn(S("String"))),field("level",nn(E("LogLevel"))),field("text",nn(S("String"))),field("arguments",nn(lst(nn(O("_LogArgument_"))))),field("meta",nn(O("_LogMeta_")))]),
+]
+query_fields = [
+ field("_meta",O("_Meta_"),[("block",I("Block_height"),None)]),
+ # Graph Node adds this fixed logging field and signature to every query root. (upstream: .refs/graph_node/graph/src/schema/api.rs:L1080-L1107 @ graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/schema/api.rs:L1313-L1418 @ graph_node@aefe1737)
+ field("_logs",nn(lst(nn(O("_Log_")))),[("level",E("LogLevel"),None),("from",S("String"),None),("to",S("String"),None),("search",S("String"),None),("first",S("Int"),"100"),("skip",S("Int"),"0"),("orderDirection",E("OrderDirection"),"desc")]),
+ field("account",O("Account"),[("block",I("Block_height"),None),("id",nn(S("ID")),None),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny")]),
+ field("accounts",nn(lst(nn(O("Account")))),[("block",I("Block_height"),None),("first",S("Int"),"100"),("orderBy",E("Account_orderBy"),None),("orderDirection",E("OrderDirection"),None),("skip",S("Int"),"0"),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny"),("where",I("Account_filter"),None)]),
+ field("domain",O("Domain"),[("block",I("Block_height"),None),("id",nn(S("ID")),None),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny")]),
+ field("domains",nn(lst(nn(O("Domain")))),[("block",I("Block_height"),None),("first",S("Int"),"100"),("orderBy",E("Domain_orderBy"),None),("orderDirection",E("OrderDirection"),None),("skip",S("Int"),"0"),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny"),("where",I("Domain_filter"),None)]),
+ field("domainEvent",O("DomainEvent"),[("id",nn(S("ID")),None)]),field("domainEvents",nn(lst(nn(O("DomainEvent"))))),
+ field("registrationEvent",O("RegistrationEvent"),[("id",nn(S("ID")),None)]),field("registrationEvents",nn(lst(nn(O("RegistrationEvent"))))),
+ field("resolver",O("Resolver"),[("block",I("Block_height"),None),("id",nn(S("ID")),None),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny")]),
+ field("resolverEvent",O("ResolverEvent"),[("id",nn(S("ID")),None)]),field("resolverEvents",nn(lst(nn(O("ResolverEvent"))))),
+ field("resolvers",nn(lst(nn(O("Resolver")))),[("block",I("Block_height"),None),("first",S("Int"),"100"),("orderBy",E("Resolver_orderBy"),None),("orderDirection",E("OrderDirection"),None),("skip",S("Int"),"0"),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny"),("where",I("Resolver_filter"),None)]),
+ field("transfers",nn(lst(nn(O("Transfer")))),[("first",S("Int"),None)]),
+]
+types.append(obj("Query",query_fields)); schema={"types":types,"queryType":{"name":"Query"},"mutationType":None,"subscriptionType":None,"directives":[]}
+
+pinned_schema=root/".refs/ens_subgraph/schema.graphql"
+if not pinned_schema.is_file():
+ raise SystemExit("missing .refs/ens_subgraph/schema.graphql; run scripts/sync-refs")
+pinned_sdl=pinned_schema.read_text()
+entity_names=re.findall(r"^type\s+(\w+).*?@entity\b",pinned_sdl,re.MULTILINE)
+interface_names=re.findall(r"^interface\s+(\w+)\b",pinned_sdl,re.MULTILINE)
+existing={typ["name"] for typ in types}
+types += [obj(name,[field("id",nn(S("ID")))]) for name in entity_names if name not in existing]
+types += [{"kind":"INTERFACE","name":name,"fields":[field("id",nn(S("ID")))],"inputFields":None,"enumValues":None,"possibleTypes":[],"interfaces":[]} for name in interface_names]
+types += [definition for name in entity_names+interface_names for definition in (inp(name+"_filter",[input_field("id",S("ID"))]),enum(name+"_orderBy",["id"])) if definition["name"] not in existing]
+types += [{"kind":"SCALAR","name":name,"fields":None,"inputFields":None,"enumValues":None,"possibleTypes":None} for name in ("BigDecimal","Int8","Timestamp")]
+types += [inp("BlockChangedFilter",[input_field("number_gte",nn(S("Int")))]),enum("Aggregation_current",["exclude","include"]),enum("Aggregation_interval",["day","hour"])]
+assert schema["subscriptionType"] is None
+
+class Handler(BaseHTTPRequestHandler):
+ deployment_meta_requests=0
+ oracle_header_requests=0
+ def log_message(self,*_): pass
+ def do_POST(self):
+  mode=self.path.strip("/").split("/")[0] or "ok"
+  if mode=="requires-oracle-headers":
+   if self.headers.get("User-Agent")!="graphql-compat-oracle/1" or self.headers.get("Accept")!="application/json": self.send_response(403); self.end_headers(); return
+   Handler.oracle_header_requests+=1
+  if mode=="status": self.send_response(503); self.end_headers(); return
+  length=int(self.headers.get("Content-Length","0")); raw=self.rfile.read(length)
+  if mode=="invalid": self.send_response(200); self.end_headers(); self.wfile.write(b"{"); return
+  body=json.loads(raw); op=body.get("operationName"); block=body.get("variables",{}).get("block",{}).get("number",414)
+  if op=="OracleIntrospection" and mode=="null-repeatability" and "isRepeatable" in body["query"]:
+   encoded=b'{"errors":[{"message":"Null value resolved for non-null field `isRepeatable`"}],"data":null}\n'; self.send_response(200); self.send_header("Content-Length",str(len(encoded))); self.end_headers(); self.wfile.write(encoded); return
+  # Graph Node's pinned __Type.inputFields has no arguments. (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L35 @ graph_node@aefe1737)
+  if op=="OracleIntrospection" and "inputFields(" in body["query"]:
+   encoded=b'{"errors":[{"message":"Unknown argument includeDeprecated on field inputFields"}]}\n'; self.send_response(200); self.send_header("Content-Length",str(len(encoded))); self.end_headers(); self.wfile.write(encoded); return
+  meta={"block":{"number":block+(1 if mode=="wrong-block" else 0),"hash":None},"deployment":"secret" if mode=="leak" else "QmStubEnsDeployment","hasIndexingErrors":False}
+  if mode=="deployment-switch" and op=="OracleMeta": Handler.deployment_meta_requests+=1; meta["deployment"]=f"QmDeployment{Handler.deployment_meta_requests}"
+  if mode=={"OracleMeta":"meta-indexing-errors","OracleDomain":"point-indexing-errors","OracleDomainName":"filter-indexing-errors"}.get(op): meta["hasIndexingErrors"]=True
+  if mode=="missing-deployment": meta["deployment"]=None
+  domain={"id":domain_id,"name":"dave.eth","createdAt":"0","expiryDate":None,"owner":{"id":"0x0000000000000000000000000000000000000000"}}
+  if mode=="wrong-domain-id": domain["id"]="0x"+"0"*64
+  case_meta={key:value for key,value in meta.items() if key!="deployment"}
+  if mode=="numeric-json-type" and op in ("OracleDomain","OracleDomainName"): case_meta["block"]["number"]=float(block)
+  if op=="OracleIntrospection":
+   observed=json.loads(json.dumps(schema));
+   if mode=="schema-drift": next(field for typ in observed["types"] if typ["name"]=="Domain" for field in typ["fields"] if field["name"]=="createdAt")["type"]=nn(S("String"))
+   data={} if mode=="missing-introspection" else {"__schema":observed}
+  elif op=="OracleMeta": data={"_meta":meta}
+  elif op=="OracleDomain": data={"_meta":case_meta,"domain":None if mode=="null-point" else domain}
+  else: data={"_meta":case_meta,"domains":[] if mode=="filter-mismatch" else [domain]}
+  if mode=="missing-meta": data.pop("_meta",None)
+  payload={"data":data};
+  if mode=="errors": payload["errors"]=[{"message":"stub error"}]
+  encoded=(json.dumps(payload,separators=(",",":"))+"\n").encode(); self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
+
+server=ThreadingHTTPServer(("127.0.0.1",0),Handler); threading.Thread(target=server.serve_forever,daemon=True).start()
+base=f"http://127.0.0.1:{server.server_port}"
+
+def seed(path): path.mkdir(parents=True); shutil.copy2(coverage_source,path/"coverage.json")
+def run_capture(path,mode="ok",block=414,extra=None,ok=True,selected_domain=domain_id):
+ env=os.environ.copy(); env.update({"GRAPHQL_ORACLE_STUB_URL":f"{base}/{mode}","SOURCE_DATE_EPOCH":"1788220800"}); env.update(extra or {})
+ result=subprocess.run([tool,"capture","--upstream-endpoint-template","stub://local-mock","--block-number",str(block),"--domain-id",selected_domain,"--output",path],env=env,text=True,capture_output=True)
+ if (result.returncode==0)!=ok: raise AssertionError(f"capture mode={mode}: {result.stdout}{result.stderr}")
+ return result
+def tree(path): return {p.relative_to(path):p.read_bytes() for p in path.rglob("*") if p.is_file()}
+def resign(path,relative):
+ manifest=json.loads((path/"manifest.json").read_text()); data=(path/relative).read_bytes()
+ if relative=="coverage.json": manifest["coverage_sha256"]=hashlib.sha256(data).hexdigest()
+ else:
+  for item in manifest["artifacts"]:
+   if item["path"]==relative: item["sha256"]=hashlib.sha256(data).hexdigest()
+ (path/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n")
+def verify(path,ok=True,allow_stub=True):
+ env=os.environ.copy()
+ if allow_stub: env["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"
+ else: env.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None)
+ result=subprocess.run([tool,"verify-fixtures","--offline","--fixtures",path],env=env,text=True,capture_output=True)
+ if (result.returncode==0)!=ok: raise AssertionError(result.stdout+result.stderr)
+ return result
+
+if len(sys.argv)>2 and sys.argv[2]=="--generate":
+ destination=pathlib.Path(sys.argv[3]);
+ if not destination.exists(): seed(destination)
+ run_capture(destination); print(destination); server.shutdown(); raise SystemExit()
+
+with tempfile.TemporaryDirectory() as temporary:
+ temp=pathlib.Path(temporary); first=temp/"first"; second=temp/"second"; seed(first); seed(second); run_capture(first); run_capture(second); assert tree(first)==tree(second)
+ rejected=verify(first,False,False); assert "docs/development.md" in rejected.stderr
+ verify(first,allow_stub=True)
+ headers=temp/"headers"; seed(headers)
+ try: urllib.request.urlopen(urllib.request.Request(f"{base}/requires-oracle-headers",b"{}",{"Content-Type":"application/json"}))
+ except urllib.error.HTTPError as error: assert error.code==403
+ else: raise AssertionError("stub accepted a request without the oracle User-Agent")
+ run_capture(headers,mode="requires-oracle-headers"); assert Handler.oracle_header_requests==5
+ repeatability=temp/"null-repeatability"; seed(repeatability); run_capture(repeatability,mode="null-repeatability")
+ stub_env={**os.environ,"BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE":"1"}
+ compared=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/ok"],env=stub_env,text=True,capture_output=True); assert compared.returncode==0 and "2 passed, 0 failed" in compared.stdout
+ wrong_head=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/wrong-block"],env=stub_env,text=True,capture_output=True); assert wrong_head.returncode!=0 and "requested block" in wrong_head.stderr
+ schema_drift=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/schema-drift"],env=stub_env,text=True,capture_output=True); assert schema_drift.returncode!=0 and "schema" in schema_drift.stderr
+ numeric_type=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/numeric-json-type"],env=stub_env,text=True,capture_output=True); assert numeric_type.returncode!=0 and "comparison" in numeric_type.stderr
+ changed=temp/"changed"; seed(changed); run_capture(changed,block=415); assert json.loads((changed/"upstream/provenance.json").read_text())["block_number"]==415; assert json.loads((changed/"entities/domain/entity-by-id/variables.json").read_text())["block"]["number"]==415
+ invalid_domain=temp/"invalid-domain"; seed(invalid_domain); run_capture(invalid_domain,ok=False,selected_domain="0x1")
+ for mode in ("wrong-block","wrong-domain-id","filter-mismatch","null-point","missing-meta","missing-introspection","missing-deployment","deployment-switch","meta-indexing-errors","point-indexing-errors","filter-indexing-errors","errors","invalid","status"):
+  target=temp/mode; seed(target); (target/"marker").write_text("preserve"); run_capture(target,mode=mode,ok=False); assert (target/"marker").read_text()=="preserve"
+ leak=temp/"leak"; seed(leak); run_capture(leak,mode="leak",extra={"THE_GRAPH_API_KEY":"secret"},ok=False)
+ inline=temp/"inline"; seed(inline); (inline/"marker").write_text("preserve"); result=subprocess.run([tool,"capture","--upstream-endpoint-template",f"{base}/ok?key=inline","--block-number","414","--domain-id",domain_id,"--output",inline],text=True,capture_output=True); assert result.returncode!=0 and (inline/"marker").read_text()=="preserve"
+ corrupt=temp/"corrupt"; shutil.copytree(first,corrupt); (corrupt/"upstream/schema-surface.json").write_bytes(b"{}\n"); verify(corrupt,False)
+ edited=temp/"edited"; shutil.copytree(first,edited); (edited/"entities/domain/entity-by-id/upstream-response.json").write_bytes(b"{}\n"); verify(edited,False)
+ manual_coverage=temp/"manual-coverage"; shutil.copytree(first,manual_coverage); coverage=json.loads((manual_coverage/"coverage.json").read_text()); coverage["local_extensions"][0]["docs"]="manual-coverage"; (manual_coverage/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(manual_coverage,"coverage.json"); result=verify(manual_coverage); assert "captured artifact digests valid; manual coverage valid" in result.stdout
+ mismatched_coverage_digest=temp/"mismatched-coverage-digest"; shutil.copytree(first,mismatched_coverage_digest); manifest=json.loads((mismatched_coverage_digest/"manifest.json").read_text()); manifest["coverage_sha256"]="0"*64; (mismatched_coverage_digest/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); result=verify(mismatched_coverage_digest,False); assert "coverage_sha256 mismatch" in result.stderr
+ invalid_claims=temp/"invalid-claims"; shutil.copytree(first,invalid_claims); coverage=json.loads((invalid_claims/"coverage.json").read_text()); coverage["claimed_paths"].append(None); (invalid_claims/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(invalid_claims,"coverage.json"); verify(invalid_claims,False)
+ duplicate_claims=temp/"duplicate-claims"; shutil.copytree(first,duplicate_claims); coverage=json.loads((duplicate_claims/"coverage.json").read_text()); coverage["claimed_paths"].append(coverage["claimed_paths"][0]); (duplicate_claims/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(duplicate_claims,"coverage.json"); verify(duplicate_claims,False)
+ stale_scope=temp/"stale-scope"; shutil.copytree(first,stale_scope); coverage=json.loads((stale_scope/"coverage.json").read_text()); coverage["upstream_only"].append({"scope":"field:Domain.missing","status":"deferred","owner":"#1","docs":"x"}); (stale_scope/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_scope,"coverage.json"); verify(stale_scope,False)
+ wrong_signature=temp/"wrong-signature"; shutil.copytree(first,wrong_signature); coverage=json.loads((wrong_signature/"coverage.json").read_text()); coverage["schema_signature_differences"][0]["upstream"]={"wrong":True}; (wrong_signature/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(wrong_signature,"coverage.json"); verify(wrong_signature,False)
+ present_extension=temp/"present-extension"; shutil.copytree(first,present_extension); coverage=json.loads((present_extension/"coverage.json").read_text()); coverage["local_extensions"].append({"path":"field:Domain.name","status":"intentional-extension","owner":"#1","docs":"x"}); (present_extension/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(present_extension,"coverage.json"); verify(present_extension,False)
+ missing=temp/"missing"; shutil.copytree(first,missing); prov=json.loads((missing/"upstream/provenance.json").read_text()); del prov["pin_kind"]; (missing/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(missing,"upstream/provenance.json"); verify(missing,False)
+ identity=temp/"identity"; shutil.copytree(first,identity); prov=json.loads((identity/"upstream/provenance.json").read_text()); prov.update({"pin_kind":"hash","upstream_identifier":"other"}); (identity/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(identity,"upstream/provenance.json"); verify(identity,False)
+ fake_live=temp/"fake-live"; shutil.copytree(first,fake_live); prov=json.loads((fake_live/"upstream/provenance.json").read_text()); prov.update({"endpoint_template":"https://example.test/${THE_GRAPH_API_KEY}","provisional_stub":False}); (fake_live/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(fake_live,"upstream/provenance.json"); verify(fake_live,False)
+ unverified_live=temp/"unverified-live"; shutil.copytree(first,unverified_live); prov=json.loads((unverified_live/"upstream/provenance.json").read_text()); prov.update({"endpoint_template":"https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/QmRealDeployment","provisional_stub":False}); (unverified_live/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(unverified_live,"upstream/provenance.json"); verify(unverified_live,False)
+ wrong_deployment=temp/"wrong-deployment"; shutil.copytree(first,wrong_deployment); prov=json.loads((wrong_deployment/"upstream/provenance.json").read_text()); prov.update({"endpoint_template":"https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH","observed_meta_deployment":"QmWrongDeployment","pinned_schema_verification_date":"2026-09-02","pinned_schema_verified_by":"tool-self-test","provisional_stub":False,"upstream_identifier":"QmWrongDeployment"}); (wrong_deployment/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(wrong_deployment,"upstream/provenance.json"); verify(wrong_deployment,False)
+ stale_pin=temp/"stale-pin"; shutil.copytree(first,stale_pin); prov=json.loads((stale_pin/"upstream/provenance.json").read_text()); prov["ens_subgraph_commit"]="deadbee"; (stale_pin/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_pin,"upstream/provenance.json"); verify(stale_pin,False)
+ census=temp/"census"; shutil.copytree(first,census); coverage=json.loads((census/"coverage.json").read_text()); coverage["known_upstream_types"]["Transfer"]={}; (census/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(census,"coverage.json"); verify(census,False)
+ unknown_census=temp/"unknown-census"; shutil.copytree(first,unknown_census); coverage=json.loads((unknown_census/"coverage.json").read_text()); coverage["known_upstream_types"].pop("AbiChanged"); coverage["known_upstream_types"].pop("Timestamp"); (unknown_census/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(unknown_census,"coverage.json"); result=verify(unknown_census,False); assert "unknown upstream types: AbiChanged, Timestamp" in result.stderr
+ stale_census=temp/"stale-census"; shutil.copytree(first,stale_census); coverage=json.loads((stale_census/"coverage.json").read_text()); coverage["known_upstream_types"]["Ghost"]={"owner":"#1","docs":"x"}; (stale_census/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_census,"coverage.json"); verify(stale_census,False)
+ duplicate=temp/"duplicate"; shutil.copytree(first,duplicate); manifest=json.loads((duplicate/"manifest.json").read_text()); manifest["cases"].append(manifest["cases"][0]); (duplicate/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); verify(duplicate,False)
+ aliased=temp/"aliased"; shutil.copytree(first,aliased); manifest=json.loads((aliased/"manifest.json").read_text()); manifest["cases"][0].update({key:manifest["cases"][1][key] for key in ("entity","kind","query","variables","response")}); (aliased/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); verify(aliased,False)
+ wrong_case_block=temp/"case-block"; shutil.copytree(first,wrong_case_block); variables=json.loads((wrong_case_block/"entities/domain/entity-by-id/variables.json").read_text()); variables["block"]["number"]=999; (wrong_case_block/"entities/domain/entity-by-id/variables.json").write_text(json.dumps(variables,sort_keys=True,separators=(",",":"))+"\n"); resign(wrong_case_block,"entities/domain/entity-by-id/variables.json"); verify(wrong_case_block,False)
+ version=temp/"version"; shutil.copytree(first,version); manifest=json.loads((version/"manifest.json").read_text()); manifest["fixture_format_version"]=999; (version/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); result=verify(version,False); assert "upgrade" in result.stderr
+ sys.dont_write_bytecode=True; loader=importlib.machinery.SourceFileLoader("oracle",str(tool)); spec=importlib.util.spec_from_loader("oracle",loader); module=importlib.util.module_from_spec(spec); loader.exec_module(module)
+ stub_surface=module.schema_surface(schema); coverage_contract=json.loads(coverage_source.read_text()); known_types=set(coverage_contract["known_upstream_types"]); assert known_types=={path.removeprefix("type:") for path in stub_surface if path.startswith("type:")} and len(known_types)==113; assert "isRepeatable" not in module.INTROSPECTION
+ expected_logs_surface={"field:Query._logs","arg:Query._logs(level)","arg:Query._logs(from)","arg:Query._logs(to)","arg:Query._logs(search)","arg:Query._logs(first)","arg:Query._logs(skip)","arg:Query._logs(orderDirection)"}; assert expected_logs_surface <= set(stub_surface); assert any(entry["scope"]=="root:Query._logs" and entry["owner"]=="#670/T0" for entry in coverage_contract["upstream_only"])
+ membership={"types":[obj("Query",[]),{"kind":"INTERFACE","name":"DomainEvent","fields":[],"inputFields":None,"enumValues":None,"possibleTypes":[{"name":"Transfer"}],"interfaces":[]},{**obj("Transfer",[]),"interfaces":[{"name":"DomainEvent"}]}],"queryType":{"name":"Query"},"mutationType":None,"subscriptionType":None,"directives":[]}; surface=module.schema_surface(membership); assert surface["root:query"]=={"type":"Query"} and "implements:Transfer.DomainEvent" in surface and "member:DomainEvent.Transfer" in surface; assert b"type Transfer implements DomainEvent" in module.render_sdl(membership)
+ import socket; original=socket.socket; socket.socket=lambda *_args,**_kwargs: (_ for _ in ()).throw(AssertionError("offline verifier opened a socket"))
+ try:
+  os.environ["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"; module.verify(first)
+ finally:
+  os.environ.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None); socket.socket=original
+ print("graphql compatibility oracle tool tests: 54 passed (oracle request headers; null-repeatability capture; 113-type coverage census; captured-upstream coverage validation; coverage digest validation; claimed-path validation; logging surface disposition)")
+server.shutdown()
+PY

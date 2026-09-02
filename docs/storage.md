@@ -865,12 +865,24 @@ resolver has a final supported `ens_v1_resolver_l1` classification from an
 applicable exact declaration, and that classifying manifest's namespace
 matches the pointer's namespace. Incremental staging applies the same guarded
 exception by requiring the pointer namespace and exact declared resolver
-address to match. When an ended
+address to match. A `basenames_base_resolver` event without logical-name
+attribution may join only through a `basenames_base_registry` pointer on the
+same chain, node, and resolver emitter. Basenames keeps the current resolver by
+node, authorizes its registrar controller and reverse registrar independently
+of the node owner, and stores text by record version, node, and key.
+(upstream: .refs/basenames/src/L2/Registry.sol:L173-L180 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/L2Resolver.sol:L193-L199 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/ResolverBase.sol:L7-L24 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L7-L36 @ basenames@1809bbc)
+When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
-resource-less. This does not restore a current binding: name and record reads
-join inventory through `name_current.resource_id`, which remains null for the
-released or expired name. ENSv2 stores resolver records by node and version.
+resource-less. This does not restore a current binding. ENSv2 released or expired names have no
+[`serving_resource_id`](glossary.md#serving-resource), so their reads still find no current
+resource. Registry-only ENSv1 and Basenames names are different when a current nonzero resolver
+pointer remains event-linked: `name_current.resource_id` stays null while the serving resource
+joins resolver and inventory reads without creating control. ENSv2 stores resolver records by node
+and version.
 `setName` passes
 part zero, selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no

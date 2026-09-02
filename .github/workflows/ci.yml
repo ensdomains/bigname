@@ -215,6 +215,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Sync pinned upstream checkouts
+        if: matrix.name == 'api'
+        run: |
+          scripts/sync-refs
+          scripts/sync-refs --check
+
+      - name: Verify GraphQL oracle tooling (offline)
+        if: matrix.name == 'api'
+        run: |
+          scripts/graphql-compat-oracle verify-fixtures --offline
+          (cd scripts && bash test-graphql-compat-oracle)
+
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@master
         with:

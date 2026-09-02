@@ -437,8 +437,11 @@ async fn load_name(
         FROM name_current name
         JOIN name_surfaces surface
           ON surface.logical_name_id = name.logical_name_id
-        JOIN resources resource ON resource.resource_id = name.resource_id
-        JOIN surface_bindings binding
+        JOIN resources resource
+          ON resource.resource_id = COALESCE(
+              name.serving_resource_id, name.resource_id
+          )
+        LEFT JOIN surface_bindings binding
           ON binding.surface_binding_id = name.surface_binding_id
          AND binding.logical_name_id = name.logical_name_id
          AND binding.resource_id = name.resource_id
@@ -456,7 +459,7 @@ async fn load_name(
           ON resource_lineage.chain_id = resource.chain_id
          AND resource_lineage.block_hash = resource.block_hash
          AND resource_lineage.block_number = resource.block_number
-        JOIN chain_lineage binding_lineage
+        LEFT JOIN chain_lineage binding_lineage
           ON binding_lineage.chain_id = binding.chain_id
          AND binding_lineage.block_hash = binding.block_hash
          AND binding_lineage.block_number = binding.block_number
@@ -465,8 +468,21 @@ async fn load_name(
           AND surface.visibility_state = 'active'
           AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND binding.active_to IS NULL
+          AND (
+              (
+                  name.surface_binding_id IS NULL
+                  AND name.resource_id IS NULL
+                  AND name.binding_kind IS NULL
+                  AND name.serving_resource_id IS NOT NULL
+              )
+              OR (
+                  binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  AND binding.active_to IS NULL
+                  AND binding_lineage.canonicality_state IN (
+                      'canonical', 'safe', 'finalized'
+                  )
+              )
+          )
           AND (
               name.token_lineage_id IS NULL
               OR (
@@ -476,7 +492,6 @@ async fn load_name(
           )
           AND surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         "#,
     )
     .bind(logical_name_id)

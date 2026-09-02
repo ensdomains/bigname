@@ -82,7 +82,7 @@ selectors in the same request.
 For Universal Resolver ancestor discovery, `ResolverNotFound(bytes)` is a live
 `not_found` with reason `resolver_not_found` only when its embedded DNS name
 equals the request name. Other reverts fail execution, and `OffchainLookup`
-stays unsupported because ENS verified resolution does not follow CCIP-Read.
+stays unsupported because ENS verified record resolution does not follow CCIP-Read.
 Every successfully decoded call for one name at one block must identify the
 same effective resolver. A `ResolverNotFound` outcome cannot coexist with a
 successfully decoded effective resolver; either inconsistency fails the request

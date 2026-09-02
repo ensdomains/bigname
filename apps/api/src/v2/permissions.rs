@@ -11,7 +11,7 @@ use crate::AppState;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::name_record::wrapper_metadata;
 use super::permission_support::{
-    apply_permissions_collection_support_meta, permission_support_for_resources,
+    PermissionSupport, apply_permissions_collection_support_meta, permission_support_for_resources,
 };
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
@@ -28,7 +28,7 @@ mod current_name;
 use current_name::load_current_name_row;
 
 mod filter;
-use filter::{permissions_filter_inputs, resolve_permissions_filter};
+use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permissions_filter};
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -105,8 +105,8 @@ pub(crate) async fn get_permissions(
         })
         .transpose()?;
 
-    if resolved.known_empty {
-        return Ok(empty_permissions_response(&params));
+    if let Some(selection) = resolved.empty_selection {
+        return Ok(empty_permissions_response(&params, selection));
     }
 
     let storage_page = bigname_storage::load_permissions_current_account_resource_page(
@@ -184,7 +184,19 @@ pub(crate) async fn get_permissions(
     }))
 }
 
-fn empty_permissions_response(params: &QueryParams) -> Json<Envelope<Vec<PermissionRow>>> {
+fn empty_permissions_response(
+    params: &QueryParams,
+    selection: EmptyPermissionsSelection,
+) -> Json<Envelope<Vec<PermissionRow>>> {
+    let mut meta = Meta::default();
+
+    match selection {
+        EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor => {
+            apply_permissions_collection_support_meta(&mut meta, PermissionSupport::Unknown, false);
+        }
+        EmptyPermissionsSelection::SupersededNameRegistrationPair => {}
+    }
+
     Json(Envelope {
         data: Vec::new(),
         page: Some(Page {
@@ -194,7 +206,7 @@ fn empty_permissions_response(params: &QueryParams) -> Json<Envelope<Vec<Permiss
             total_count: None,
             has_more: false,
         }),
-        meta: Meta::default(),
+        meta,
     })
 }
 

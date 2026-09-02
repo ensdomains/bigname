@@ -420,6 +420,9 @@ Field ownership:
   `current_authority_not_projected` remains `status=ok` for the identity and
   registration fields that can be served, but omits `resolver`; retained
   resolver-pointer evidence is not presented as current authority.
+  A registry-only V1 name whose [getter-visible owner](glossary.md#getter-visible-owner) is zero is instead supported and
+  unregistered. When a current event-linked nonzero registry resolver pointer survives, name
+  detail includes that resolver while registration and control fields remain absent.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -493,8 +496,8 @@ Field ownership:
   has no indexed comparison: success and
   live `not_found` write and clear no divergence rows, while CCIP-required
   answers remain `unsupported` with `offchain_lookup_required` and likewise
-  write nothing. ENS continues not to follow CCIP-Read. Basenames and other
-  chains and namespaces do not enter this route. Outside this
+  write nothing. ENS verified record resolution continues not to follow CCIP-Read.
+  Basenames and other chains and namespaces do not enter this route. Outside this
   null-exact-resolver class, exact indexed `ok` answers and authoritative
   ENSIP-19 derived answers satisfy auto without a provider request. Within this
   class, all requested keys execute through verified lookup because retained
@@ -558,9 +561,17 @@ Field ownership:
   is supported `ens_v1_resolver_l1` from an applicable exact declaration and
   the classifying manifest's namespace matches the pointer's namespace. Under
   that guard, absence from the projected inventory is authoritative
-  `not_found`. Other ENSv2-family pointers and Basenames pointers do not
-  attribute this node-keyed history; the Basenames question remains unresolved
-  in [#621](https://github.com/ensdomains/bigname/issues/621).
+  `not_found`. A node-keyed `basenames_base_resolver` row with no
+  `logical_name_id` is likewise attributable only through a
+  `basenames_base_registry` pointer on the same chain, node, and resolver
+  emitter. Basenames keeps the current resolver by node, authorizes its
+  registrar controller and reverse registrar independently of the node owner,
+  and stores text by record version, node, and key.
+  (upstream: .refs/basenames/src/L2/Registry.sol:L173-L180 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193-L199 @ basenames@1809bbc)
+  (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/ResolverBase.sol:L7-L24 @ basenames@1809bbc)
+  (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L7-L36 @ basenames@1809bbc)
+  Other ENSv2-family pointers do not attribute this node-keyed history.
   An inventory in any other coverage state is not authoritative, and the
   request falls through to verified lookup or an explicit unsupported answer
   rather than reporting absence from the index as absence on chain.
@@ -602,6 +613,10 @@ Field ownership:
   documented behavior: the response has no resolver values and reports each
   requested or inventory-derived key as `status=unsupported`
   with `inventory_not_available`.
+  A supported ownerless registry name does not enter that short circuit merely because its control
+  state is unregistered. Indexed reads use the [serving resource](glossary.md#serving-resource)'s inventory, verified reads select
+  the surviving resolver, and `source=auto` follows the ordinary indexed/verified blend. Owner zero
+  or registry-self alone therefore does not produce `inventory_not_available`.
   When current authority is projected but inventory is missing because resolver
   selection predates the [name surface](glossary.md#surface-name-surface) and
   was never repeated, `source=indexed` reports requested keys as
@@ -699,6 +714,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   publication for that generation,
   so this route never chooses one by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
+  A V1 child with getter-visible owner zero is omitted unless a current
+  event-linked nonzero resolver independently establishes read reachability.
+  Such a row has owner zero and no registrant or control registration; clearing
+  the resolver removes it.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
 
 ### `GET /v2/names/{name}/history`
@@ -735,7 +754,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   response. Candidate visibility is filtered in
   storage before summary calculation, keyset pagination, page-size limiting,
   cursor construction, or the later product-type mapping; candidate rows cannot
-  consume a page slot or move an existing cursor.
+  consume a page slot or move an existing cursor. When one V1 registry resolver
+  log is linked to both the registry resource retained for reads and a distinct
+  control resource, this product route returns the control-resource row once.
+  The additional normalized row that retains the registry resource link remains available from
+  `GET /v2/diagnostics/events`; product suppression happens before cursor
+  validation, summary calculation, and pagination. Without a distinct control
+  resource, the sole registry-resource row remains product-visible.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
 - Pagination behavior: standard newest-first collection pagination by chain
   position. The cursor is bound to the resolved namespace, parent name, scope,
   and sort. Product event-type filtering is applied after loading the storage
@@ -745,6 +771,17 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Scope behavior: `scope=name` reads name-surface events only,
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
+  A V1 ownerless row linked only to the registry resource retained for reads is
+  visible through name history with `registration_id=null` when it carries the
+  name's `logical_name_id`. Name history returns a pre-surface owner row on a
+  registry resource that was ever bound to the name under `scope=both` or
+  `scope=registration`, even when the row was stored before the
+  [name surface](glossary.md#surface-name-surface) existed and carries no name
+  attribution. `scope=name` returns only rows carrying the name's
+  `logical_name_id`. A row on a resource that was never bound to the name is
+  reachable through `GET /v2/diagnostics/events` via the registry resource
+  recorded internally at
+  `name_current.provenance.read_reachability.serving_resource_id`.
 - Snapshot behavior: the parent anchor and history rows are selected from
   current state. The response omits `meta.as_of` and `meta.as_of_token`, and
   its cursor carries no snapshot validity claim. True as-of history
@@ -803,6 +840,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   pairing `name` with a `registration_id` that is not that name's selected
   current registration is not one of them. It is a supported query that selects
   nothing, so it returns `200` with empty `data`.
+  A supplied `name` that is missing or unrecognized, whose current name is
+  marked unsupported, or that resolves to a current name not bound to a
+  registration resource cannot select a supported current registration. Its
+  request-relative empty result returns `meta.completeness=partial` with
+  `unsupported_reason=permission_support_unknown`; it does not prove that the
+  name has no permission rows. By contrast, a resolved current name paired with
+  an explicitly different `registration_id` is a supported, proven-empty
+  selection, so its empty page has no `completeness` or `unsupported_reason`.
   The route reads current permission rows and summaries without claiming a
   request-wide immutable projection generation; current-state generation changes
   do not produce `409 stale`. When `name` or `registration_id` binds the read to a
@@ -1150,7 +1195,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   the visibility predicate before deriving address anchors from ownership or
   control events, constructing selectors, validating cursors, calculating
   summaries, or selecting and paginating final rows. A candidate row therefore
-  cannot expose an older activated row by broadening the anchor set.
+  cannot expose an older activated row by broadening the anchor set. If those
+  anchors reach both rows emitted for one V1 registry resolver log, product
+  history keeps the control-resource row and suppresses the additional row
+  carrying the registry resource link before cursor validation and pagination; raw diagnostics keeps
+  both. Without a distinct control resource, the sole registry-resource row
+  remains visible.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: address-history rows come from current state. The response
   omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
@@ -1247,7 +1298,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   the underlying resource identity, including non-registration resources such
   as reserved entries. A reservation fact carries `resource_id` but never
   `registration_id`; resource identity is not registration authority. The
-  served API currently exposes the old single-field shape, with
+  product `registration_id` filter likewise excludes V1 ownerless rows linked
+  only to the registry resource retained for reads. Raw diagnostics keeps that
+  resource attribution. The filter still returns resource-less events for names
+  bound to the requested registration. The served API currently exposes the old single-field shape, with
   `registration_id` only; the field change is the committed contract and lands
   in an immediate companion change. The
   slice-2 consumer activation contract maps each
@@ -1273,8 +1327,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   manifest-family, backfill, and interpretation activation alone change no
   `/v2/events` or product-history response; only slice 2 changes visibility.
   The shared visibility predicate runs before keyset pagination, page-size
-  limiting, cursor construction, and product-type mapping.
-  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L226 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L160 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L162 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L169 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64)
+  limiting, cursor construction, and product-type mapping. A V1 registry
+  resolver log linked to both the registry resource retained for reads and a
+  distinct control resource appears once in this product route: the
+  additional row carrying the registry resource link is suppressed before cursor validation and
+  pagination, while the control-resource row remains visible and raw
+  diagnostics retain both normalized rows. Without a distinct control resource,
+  the sole registry-resource row remains product-visible.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L226 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L160 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L162 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L169 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64)
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: event rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
@@ -1304,8 +1365,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   resolver listings rather than forced to `ok`. This nested collection adds no
   row-local mixed-authority status, so callers use name detail or batch lookup
   for the explicit coverage reason. A row classified as
-  `current_authority_not_projected` is also absent from `bound_names`; retained
-  resolver-pointer evidence does not establish listing membership.
+  `current_authority_not_projected` is absent from `bound_names`. A positively
+  classified ownerless registry row is different: its event-derived resolver
+  binding is eligible for `bound_names` only where that resolver family's
+  existing binding-enumeration capability is supported.
   `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
   while the corresponding `include=nodes`, `include=aliases`, and
   `include=roles` arrays are deterministic samples of at most 100 items. A
@@ -1529,6 +1592,13 @@ so there is no persisted artifact to explain. See
   not filter its associations. Retained associations from replaced forks can
   therefore appear beside a canonical event. Consumers that require canonical-only
   correlation must not treat association presence as a current relationship.
+  When interpretation links one V1 registry resolver log to both the registry
+  resource retained for reads and a distinct control resource, diagnostics
+  returns both normalized rows and permits cursors anchored to either row;
+  product event and name-history routes return that on-chain log once through
+  the control-resource row. Without a distinct control resource, the sole
+  registry-resource row remains product-visible.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
   When `address` is present, diagnostics derives its name/resource anchor set
   from both activated and candidate address-relation evidence. Candidate
   evidence never contributes anchors to `/v2/events` or product history routes.

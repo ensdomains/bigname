@@ -1,0 +1,4 @@
+query OracleDomain($id: ID!, $block: Block_height!) {
+  _meta(block: $block) { block { number hash } hasIndexingErrors }
+  domain(id: $id, block: $block) { id name createdAt expiryDate owner { id } }
+}

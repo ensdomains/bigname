@@ -34,3 +34,4 @@ bigname-storage.workspace = true
 alloy-sol-types.workspace = true
 bigname-test-support.workspace = true
 futures-util.workspace = true
+sha2 = "0.10.9"
