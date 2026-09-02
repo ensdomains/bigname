@@ -20,13 +20,14 @@ not affect matching; wildcards, conflicts, unknown paths, and stale entries inva
 Upstream-only fields on a shared type require exact field entries; a type-wide entry is valid only when the whole type is
 absent locally. The one bounded exception is an upstream-only `Query` entity field: when its return type, after list and
 non-null wrappers are unwrapped, is a censused object with an `id` field, the root field inherits that type's owner unless
-that return type is claimed. An
+that return type is claimed or already served locally. An
 upstream-only argument inherits its parent field's disposition, never the parent type's, so a new argument on a claimed field still fails. An
 upstream-only enum value inherits the owner of its enum type in `known_upstream_types`; a value whose enum type is absent
 from that census still fails.
 
-`coverage.json` is the manually maintained ownership policy. The manifest records the version present at capture time, but later
-ownership dispositions do not rewrite the steward's captured deployment manifest.
+`coverage.json` is the manually maintained ownership policy. Its artifact digest records the version present at capture time,
+but later ownership dispositions do not rewrite that captured digest. The manifest's `coverage_sha256` must match the checked-in
+`coverage.json` bytes; both the offline verifier and Rust fixture gate reject a mismatch.
 Offline fixture verification validates that claims and dispositions agree with the captured upstream index. The Rust
 fixture tests perform the separate local-introspection comparison and apply the field, argument, Query-entity, and enum
 ownership rules above; the command-line capture and verification tool does not duplicate that local census walk.

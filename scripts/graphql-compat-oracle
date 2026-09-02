@@ -285,6 +285,9 @@ def verify(root):
     manifest = json.loads(manifest_path.read_bytes())
     if manifest.get("fixture_format_version") != FORMAT:
         raise ValueError(f"fixture format {manifest.get('fixture_format_version')} is unsupported; upgrade graphql-compat-oracle")
+    coverage_bytes = (root / "coverage.json").read_bytes()
+    if manifest.get("coverage_sha256") != sha(coverage_bytes):
+        raise ValueError("coverage_sha256 mismatch: manifest does not match coverage.json")
     provenance = json.loads((root / "upstream/provenance.json").read_bytes())
     required = ("endpoint_template", "upstream_identifier", "retrieved_at", "pin_kind", "block_number", "observed_meta_block_number", "observed_meta_block_hash", "ens_subgraph_commit", "graph_node_commit", "pinned_schema_verified_by", "pinned_schema_verification_date", "provisional_stub")
     missing = [key for key in required if key not in provenance]
@@ -319,9 +322,8 @@ def verify(root):
             raise ValueError(f"invalid artifact path {relative}")
         seen.add(relative)
         path = root / relative
-        # coverage.json is the manually maintained ownership policy. Its manifest hash records the
-        # capture-time version, but later coverage dispositions do not require rewriting the captured
-        # deployment manifest.
+        # coverage.json is the manually maintained ownership policy. The artifact hash records the
+        # capture-time version; coverage_sha256 separately authenticates the checked-in policy.
         if not path.is_file() or relative != "coverage.json" and sha(path.read_bytes()) != entry["sha256"]:
             raise ValueError(f"artifact digest mismatch: {relative}")
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} - {"manifest.json"}
@@ -335,7 +337,7 @@ def verify(root):
     compressed = (root / "upstream/schema.graphql.gz").read_bytes()
     if compressed[4:8] != b"\0\0\0\0" or gzip.decompress(compressed) == b"":
         raise ValueError("compressed schema is empty")
-    coverage = json.loads((root / "coverage.json").read_bytes())
+    coverage = json.loads(coverage_bytes)
     surface = json.loads((root / "upstream/schema-surface.json").read_bytes())
     claimed_paths = coverage.get("claimed_paths")
     if not isinstance(claimed_paths, list) or any(not isinstance(path, str) or not path for path in claimed_paths) or len(set(claimed_paths)) != len(claimed_paths):

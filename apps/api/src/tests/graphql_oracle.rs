@@ -4,6 +4,7 @@ use std::{
     path::{Path as OraclePath, PathBuf as OraclePathBuf},
     process::Command as OracleCommand,
 };
+use sha2::{Digest, Sha256};
 
 const ORACLE_INTROSPECTION: &str = r#"query OracleIntrospection {
   __schema { queryType { name } mutationType { name } subscriptionType { name }
@@ -28,8 +29,38 @@ fn read_oracle_json(path: impl AsRef<OraclePath>) -> Result<Value> {
     Ok(serde_json::from_slice(&oracle_fs::read(path)?)?)
 }
 
+fn oracle_sha256(input: &[u8]) -> String {
+    hex::encode(Sha256::digest(input))
+}
+
+#[test]
+fn graphql_oracle_sha256_matches_known_vector() {
+    assert_eq!(
+        oracle_sha256(b"{}\n"),
+        "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    );
+}
+
+fn verify_coverage_sha256(root: &OraclePath, manifest: &Value) -> Result<()> {
+    let actual = oracle_sha256(&oracle_fs::read(root.join("coverage.json"))?);
+    let expected = manifest["coverage_sha256"]
+        .as_str()
+        .context("manifest coverage_sha256")?;
+    anyhow::ensure!(
+        actual == expected,
+        "coverage_sha256 mismatch: manifest has {expected}, coverage.json has {actual}"
+    );
+    Ok(())
+}
+
 fn verify_oracle_integrity() -> Result<Value> {
     let workspace = OraclePath::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = read_oracle_json(oracle_root().join("manifest.json"))?;
+    anyhow::ensure!(
+        manifest["fixture_format_version"] == json!(1),
+        "unsupported fixture format; upgrade the oracle runner"
+    );
+    verify_coverage_sha256(&oracle_root(), &manifest)?;
     let output = OracleCommand::new(workspace.join("scripts/graphql-compat-oracle"))
         .args(["verify-fixtures", "--offline", "--fixtures"])
         .arg(oracle_root())
@@ -39,11 +70,6 @@ fn verify_oracle_integrity() -> Result<Value> {
         output.status.success(),
         "fixture integrity failed before query execution: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    let manifest = read_oracle_json(oracle_root().join("manifest.json"))?;
-    anyhow::ensure!(
-        manifest["fixture_format_version"] == json!(1),
-        "unsupported fixture format; upgrade the oracle runner"
     );
     Ok(manifest)
 }
@@ -78,6 +104,24 @@ fn graphql_oracle_rejects_provisional_fixture_without_local_escape() -> Result<(
         "rejection did not name the operator refresh procedure: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
+}
+
+#[test]
+fn graphql_oracle_rejects_mismatched_manifest_coverage_digest() -> Result<()> {
+    let fixtures = std::env::temp_dir().join(format!(
+        "bigname-graphql-oracle-coverage-digest-{}-{}",
+        std::process::id(),
+        NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    oracle_fs::create_dir_all(&fixtures)?;
+    oracle_fs::write(fixtures.join("coverage.json"), b"{}\n")?;
+    let manifest = json!({"coverage_sha256": "0000000000000000000000000000000000000000000000000000000000000000"});
+    let error = verify_coverage_sha256(&fixtures, &manifest)
+        .expect_err("mismatched coverage_sha256 was accepted")
+        .to_string();
+    oracle_fs::remove_dir_all(fixtures)?;
+    assert!(error.contains("coverage_sha256 mismatch"));
     Ok(())
 }
 
@@ -268,6 +312,7 @@ fn oracle_field_is_deferred(
     let return_type_path = format!("type:{return_type}");
     known.contains_key(return_type)
         && !claimed.contains(&return_type_path)
+        && upstream_only.contains(&return_type_path)
         && upstream[&return_type_path]["kind"] == json!("OBJECT")
         && upstream.contains_key(&format!("field:{return_type}.id"))
 }
@@ -525,6 +570,14 @@ async fn run_oracle_cases(kind: &str) -> Result<()> {
     let manifest = verify_oracle_integrity()?;
     let root = oracle_root();
     let coverage = read_oracle_json(root.join("coverage.json"))?;
+    assert_eq!(
+        coverage["known_upstream_types"]
+            .as_object()
+            .context("known_upstream_types")?
+            .len(),
+        113,
+        "live fixture coverage census changed"
+    );
     let upstream: OracleMap<String, Value> =
         serde_json::from_value(read_oracle_json(root.join("upstream/schema-surface.json"))?)?;
     let database = TestDatabase::new_migrated().await?;
@@ -749,6 +802,26 @@ fn assert_oracle_field_ownership_rules() {
     assert!(claimed_return_error
         .contains("unowned upstream-only path: field:Query.futureDomains"));
 
+    let locally_served_return_coverage = json!({
+        "claimed_paths": [],
+        "schema_signature_differences": [],
+        "upstream_only": [],
+        "local_extensions": [],
+        "known_upstream_types": {
+            "Domain": {"owner":"#1", "docs":"x"},
+            "Query": {"owner":"#2", "docs":"x"}
+        }
+    });
+    let locally_served_return_error = apply_oracle_coverage(
+        &claimed_return_upstream,
+        &claimed_return_local,
+        &locally_served_return_coverage,
+    )
+    .expect_err("locally served return type auto-owned an upstream-only Query field")
+    .to_string();
+    assert!(locally_served_return_error
+        .contains("unowned upstream-only path: field:Query.futureDomains"));
+
     let claimed_domain = OracleMap::from([
         ("type:Domain".into(), json!({"kind":"OBJECT"})),
         ("field:Domain.future".into(), json!({"type":"String"})),
@@ -772,6 +845,44 @@ fn assert_oracle_field_ownership_rules() {
     assert!(
         apply_oracle_coverage(&claimed_domain, &claimed_local, &type_wide_coverage).is_err()
     );
+}
+
+#[tokio::test]
+async fn graphql_oracle_claims_deny_and_matches_the_default_policy() -> Result<()> {
+    let root = oracle_root();
+    let coverage = read_oracle_json(root.join("coverage.json"))?;
+    assert!(
+        coverage["claimed_paths"]
+            .as_array()
+            .context("claimed_paths")?
+            .iter()
+            .any(|path| path == "enum:_SubgraphErrorPolicy_.deny"),
+        "deny is not an exact claimed path"
+    );
+    let manifest = verify_oracle_integrity()?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_oracle_fixture(&database, &load_oracle_seed(&root, &manifest)?).await?;
+    let variables = read_oracle_json(
+        root.join("entities/domain/entity-by-id/variables.json"),
+    )?;
+    let default_policy = post_graphql(
+        database.app_state(),
+        r#"query OracleDefaultPolicy($id: ID!, $block: Block_height!) {
+            domain(id: $id, block: $block) { id }
+        }"#,
+        variables.clone(),
+    )
+    .await?;
+    let deny_policy = post_graphql(
+        database.app_state(),
+        r#"query OracleDenyPolicy($id: ID!, $block: Block_height!) {
+            domain(id: $id, block: $block, subgraphError: deny) { id }
+        }"#,
+        variables,
+    )
+    .await?;
+    assert_eq!(deny_policy, default_policy);
+    database.cleanup().await
 }
 
 fn assert_oracle_argument_ownership_rules() {
