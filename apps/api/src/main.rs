@@ -23,6 +23,7 @@ mod metrics;
 mod name_filter;
 #[path = "support/service.rs"]
 mod service;
+mod startup_preflight;
 mod state;
 mod v2;
 
@@ -59,6 +60,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         args.bounds.db_statement_timeout(),
     )
     .await?;
+    startup_preflight::ensure_api_storage_compatible(&pool).await?;
     let health_pool = bigname_storage::connect_phase_reserved_readiness_pool(
         &args.database,
         "bigname-api-health",
