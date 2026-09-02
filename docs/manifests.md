@@ -21,6 +21,10 @@ manifests/sepolia/base/<namespace>/<source_family>/v1.toml
 
 One runtime selects exactly one manifest profile root at startup — `manifests/mainnet/` for the shipped mainnet profile, or `manifests/sepolia/` for the Sepolia profile. Deployment-profile selection is not a manifest schema change. A runtime never loads two profile roots into the same canonical corpus, [watch plan](glossary.md), discovery graph, or [projection](glossary.md) set.
 
+Phase-runner executes its retained-ENS validation and the complete manifest
+mutation transaction on the same PostgreSQL session that owns the startup
+advisory lock; losing that session aborts the transaction.
+
 Within a selected profile root, the first directory component is the chain combo. It must match the leading component of each manifest `chain` ID: `ethereum-mainnet` lives under `ethereum/`, `base-mainnet` under `base/`, and `ethereum-sepolia` under `ethereum/`.
 
 TOML is chosen for deterministic diffs, hand-editing, and straightforward Rust parsing.

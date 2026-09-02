@@ -86,8 +86,9 @@ mod registry_calls {
     }
 }
 
-/// Local deployment of the current post-audit ENSv2 Sepolia contracts from
-/// pinned hardhat artifacts.
+/// Local deployment of the repository-selected 2026-06-29 ENSv2 Sepolia
+/// contracts from pinned Hardhat artifacts.
+/// (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/.deployment.json:L4 @ ens_v2@a971bd64)
 ///
 /// Constructor signatures are pinned in upstream sources:
 /// - `LabelStore(IContractNamer)`
