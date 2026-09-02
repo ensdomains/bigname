@@ -430,24 +430,35 @@ namehashes only.
 `Domain_filter` accepts exactly `id: ID`, `id_in: [ID!]`, `owner: String`,
 `owner_in: [String!]`, `name: String`, and `name_contains: String`. Supplied
 members combine with logical AND. A supplied empty `id_in` or `owner_in` list
-matches no rows. `owner` and `owner_in` match the projected effective controller,
-which agrees with `Domain.owner` when the latest projected registry-ownership event
-is an owner-bearing `AuthorityTransferred` to a non-zero address on a
-non-wrapper-authority name. Task `#670/T5` owns these remaining disagreement
-classes:
+matches no rows. `owner` and `owner_in` match the projected effective controller.
+The effective controller agrees with `Domain.owner` when the latest projected
+registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero
+address on a non-wrapper-authority name and no later resource-scoped
+`PermissionChanged` event exists on the selected resource. Task `#670/T5` owns
+these remaining disagreement classes:
 
 - Wrapper-authority names serve the wrapper token holder through the registrant
   fallback, while the effective controller is a registry-controller fold for
   eligible wrapped or emancipated names and is absent for locked or in-grace names.
-- A zero or masked registry owner is served as the zero address, while the
-  address-name projection deliberately omits zero-address relations.
+- A zero registry owner is served as the zero address; a masked owner word is
+  served as the registrant fallback, or the zero address when there is none. In
+  both cases the address-name projection drops the row, so the filter selects
+  nothing.
 - Without a projected registry-ownership event, the effective controller can fall
   back to a token holder or be absent while the served owner falls back to a
   registrant or the zero address.
-- A `PermissionChanged` event granting `resource_control` can set the effective
-  controller to its grantee, while served control ownership follows the latest
-  `AuthorityTransferred` or `AuthorityEpochChanged`; an epoch event without an
-  owner clears the served registry owner.
+- Resource-scoped `PermissionChanged` events granting or revoking
+  `resource_control`, or an owner-less `AuthorityEpochChanged` emitted on release.
+  A resource-scoped `PermissionChanged` granting `resource_control` makes its
+  grantee the effective controller, while one revoking the current controller's
+  `resource_control` clears the current controller. The effective controller is
+  then absent when the name has no registrar [token lineage](glossary.md#token-lineage),
+  or falls back to the token holder or registrant otherwise; served control
+  ownership is unchanged by either `PermissionChanged`. A release can also
+  co-emit an owner-less `AuthorityEpochChanged`, which clears the served registry
+  owner so `Domain.owner` falls back to the registrant or zero address, while the
+  epoch event is excluded from the effective-controller fold and the release's
+  `resource_control` grant keeps the registry owner there.
 
 `name` and `name_contains` preserve the existing ENS-aware name normalization.
 Every other captured upstream member is absent from the SDL, so GraphQL input

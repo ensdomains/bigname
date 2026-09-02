@@ -140,11 +140,21 @@ to the applicable entries below.
 > **Since**: `2026-09-02`
 
 > **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
-> `owner_in` members use bigname's effective-controller relation. It agrees with `Domain.owner` when the latest projected
-> registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero address on a non-wrapper-authority
-> name. Task `#670/T5` owns four remaining disagreement classes: wrapper-authority names; zero or masked registry owners;
-> names without a projected registry-ownership event; and static-read `PermissionChanged` or owner-less
-> `AuthorityEpochChanged` state. `docs/consumer-capabilities.md` § GraphQL compatibility states each class explicitly.
+> `owner_in` members use bigname's effective-controller relation. The effective controller agrees with `Domain.owner`
+> when the latest projected registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero address on
+> a non-wrapper-authority name and no later resource-scoped `PermissionChanged` event exists on the selected resource.
+> A zero registry owner is served as the zero address; a masked owner word is served as the registrant fallback, or the
+> zero address when there is none. In both cases the address-name projection drops the row, so the filter selects nothing.
+> Task `#670/T5` owns four remaining disagreement classes: wrapper-authority names; the zero or masked case just described;
+> names without a projected registry-ownership event; and resource-scoped `PermissionChanged` events granting or revoking
+> `resource_control`, or an owner-less `AuthorityEpochChanged` emitted on release. A resource-scoped `PermissionChanged`
+> granting `resource_control` makes its grantee the effective controller, while one revoking the current controller's
+> `resource_control` clears the current controller. The effective controller is then absent when the name has no registrar
+> [token lineage](glossary.md#token-lineage), or falls back to the token holder or registrant otherwise; served control
+> ownership is unchanged by either `PermissionChanged`. A release can also co-emit an owner-less `AuthorityEpochChanged`,
+> which clears the served registry owner so `Domain.owner` falls back to the registrant or zero address, while the epoch
+> event is excluded from the effective-controller fold and the release's `resource_control` grant keeps the registry owner
+> there. `docs/consumer-capabilities.md` § GraphQL compatibility states each class explicitly.
 > **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
 > ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
