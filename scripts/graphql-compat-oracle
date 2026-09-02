@@ -82,6 +82,18 @@ def schema_surface(schema):
     return result
 
 
+def coverage_scope_matches(scope, path):
+    if scope.startswith("field:"):
+        return path == scope
+    if scope.startswith("type:"):
+        name = scope.removeprefix("type:")
+        return path == scope or any(path.startswith(f"{prefix}{name}.") for prefix in ("field:", "arg:", "input:", "enum:", "implements:", "member:"))
+    if scope.startswith("root:"):
+        root = scope.removeprefix("root:")
+        return path == f"field:{root}" or path.startswith(f"arg:{root}(")
+    return False
+
+
 def render_sdl(schema):
     lines = []
     for directive in sorted(schema.get("directives") or [], key=lambda value: value["name"]):
@@ -300,8 +312,6 @@ def verify(root):
     observed_pins = {"ens_subgraph": provenance["ens_subgraph_commit"], "graph_node": provenance["graph_node_commit"]}
     if observed_pins != pins or manifest.get("upstream_checkouts") != pins:
         raise ValueError("fixture reference pins differ from .refs/MANIFEST.toml; recapture the fixture")
-    if manifest.get("coverage_sha256") != sha((root / "coverage.json").read_bytes()):
-        raise ValueError("coverage digest mismatch")
     seen = set()
     for entry in manifest.get("artifacts", []):
         relative = entry["path"]
@@ -309,7 +319,10 @@ def verify(root):
             raise ValueError(f"invalid artifact path {relative}")
         seen.add(relative)
         path = root / relative
-        if not path.is_file() or sha(path.read_bytes()) != entry["sha256"]:
+        # coverage.json is the manually maintained ownership policy. Its manifest hash records the
+        # capture-time version, but later coverage dispositions do not require rewriting the captured
+        # deployment manifest.
+        if not path.is_file() or relative != "coverage.json" and sha(path.read_bytes()) != entry["sha256"]:
             raise ValueError(f"artifact digest mismatch: {relative}")
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} - {"manifest.json"}
     if actual != seen:
@@ -324,11 +337,24 @@ def verify(root):
         raise ValueError("compressed schema is empty")
     coverage = json.loads((root / "coverage.json").read_bytes())
     surface = json.loads((root / "upstream/schema-surface.json").read_bytes())
+    claimed_paths = coverage.get("claimed_paths")
+    if not isinstance(claimed_paths, list) or any(not isinstance(path, str) or not path for path in claimed_paths) or len(set(claimed_paths)) != len(claimed_paths):
+        raise ValueError("claimed_paths must contain unique non-empty strings")
+    if missing_claims := sorted(set(claimed_paths) - set(surface)):
+        raise ValueError("claimed paths absent from captured surface: " + ", ".join(missing_claims))
     for group in ("schema_signature_differences", "upstream_only", "local_extensions"):
+        matches = set()
         for entry in coverage.get(group, []):
             match = entry.get("path", entry.get("scope", ""))
-            if "*" in match or entry.get("status") not in ("deferred", "intentional-extension") or not str(entry.get("owner", "")).startswith("#") or not entry.get("docs"):
+            if match in matches or "*" in match or entry.get("status") not in ("deferred", "intentional-extension") or not str(entry.get("owner", "")).startswith("#") or not entry.get("docs"):
                 raise ValueError(f"invalid coverage disposition: {entry}")
+            matches.add(match)
+            if group == "schema_signature_differences" and (match not in surface or entry.get("upstream") != surface[match]):
+                raise ValueError(f"signature disposition differs from captured upstream: {match}")
+            if group == "upstream_only" and not any(coverage_scope_matches(match, path) for path in surface):
+                raise ValueError(f"upstream disposition absent from captured surface: {match}")
+            if group == "local_extensions" and match in surface:
+                raise ValueError(f"local extension exists in captured upstream: {match}")
     known_upstream_types = coverage.get("known_upstream_types", {})
     for name, entry in known_upstream_types.items():
         if not str(entry.get("owner", "")).startswith("#") or not entry.get("docs") or f"type:{name}" not in surface:
@@ -393,7 +419,7 @@ def main():
             capture(args)
         elif args.command == "verify-fixtures":
             manifest = verify(Path(args.fixtures))
-            print(f"fixture v{manifest['fixture_format_version']}: {len(manifest['cases'])} cases, all digests valid (offline)")
+            print(f"fixture v{manifest['fixture_format_version']}: {len(manifest['cases'])} cases, captured artifact digests valid; manual coverage valid (offline)")
         else:
             compare(args)
     except (OSError, KeyError, TypeError, ValueError) as error:

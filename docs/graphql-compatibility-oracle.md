@@ -15,6 +15,19 @@ The fixture separates three concepts:
 Each difference has an exact path or bounded scope, status, GitHub issue/task identifier, and documentation anchor. Notes do
 not affect matching; wildcards, conflicts, unknown paths, and stale entries invalidate the fixture.
 
+Upstream-only fields on a shared type require exact field entries; a type-wide entry is valid only when the whole type is
+absent locally. The one bounded exception is an upstream-only `Query` entity field: when its return type is an object with
+an `id` field in `known_upstream_types`, the root field inherits that entity type's owner. An upstream-only argument
+inherits its parent field's disposition, never the parent type's, so a new argument on a claimed field still fails. An
+upstream-only enum value inherits the owner of its enum type in `known_upstream_types`; a value whose enum type is absent
+from that census still fails.
+
+`coverage.json` is the manually maintained ownership policy. The manifest records the version present at capture time, but later
+ownership dispositions do not rewrite the steward's captured deployment manifest.
+Offline fixture verification validates that claims and dispositions agree with the captured upstream index. The Rust
+fixture tests perform the separate local-introspection comparison and apply the field, argument, Query-entity, and enum
+ownership rules above; the command-line capture and verification tool does not duplicate that local census walk.
+
 Broader entity/event fixtures, filter matrix, historical reads, errors, and reports are deferred; only the Domain point and name-equality responses are claimed.
 
 The steward's live introspection observed the Graph Node logging types `LogLevel`, `_LogArgument_`, `_LogMeta_`, and
@@ -38,7 +51,7 @@ with the reference-indexer comparisons.
 | --- | --- |
 | Claimed path absent locally or its signature changed | Fail |
 | New or changed shared path without a disposition | Fail |
-| Upstream-only path in a named deferred type/entity/task | Report |
+| Upstream-only path with the field, parent-field, Query-entity, or enum ownership described above | Report |
 | Exact documented local extension | Report |
 | Unclassified local-only path | Fail |
 | Recorded difference no longer present | Fail as stale |

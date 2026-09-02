@@ -101,6 +101,30 @@ Intentional differences between our docs/manifests and upstream. Every divergenc
 > **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
 > **Since**: `2026-09-02`
 
+> **Graph Node collection-argument schema defaults are omitted locally** — Graph Node publishes collection arguments as
+> nullable `Int` values with `first = 100` and `skip = 0`, while bigname currently publishes the same nullable arguments
+> without schema defaults. The bigname resolver still applies page size `100` and offset `0` when callers omit them.
+> **Upstream**: Graph Node's generated collection arguments assign `skip` the default `0` and `first` the default `100`
+> (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact signature dispositions in the
+> GraphQL oracle `coverage.json`; task `#670/T2` owns publishing the defaults.
+> **Why**: preserving the current runtime page size avoids a behavior change in the capture-preparation change while the
+> entities machinery task aligns the introspected signature.
+> **Since**: `2026-09-02`
+
+> **Direct Domain registration-date ordering is a local GraphQL extension** — bigname retains
+> `Domain_orderBy.registrationDate` from bigname's earlier GraphQL schema. The generated upstream equivalent is the nested
+> `registration__registrationDate` value reached through `Domain.registration`.
+> **Upstream**: the ENS subgraph's `Domain` has a `registration` relation but no direct `registrationDate` field, while
+> `Registration` owns `registrationDate` (upstream: .refs/ens_subgraph/schema.graphql:L1-L46 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/schema.graphql:L184-L190 @ ens_subgraph@723f1b6). Graph Node generates sortable child
+> fields as `<parent>__<child>` (upstream: .refs/graph_node/graph/src/schema/api.rs:L531-L603 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact local extension in the GraphQL
+> oracle `coverage.json`; task `#670/T3` owns the order/filter vocabulary.
+> **Why**: retaining the direct value preserves bigname's existing GraphQL query surface without claiming that it is an
+> upstream `Domain_orderBy` value.
+> **Since**: `2026-09-02`
+
 > **Pre-surface-only ENSv1 resolver selection is not projected** — when a resolver was selected before bigname materialized a [name surface](glossary.md#surface-name-surface) and was never selected again afterward, bigname retains the record facts but has no linked current-resolver pointer and does not publish a record inventory for the name.
 > **Upstream**: ENSv1 reads the resolver stored for the node without requiring a later selection event `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)`, and its text resolver reads storage keyed by record version, node, and key `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Resolver and records and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.

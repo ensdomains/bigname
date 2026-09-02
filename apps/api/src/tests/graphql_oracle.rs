@@ -208,6 +208,9 @@ fn oracle_schema_surface(payload: &Value) -> Result<OracleMap<String, Value>> {
 }
 
 fn scope_matches(scope: &str, path: &str) -> bool {
+    if scope.starts_with("field:") {
+        return path == scope;
+    }
     if let Some(name) = scope.strip_prefix("type:") {
         return path == scope
             || ["field:", "arg:", "input:", "enum:", "implements:", "member:"]
@@ -219,11 +222,94 @@ fn scope_matches(scope: &str, path: &str) -> bool {
     })
 }
 
+fn oracle_named_type(type_ref: &str) -> &str {
+    type_ref.trim_matches(['[', ']', '!'])
+}
+
+fn oracle_parent_field(path: &str) -> Option<String> {
+    path.strip_prefix("arg:")
+        .and_then(|path| path.split_once('('))
+        .map(|(field, _)| format!("field:{field}"))
+}
+
+fn oracle_field_is_deferred(
+    path: &str,
+    upstream: &OracleMap<String, Value>,
+    upstream_only: &OracleSet<String>,
+    deferred: &[Value],
+    known: &serde_json::Map<String, Value>,
+) -> bool {
+    if deferred.iter().any(|entry| {
+        entry["scope"]
+            .as_str()
+            .is_some_and(|scope| scope_matches(scope, path))
+    }) {
+        return true;
+    }
+    let Some(field) = path.strip_prefix("field:") else {
+        return false;
+    };
+    let Some((parent_type, _)) = field.split_once('.') else {
+        return false;
+    };
+    if upstream_only.contains(&format!("type:{parent_type}")) {
+        return true;
+    }
+    if parent_type != "Query" {
+        return false;
+    }
+    if !upstream_only.contains(path) {
+        return false;
+    }
+    let Some(return_type) = upstream[path]["type"].as_str().map(oracle_named_type) else {
+        return false;
+    };
+    known.contains_key(return_type)
+        && upstream[&format!("type:{return_type}")]["kind"] == json!("OBJECT")
+        && upstream.contains_key(&format!("field:{return_type}.id"))
+}
+
+fn oracle_upstream_path_is_deferred(
+    path: &str,
+    upstream: &OracleMap<String, Value>,
+    upstream_only: &OracleSet<String>,
+    deferred: &[Value],
+    known: &serde_json::Map<String, Value>,
+) -> bool {
+    if path.starts_with("field:") {
+        return oracle_field_is_deferred(path, upstream, upstream_only, deferred, known);
+    }
+    if let Some(parent) = oracle_parent_field(path) {
+        return oracle_field_is_deferred(
+            &parent,
+            upstream,
+            upstream_only,
+            deferred,
+            known,
+        );
+    }
+    if let Some(enum_type) = path
+        .strip_prefix("enum:")
+        .and_then(|path| path.split_once('.'))
+        .map(|(name, _)| name)
+    {
+        return known.contains_key(enum_type);
+    }
+    deferred.iter().any(|entry| {
+        entry["scope"]
+            .as_str()
+            .is_some_and(|scope| scope_matches(scope, path))
+    }) || known.keys().any(|name| {
+        upstream_only.contains(&format!("type:{name}"))
+            && scope_matches(&format!("type:{name}"), path)
+    })
+}
+
 fn apply_oracle_coverage(
     upstream: &OracleMap<String, Value>,
     local: &OracleMap<String, Value>,
     coverage: &Value,
-) -> Result<(usize, usize, usize)> {
+) -> Result<(usize, usize, usize, usize)> {
     let upstream_only: OracleSet<_> = upstream
         .keys()
         .filter(|path| !local.contains_key(*path))
@@ -244,12 +330,19 @@ fn apply_oracle_coverage(
     let known = coverage["known_upstream_types"]
         .as_object()
         .context("known_upstream_types")?;
-    for path in coverage["claimed_paths"]
+    let mut claimed = OracleSet::new();
+    for value in coverage["claimed_paths"]
         .as_array()
         .context("claimed_paths")?
-        .iter()
-        .filter_map(Value::as_str)
     {
+        let Some(path) = value.as_str().filter(|path| !path.is_empty()) else {
+            failures.push(format!("invalid claimed path: {value}"));
+            continue;
+        };
+        if !claimed.insert(path) {
+            failures.push(format!("duplicate claimed path: {path}"));
+            continue;
+        }
         if !upstream.contains_key(path) || local.get(path) != upstream.get(path) {
             failures.push(format!("claimed path changed: {path}"));
         }
@@ -288,7 +381,15 @@ fn apply_oracle_coverage(
         if !scopes.insert(scope) {
             failures.push(format!("duplicate conflicting disposition: {scope}"));
         }
-        if scope.contains('*') || !scope.starts_with("type:") && !scope.starts_with("root:") {
+        if scope.contains('*')
+            || !scope.starts_with("type:")
+                && !scope.starts_with("root:")
+                && !scope.starts_with("field:")
+        {
+            failures.push(format!("overbroad disposition: {scope}"));
+            continue;
+        }
+        if scope.starts_with("type:") && !upstream_only.contains(scope) {
             failures.push(format!("overbroad disposition: {scope}"));
             continue;
         }
@@ -296,17 +397,10 @@ fn apply_oracle_coverage(
             failures.push(format!("stale upstream disposition: {scope}"));
         }
     }
+    let mut unowned = 0;
     for path in &upstream_only {
-        let explicitly_deferred = deferred.iter().any(|entry| {
-            entry["scope"]
-                .as_str()
-                .is_some_and(|scope| scope_matches(scope, path))
-        });
-        let wholly_deferred_type = known.keys().any(|name| {
-            upstream_only.contains(&format!("type:{name}"))
-                && scope_matches(&format!("type:{name}"), path)
-        });
-        if !explicitly_deferred && !wholly_deferred_type {
+        if !oracle_upstream_path_is_deferred(path, upstream, &upstream_only, deferred, known) {
+            unowned += 1;
             failures.push(format!("unowned upstream-only path: {path}"));
         }
     }
@@ -369,7 +463,7 @@ fn apply_oracle_coverage(
         "schema compatibility failures:\n{}",
         failures.join("\n")
     );
-    Ok((upstream_only.len(), local_only.len(), changed.len()))
+    Ok((upstream_only.len(), local_only.len(), changed.len(), unowned))
 }
 
 fn first_json_difference(
@@ -426,6 +520,7 @@ async fn run_oracle_cases(kind: &str) -> Result<()> {
     let introspection = post_graphql(database.app_state(), ORACLE_INTROSPECTION, json!({})).await?;
     let local = oracle_schema_surface(&introspection)?;
     let summary = apply_oracle_coverage(&upstream, &local, &coverage)?;
+    assert_eq!(summary.3, 0, "live fixture surface has unowned paths");
     println!(
         "GraphQL schema diff: {} upstream-only, {} local-only, {} signature differences; all dispositioned",
         summary.0, summary.1, summary.2
@@ -541,9 +636,12 @@ fn graphql_oracle_dispositions_reject_unknown_stale_duplicate_and_wildcard_entri
         json!({"claimed_paths":[],"schema_signature_differences":[],"upstream_only":[{"scope":"type:Future","status":"deferred","owner":"#1","docs":"x"}],"local_extensions":[{"path":"field:Query.stale","status":"intentional-extension","owner":"#1","docs":"x"}],"known_upstream_types":{"Future":{"owner":"#1","docs":"x"}}}),
         json!({"claimed_paths":[],"schema_signature_differences":[],"upstream_only":[{"scope":"type:Future","status":"deferred","owner":"#1","docs":"x"}],"local_extensions":[],"known_upstream_types":{"Future":{}}}),
         json!({"claimed_paths":[],"schema_signature_differences":[],"upstream_only":[{"scope":"type:Future","status":"deferred","owner":"#1","docs":"x"}],"local_extensions":[],"known_upstream_types":{"Future":{"owner":"#1","docs":"x"},"Ghost":{"owner":"#1","docs":"x"}}}),
+        json!({"claimed_paths":[null],"schema_signature_differences":[],"upstream_only":[{"scope":"type:Future","status":"deferred","owner":"#1","docs":"x"}],"local_extensions":[],"known_upstream_types":{"Future":{"owner":"#1","docs":"x"}}}),
     ] {
         assert!(apply_oracle_coverage(&upstream, &local, &coverage).is_err());
     }
+    let duplicate_claims = json!({"claimed_paths":["type:Future","type:Future"],"schema_signature_differences":[],"upstream_only":[],"local_extensions":[],"known_upstream_types":{"Future":{"owner":"#1","docs":"x"}}});
+    assert!(apply_oracle_coverage(&upstream, &upstream, &duplicate_claims).is_err());
 }
 
 #[test]
@@ -565,6 +663,171 @@ fn graphql_oracle_census_owns_wholly_deferred_type_surfaces() {
         }
     });
     assert!(apply_oracle_coverage(&upstream, &OracleMap::new(), &coverage).is_ok());
+    assert_oracle_field_ownership_rules();
+    assert_oracle_argument_ownership_rules();
+    assert_oracle_enum_value_ownership_rules();
+}
+
+fn assert_oracle_field_ownership_rules() {
+    let query = ("type:Query".into(), json!({"kind":"OBJECT"}));
+    let account = ("type:Account".into(), json!({"kind":"OBJECT"}));
+    let future = ("type:Future".into(), json!({"kind":"OBJECT"}));
+    let future_id = ("field:Future.id".into(), json!({"type":"ID!"}));
+    let account_domains = (
+        "field:Account.domains".into(),
+        json!({"type":"[Future!]!"}),
+    );
+    let query_future = (
+        "field:Query.future".into(),
+        json!({"type":"Future"}),
+    );
+    let coverage = json!({
+        "claimed_paths": [],
+        "schema_signature_differences": [],
+        "upstream_only": [{"scope":"field:Account.domains", "status":"deferred", "owner":"#1", "docs":"x"}],
+        "local_extensions": [],
+        "known_upstream_types": {
+            "Account": {"owner":"#1", "docs":"x"},
+            "Future": {"owner":"#2", "docs":"x"},
+            "Query": {"owner":"#3", "docs":"x"}
+        }
+    });
+    let upstream = OracleMap::from([
+        query.clone(),
+        account.clone(),
+        future,
+        future_id,
+        account_domains,
+        query_future,
+    ]);
+    let local = OracleMap::from([query, account]);
+    assert!(apply_oracle_coverage(&upstream, &local, &coverage).is_ok());
+
+    let claimed_domain = OracleMap::from([
+        ("type:Domain".into(), json!({"kind":"OBJECT"})),
+        ("field:Domain.future".into(), json!({"type":"String"})),
+    ]);
+    let claimed_local = OracleMap::from([("type:Domain".into(), json!({"kind":"OBJECT"}))]);
+    let claimed_coverage = json!({
+        "claimed_paths": [],
+        "schema_signature_differences": [],
+        "upstream_only": [],
+        "local_extensions": [],
+        "known_upstream_types": {"Domain": {"owner":"#1", "docs":"x"}}
+    });
+    assert!(apply_oracle_coverage(&claimed_domain, &claimed_local, &claimed_coverage).is_err());
+    let type_wide_coverage = json!({
+        "claimed_paths": [],
+        "schema_signature_differences": [],
+        "upstream_only": [{"scope":"type:Domain", "status":"deferred", "owner":"#1", "docs":"x"}],
+        "local_extensions": [],
+        "known_upstream_types": {"Domain": {"owner":"#1", "docs":"x"}}
+    });
+    assert!(
+        apply_oracle_coverage(&claimed_domain, &claimed_local, &type_wide_coverage).is_err()
+    );
+}
+
+fn assert_oracle_argument_ownership_rules() {
+    let query = ("type:Query".into(), json!({"kind":"OBJECT"}));
+    let future = ("type:Future".into(), json!({"kind":"OBJECT"}));
+    let future_id = ("field:Future.id".into(), json!({"type":"ID!"}));
+    let field = ("field:Query.future".into(), json!({"type":"[Future!]!"}));
+    let argument = (
+        "arg:Query.future(first)".into(),
+        json!({"type":"Int", "default":null, "deprecated":false}),
+    );
+    let coverage = json!({
+        "claimed_paths": [],
+        "schema_signature_differences": [],
+        "upstream_only": [],
+        "local_extensions": [],
+        "known_upstream_types": {
+            "Future": {"owner":"#1", "docs":"x"},
+            "Query": {"owner":"#2", "docs":"x"}
+        }
+    });
+    let upstream = OracleMap::from([query.clone(), future, future_id, field, argument]);
+    let local = OracleMap::from([query]);
+    assert!(apply_oracle_coverage(&upstream, &local, &coverage).is_ok());
+
+    for (parent, argument) in [
+        ("field:Query.domain", "arg:Query.domain(extra)"),
+        ("field:Domain.name", "arg:Domain.name(extra)"),
+    ] {
+        let parent_type = parent
+            .strip_prefix("field:")
+            .and_then(|path| path.split_once('.'))
+            .map(|(name, _)| name)
+            .unwrap();
+        let upstream = OracleMap::from([
+            (format!("type:{parent_type}"), json!({"kind":"OBJECT"})),
+            (parent.into(), json!({"type":"String"})),
+            (
+                argument.into(),
+                json!({"type":"String", "default":null, "deprecated":false}),
+            ),
+        ]);
+        let local = OracleMap::from([
+            (format!("type:{parent_type}"), json!({"kind":"OBJECT"})),
+            (parent.into(), json!({"type":"String"})),
+        ]);
+        let coverage = json!({
+            "claimed_paths": [parent],
+            "schema_signature_differences": [],
+            "upstream_only": [],
+            "local_extensions": [],
+            "known_upstream_types": {parent_type: {"owner":"#1", "docs":"x"}}
+        });
+        assert!(apply_oracle_coverage(&upstream, &local, &coverage).is_err());
+    }
+}
+
+fn assert_oracle_enum_value_ownership_rules() {
+    let enum_type = ("type:Domain_orderBy".into(), json!({"kind":"ENUM"}));
+    let new_value = (
+        "enum:Domain_orderBy.future".into(),
+        json!({"deprecated":false}),
+    );
+    let coverage = json!({
+        "claimed_paths": [],
+        "schema_signature_differences": [],
+        "upstream_only": [],
+        "local_extensions": [],
+        "known_upstream_types": {"Domain_orderBy": {"owner":"#670/T3", "docs":"x"}}
+    });
+    assert!(
+        apply_oracle_coverage(
+            &OracleMap::from([enum_type.clone(), new_value]),
+            &OracleMap::from([enum_type]),
+            &coverage,
+        )
+        .is_ok()
+    );
+
+    let uncensused = apply_oracle_coverage(
+        &OracleMap::from([
+            ("type:Other_orderBy".into(), json!({"kind":"ENUM"})),
+            (
+                "enum:Other_orderBy.future".into(),
+                json!({"deprecated":false}),
+            ),
+        ]),
+        &OracleMap::from([(
+            "type:Other_orderBy".into(),
+            json!({"kind":"ENUM"}),
+        )]),
+        &json!({
+            "claimed_paths": [],
+            "schema_signature_differences": [],
+            "upstream_only": [],
+            "local_extensions": [],
+            "known_upstream_types": {}
+        }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(uncensused.contains("unowned upstream-only path: enum:Other_orderBy.future"));
 }
 
 #[test]

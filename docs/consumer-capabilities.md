@@ -405,6 +405,17 @@ Its captured SDL and semantic index form a [GraphQL upstream
 census](glossary.md#graphql-upstream-census), not a claim of complete entity
 coverage. Directive repeatability is excluded at the documented [schema-comparison
 boundary](graphql-compatibility-oracle.md#schema-comparison).
+The captured upstream signature declares `domains(first: Int = 100, skip: Int = 0)`, matching Graph Node's generated
+collection arguments (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737), while
+bigname's introspection currently declares both arguments without schema defaults; its resolver nevertheless uses page
+size `100` and offset `0` when they are omitted. Task `#670/T2` owns aligning the published argument signature.
+`Domain_orderBy.registrationDate` is an intentional bigname extension retained from bigname's earlier GraphQL schema:
+upstream
+has no direct `Domain.registrationDate` field and instead exposes the nested
+`registration__registrationDate` order value through `Domain.registration`; the date itself belongs to
+`Registration.registrationDate` (upstream: .refs/ens_subgraph/schema.graphql:L1-L46 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/schema.graphql:L184-L190 @ ens_subgraph@723f1b6), and Graph Node generates child order
+values as `<parent>__<child>` (upstream: .refs/graph_node/graph/src/schema/api.rs:L531-L603 @ graph_node@aefe1737).
 
 The schema includes graph-node-compatible `BigInt` and `Bytes` scalars,
 `Block_height`, `_SubgraphErrorPolicy_`, and `_meta`/`_Meta_`/`_Block_` shapes.
