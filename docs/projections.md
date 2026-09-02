@@ -129,9 +129,9 @@ outcomes, or durable traces.
   chain-position or target-publication context.
 - Every projection-row value other than the closed set of
   [Project-owned maintenance fields](glossary.md#projection) is subject to the
-  input source enumeration below. This includes every [serving
-  field](glossary.md#projection) — a value a consumer can read through the API
-  or history — and every storage-only row key or retained evidence field. The
+  input source enumeration below. This includes every value a consumer can read
+  through the API or history and every storage-only row key or retained
+  evidence field. The
   maintenance fields are `last_recomputed_at`, `inserted_at`,
   `reverse_hydration_attempted_block_number`,
   `reverse_hydration_attempted_block_hash`, and
@@ -139,7 +139,7 @@ outcomes, or durable traces.
   scope and value sources. Only the maintenance fields are outside the input
   source enumeration below.
 - Review every projection-builder and hydration change for non-maintenance
-  inputs. Each serving field or storage-only builder field written to a
+  inputs. Each consumer-visible or storage-only builder field written to a
   replacement row or by hydration must be a contract-defined literal or take
   all of its inputs only from one or more of these exhaustive input classes:
   - the current batch's staged normalized events;
@@ -155,9 +155,10 @@ outcomes, or durable traces.
   - `chain_lineage` context resolved at any otherwise-admitted input's stored
     chain position, including a staged event's own position, for times such as
     registration, creation, and last change;
-  - timestamp alignment that selects another chain's latest canonical-family
-    block at or before an input timestamp, for auxiliary-chain positions such as
-    a declared registry path's execution-chain context;
+  - timestamp alignment that selects another chain's latest
+    [read-safe](glossary.md#readable--read-safe) `chain_lineage` block at or
+    before an input timestamp, for auxiliary-chain positions such as a declared
+    registry path's execution-chain context;
   - a replacement row already staged in the same batch and derived only from
     these inputs;
   - a field deliberately stored for later reuse; or
