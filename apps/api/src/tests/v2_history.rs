@@ -340,6 +340,21 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
         "owner_getter_reason": "literal_zero",
         "authority_kind": null
     });
+    let mut epoch = v2_history_event(
+        "ownerless-registry-authority-epoch",
+        Some(logical_name_id),
+        Some(read_resource_id),
+        "AuthorityEpochChanged",
+        121,
+    );
+    epoch.source_family = "ens_v1_registry_l1".to_owned();
+    epoch.after_state = json!({
+        "node": "node:ownerless-history.eth",
+        "owner": "0x0000000000000000000000000000000000000000",
+        "owner_getter": "0x0000000000000000000000000000000000000000",
+        "owner_getter_reason": "literal_zero",
+        "authority_kind": null
+    });
     let mut resolver = v2_history_event(
         "ownerless-registry-resolver",
         Some(logical_name_id),
@@ -354,7 +369,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     });
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
-        &[authority, resolver],
+        &[authority, epoch, resolver],
     )
     .await?;
 
@@ -364,7 +379,14 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     ] {
         let payload = v2_history_payload_for_database(&database, route).await?;
         let rows = payload["data"].as_array().expect("product history rows");
-        assert_eq!(rows.len(), 2, "{route}: {rows:?}");
+        assert_eq!(rows.len(), 3, "{route}: {rows:?}");
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["type"] == json!("authority"))
+                .count(),
+            2,
+            "{route}: {rows:?}"
+        );
         assert!(
             rows.iter()
                 .all(|row| row.get("registration_id") == Some(&Value::Null)),
@@ -385,7 +407,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     )
     .await?;
     let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic rows");
-    assert_eq!(diagnostic_rows.len(), 2);
+    assert_eq!(diagnostic_rows.len(), 3);
     assert!(diagnostic_rows.iter().all(|row| {
         row["registration_id"] == json!(read_resource_id.to_string())
     }));
