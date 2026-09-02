@@ -397,18 +397,72 @@ separately reviewed capabilities but share the deployment boundary above; slice
 current projections. The existing `domain`, `domains`,
 `registrationConnection`, and `domainConnection` operations remain available;
 `Domain.normalizedName`, `Domain.tokenId`, and both connection count operations
-are bigname additions to the subgraph-shaped surface. `domain(id:)` accepts an
-`ID!` containing the same ENS name or namehash strings accepted previously.
+are bigname additions to the subgraph-shaped surface. The generated-style
+Domain roots have these signatures:
+
+```graphql
+domain(
+  id: ID!
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): Domain
+
+domains(
+  skip: Int = 0
+  first: Int = 100
+  orderBy: Domain_orderBy
+  orderDirection: OrderDirection
+  where: Domain_filter
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): [Domain!]!
+```
+
+`account`, `accounts`, `resolver`, and `resolvers` are the named second-PR
+boundary of `#670/T2`; this slice does not add them through adjacent root work.
+`Domain.id` is `ID!` and remains a JSON string. `domain(id:)` also retains a
+local runtime extension that accepts an ENS name string and falls back to a
+namehash lookup. A name cannot shadow an ID because an ENS name is never a
+32-byte hexadecimal namehash string. `Domain_filter.id` and
+`Domain_filter.id_in` match namehashes only.
+
+`Domain_filter` accepts exactly `id: ID`, `id_in: [ID!]`, `owner: String`,
+`owner_in: [String!]`, `name: String`, and `name_contains: String`. Supplied
+members combine with logical AND. A supplied empty `id_in` or `owner_in` list
+matches no rows. Every other captured upstream member is absent from the SDL,
+so GraphQL input validation rejects it instead of ignoring it at runtime.
+`DomainFilter` remains the separate input for the local `domainConnection`
+operation. In particular, `isMigrated` remains on `DomainFilter` and is not
+accepted by `Domain_filter`; task `#670/T10` remains outside this slice and is
+subject to the Manager constraint below.
+
+When `orderBy` is omitted, `domains()` now orders by namehash ascending using
+PostgreSQL `COLLATE "C"`; this is a behavior change from the previous name
+ordering. `Domain_orderBy.id` uses that same namehash ordering. The existing
+`createdAt`, `expiryDate`, `name`, and `registrationDate` orderings remain.
+Omitted pagination starts at offset zero and returns the first 100 rows.
+Non-positive `first` returns an empty page, positive `first` is capped at
+`crate::v2::MAX_PAGE_SIZE`, negative `skip` becomes zero, and positive `skip`
+is capped at `1_000_000`.
+
+Manager's migration list therefore requires two operation declaration edits:
+`$id: String!` becomes `$id: ID!`, and the `Domains.graphql` declaration
+`$where: DomainFilter!` becomes `$where: Domain_filter!`. A Manager runtime
+`where` value containing `isMigrated` fails GraphQL input coercion with an
+explicit unknown-member error; the compatibility layer does not silently
+discard it. The `MigratedNamesCount.graphql` operation continues to call
+`domainConnection` with `DomainFilter`.
+
 The reviewed [GraphQL compatibility oracle](graphql-compatibility-oracle.md)
-currently claims one `Domain` point case and one `name` equality-filter case.
+claims the generated-style Domain root signatures and the implemented partial
+filter surface alongside its response cases.
 Its captured SDL and semantic index form a [GraphQL upstream
 census](glossary.md#graphql-upstream-census), not a claim of complete entity
 coverage. Directive repeatability is excluded at the documented [schema-comparison
 boundary](graphql-compatibility-oracle.md#schema-comparison).
-The captured upstream signature declares `domains(first: Int = 100, skip: Int = 0)`, matching Graph Node's generated
-collection arguments (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737), while
-bigname's introspection currently declares both arguments without schema defaults; its resolver nevertheless uses page
-size `100` and offset `0` when they are omitted. Task `#670/T2` owns aligning the published argument signature.
+The `skip` and `first` defaults follow Graph Node's generated collection
+arguments (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L679 @
+graph_node@aefe1737).
 `Domain_orderBy.registrationDate` is an intentional bigname extension retained from bigname's earlier GraphQL schema:
 upstream
 has no direct `Domain.registrationDate` field and instead exposes the nested

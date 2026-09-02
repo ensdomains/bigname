@@ -26,6 +26,13 @@ deleted. The production edge does not expose `/v2` until the maintainer-gated
 C3 edge flip. These docs define the currently served internal REST contract,
 not the public-edge rollout state.
 
+## GraphQL compatibility
+
+`POST /graphql` is governed by
+[`consumer-capabilities.md` § GraphQL compatibility](consumer-capabilities.md#graphql-compatibility),
+including its generated-style roots, local extensions, and explicit unsupported
+behavior. This document does not define a second GraphQL contract.
+
 ## Naming Dictionary
 
 Normative one-name-per-concept dictionary from ADR 0006, extended with the

@@ -25,6 +25,13 @@ upstream-only argument inherits its parent field's disposition, never the parent
 upstream-only enum value inherits the owner of its enum type in `known_upstream_types`; a value whose enum type is absent
 from that census still fails.
 
+An exact `input:<Type>.<name>` disposition owns one currently upstream-only
+input member. It cannot contain a wildcard, own the input type or a sibling,
+or remain after that member becomes local. Duplicate and unknown exact-input
+scopes are invalid. A `type:<Type>` disposition remains valid only while the
+complete type is absent locally; it cannot own the remainder of a partial input
+object.
+
 `coverage.json` is the manually maintained ownership policy. Its artifact digest records the version present at capture time,
 but later ownership dispositions do not rewrite that captured digest. The manifest's `coverage_sha256` must match the checked-in
 `coverage.json` bytes; both the offline verifier and Rust fixture gate reject a mismatch.
@@ -32,7 +39,10 @@ Offline fixture verification validates that claims and dispositions agree with t
 fixture tests perform the separate local-introspection comparison and apply the field, argument, Query-entity, and enum
 ownership rules above; the command-line capture and verification tool does not duplicate that local census walk.
 
-Broader entity/event fixtures, filter matrix, historical reads, errors, and reports are deferred; only the Domain point and name-equality responses are claimed.
+Broader entity/event fixtures, the remaining filter matrix, historical reads,
+errors, and reports are deferred. The Domain point and name-equality responses
+remain the claimed response cases; schema coverage additionally claims the
+generated-style Domain roots and the six-member partial `Domain_filter`.
 
 The steward's live introspection observed the Graph Node logging types `LogLevel`, `_LogArgument_`, `_LogMeta_`, and
 `_Log_`. They are infrastructure rather than ENS schema, so coverage assigns them to `#670/T0`; they are captured but
