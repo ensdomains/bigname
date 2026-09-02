@@ -191,6 +191,9 @@ async fn discovery_watch_coverage_ignores_unrelated_address_on_shared_instance()
         .context("database URL is required for discovery-watch coverage test")?;
     let mut connection = PgConnection::connect(&database_url).await?;
     let mut transaction = connection.begin().await?;
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public")
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query(
         "CREATE TEMP TABLE manifest_versions (
             manifest_id BIGINT PRIMARY KEY,
