@@ -10,6 +10,8 @@ GENERATOR = "graphql-compat-oracle/1"
 DEFAULT_FIXTURES = Path("apps/api/src/tests/fixtures/graphql-oracle/v1")
 ALLOW_PROVISIONAL = "BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"
 LIVE_ENDPOINT_PREFIX = "https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/"
+LIVE_SUBGRAPH_ID = "5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH"
+LIVE_DEPLOYMENT_ID = "QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ"
 TYPE_REF = "kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }"
 INTROSPECTION = "query OracleIntrospection { __schema { queryType { name } mutationType { name } subscriptionType { name } directives { name isRepeatable locations args { name defaultValue type { %s } } } types { kind name interfaces { name } possibleTypes { name } fields(includeDeprecated:true) { name isDeprecated type { %s } args(includeDeprecated:true) { name defaultValue isDeprecated type { %s } } } inputFields { name defaultValue isDeprecated type { %s } } enumValues(includeDeprecated:true) { name isDeprecated } } } }" % (TYPE_REF, TYPE_REF, TYPE_REF, TYPE_REF)
 META = "query OracleMeta($block: Block_height!) { _meta(block: $block) { block { number hash } deployment hasIndexingErrors } }"
@@ -34,8 +36,11 @@ def sha(data): return hashlib.sha256(data).hexdigest()
 
 
 def is_live_endpoint_template(template):
-    deployment = template.removeprefix(LIVE_ENDPOINT_PREFIX)
-    return template.startswith(LIVE_ENDPOINT_PREFIX) and bool(deployment) and all(character.isalnum() for character in deployment)
+    return template == LIVE_ENDPOINT_PREFIX + LIVE_SUBGRAPH_ID
+
+
+def is_bytes32_hex(value):
+    return isinstance(value, str) and len(value) == 66 and value.startswith("0x") and all(character in "0123456789abcdefABCDEF" for character in value[2:])
 
 
 def reference_pins():
@@ -172,6 +177,8 @@ def install_tree(staged, output):
 def capture(args):
     pins = reference_pins()
     template = args.upstream_endpoint_template
+    if not is_bytes32_hex(args.domain_id):
+        raise ValueError("domain ID must be a 32-byte 0x-prefixed hex namehash")
     if template != "stub://local-mock" and not is_live_endpoint_template(template):
         raise ValueError("live endpoint must use the operator refresh template in docs/development.md")
     if template != "stub://local-mock":
@@ -196,6 +203,8 @@ def capture(args):
     meta = observed_meta(meta_payload, args.block_number)
     if not isinstance(meta.get("deployment"), str) or not meta["deployment"]:
         raise ValueError("upstream _meta.deployment is required to identify the capture")
+    if template != "stub://local-mock" and meta["deployment"] != LIVE_DEPLOYMENT_ID:
+        raise ValueError("live endpoint returned an unreviewed ENS subgraph deployment")
     introspection = request(endpoint, INTROSPECTION, {}, "OracleIntrospection")
     schema = introspection["data"].get("__schema")
     if not isinstance(schema, dict) or not isinstance(schema.get("types"), list):
@@ -207,6 +216,8 @@ def capture(args):
     required = (domain or {}).get("id"), (domain or {}).get("name"), (domain or {}).get("createdAt"), ((domain or {}).get("owner") or {}).get("id")
     if any(value is None for value in required) or domain.get("expiryDate") is not None:
         raise ValueError("point Domain must have required fields and a null nullable expiryDate")
+    if domain["id"].lower() != args.domain_id.lower():
+        raise ValueError("point Domain ID differs from the requested namehash")
     filter_vars = {**variables, "name": domain["name"]}
     filtered = request(endpoint, FILTER, filter_vars, "OracleDomainName")
     observed_meta(filtered, args.block_number)
@@ -276,6 +287,8 @@ def verify(root):
     if not provenance["provisional_stub"] and not is_live_endpoint_template(provenance["endpoint_template"]):
         raise ValueError("non-upstream GraphQL fixture rejected; run the operator refresh procedure in docs/development.md")
     if not provenance["provisional_stub"]:
+        if provenance["observed_meta_deployment"] != LIVE_DEPLOYMENT_ID:
+            raise ValueError("live fixture identifies an unreviewed ENS subgraph deployment")
         if not all(isinstance(provenance.get(key), str) and provenance[key] for key in ("pinned_schema_verified_by", "pinned_schema_verification_date")):
             raise ValueError("live fixture lacks pinned-schema verification provenance")
         try:

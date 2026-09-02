@@ -88,7 +88,7 @@ scripts/graphql-compat-oracle capture \
   --upstream-endpoint-template \
   'https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH' \
   --block-number 23000000 \
-  --domain-id 0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f046a0bcc88a93fc4ae0 \
+  --domain-id 0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae \
   --pinned-schema-verified-by "$(gh api user --jq .login)" \
   --pinned-schema-verification-date "$(date -u +%F)" \
   --output apps/api/src/tests/fixtures/graphql-oracle/v1
