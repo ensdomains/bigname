@@ -49,14 +49,21 @@ fn reconcile_registration(
     closures: &mut ClosureIndex,
     registration: &Registration,
 ) {
-    if registration.window == RegistrationWindow::WholeTransaction && registration.surface_known {
-        return;
-    }
     let target_candidates = events
         .by_target
         .get(&registration.key)
         .cloned()
         .unwrap_or_default();
+    if target_candidates
+        .iter()
+        .any(|index| events.fields[*index].current_registry_new_owner)
+    {
+        output.normalized_events[registration.event_index].after_state["registry_migrated"] =
+            serde_json::Value::Bool(true);
+    }
+    if registration.window == RegistrationWindow::WholeTransaction && registration.surface_known {
+        return;
+    }
     let registrar_owner = target_candidates
         .iter()
         .filter_map(|index| {
@@ -77,8 +84,24 @@ fn reconcile_registration(
         .iter()
         .filter_map(|index| {
             let fields = &events.fields[*index];
+            let returns_to_registrar = fields.position.is_some_and(|position| {
+                target_candidates.iter().any(|later| {
+                    let later = &events.fields[*later];
+                    later.family == SourceFamily::Registry
+                        && matches!(
+                            later.source_event,
+                            SourceEvent::NewOwner | SourceEvent::Transfer
+                        )
+                        && later.position.is_some_and(|later| later > position)
+                        && later.owner.as_ref() == Some(&registrar_owner)
+                })
+            });
             (fields.family == SourceFamily::Registry
-                && fields.source_event == SourceEvent::Transfer
+                && matches!(
+                    fields.source_event,
+                    SourceEvent::NewOwner | SourceEvent::Transfer
+                )
+                && (fields.source_event == SourceEvent::Transfer || !returns_to_registrar)
                 && fields
                     .position
                     .is_some_and(|position| position > registration.position))

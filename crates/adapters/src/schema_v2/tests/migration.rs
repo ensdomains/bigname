@@ -1251,8 +1251,8 @@ fn cross_family_registrar_renewal_preserves_resource_anchored_multiplicity() -> 
     assert_eq!(
         base.raw_fact_ref["state_scope"],
         format!(
-            "migration-renewal:base-registrar:{}",
-            base.logical_name_id.as_deref().unwrap()
+            "migration-renewal:base-registrar:ens:{}",
+            base.after_state["namehash"].as_str().unwrap()
         )
     );
     assert_ne!(

@@ -2922,31 +2922,6 @@
         },
         {
           "after_state": {
-            "authority_kind": "registry_only",
-            "source_event": "NewOwner"
-          },
-          "before_state": {},
-          "block_hash": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
-          "block_number": 180,
-          "canonicality_state": "canonical",
-          "chain_id": "base-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_kind": "AuthorityEpochChanged",
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "basenames",
-          "raw_fact_ref": {
-            "block_hash": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
-            "block_number": 180,
-            "chain_id": "base-mainnet"
-          },
-          "resource_id": "39396a57-17da-5b52-ab41-e6c5fd56b8ff",
-          "source_family": "basenames_base_registry",
-          "source_manifest_id": 1,
-          "transaction_hash": "0xf1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
-        },
-        {
-          "after_state": {
             "child_node": "0xb200d2bfac166c814e32bfb9f34bde9c866514a1501c47af54d0fffa03a6bfee",
             "owner": "0x0000000000000000000000000000000000003011",
             "source_event": "NewOwner"

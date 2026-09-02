@@ -207,6 +207,11 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
     if !(event.source_family.starts_with("ens_v1_") || event.source_family.starts_with("basenames_")) {
         return;
     }
+    if event.after_state["registry_migrated"] == true
+        && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str)
+    {
+        state.mark_v1_migrated(&event.namespace, namehash);
+    }
     if event.event_kind == "PreimageObserved" && event.logical_name_id.is_some() && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str) {
         if event
             .after_state

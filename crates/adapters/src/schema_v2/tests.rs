@@ -36,6 +36,7 @@ mod v1_registrar {
 
     const CONTROLLER: &str = "0x0000000000000000000000000000000000000043";
     const REGISTRY: &str = "0x0000000000000000000000000000000000000044";
+    const OLD_REGISTRY: &str = "0x0000000000000000000000000000000000000045";
 
     fn lifecycle_manifest() -> ManifestInput {
         manifest_with_events(
@@ -161,6 +162,16 @@ mod v1_registrar {
             "ens_v1_registry_l1",
             &[
                 (
+                    "NewOwner",
+                    "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                    &["registry", "registry_old"],
+                    &[
+                        "SubregistryChanged",
+                        "AuthorityTransferred",
+                        "PermissionChanged",
+                    ],
+                ),
+                (
                     "Transfer",
                     "event Transfer(bytes32 indexed node, address owner)",
                     &["registry"],
@@ -186,6 +197,13 @@ mod v1_registrar {
         let mut value = admission(82, "registry");
         value.address = REGISTRY.to_owned();
         value.contract_instance_id = Uuid::from_u128(82);
+        value
+    }
+
+    fn old_registry_admission() -> AddressAdmissionInput {
+        let mut value = admission(82, "registry_old");
+        value.address = OLD_REGISTRY.to_owned();
+        value.contract_instance_id = Uuid::from_u128(83);
         value
     }
 
@@ -437,6 +455,20 @@ mod v1_registrar {
 
     #[test]
     #[rustfmt::skip]
+    fn reconciled_current_registry_registration_suppresses_later_old_registry_updates() -> anyhow::Result<()> {
+        const OWNER: &str = "0x0000000000000000000000000000000000000055";
+        let label = "migration-marker"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]);
+        let manifests = vec![lifecycle_manifest(), registry_manifest()]; let admissions = admissions().into_iter().chain([registry_admission(), old_registry_admission()]).collect::<Vec<_>>();
+        let numeric = raw_at(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTROLLER.parse()?, expires: U256::from(42) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 1, 1, CONTRACT);
+        let first = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY), numeric, raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: OWNER.parse()? }.encode_log_data(), 1, 2, REGISTRY), raw_at(Transfer { from: CONTROLLER.parse()?, to: OWNER.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 1, 3, CONTRACT), controller_registration(label, 999, 4)] })?;
+        let retained_markers = first.normalized_events.iter().filter(|event| event.after_state["source_event"] == "NewOwner" && event.after_state["emitter_role"] == "registry").collect::<Vec<_>>(); assert!(retained_markers.is_empty(), "the test must exercise a reconciled-away migration marker: {retained_markers:#?}");
+        let second = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: OWNER.parse()? }.encode_log_data(), 2, 0, OLD_REGISTRY)] })?;
+        assert!(second.normalized_events.is_empty(), "later old-registry update survived restored migration state: {:#?}", second.normalized_events);
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
     fn whole_transaction_reconciliation_preserves_post_registration_registry_divergence() -> anyhow::Result<()> {
         const DIVERGED: &str = "0x0000000000000000000000000000000000000077";
         let label = "reclaimed"; let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
@@ -446,6 +478,18 @@ mod v1_registrar {
         assert_eq!(divergence.after_state["authority_kind"], "registry_only");
         assert_ne!(divergence.resource_id, Some(registrar_resource));
         assert_eq!(divergence.logical_name_id.as_deref(), Some(format!("ens:{node}").as_str()));
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn whole_transaction_reconciliation_preserves_post_registration_reclaim_divergence() -> anyhow::Result<()> {
+        const DIVERGED: &str = "0x0000000000000000000000000000000000000077";
+        let label = "reclaim-new-owner"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]);
+        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: vec![lifecycle_manifest(), registry_manifest()], discovery_rules: vec![], admissions: admissions().into_iter().chain([registry_admission()]).collect(), prior_events: vec![], blocks: vec![], raw_logs: vec![base_registration(label, 42, 0), raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: DIVERGED.parse()? }.encode_log_data(), 1, 1, REGISTRY)] })?;
+        let registrar_resource = output.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").and_then(|event| event.resource_id).expect("registrar resource");
+        let divergence = output.normalized_events.iter().find(|event| event.event_kind == "AuthorityTransferred" && event.after_state["source_event"] == "NewOwner" && event.after_state["child_node"] == node).expect("registry reclaim divergence");
+        assert_eq!(divergence.after_state["authority_kind"], "registry_only"); assert_ne!(divergence.resource_id, Some(registrar_resource)); assert_eq!(divergence.logical_name_id, None);
         Ok(())
     }
 

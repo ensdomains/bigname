@@ -52,6 +52,7 @@ pub(super) struct EventFields {
     pub(super) grant: bool,
     pub(super) revocation: bool,
     pub(super) named: bool,
+    pub(super) current_registry_new_owner: bool,
 }
 
 impl EventFields {
@@ -104,12 +105,15 @@ impl EventFields {
                 .get("revocation_source")
                 .is_some_and(|source| !source.is_null()),
             named: event.logical_name_id.is_some(),
+            current_registry_new_owner: source_event == SourceEvent::NewOwner
+                && state.get("emitter_role").and_then(Value::as_str) == Some("registry"),
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct Registration {
+    pub(super) event_index: usize,
     pub(super) key: TargetKey,
     pub(super) logical_name_id: String,
     pub(super) surface_known: bool,
@@ -187,7 +191,7 @@ impl EventIndex {
             .filter(|(index, _)| {
                 self.fields[*index].source_event == SourceEvent::NameRegistered
             })
-            .filter_map(|(_, event)| {
+            .filter_map(|(event_index, event)| {
                 let registrant = event.after_state.get("registrant").and_then(Value::as_str);
                 let emitter = event
                     .raw_fact_ref
@@ -212,6 +216,7 @@ impl EventIndex {
                 registrant?;
                 let namehash = event.after_state["namehash"].as_str()?.to_ascii_lowercase();
                 Some(Registration {
+                    event_index,
                     key: TargetKey {
                         namespace: event.namespace.clone(),
                         block_hash: event.block_hash.clone()?,
