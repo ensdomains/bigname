@@ -230,7 +230,7 @@ async fn seed_generated_owner_shape(
 }
 
 #[tokio::test]
-async fn graphql_generated_domains_default_to_first_100_ids_from_zero() -> Result<()> {
+async fn graphql_generated_domains_default_to_first_100_ids_and_cap_first_at_200() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     let mut expected = vec![
@@ -239,7 +239,7 @@ async fn graphql_generated_domains_default_to_first_100_ids_from_zero() -> Resul
         GRAPHQL_CAROL_NAMEHASH.to_owned(),
         GRAPHQL_DAVE_NAMEHASH.to_owned(),
     ];
-    for index in 0..99_u128 {
+    for index in 0..198_u128 {
         let name = format!("generated-{index:03}.eth");
         let namehash = bigname_lookup::ens_namehash_hex(&name)?;
         expected.push(namehash.clone());
@@ -259,7 +259,8 @@ async fn graphql_generated_domains_default_to_first_100_ids_from_zero() -> Resul
         .await?;
     }
     expected.sort();
-    expected.truncate(100);
+    let expected_capped = expected.iter().take(200).cloned().collect::<Vec<_>>();
+    let expected_default = expected.iter().take(100).cloned().collect::<Vec<_>>();
     let payload = post_graphql(database.app_state(), "query { domains { id } }", json!({})).await?;
     let actual = payload["data"]["domains"]
         .as_array()
@@ -267,7 +268,21 @@ async fn graphql_generated_domains_default_to_first_100_ids_from_zero() -> Resul
         .iter()
         .filter_map(|row| row["id"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
-    assert_eq!(actual, expected);
+    assert_eq!(actual, expected_default);
+
+    let payload = post_graphql(
+        database.app_state(),
+        "query { domains(first: 500) { id } }",
+        json!({}),
+    )
+    .await?;
+    let capped = payload["data"]["domains"]
+        .as_array()
+        .context("capped domains array")?
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(capped, expected_capped);
     database.cleanup().await
 }
 
@@ -369,9 +384,26 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
         json!({"owner_in": [SUBNAME_OWNER, SECOND_LEVEL_OWNER, NAME_WRAPPER]}),
     )
     .await?;
+    let mut legacy_counts = Vec::new();
+    for address in [
+        SECOND_LEVEL_HOLDER,
+        WRAPPED_HOLDER,
+        SECOND_LEVEL_OWNER,
+        NAME_WRAPPER,
+    ] {
+        let payload = post_graphql(
+            database.app_state(),
+            r#"query LegacyDomainCount($where: DomainFilter!) {
+                domainConnection(first: 0, where: $where) { totalCount }
+            }"#,
+            json!({"where": {"owner": address}}),
+        )
+        .await?;
+        legacy_counts.push(payload["data"]["domainConnection"]["totalCount"].clone());
+    }
 
     assert_eq!(
-        (actual, actual_holders, owner_in),
+        (actual, actual_holders, owner_in, legacy_counts),
         (
             vec![
                 (SUBNAME_OWNER, vec![("owner-sub.parent.eth".into(), SUBNAME_OWNER.into())]),
@@ -384,6 +416,7 @@ async fn graphql_generated_owner_filters_match_the_served_owner() -> Result<()> 
                 ("owner-sub.parent.eth".into(), SUBNAME_OWNER.into()),
                 ("owner-wrapped.eth".into(), NAME_WRAPPER.into()),
             ],
+            vec![json!(1), json!(1), json!(0), json!(0)],
         )
     );
     database.cleanup().await

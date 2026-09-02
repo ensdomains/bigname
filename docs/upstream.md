@@ -108,7 +108,7 @@ to the applicable entries below.
 
 > **Generated Domain pagination retains bigname's safety bounds** — Graph Node rejects a non-positive or over-limit
 > `first` and a negative or over-limit `skip`. Bigname's generated-style `domains` root instead returns an empty page for
-> non-positive `first`, caps positive `first` at `crate::v2::MAX_PAGE_SIZE`, treats negative `skip` as zero, and caps
+> non-positive `first`, caps positive `first` at `200`, treats negative `skip` as zero, and caps
 > positive `skip` at `1_000_000`.
 > **Upstream**: Graph Node accepts `first` only in `1..=max_first` and `skip` only in `0..=max_skip`, returning a range
 > argument error otherwise (upstream: .refs/graph_node/graphql/src/store/query.rs:L62-L84 @ graph_node@aefe1737).
@@ -139,16 +139,19 @@ to the applicable entries below.
 > **Why**: the existing Manager-facing name semantics treat normalization-equivalent spellings as the same ENS name.
 > **Since**: `2026-09-02`
 
-> **Generated Domain owner filters retain token-holder matching** — the partial `Domain_filter.owner` and `owner_in`
-> members use bigname's existing token-holder address relation, which can differ from the registry owner returned by
-> `Domain.owner`.
+> **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
+> `owner_in` members use bigname's effective-controller relation. When a registry ownership event has been projected,
+> that relation is the registry owner returned by `Domain.owner`. Without such an event, a tokenized name's effective
+> controller can fall back to its token holder, while a name without token lineage has no effective-controller relation;
+> the served owner can instead fall back to a registrant or the zero address.
 > **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
 > ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L151-L158 @ ens_subgraph@723f1b6).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T3` owns the remaining filter
-> vocabulary and any later alignment.
-> **Why**: this T2 slice preserves the pre-existing owner-filter path for current consumers.
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the residual fallback
+> semantics for names without projected registry ownership.
+> **Why**: an equality filter must select the registry-owner value that the generated Domain object serves whenever that
+> ownership event is available, without confusing the registry owner with the registration-token holder.
 > **Since**: `2026-09-02`
 
 > **Generated Domain `name_contains` retains ENS normalization** — bigname normalizes the supplied ENS fragment before

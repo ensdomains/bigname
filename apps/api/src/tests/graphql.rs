@@ -199,6 +199,30 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
                 412,
             ),
             address_name_current_row(
+                GRAPHQL_OWNER,
+                "ens:alice.eth",
+                bigname_storage::AddressNameRelation::EffectiveController,
+                "Alice.eth",
+                "alice.eth",
+                GRAPHQL_ALICE_NAMEHASH,
+                alice_sb,
+                alice_res,
+                Some(alice_tl),
+                411,
+            ),
+            address_name_current_row(
+                GRAPHQL_OWNER,
+                "ens:bob.eth",
+                bigname_storage::AddressNameRelation::EffectiveController,
+                "Bob.eth",
+                "bob.eth",
+                GRAPHQL_BOB_NAMEHASH,
+                bob_sb,
+                bob_res,
+                Some(bob_tl),
+                412,
+            ),
+            address_name_current_row(
                 GRAPHQL_REGISTRANT,
                 "ens:alice.eth",
                 bigname_storage::AddressNameRelation::Registrant,
@@ -2312,7 +2336,7 @@ async fn graphql_name_order_uses_stored_normalized_name_bytes() -> Result<()> {
         r#"query Domains($where: Domain_filter!) {
             domains(where: $where, orderBy: name, orderDirection: asc) { name }
         }"#,
-        json!({ "where": { "owner": GRAPHQL_FALLBACK_HOLDER } }),
+        json!({ "where": { "id_in": [GRAPHQL_CAROL_NAMEHASH, GRAPHQL_DAVE_NAMEHASH] } }),
     )
     .await?;
     assert_eq!(
@@ -2354,7 +2378,7 @@ async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<
                     domains(where: $where, orderBy: name, orderDirection: {direction}) {{ name }}
                 }}"#
             ),
-            json!({ "where": { "owner": GRAPHQL_FALLBACK_HOLDER } }),
+            json!({ "where": { "id_in": [GRAPHQL_CAROL_NAMEHASH, GRAPHQL_DAVE_NAMEHASH] } }),
         )
         .await?;
     }
@@ -2403,7 +2427,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
             domains(where: $where, orderBy: $orderBy, orderDirection: $orderDirection) { name }
         }"#,
         json!({
-            "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER] },
+            "where": { "id_in": [GRAPHQL_CAROL_NAMEHASH, GRAPHQL_DAVE_NAMEHASH] },
             "orderBy": "name",
             "orderDirection": "desc",
         }),
@@ -2418,7 +2442,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
             domains(where: $where, orderBy: $orderBy, orderDirection: $orderDirection) { name }
         }"#,
         json!({
-            "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER] },
+            "where": { "id_in": [GRAPHQL_CAROL_NAMEHASH, GRAPHQL_DAVE_NAMEHASH] },
             "orderBy": "expiryDate",
             "orderDirection": "asc",
         }),
@@ -2433,7 +2457,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
             domains(where: $where, orderBy: $orderBy, orderDirection: $orderDirection) { name }
         }"#,
         json!({
-            "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER] },
+            "where": { "id_in": [GRAPHQL_CAROL_NAMEHASH, GRAPHQL_DAVE_NAMEHASH] },
             "orderBy": "expiryDate",
             "orderDirection": "desc",
         }),
@@ -2461,13 +2485,13 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
     .await?;
     assert_eq!(owned["data"]["registrationConnection"]["totalCount"], json!(2));
 
-    // name_contains narrows the holder's two names down to the substring match.
+    // name_contains narrows the fixture names down to the substring match.
     let contains = post_graphql(
         database.app_state(),
         r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
         }"#,
-        json!({ "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER], "name_contains": "aro" } }),
+        json!({ "where": { "name_contains": "aro" } }),
     )
     .await?;
     let matched = contains["data"]["domains"].as_array().expect("array");
@@ -2479,7 +2503,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
         }"#,
-        json!({ "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER], "name_contains": "ARO" } }),
+        json!({ "where": { "name_contains": "ARO" } }),
     )
     .await?;
     assert_eq!(wrong_case["data"]["domains"].as_array().map(Vec::len), Some(1));

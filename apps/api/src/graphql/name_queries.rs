@@ -4,10 +4,10 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::Uuid};
 
 use bigname_storage::{
-    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER, DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
-    DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentAddressRelationFilter, NameCurrentListFilter,
-    NameCurrentListOrder, NameCurrentListRow, NameCurrentListSort, NameCurrentRow,
-    SurfaceBindingKind,
+    AddressNameRelation, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
+    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
+    NameCurrentAddressRelationFilter, NameCurrentListFilter, NameCurrentListOrder,
+    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, SurfaceBindingKind,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -242,14 +242,25 @@ fn push_filtered_names<'a>(
                   membership_token_lineage.block_hash \
              WHERE anc.support_status = 'supported' AND ",
         );
+        let indexed_address_column = matches!(
+            address.relation,
+            NameCurrentAddressRelationFilter::Relation(AddressNameRelation::EffectiveController)
+        );
+        let address_column = if indexed_address_column {
+            "anc.address"
+        } else {
+            "LOWER(address)"
+        };
         match address.addresses.as_ref() {
             Some(addresses) => {
-                builder.push("LOWER(address) = ANY(");
+                builder.push(address_column);
+                builder.push(" = ANY(");
                 builder.push_bind(addresses.as_slice());
                 builder.push(")");
             }
             None => {
-                builder.push("LOWER(address) = ");
+                builder.push(address_column);
+                builder.push(" = ");
                 builder.push_bind(&address.address);
             }
         }

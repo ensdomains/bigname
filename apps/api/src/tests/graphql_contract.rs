@@ -266,7 +266,6 @@ fn base_graphql_requests() -> Vec<GraphqlRequestCase> {
             }"#,
             json!({
                 "where": {
-                    "owner_in": [GRAPHQL_FALLBACK_HOLDER],
                     "name_contains": "aro"
                 }
             }),
@@ -293,7 +292,7 @@ fn ordered_names_request(
             ) { name }
         }"#,
         json!({
-            "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER] },
+            "where": { "id_in": [GRAPHQL_CAROL_NAMEHASH, GRAPHQL_DAVE_NAMEHASH] },
             "orderBy": order_by,
             "orderDirection": direction,
         }),

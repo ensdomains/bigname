@@ -429,11 +429,14 @@ namehashes only.
 `Domain_filter` accepts exactly `id: ID`, `id_in: [ID!]`, `owner: String`,
 `owner_in: [String!]`, `name: String`, and `name_contains: String`. Supplied
 members combine with logical AND. A supplied empty `id_in` or `owner_in` list
-matches no rows. `owner` and `owner_in` preserve the existing token-holder
-relation filter, which can differ from the registry owner exposed by
-`Domain.owner`; `name` and `name_contains` preserve the existing ENS-aware name
-normalization. Every other captured upstream member is absent from the SDL, so
-GraphQL input validation rejects it instead of ignoring it at runtime.
+matches no rows. `owner` and `owner_in` match the projected effective controller,
+which is the registry owner returned by `Domain.owner` when a registry ownership
+event has been projected. Names without a projected registry-owner event retain a
+T5-owned residual: the effective controller can fall back to a token holder or be
+absent while the served owner can fall back to the registrant or zero address.
+`name` and `name_contains` preserve the existing ENS-aware name normalization.
+Every other captured upstream member is absent from the SDL, so GraphQL input
+validation rejects it instead of ignoring it at runtime.
 `DomainFilter` remains the separate input for the local `domainConnection`
 operation. In particular, `isMigrated` remains on `DomainFilter` and is not
 accepted by `Domain_filter`; task `#670/T10` remains outside this slice and is
@@ -445,8 +448,8 @@ ordering. `Domain_orderBy.id` uses that same namehash ordering. The existing
 `createdAt`, `expiryDate`, `name`, and `registrationDate` orderings remain.
 Omitted pagination starts at offset zero and returns the first 100 rows.
 Non-positive `first` returns an empty page, positive `first` is capped at
-`crate::v2::MAX_PAGE_SIZE`, negative `skip` becomes zero, and positive `skip`
-is capped at `1_000_000`.
+`200`, negative `skip` becomes zero, and positive `skip` is capped at
+`1_000_000`.
 
 The affected Manager operation set therefore requires two declaration edits:
 `$id: String!` becomes `$id: ID!`, and the `Domains.graphql` declaration

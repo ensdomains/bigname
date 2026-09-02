@@ -245,7 +245,7 @@ fn domain_entity_filter_to_storage(
         address: generated_address_membership(
             filter.owner,
             filter.owner_in,
-            AddressNameRelation::TokenHolder,
+            AddressNameRelation::EffectiveController,
         ),
         ..Default::default()
     };
