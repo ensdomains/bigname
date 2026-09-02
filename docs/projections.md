@@ -465,10 +465,29 @@ The resolver classification also carries effective manifest-declared
 `ensip19_default_address` into `provenance.read_rules` with source key
 `addr:2147483648`. `selectors` and `entries` remain exact `RecordChanged`
 observations: Project does not fabricate target coin types or rewrite the
-default entry. Empty address bytes in either the ENSv1 `value` shape or ENSv2
-`address_bytes_hex` shape are normalized to an exact `not_found` entry. For
-coin type 60, the multicoin `AddressChanged` payload takes precedence over its
-immediately adjacent compatibility `AddrChanged` sibling in the same
+default entry. ENSv1 `ContenthashChanged` normalized state uses
+`contenthash_hex` with `value_retained=false`. ENSv1 and Basenames
+`AddressChanged` normalized state uses decimal `coin_type`,
+`address_bytes_hex`, and `value_retained=false`, except that coin type 60 with
+an exactly 20-byte payload preserves the scalar `value` envelope used by the
+legacy `AddrChanged` event.
+Project reconstructs a retained contenthash entry as
+`value={"encoding":"hex","bytes":"0x..."}` and retains an address entry as
+scalar `value="0x..."`. An empty `contenthash_hex` or `address_bytes_hex`
+payload becomes an exact `not_found` entry with `value` omitted. The nested
+`value.bytes` address compatibility shape receives the same empty-value
+classification.
+
+Rows produced under an earlier [interpreter content
+hash](glossary.md#interpreter-content-hash) may retain the nested `value` object
+until the [re-derivation boundary](glossary.md#re-derivation-boundary) completes.
+They are not serving-eligible with the matching API during that interval;
+shared readers nevertheless normalize both the nested bytes object and scalar
+address forms. This hash rotation requires a complete retained-range Interpret
+re-walk and Project rebuild before publication, with no manifest change.
+
+For coin type 60, the multicoin `AddressChanged` payload takes precedence over
+its immediately adjacent compatibility `AddrChanged` sibling in the same
 transaction, so an empty multicoin clear remains empty instead of becoming a
 retained zero-address value. The paired logs share one effective ordering
 position; any later independent write in that transaction still wins.

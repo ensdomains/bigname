@@ -586,6 +586,50 @@ Rules:
 - `completeness` is `full`, `partial`, or `unsupported`.
 - Empty arrays and empty maps mean known-empty, not unknown.
 
+### Resolver record answers and values
+
+A keyed resolver record answer contains `status`. It contains `value` only
+when `status` is `ok`; `unsupported_reason`, `failure_reason`, and `meta` are
+present only where the route contract permits them.
+
+For a successful `contenthash` answer, `value` is a lowercase,
+`0x`-prefixed hex string containing the bytes returned by the resolver. The API
+does not decode those bytes into a URI or media-type-specific representation.
+For a successful `addr:<coin_type>` answer, both `<coin_type>` and the selector
+are decimal strings and `value` is a lowercase, `0x`-prefixed hex string. For
+multicoin records, that string contains the resolver-returned native binary
+address bytes without chain-specific textual re-encoding.
+
+ENSv1 and Basenames store the supplied contenthash and address byte payloads
+verbatim and emit the same bytes. Contenthash reads, and address reads when no
+default-address fallback applies, return the stored bytes. An empty payload is
+therefore the stored value after a clear, and those reads return the same empty
+bytes.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L28 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99 @ basenames@1809bbc)
+Bigname represents that zero-length exact stored contenthash or address answer
+as `{"status":"not_found"}` and omits `value`. A records route may then apply a
+documented derived-record rule, such as the ENSIP-19 default-address rule; when
+it does, the final keyed answer and convenience field follow that derived
+answer and carry its metadata. A clear is distinct from any non-empty all-zero
+byte payload; this contract does not define a new meaning for a non-empty
+20-byte all-zero `addr:60` value.
+
+The `addresses` convenience map uses the same scalar hex string for each
+decimal coin type, and `content_hash` uses the same contenthash scalar string.
+Cleared exact values are omitted from both convenience fields unless a
+documented derived-record rule supplies a replacement answer. Diagnostics and
+Project use the internal status `success` for a retained value; product routes
+publish that status as `ok`.
+
+The exact-name detail route, resolver-records route, `profile=detail` lookup, and
+GraphQL resolver address fields flatten both projected `{encoding,bytes}`
+address values and projected scalar address values to the same scalar hex
+string. The supported internal shapes therefore do not create a second public
+multicoin-address shape.
+
 ## Finality And Snapshots
 
 `finality` values are `latest`, `safe`, and `finalized`. Snapshot selection is

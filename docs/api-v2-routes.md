@@ -469,6 +469,41 @@ Field ownership:
   Product records use product reason vocabulary: retained-selector misses use
   `value_not_retained`, and phase-unsupported record families use
   `record_family_not_supported`.
+
+  Representative keyed answers and convenience fields are:
+
+  ```json
+  {
+    "addresses": {
+      "0": "0x001122"
+    },
+    "content_hash": "0xe3010170",
+    "records": {
+      "contenthash": {
+        "status": "ok",
+        "value": "0xe3010170"
+      },
+      "addr:0": {
+        "status": "ok",
+        "value": "0x001122"
+      },
+      "addr:2": {
+        "status": "not_found"
+      }
+    }
+  }
+  ```
+
+  Coin types in record keys and the `addresses` map are decimal strings.
+  Contenthash and address answers are scalar lowercase, `0x`-prefixed hex.
+  This route flattens both projected `{encoding,bytes}` address values and
+  projected scalar address values to that same public string; the exact-name
+  detail route, `profile=detail` lookup, and GraphQL resolver address fields
+  apply the same normalization.
+  A zero-length byte payload makes the exact stored answer `not_found` and
+  omits `value`. Cleared exact values are absent from `addresses` and
+  `content_hash` unless a documented derived-record rule supplies a replacement
+  answer. The ENSIP-19 default-address rule below is one such rule.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
   lookup. [Universal Resolver ancestor
@@ -1531,6 +1566,15 @@ so there is no persisted artifact to explain. See
   spellings (`namespace`, `name`, `display_name`, `registration_id`), while
   pipeline-only identifiers such as `normalized_event_id` keep their pipeline
   names per the tier-3 rule.
+  `record_cache.entries` is an internal projected representation, not the
+  product-route answer envelope. A retained contenthash entry uses
+  `status="success"` with
+  `value={"encoding":"hex","bytes":"0x..."}`; a retained address entry uses
+  `status="success"` with scalar `value="0x..."`. A cleared contenthash or
+  address entry uses `status="not_found"` and omits `value`. Normalized fields
+  such as `contenthash_hex` and `address_bytes_hex` are not product
+  record-answer fields; they can appear inside the complete normalized
+  `after_state` returned by the raw event diagnostics route below.
 - Pagination behavior: none.
 - Status semantics: missing names return `404 not_found`.
 - Replaces (v1): record inventory/cache diagnostics formerly embedded in
