@@ -93,6 +93,7 @@ fn settle_block_boundary(
                 "released_at":block.block_timestamp.unix_timestamp(),
                 "labelhash":release.registrar.labelhash,
                 "namehash":release.namehash,
+                "expiry":release.registrar.expiry,
             }),
             state_scope: format!("boundary:{}:registration", release.namehash),
         }];

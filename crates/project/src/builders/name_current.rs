@@ -276,12 +276,13 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT lower(CASE event.event_kind
                        WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
+                       WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
-                  'RegistrationGranted', 'TokenControlTransferred'
+                  'RegistrationGranted', 'RegistrationReleased', 'TokenControlTransferred'
               )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
@@ -301,7 +302,7 @@ pub(super) async fn build(
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
+                  'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged'
               )
               AND NOT (
                   event.event_kind = 'ExpiryChanged'
