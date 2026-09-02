@@ -1,8 +1,10 @@
+mod account_permissions;
 mod address_names;
 mod children;
 mod name_authority;
 mod name_current;
 mod name_topology;
+mod permission_resources;
 mod permissions;
 mod primary_names;
 mod record_inventory;
@@ -20,6 +22,8 @@ pub(crate) async fn build_all(
 ) -> Result<()> {
     name_authority::build(transaction, chain_id, target).await?;
     permissions::build(transaction, chain_id, target).await?;
+    permission_resources::build_registry_binding(transaction).await?;
+    account_permissions::build(transaction, chain_id, target).await?;
     name_current::build(transaction, chain_id, target).await?;
     resolver::build(transaction, chain_id, target, full_rebuild).await?;
     record_inventory::build(transaction, chain_id, target).await?;

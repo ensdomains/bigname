@@ -206,7 +206,7 @@ sol! {
 }
 
 #[tokio::test]
-async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> {
+async fn canonical_fixture_builds_all_eight_projection_families() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_all_builders").await?;
     seed_project_fixture(scratch.pool()).await?;
 
@@ -214,6 +214,13 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
 
     let grouped_builder_snapshot: Value = sqlx::query_scalar(
         "SELECT jsonb_build_object(
+             'account_permissions', COALESCE((
+                 SELECT jsonb_agg(
+                     to_jsonb(account_permission) - 'last_recomputed_at' - 'inserted_at'
+                     ORDER BY chain_id, authority_kind, authority_contract, owner, subject,
+                         relation_kind
+                 ) FROM account_permission_state_current account_permission
+             ), '[]'::jsonb),
              'permissions', COALESCE((
                  SELECT jsonb_agg(
                      to_jsonb(permission) - 'last_recomputed_at' - 'inserted_at'
@@ -251,6 +258,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
     assert_eq!(
         grouped_builder_snapshot,
         json!({
+            "account_permissions": [],
             "permission_summaries": [{
                 "authority_kind": "registrar",
                 "canonicality_summary": {
@@ -270,8 +278,13 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                     "coverage": {
                         "exhaustiveness": "not_asserted",
                         "status": "projected"
-                    }
+                    },
+                    "registry_binding_clear_event_id": 3
                 },
+                "registry_binding_chain_positions": null,
+                "registry_binding_provenance": null,
+                "registry_contract": null,
+                "registry_owner": null,
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
                 "support_status": "unsupported",
@@ -384,11 +397,12 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
         })
     );
 
-    let counts: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM name_current),
             (SELECT count(*) FROM children_current),
             (SELECT count(*) FROM permissions_current),
+            (SELECT count(*) FROM account_permission_state_current),
             (SELECT count(*) FROM permissions_current_resource_summary),
             (SELECT count(*) FROM record_inventory_current),
             (SELECT count(*) FROM resolver_current),
@@ -397,7 +411,7 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
     )
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(counts, (2, 2, 1, 1, 1, 1, 3, 1));
+    assert_eq!(counts, (2, 2, 1, 0, 1, 1, 1, 3, 1));
 
     let evidence: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT family, status, exhaustiveness
@@ -794,8 +808,13 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                         "exhaustiveness": "not_asserted",
                         "status": "projected"
                     },
-                    "history": "tie_break_winner"
+                    "history": "tie_break_winner",
+                    "registry_binding_clear_event_id": 3
                 },
+                "registry_binding_chain_positions": null,
+                "registry_binding_provenance": null,
+                "registry_contract": null,
+                "registry_owner": null,
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
                 "support_status": "unsupported",

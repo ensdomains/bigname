@@ -2041,6 +2041,7 @@ DO $$
 DECLARE
     manifest_key bigint;
     transition_case record;
+    violated_constraint text;
     accepted_projection_identity_mismatches text[] := ARRAY[]::text[];
     accepted_cross_chain_relationships text[] := ARRAY[]::text[];
     accepted_head_invariants text[] := ARRAY[]::text[];
@@ -4743,15 +4744,26 @@ BEGIN
 
     BEGIN
         INSERT INTO permissions_current_resource_summary (
-            resource_id, registry_owner, support_status, provenance,
-            chain_positions, canonicality_summary, manifest_version
+            resource_id, registry_owner, registry_contract,
+            registry_binding_chain_positions, support_status,
+            unsupported_reason, provenance, chain_positions,
+            canonicality_summary, manifest_version
         ) VALUES (
             '00000000-0000-0000-0000-000000000011',
             '0x00000000000000000000000000000000000000aa',
-            'unsupported', '{}', '{}', '{}', 1
+            '0x00000000000000000000000000000000000000bb',
+            '{}', 'unsupported', 'registry-binding-probe', '{}', '{}', '{}', 1
         );
         RAISE EXCEPTION 'permission resource summary accepted a partial registry binding';
-    EXCEPTION WHEN check_violation THEN NULL;
+    EXCEPTION WHEN check_violation THEN
+        GET STACKED DIAGNOSTICS violated_constraint = CONSTRAINT_NAME;
+        IF violated_constraint <>
+            'permissions_current_resource_summary_registry_binding_check'
+        THEN
+            RAISE EXCEPTION
+                'partial registry binding failed through unexpected constraint %',
+                violated_constraint;
+        END IF;
     END;
 
     BEGIN

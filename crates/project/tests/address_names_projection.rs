@@ -120,6 +120,20 @@ async fn run_project(
     Ok(())
 }
 
+async fn run_project_redo(pool: &PgPool, target_block: i64, affected_block: i64) -> Result<()> {
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block,
+            affected_from_block: affected_block,
+            affected_to_block: affected_block,
+            resume_current: None,
+            mode: RunMode::Redo,
+        })
+        .await?;
+    Ok(())
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!(r#""{}""#, identifier.replace('"', r#""""#))
 }
@@ -285,6 +299,11 @@ async fn seed_namespaced_normalized_event(
     after_state: serde_json::Value,
     raw_fact_ref: serde_json::Value,
 ) -> Result<()> {
+    let derivation_kind = if event_kind == "AccountPermissionChanged" {
+        "standard_approval"
+    } else {
+        "ens_v1_unwrapped_authority"
+    };
     sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, logical_name_id, resource_id, event_kind,
@@ -293,7 +312,7 @@ async fn seed_namespaced_normalized_event(
              canonicality_state, after_state, raw_fact_ref
          ) VALUES (
              $1, $2, $3, $4::uuid, $5, $6, 1, $7, $8, $9,
-             $10, 0, $11, 'ens_v1_unwrapped_authority', 'canonical', $12, $13
+             $10, 0, $11, $14, 'canonical', $12, $13
          )",
     )
     .bind(identity)
@@ -309,6 +328,7 @@ async fn seed_namespaced_normalized_event(
     .bind(log_index)
     .bind(after_state)
     .bind(raw_fact_ref)
+    .bind(derivation_kind)
     .execute(pool)
     .await?;
     Ok(())
@@ -322,6 +342,10 @@ async fn serving_projection_snapshot(pool: &PgPool) -> Result<Vec<(String, serde
             "parent_logical_name_id, child_logical_name_id, surface_class",
         ),
         ("permissions_current", "resource_id, subject, scope"),
+        (
+            "account_permission_state_current",
+            "chain_id, authority_kind, authority_contract, owner, subject, relation_kind",
+        ),
         ("permissions_current_resource_summary", "resource_id"),
         (
             "record_inventory_current",
@@ -349,6 +373,413 @@ async fn serving_projection_snapshot(pool: &PgPool) -> Result<Vec<(String, serde
         ));
     }
     Ok(snapshot)
+}
+
+#[tokio::test]
+async fn registry_operator_state_and_binding_converge_after_revocation() -> Result<()> {
+    const NAMEHASH: &str = "0x6050000000000000000000000000000000000000000000000000000000000001";
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000605";
+    const BINDING: &str = "00000000-0000-0000-0000-000000000606";
+    const OWNER: &str = "0x0000000000000000000000000000000000000a11";
+    const OPERATOR: &str = "0x0000000000000000000000000000000000000b22";
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000c33";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(&pool, NAMEHASH, "operator.eth", RESOURCE, BINDING).await?;
+    seed_normalized_event(
+        &pool,
+        "fixture:registry-owner",
+        Some(&format!("ens:{NAMEHASH}")),
+        Some(RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registry_l1",
+        8,
+        1,
+        json!({
+            "owner": OWNER,
+            "owner_getter": OWNER,
+            "authority_kind": "registry_only"
+        }),
+        json!({"emitting_address": REGISTRY}),
+    )
+    .await?;
+    for (identity, block, approved) in [
+        ("fixture:operator-grant", 9, true),
+        ("fixture:operator-revoke", 10, false),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            None,
+            None,
+            "AccountPermissionChanged",
+            "ens_v1_registry_l1",
+            block,
+            1,
+            json!({
+                "subject": OPERATOR,
+                "relation_kind": "operator",
+                "approved": approved,
+                "scope": {
+                    "authority_kind": "registry",
+                    "authority_contract": REGISTRY,
+                    "authority_contract_instance_id":
+                        "00000000-0000-0000-0000-000000000607",
+                    "owner": OWNER
+                },
+                "effective_powers": if approved { json!(["registry_control"]) } else { json!([]) },
+                "grant_source": if approved { json!({"kind":"raw_log"}) } else { json!({}) },
+                "revocation_source": if approved { serde_json::Value::Null } else { json!({"kind":"raw_log"}) },
+                "inheritance_path": [],
+                "transfer_behavior": {"mode":"owner_scoped"}
+            }),
+            json!({"emitting_address": REGISTRY}),
+        )
+        .await?;
+        if approved {
+            run_project(&pool, 9, 8, None).await?;
+            let active: (bool, String, String, String) = sqlx::query_as(
+                "SELECT account.approved, summary.registry_owner,
+                        summary.registry_contract, summary.unsupported_reason
+                 FROM account_permission_state_current account
+                 JOIN permissions_current_resource_summary summary
+                   ON summary.resource_id = $1::uuid",
+            )
+            .bind(RESOURCE)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(
+                active,
+                (
+                    true,
+                    OWNER.to_owned(),
+                    REGISTRY.to_owned(),
+                    "operator_approval_surfaces_not_ingested".to_owned()
+                )
+            );
+        }
+    }
+
+    run_project(&pool, 10, 10, Some(9)).await?;
+    let approved: bool = sqlx::query_scalar(
+        "SELECT approved FROM account_permission_state_current WHERE subject = $1",
+    )
+    .bind(OPERATOR)
+    .fetch_one(&pool)
+    .await?;
+    assert!(!approved, "the latest revocation must remain projected");
+    let incremental: (serde_json::Value, Option<String>, Option<String>, String) = sqlx::query_as(
+        "SELECT to_jsonb(account) - 'last_recomputed_at' - 'inserted_at',
+                summary.registry_owner, summary.registry_contract,
+                summary.unsupported_reason
+         FROM account_permission_state_current account
+         JOIN permissions_current_resource_summary summary
+           ON summary.resource_id = $1::uuid
+         WHERE account.subject = $2",
+    )
+    .bind(RESOURCE)
+    .bind(OPERATOR)
+    .fetch_one(&pool)
+    .await?;
+    run_project(&pool, 10, 8, None).await?;
+    let rebuilt = sqlx::query_as(
+        "SELECT to_jsonb(account) - 'last_recomputed_at' - 'inserted_at',
+                summary.registry_owner, summary.registry_contract,
+                summary.unsupported_reason
+         FROM account_permission_state_current account
+         JOIN permissions_current_resource_summary summary
+           ON summary.resource_id = $1::uuid
+         WHERE account.subject = $2",
+    )
+    .bind(RESOURCE)
+    .bind(OPERATOR)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(incremental, rebuilt);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn registry_operator_reorg_restores_losing_grant_and_revoke() -> Result<()> {
+    const OWNER: &str = "0x0000000000000000000000000000000000000a51";
+    const GRANT_LOSER: &str = "0x0000000000000000000000000000000000000b51";
+    const REVOKE_LOSER: &str = "0x0000000000000000000000000000000000000b52";
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000c51";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    for (identity, subject, block, approved) in [
+        ("fixture:surviving-revoke", GRANT_LOSER, 8, false),
+        ("fixture:losing-grant", GRANT_LOSER, 9, true),
+        ("fixture:surviving-grant", REVOKE_LOSER, 8, true),
+        ("fixture:losing-revoke", REVOKE_LOSER, 9, false),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            None,
+            None,
+            "AccountPermissionChanged",
+            "ens_v1_registry_l1",
+            block,
+            if subject == GRANT_LOSER { 1 } else { 2 },
+            json!({
+                "subject": subject,
+                "relation_kind": "operator",
+                "approved": approved,
+                "scope": {
+                    "authority_kind": "registry",
+                    "authority_contract": REGISTRY,
+                    "authority_contract_instance_id":
+                        "00000000-0000-0000-0000-000000000657",
+                    "owner": OWNER
+                },
+                "effective_powers": if approved { json!(["registry_control"]) } else { json!([]) },
+                "grant_source": if approved { json!({"kind":"raw_log"}) } else { json!({}) },
+                "revocation_source": if approved { serde_json::Value::Null } else { json!({"kind":"raw_log"}) },
+                "inheritance_path": [],
+                "transfer_behavior": {"mode":"owner_scoped"}
+            }),
+            json!({"emitting_address": REGISTRY}),
+        )
+        .await?;
+    }
+    run_project(&pool, 9, 8, None).await?;
+    let before: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT subject, approved FROM account_permission_state_current ORDER BY subject",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        before,
+        vec![
+            (GRANT_LOSER.to_owned(), true),
+            (REVOKE_LOSER.to_owned(), false)
+        ]
+    );
+
+    sqlx::query(
+        "UPDATE normalized_events SET canonicality_state = 'orphaned'
+         WHERE event_identity IN ('fixture:losing-grant', 'fixture:losing-revoke')",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 9",
+    )
+    .bind(CHAIN)
+    .execute(&pool)
+    .await?;
+    run_project_redo(&pool, 10, 10).await?;
+    let restored: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT subject, approved FROM account_permission_state_current ORDER BY subject",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        restored,
+        vec![
+            (GRANT_LOSER.to_owned(), false),
+            (REVOKE_LOSER.to_owned(), true)
+        ]
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn registry_binding_tracks_generation_replacement_and_zero_clear() -> Result<()> {
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000615";
+    const OWNER: &str = "0x0000000000000000000000000000000000000a11";
+    const ZERO: &str = "0x0000000000000000000000000000000000000000";
+    const OLD_REGISTRY: &str = "0x0000000000000000000000000000000000000c31";
+    const CURRENT_REGISTRY: &str = "0x0000000000000000000000000000000000000c32";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_blocks(&pool, [11]).await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(RESOURCE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    for (identity, kind, block, owner, registry) in [
+        (
+            "fixture:old-registry",
+            "AuthorityTransferred",
+            8,
+            OWNER,
+            OLD_REGISTRY,
+        ),
+        (
+            "fixture:current-registry",
+            "SubregistryChanged",
+            9,
+            OWNER,
+            CURRENT_REGISTRY,
+        ),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            None,
+            Some(RESOURCE),
+            kind,
+            "ens_v1_registry_l1",
+            block,
+            1,
+            json!({"owner": owner, "owner_getter": owner, "authority_kind": "registrar", "source_event": "NewOwner"}),
+            json!({"emitting_address": registry}),
+        )
+        .await?;
+    }
+    run_project(&pool, 9, 8, None).await?;
+    let binding: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT registry_contract, authority_kind FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        binding,
+        (
+            Some(CURRENT_REGISTRY.to_owned()),
+            Some("registrar".to_owned())
+        )
+    );
+
+    seed_normalized_event(
+        &pool,
+        "fixture:current-registry-clear",
+        None,
+        Some(RESOURCE),
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        10,
+        1,
+        json!({"owner": ZERO, "owner_getter": ZERO, "authority_kind": "registrar", "source_event": "NewOwner"}),
+        json!({"emitting_address": CURRENT_REGISTRY}),
+    )
+    .await?;
+    run_project(&pool, 10, 10, Some(9)).await?;
+    let cleared: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT registry_owner, registry_contract FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cleared, (None, None));
+
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE event_identity = 'fixture:current-registry-clear'",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 10",
+    )
+    .bind(CHAIN)
+    .execute(&pool)
+    .await?;
+    run_project_redo(&pool, 11, 10).await?;
+    let restored: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT registry_owner, registry_contract
+         FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        restored,
+        (Some(OWNER.to_owned()), Some(CURRENT_REGISTRY.to_owned()))
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn registry_binding_reorg_restores_surviving_observation() -> Result<()> {
+    const NAMEHASH: &str = "0x6050000000000000000000000000000000000000000000000000000000000021";
+    const RESOURCE: &str = "00000000-0000-0000-0000-000000000625";
+    const BINDING: &str = "00000000-0000-0000-0000-000000000626";
+    const OWNER: &str = "0x0000000000000000000000000000000000000a11";
+    const SURVIVING: &str = "0x0000000000000000000000000000000000000c41";
+    const LOSING: &str = "0x0000000000000000000000000000000000000c42";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    seed_surface(&pool, NAMEHASH, "reorg.eth", RESOURCE, BINDING).await?;
+    for (identity, block, registry) in [
+        ("fixture:surviving-binding", 8, SURVIVING),
+        ("fixture:losing-binding", 9, LOSING),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            Some(&format!("ens:{NAMEHASH}")),
+            Some(RESOURCE),
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            block,
+            1,
+            json!({"owner": OWNER, "owner_getter": OWNER, "authority_kind": "registry_only"}),
+            json!({"emitting_address": registry}),
+        )
+        .await?;
+    }
+    let losing_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events
+         WHERE event_identity = 'fixture:losing-binding'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO permissions_current_resource_summary (
+             resource_id, authority_kind, registry_owner, registry_contract,
+             registry_binding_provenance, registry_binding_chain_positions,
+             support_status, unsupported_reason, provenance, chain_positions,
+             canonicality_summary, manifest_version
+         ) VALUES (
+             $1::uuid, 'registry_only', $2, $3,
+             jsonb_build_object('normalized_event_ids', jsonb_build_array($4::bigint),
+                                'chain_id', $5::text),
+             jsonb_build_object('block_number', 9), 'unsupported',
+             'resolver_approval_and_delegation_surfaces_not_interpreted',
+             jsonb_build_object('chain_id', $5::text),
+             jsonb_build_object('block_number', 8), '{}'::jsonb, 1
+         )",
+    )
+    .bind(RESOURCE)
+    .bind(OWNER)
+    .bind(LOSING)
+    .bind(losing_id)
+    .bind(CHAIN)
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE normalized_events SET canonicality_state = 'orphaned' WHERE event_identity = 'fixture:losing-binding'")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = $1 AND block_number = 9")
+        .bind(CHAIN)
+        .execute(&pool)
+        .await?;
+    run_project_redo(&pool, 10, 10).await?;
+    let contract: Option<String> = sqlx::query_scalar(
+        "SELECT registry_contract FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(contract.as_deref(), Some(SURVIVING));
+    database.cleanup().await?;
+    Ok(())
 }
 
 async fn ownerless_serving_projection_snapshot(

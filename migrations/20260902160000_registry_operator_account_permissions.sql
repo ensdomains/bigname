@@ -99,7 +99,11 @@ BEGIN
             (registry_owner IS NULL AND registry_contract IS NULL
                 AND registry_binding_provenance IS NULL
                 AND registry_binding_chain_positions IS NULL)
-            OR (registry_owner ~ '^0x[0-9a-f]{40}$'
+            OR (registry_owner IS NOT NULL
+                AND registry_contract IS NOT NULL
+                AND registry_binding_provenance IS NOT NULL
+                AND registry_binding_chain_positions IS NOT NULL
+                AND registry_owner ~ '^0x[0-9a-f]{40}$'
                 AND registry_contract ~ '^0x[0-9a-f]{40}$'
                 AND jsonb_typeof(registry_binding_provenance) = 'object'
                 AND jsonb_typeof(registry_binding_chain_positions) = 'object')
