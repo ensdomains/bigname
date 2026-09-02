@@ -78,8 +78,24 @@ registration histories for those instances. This transitive step can rebuild a
 whole connected topology component: every child edge whose parent or child
 enters deletion scope must have its complete per-name event history staged
 before publication. Candidate events and events whose block is no longer on
-readable canonical lineage never widen this scope. `project_events` remains the
-single filter for data that builders may serve.
+readable canonical lineage never contribute builder input or ordinary topology
+expansion. A Project-only redo may run before Interpret replaces the affected
+range; in that narrow case, a retained orphaned, state-derived ENSv2 path-expiry
+release directly seeds its available logical-name and permission-resource
+identifiers. A logical name becomes an [expiry root](glossary.md#expiry-root)
+after the earlier publication deleted its descendants. In the standard
+pipeline, Interpret copies those same identifiers to
+`project_redo_expiry_roots` before deleting the release and preserves the first
+copy across retries. Project consumes it when a publication covers the recorded
+release block. This handoff is necessary because the deleted
+descendant projections and Project's transaction-local binding selection leave
+no other durable citation from which to recover the ancestor. Project also
+selects a still-live ENSv2 lifecycle whose expiry crossed the displaced branch's
+timestamps or whose lifecycle changed in the affected range. From either seed,
+it follows only activated canonical ENSv2 subregistry edges to descendants. The
+deleted or orphaned release is not served, and unrelated topology components are
+not admitted.
+`project_events` remains the single filter for data that builders may serve.
 
 Code that builds a replacement projection row may read normalized events staged
 for the current Project batch and fields that an earlier build deliberately
@@ -251,6 +267,13 @@ coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
 in [`architecture.md`](architecture.md#identity-model).
+For ENSv2, a selected binding's non-terminal lifecycle remains the exact-name
+registration until it becomes terminal, even if another lifecycle has a later
+grant or reservation event.
+After it becomes terminal, `name_current` prefers another surviving lifecycle;
+if all lifecycles are terminal, it prefers the selected binding's terminal
+event over a later terminal event from another lifecycle, then prefers the
+greater block number and, within one block, the normalized event stored later.
 `name_current.resource_id` identifies the current control or registration resource. The nullable
 `name_current.serving_resource_id` identifies a separate, event-derived resolver and record-serving
 [serving resource](glossary.md#serving-resource) when no control binding is open. It is not a binding, registration,
@@ -385,6 +408,34 @@ owner-derived rows remain available, but neither those rows nor a zero-row
 summary is an authoritative permission enumeration. API contract tests inject
 an independently proven full summary to verify that resource-bound public
 requests are not globally forced to partial.
+
+When a state-derived ENSv2 path-expiry release remains the resource's terminal
+lifecycle event and retires effective permission rows, the resource summary
+keeps the selected registration-authority event's provenance unchanged.
+Separate `expiry_retirement_*` fields identify the release event, its source
+manifest and source family, its manifest version, and its
+block/transaction/log position. A later ENSv2 grant or reservation removes
+these fields. A later `RegistrationRenewed` removes them when
+`revived_from_expiry=true` and a preceding state-derived path-expiry release
+belongs to the same `resource_id`. Whether the release named a surface does not
+participate: a same-resource renewal revives retained grants even while another
+token remains the current holder of that name. Unregistering an owned entry and
+later registering it use a new versioned resource, so a renewal on that new
+resource cannot match the old resource's release or grants. Registering a
+non-expired owner-zero reservation does not enter the owner-burn branch, so
+neither version counter advances. ENSv2 constructs the permission resource from
+`eacVersionId`, so the registration reuses the reservation's resource ID.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29-L34
+@ ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L632-L645 @
+ens_v2@a971bd64)
+This is the
+resource-lifecycle form of the [ENSv2 expired-role projection
+narrowing](upstream.md#known-divergences). The retirement citation therefore
+explains why the rows are absent without
+rewriting which event established authority.
 
 For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
 holder grant. A separately observed compatible holder grant is masked by the
@@ -564,10 +615,15 @@ Canonicality change, manifest change, or interpreted-content replacement stamps
 the affected Project range. Project rebuilds the affected scope in dependency
 order and publishes one coherent generation. There is no worker invalidation
 queue, apply cursor, replay-version fence, general-purpose durable staging,
-replay marker, dead-letter queue, or cache invalidation side effect. The narrow
-`project_redo_resolver_evidence` exception preserves only resolver references
-that would otherwise disappear before Project can select its redo scope; it is
-never serving data and Project consumes it with the corresponding publication.
+replay marker, dead-letter queue, or cache invalidation side effect. Two narrow
+handoffs preserve input that would otherwise disappear before Project can
+select its redo scope: `project_redo_resolver_evidence` retains resolver and
+permission-resource references, while `project_redo_expiry_roots` retains
+logical names and permission resources from state-derived ENSv2 path-expiry
+releases. Neither table is serving data. Project consumes a row only when its
+publication range covers the recorded block; an operator redo ending below an
+already recorded Project head can therefore leave later rows for a covering
+redo or full rebuild.
 
 `phase-runner rewind` selects an exact stored readable ancestor, marks the
 displaced suffix orphaned through normal head publication, and stamps downstream
@@ -591,9 +647,10 @@ new truth family.
 ## Ownership
 
 - Interpret and adapters emit identity, discovery, and normalized events.
-  Interpret also preserves the pre-delete resolver references needed for the
-  next Project redo or normal catch-up; this is replay coordination, not a
-  projection write.
+  Interpret also preserves the pre-delete resolver references and state-derived
+  ENSv2 path-expiry logical names or permission resources needed for a covering
+  Project redo or normal catch-up; these are replay coordination, not projection
+  writes.
 - Project reads canonical interpreted input and owns every projection write.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not

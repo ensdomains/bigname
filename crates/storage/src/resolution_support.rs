@@ -4,6 +4,8 @@ mod support_classes;
 mod topology;
 
 pub use boundaries::{
+    identity_name_current_has_event_linked_ownerless_registry_serving,
+    name_current_has_event_linked_ownerless_registry_serving,
     projected_resolution_boundaries_from_topology, record_version_boundary_has_pointer,
     resolution_record_inventory_lookup_key, resolution_record_inventory_lookup_key_any_chain,
     resolution_record_inventory_lookup_key_for_revalidation, resolution_record_version_boundary,

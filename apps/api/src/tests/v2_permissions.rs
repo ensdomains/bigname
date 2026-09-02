@@ -100,6 +100,96 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     Ok(())
 }
 
+// An explicit ENSv2 release leaves retained permission rows available to a resource audit, but
+// the released name no longer has a current registration and cannot select those rows.
+#[tokio::test]
+async fn v2_get_permissions_empties_a_released_name_but_keeps_its_resource_audit() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let released_resource_id = v2_permissions_current_resource_id();
+
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration,status}',
+             '\"released\"'::jsonb
+         )
+         WHERE resource_id = $1",
+    )
+    .bind(released_resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert_eq!(by_name["data"], json!([]));
+
+    let audited = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?registration_id={released_resource_id}"),
+    )
+    .await?;
+    let rows = audited["data"]
+        .as_array()
+        .expect("resource audit must return an array");
+    assert!(!rows.is_empty(), "the released resource lost its audit read");
+    assert!(
+        rows.iter()
+            .all(|row| row["authority_context"] == json!("resource_audit"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+// This deliberately retains resource-keyed audit evidence while changing the name summary to the
+// reservation shape and removing current-owner evidence. The API therefore classifies the name as
+// unregistered, so the retained evidence remains audit-only and cannot become `current_for_name`.
+#[tokio::test]
+async fn v2_get_permissions_keeps_retained_resource_audit_out_of_reserved_name_scope() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let reserved_resource_id = v2_permissions_current_resource_id();
+
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+                 jsonb_set(
+                     declared_summary #- '{control,owner}' #- '{control,registry_owner}',
+                     '{registration,status}', '\"reserved\"'::jsonb
+                 ),
+                 '{registration,authority_kind}', '\"ens_v2_registry\"'::jsonb
+             )
+         WHERE resource_id = $1",
+    )
+    .bind(reserved_resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert_eq!(by_name["data"], json!([]));
+
+    let audited = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?registration_id={reserved_resource_id}"),
+    )
+    .await?;
+    let rows = audited["data"]
+        .as_array()
+        .expect("resource audit must return an array");
+    assert!(!rows.is_empty(), "the reserved resource lost its audit read");
+    assert!(
+        rows.iter()
+            .all(|row| row["authority_context"] == json!("resource_audit"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 // Every permission row says how it may be read. Only a `name` filter that selected the row's
 // current registration claims `current_for_name`; a resource-keyed read never does, even when the
 // row carries an optional display name.
@@ -423,6 +513,28 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_name_and_name_filtered_permissions_select_the_same_live_registration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let expected = v2_permissions_current_resource_id().to_string();
+
+    let name = v2_name_record_payload_for_database(&database, "/v2/names/Perms.eth").await?;
+    assert_eq!(name["data"]["registration_status"], json!("active"));
+    assert_eq!(name["data"]["registration_id"], json!(expected));
+
+    let permissions =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    let rows = permissions["data"].as_array().expect("permissions data");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| {
+        row["registration_id"] == name["data"]["registration_id"]
+            && row["authority_context"] == json!("current_for_name")
+    }));
+
+    database.cleanup().await
 }
 
 #[tokio::test]

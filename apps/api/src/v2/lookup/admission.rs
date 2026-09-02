@@ -3,7 +3,7 @@ use bigname_storage::{
     SelectedSnapshot,
 };
 
-use crate::v2::{V2Error, V2Result};
+use crate::v2::{V2Error, V2Result, name_record::identity_row_has_current_registration};
 
 pub(super) fn require_name_records_at_served_head(
     records: &[IdentityNameRecordRow],
@@ -49,7 +49,9 @@ fn require_record_at_served_head(
         &record.row.namespace,
         selected_snapshot,
     )?;
-    if let Some(inventory) = record.record_inventory_current.as_ref() {
+    if identity_row_has_current_registration(&record.row)
+        && let Some(inventory) = record.record_inventory_current.as_ref()
+    {
         require_name_projection_at_served_head(
             &inventory.chain_positions,
             &record.row.namespace,

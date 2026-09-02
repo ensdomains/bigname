@@ -604,6 +604,88 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
 }
 
 #[tokio::test]
+async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:reserved.eth",
+        "reserved.eth",
+        "reserved.eth",
+        "namehash:reserved.eth",
+        Uuid::from_u128(0x5a0411),
+        Uuid::from_u128(0x5a0412),
+        Uuid::from_u128(0x5a0413),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             jsonb_set(
+                 declared_summary
+                     #- '{control,owner}'
+                     #- '{control,registry_owner}'
+                     #- '{control,registrant}'
+                     #- '{registration,registrant}'
+                     #- '{registration,registered_at}',
+                 '{registration,status}',
+                 '\"reserved\"'
+             ),
+             '{registration,authority_kind}',
+             '\"ens_v2_registry\"'
+         )
+         WHERE raw_name = 'reserved.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES
+             ('ethereum-mainnet', '0xorphaned-audit-inventory', 39,
+              '2026-04-17T00:00:39Z', 'canonical')",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE record_inventory_current inventory
+         SET chain_positions = inventory.chain_positions || jsonb_build_object(
+             'target_block_number', 39,
+             'target_block_hash', '0xorphaned-audit-inventory'
+         ),
+         canonicality_summary = inventory.canonicality_summary || jsonb_build_object(
+             'target_block_number', 39,
+             'target_block_hash', '0xorphaned-audit-inventory'
+         )
+         FROM name_current name
+         WHERE name.resource_id = inventory.resource_id
+           AND name.raw_name = 'reserved.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "reserved.eth"}]}),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert!(record.get("registration_id").is_none());
+    assert!(record.get("resolver").is_none());
+    assert!(record.get("addresses").is_none());
+    assert!(record.get("text_records").is_none());
+    assert!(record.get("content_hash").is_none());
+    assert!(record.get("primary_address").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_flattens_phase_writer_byte_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

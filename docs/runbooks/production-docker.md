@@ -149,6 +149,28 @@ when the concurrent index is already valid. Do not allow the versioned
 schema-migration to perform the first build against a populated production
 `normalized_events` table.
 
+The release containing
+`20260831150000_normalized_events_v2_expiry_scope_idx.sql` adds the bounded
+ENSv2 expiry lookup used to select affected names during replay. On an
+initialized production namespace, build both
+`normalized_events_v2_expiry_scope_idx` and the widened
+`normalized_events_subregistry_registration_history_idx` concurrently in step
+3 with the reviewed statements below, and validate that both are ready and
+valid. Then apply the schema-migration in step 4; its index builds are no-ops
+when the concurrent indexes are already valid. Do not allow the versioned
+schema-migration to perform either first build against a populated production
+`normalized_events` table.
+
+The release containing
+`20260902140000_project_redo_expiry_roots.sql` adds the bounded
+Interpret-to-Project handoff for logical names from deleted state-derived ENSv2
+path-expiry releases. The follow-up
+`20260902150000_project_redo_expiry_resources.sql` admits resource-only releases
+and records the resource identifier when available. Apply both schema-migrations
+in step 4 before deploying the new binary. Before starting any Project process,
+confirm the handoff table, nullable identifier columns, and range index exist and
+that the index is ready and valid with the query below.
+
 ```sql
 SELECT
     to_regclass('bigname_phase.project_redo_resolver_evidence') IS NOT NULL
@@ -162,6 +184,58 @@ SELECT
           AND index_state.indisvalid
           AND index_state.indisready
     ) AS redo_handoff_range_index_ready;
+
+SELECT
+    to_regclass('bigname_phase.project_redo_expiry_roots') IS NOT NULL
+        AS expiry_redo_handoff_exists,
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'bigname_phase'
+          AND table_name = 'project_redo_expiry_roots'
+          AND column_name = 'logical_name_id'
+          AND is_nullable = 'YES'
+    ) AS expiry_redo_logical_name_nullable,
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'bigname_phase'
+          AND table_name = 'project_redo_expiry_roots'
+          AND column_name = 'resource_id'
+          AND is_nullable = 'YES'
+    ) AS expiry_redo_resource_available,
+    EXISTS (
+        SELECT 1
+        FROM pg_class index_relation
+        JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+        WHERE index_relation.oid = to_regclass(
+                  'bigname_phase.project_redo_expiry_roots_range_idx'
+              )
+          AND index_state.indisvalid
+          AND index_state.indisready
+    ) AS expiry_redo_handoff_range_index_ready;
+
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_class index_relation
+    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+    WHERE index_relation.oid =
+          to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx')
+      AND index_state.indisvalid
+      AND index_state.indisready
+) AS normalized_events_v2_expiry_scope_index_ready,
+EXISTS (
+    SELECT 1
+    FROM pg_class index_relation
+    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+    WHERE index_relation.oid = to_regclass(
+              'bigname_phase.normalized_events_subregistry_registration_history_idx'
+          )
+      AND index_state.indisvalid
+      AND index_state.indisready
+      AND pg_get_expr(index_state.indpred, index_state.indrelid, true)
+          LIKE '%RegistrationReserved%'
+) AS normalized_events_reserved_registration_history_index_ready;
 ```
 
 Apply the following index statements one at a time with the writer role. Do not
@@ -222,12 +296,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_before_reso
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND before_state #>> '{scope,kind}' = 'resolver'
       AND resource_id IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_subregistry_registration_history_idx
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_subregistry_registration_history_idx;
+CREATE INDEX CONCURRENTLY normalized_events_subregistry_registration_history_idx
     ON bigname_phase.normalized_events
        (chain_id, (after_state ->> 'registry_contract_instance_id'),
         block_number DESC, normalized_event_id DESC, logical_name_id)
     WHERE event_kind IN (
-              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased'
+              'RegistrationGranted', 'RegistrationReserved',
+              'RegistrationRenewed', 'RegistrationReleased'
           )
       AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -244,6 +320,18 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_ens_v1_record_node_res
       AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v2_expiry_scope_idx
+    ON bigname_phase.normalized_events
+       (chain_id, ((after_state ->> 'expiry')::numeric),
+        block_number, logical_name_id)
+    WHERE logical_name_id IS NOT NULL
+      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND event_kind IN (
+          'RegistrationGranted', 'RegistrationReserved',
+          'RegistrationRenewed', 'RegistrationReleased', 'ExpiryChanged'
+      )
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND jsonb_typeof(after_state -> 'expiry') = 'number';
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_basenames_record_node_resolver_idx
     ON bigname_phase.normalized_events
        (chain_id, lower(after_state ->> 'node'),
@@ -317,6 +405,7 @@ indexes are additive; rollback may leave them in place.
    rollout section](../deployment.md#owner-ratified-sepolia-source-role-rollout)
    at step 9;
 3. for the release containing Issue #400, Issue #591, or
+   `20260831150000_normalized_events_v2_expiry_scope_idx.sql`, or
    `20260902120000_normalized_events_basenames_record_node_resolver_idx.sql`,
    apply and validate the applicable concurrent baseline indexes above;
    otherwise skip this step;

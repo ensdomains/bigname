@@ -100,6 +100,23 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
+> **Ownerless ENSv2 reservation resolver serving narrowing** — bigname retains
+> reservation resolver facts for diagnostics, but product name, record, batch
+> lookup, and resolver-listing routes classify an ownerless reservation as no
+> current registration and do not serve that resolver or its record inventory.
+> **Upstream**: `PermissionedRegistry` stores the supplied resolver before its
+> owner-zero reservation branch and emits `ResolverUpdated` for a nonzero value
+> `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)`;
+> `getResolver` returns the stored value until the entry expires
+> `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)`.
+> **Our rule**: `docs/api-v2.md` § Field Budgets,
+> `docs/api-v2-routes.md` name and resolver routes, and `docs/storage.md` §
+> Projection storage rules.
+> **Why**: product routes use current-registration ownership as their serving
+> boundary. Diagnostics preserve the retained facts for comparison without
+> presenting them as current name data.
+> **Since**: `2026-09-02`
+
 > **Graph Node directive repeatability is declared but not resolved** — deployment `QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ` at block 23,000,000 resolved `__Directive.isRepeatable` as null for each of its five directives, producing five non-null-field errors and null data. The same introspection without that field returned 113 types and no errors.
 > **Upstream**: the pinned Graph Node introspection schema declares `isRepeatable: Boolean!` (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L85 @ graph_node@aefe1737), but its directive-object resolver supplies only `name`, `description`, `locations`, and `args` (upstream: .refs/graph_node/graphql/src/introspection/resolver.rs:L252-L263 @ graph_node@aefe1737).
 > **Our rule**: `docs/graphql-compatibility-oracle.md` § Schema comparison omits directive repeatability from capture and comparison.
@@ -203,6 +220,12 @@ to the applicable entries below.
 > **Our rule**: `docs/storage.md` § Projection storage rules.
 > **Why**: `name_current` timestamp projections and the REST/GraphQL list surfaces use representable timestamp semantics. Mapping max or otherwise unrepresentable numeric expiry values to `null` preserves the "no public finite expiry" meaning without inventing a date that route types and ordering helpers cannot represent.
 > **Since**: `2026-06-30`
+
+> **ENSv2 expired-role projection narrowing** — after a state-derived ENSv2 path-expiry release, bigname removes that resource's effective current permission rows until a same-resource renewal or later grant or reservation readmits retained grants. Whether the expiry release named a surface does not affect the resource revival. The partial-coverage resource summary remains available during the expired interval.
+> **Upstream**: `PermissionedRegistry.getResource` resolves an identifier through the resource constructor `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L304-L305 @ ens_v2@a971bd64)`, whose expiry branch bumps the EAC version for an expired entry, so live role reads during the expired interval land on a fresh empty scope while pre-expiry grants stay stored under the prior version `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L642-L644 @ ens_v2@a971bd64)`; `roles` reads EnhancedAccessControl roles through that resource `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L356-L364 @ ens_v2@a971bd64)`. A renewal — including the post-expiry revive path — extends expiry without touching either version counter, making the stored grants live again `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L228 @ ens_v2@a971bd64)`, while unregistering a registered entry burns its token and increments both version counters, so a later registration uses the already-fresh permission scope `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L206 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29-L34 @ ens_v2@a971bd64)`.
+> **Our rule**: `docs/storage.md` § Projection storage rules.
+> **Why**: bigname models the expired interval by removing the effective permission rows from current serving rather than by serving upstream's version-bumped empty scope; the partial-coverage summary and event history retain audit context. Readmission mirrors upstream's version semantics: a same-versioned continuation (revival) makes retained grants current again, and a new versioned resource receives grants only from its own permission events.
+> **Since**: `2026-08-31`
 
 > **Graph Node query-execution narrowing on the compatibility GraphQL surface** — bigname exposes Graph Node's `Block_height`, `_meta`, and `_SubgraphErrorPolicy_` shapes, including Graph Node's `hash`-then-`number`-then-`number_gte` selector precedence and rejection of an empty block object, but currently executes entity reads only at a request-scoped [served head](glossary.md#served-head). Historical block numbers and hashes are rejected, and `subgraphError` is accepted without per-entity omission because the current name projections do not attribute indexing errors to individual entities. `_Meta_.deployment` identifies bigname's interpreter content rather than a Graph Node deployment, and `hasIndexingErrors` maps durable serving-readiness signals rather than Graph Node's stored non-fatal-error flag. On chains that require verification, the verification-floor check can transiently report `true` while healthy verification catches up after a batch.
 > **Upstream**: Graph Node represents hash, number, minimum-number, and latest constraints as distinct selectors `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L53-L70 @ graph_node@aefe1737)` and applies that precedence while rejecting an empty block object `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L80-L100 @ graph_node@aefe1737)`. A number-constrained `_meta` result has a null block hash `(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L36-L73 @ graph_node@aefe1737)`. It defaults a missing `subgraphError` to `deny` and combines field policies for execution `(upstream: .refs/graph_node/graphql/src/execution/query.rs:L308-L329 @ graph_node@aefe1737)`. Its metadata resolver returns the deployment identifier and maps `hasIndexingErrors` from the deployment's non-fatal-error state `(upstream: .refs/graph_node/graphql/src/store/resolver.rs:L228-L245 @ graph_node@aefe1737)`.
