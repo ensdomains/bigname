@@ -1,6 +1,10 @@
 mod address_matches;
 mod decoders;
+mod event_page;
+#[cfg(any(test, feature = "test-support"))]
+pub mod history_anchor_read_test_hooks;
 mod paging;
+mod redo;
 mod registration_identity;
 mod selectors;
 mod source;
@@ -18,6 +22,12 @@ use crate::{CanonicalityState, address_names::AddressNameRelation};
 use address_matches::load_address_history_selector;
 use paging::{load_event_history_rows, load_history, load_history_head};
 use selectors::{name_history_selector, resource_history_selector};
+
+pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
+pub use redo::{
+    InterpretRedoFence, InterpretRedoInProgress, capture_interpret_redo_fence,
+    revalidate_interpret_redo_fence,
+};
 
 /// Anchor selection for normalized-event history reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,6 +114,7 @@ pub struct HistoryPage {
     pub rows: Vec<HistoryEvent>,
     pub next_cursor: Option<HistoryCursor>,
     pub summary: Option<HistorySummary>,
+    pub interpret_redo_fence: Option<InterpretRedoFence>,
 }
 
 #[derive(Debug)]
@@ -132,6 +143,7 @@ pub struct EventHistoryFilter {
     pub resource_id: Option<Uuid>,
     pub address: Option<EventHistoryAddressFilter>,
     pub event_kinds: Vec<String>,
+    pub bind_cursor_anchor_to_event_kinds: bool,
     pub from_block: Option<i64>,
     pub to_block: Option<i64>,
 }
@@ -142,6 +154,7 @@ pub(in crate::history) struct EventHistoryReadFilter {
     pub(in crate::history) registration_id: Option<Uuid>,
     pub(in crate::history) namespace: Option<String>,
     pub(in crate::history) event_kinds: Vec<String>,
+    pub(in crate::history) bind_cursor_anchor_to_event_kinds: bool,
     pub(in crate::history) from_block: Option<i64>,
     pub(in crate::history) to_block: Option<i64>,
 }
@@ -179,11 +192,16 @@ pub async fn load_name_history_page(
     cursor: Option<&HistoryCursor>,
     page_size: u64,
     summary_mode: HistorySummaryMode,
+    event_kinds: &[String],
+    interpret_redo_fence: Option<&InterpretRedoFence>,
 ) -> Result<HistoryPage> {
+    #[cfg(any(test, feature = "test-support"))]
+    history_anchor_read_test_hooks::run_if(pool, interpret_redo_fence.is_some()).await?;
     paging::load_history_page(
         pool,
         EventHistoryReadFilter {
             selectors: vec![name_history_selector(logical_name_id, resource_ids, scope)],
+            event_kinds: event_kinds.to_vec(),
             ..EventHistoryReadFilter::default()
         },
         canonical_only,
@@ -191,6 +209,7 @@ pub async fn load_name_history_page(
         page_size,
         summary_mode,
         false,
+        interpret_redo_fence,
     )
     .await
     .with_context(|| {
@@ -233,32 +252,6 @@ pub async fn load_event_history(
     load_event_history_rows(pool, read_filter, canonical_only)
         .await
         .context("failed to load app-facing event history")
-}
-
-/// Load one SQL-keyset page for event-history filters, optionally including rows whose
-/// `consumer_visibility` is `candidate`.
-pub async fn load_event_history_page(
-    pool: &PgPool,
-    filter: EventHistoryFilter,
-    canonical_only: bool,
-    cursor: Option<&HistoryCursor>,
-    page_size: u64,
-    summary_mode: HistorySummaryMode,
-    include_candidates: bool,
-) -> Result<HistoryPage> {
-    let read_filter =
-        event_history_read_filter(pool, filter, canonical_only, include_candidates).await?;
-    paging::load_history_page(
-        pool,
-        read_filter,
-        canonical_only,
-        cursor,
-        page_size,
-        summary_mode,
-        include_candidates,
-    )
-    .await
-    .context("failed to load app-facing event history page")
 }
 
 /// Load history rows for one resource anchor.
@@ -310,6 +303,7 @@ pub async fn load_resource_history_page(
         page_size,
         summary_mode,
         false,
+        None,
     )
     .await
     .with_context(|| {
@@ -403,6 +397,8 @@ pub async fn load_address_history_page(
         cursor,
         page_size,
         summary_mode,
+        &[],
+        false,
     )
     .await
 }
@@ -419,7 +415,10 @@ pub async fn load_address_history_page_for_relations(
     cursor: Option<&HistoryCursor>,
     page_size: u64,
     summary_mode: HistorySummaryMode,
+    event_kinds: &[String],
+    require_interpret_not_redo: bool,
 ) -> Result<HistoryPage> {
+    let interpret_redo_fence = redo::capture_fence_if(pool, require_interpret_not_redo).await?;
     let normalized_address = address.to_ascii_lowercase();
     let selector = load_address_history_selector(
         pool,
@@ -432,10 +431,14 @@ pub async fn load_address_history_page_for_relations(
     )
     .await?;
 
+    #[cfg(any(test, feature = "test-support"))]
+    history_anchor_read_test_hooks::run_if(pool, require_interpret_not_redo).await?;
+
     paging::load_history_page(
         pool,
         EventHistoryReadFilter {
             selectors: vec![selector],
+            event_kinds: event_kinds.to_vec(),
             ..EventHistoryReadFilter::default()
         },
         canonical_only,
@@ -443,6 +446,7 @@ pub async fn load_address_history_page_for_relations(
         page_size,
         summary_mode,
         false,
+        interpret_redo_fence.as_ref(),
     )
     .await
     .with_context(|| {
@@ -545,6 +549,7 @@ async fn event_history_read_filter(
         },
         namespace: filter.namespace,
         event_kinds: filter.event_kinds,
+        bind_cursor_anchor_to_event_kinds: filter.bind_cursor_anchor_to_event_kinds,
         from_block: filter.from_block,
         to_block: filter.to_block,
     })

@@ -340,7 +340,8 @@ The lookup route uses the common record shape and in-band per-result statuses.
 `bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. The stored
 head and finality fields come from `chain_heads`; indexed progress is the
 `project` phase's most recent completed publication. Readiness also uses that
-phase's lifecycle state, redo marker, and newest per-chain heartbeat in
+phase's lifecycle state and redo marker, the Interpret `redo_in_progress`
+marker, and newest per-chain heartbeat in
 `service_heartbeats`. A phase row that startup settled while its chain was
 unconfigured is not eligible for `ready` until genuine phase completion or
 completed-state revalidation clears that marker. It reports `degraded` unless
@@ -354,7 +355,8 @@ evidence, maps to `stale`. An idle, running, paused, or missing Ingest or Verify
 maps to `degraded`. An expired runner heartbeat remains `stale` while either
 required phase is incomplete. Chains without this requirement omit those
 Ingest and Verify evidence checks. A
-failed Project or expired heartbeat maps to `stale`; a paused, redoing, or missing-heartbeat Project maps
+failed Project or expired heartbeat maps to `stale`; an active Interpret redo
+or a paused, redoing, or missing-heartbeat Project maps
 to `degraded`. A running Project with a completed publication remains eligible
 for `ready` when its block and time lag are within the configured thresholds,
 its interpreter content hash matches this API build, and a same-height
@@ -673,6 +675,31 @@ dataset is frozen. A legacy collection cursor's snapshot component is ignored.
 Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
 
+The `/v2/events`, name-history, and address-history collections use a
+collection-wide `redo_in_progress` check. An active Interpret redo on any chain
+returns retryable `409 stale` for all three collections, regardless of the
+requested namespace or name. Events validates the request and cursor binding
+before its first check, while address history also validates its namespace
+first. Name history validates the request and cursor binding, then captures the
+check before parent lookup. A missing parent returns `404
+not_found` only when no redo is active and the captured generations are
+unchanged; otherwise it returns `409 stale`. Each route checks before deriving
+identity and event anchors written by Interpret and checks again inside the
+repeatable-read page transaction. Events and address history then resolve
+display names and revalidate the captured redo state before returning data;
+name history has no post-transaction display-name read. An active redo at any
+check, or a redo
+that began between them, returns `409 stale` instead of exposing a partially
+reconstructed normalized-event range. A
+well-formed cursor whose event anchor is gone therefore returns `stale` when the
+redo check takes precedence and `400 invalid_input` otherwise. Product
+event-type filtering precedes keyset pagination, so page rows and continuation
+metadata describe only product-visible events. For requests without an explicit
+`type`, cursor anchor validation omits the implicit product event-type filter,
+so a still-existing non-product anchor continues to the next product-visible
+row. An explicit `type` remains part of anchor validation. Cursor bytes remain
+unstable.
+
 A full Interpret and Project re-walk that must not change product behavior at a
 fixed readable chain head does not invalidate an outstanding collection cursor
 merely because an internal normalized-event row ID changes. On `/v2/events`,
@@ -680,9 +707,7 @@ name history, address history, and every other product cursor surface backed by
 normalized-event row identity, a cursor issued before the re-walk must resume
 after publication from the same underlying normalized-event keyset anchor, with
 identical remaining product rows, pages, fields, `has_more`, and summary
-behavior. The anchor need not itself map to a product row. The acceptance corpus
-therefore includes an unmapped normalized event interleaved at a page boundary
-and proves that no visible row is skipped or duplicated. The diagnostic-events
+behavior, including when the anchor is a non-product event. The diagnostic-events
 route must also accept its pre-re-walk cursor and continue from the same stable
 normalized-event anchor, but its remaining diagnostic rows and fields may
 reflect newly admitted candidate data. A pre-existing diagnostic row's numeric

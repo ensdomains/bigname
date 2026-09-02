@@ -175,6 +175,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
         .as_str()
         .is_some_and(|identity| identity.contains(":ResolverChanged:registry-read:")));
 
+    let product_event_kinds = crate::v2::product_history_event_kinds();
     let product_page = bigname_storage::load_name_history_page(
         &database.pool,
         logical_name_id,
@@ -184,6 +185,8 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
         None,
         20,
         bigname_storage::HistorySummaryMode::Count,
+        &product_event_kinds,
+        None,
     )
     .await?;
     assert_eq!(product_page.rows.len(), 1);
@@ -575,30 +578,6 @@ async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes(
 }
 
 #[tokio::test]
-async fn v2_get_history_filters_non_product_rows_and_advances_cursor() -> Result<()> {
-    let (database, first_page) =
-        v2_history_payload("/v2/names/History.eth/history?page_size=1").await?;
-
-    assert_eq!(first_page["data"], json!([]));
-    assert_eq!(first_page["page"]["has_more"], json!(true));
-    let next_cursor = first_page["page"]["next_cursor"]
-        .as_str()
-        .expect("filtered first page must still expose next cursor");
-
-    let second_page = v2_history_payload_for_database(
-        &database,
-        &format!("/v2/names/History.eth/history?page_size=1&cursor={next_cursor}"),
-    )
-    .await?;
-
-    assert_eq!(history_types(second_page["data"].as_array().expect("data")), vec!["renewal"]);
-    assert_ne!(second_page["page"]["next_cursor"], Value::Null);
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
     let (database, first_page) =
         v2_history_payload("/v2/names/history.eth/history?page_size=3").await?;
@@ -624,8 +603,8 @@ async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
             .all(|hash| !second_hashes.contains(hash)),
         "history pages must not overlap"
     );
-    assert_eq!(first_hashes, vec!["0xtx110", "0xtx109"]);
-    assert_eq!(second_hashes, vec!["0xtx108", "0xtx107", "0xtx106"]);
+    assert_eq!(first_hashes, vec!["0xtx110", "0xtx109", "0xtx108"]);
+    assert_eq!(second_hashes, vec!["0xtx107", "0xtx106", "0xtx105"]);
 
     let replay = v2_history_payload_for_database(
         &database,
@@ -663,13 +642,6 @@ async fn normalized_event_cursors_resume_after_rewalk_ids_rotate() -> Result<()>
     let mut before = Vec::new();
     for (route, diagnostic) in &routes {
         let first = v2_history_payload_for_database(&database, route).await?;
-        if route.starts_with("/v2/names/") || route.starts_with("/v2/events?") {
-            assert_eq!(
-                first["data"],
-                json!([]),
-                "the saved product cursor must anchor the unmapped SurfaceBound row: {route}"
-            );
-        }
         let cursor = first["page"]["next_cursor"]
             .as_str()
             .with_context(|| format!("{route} must produce a saved cursor"))?

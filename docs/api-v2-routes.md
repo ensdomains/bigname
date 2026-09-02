@@ -74,7 +74,9 @@ resume from the same normalized-event keyset anchor with identical remaining
 product rows, pages, fields, `has_more`, and summary behavior. Because that
 anchor may be an unmapped event absent from the response, the corpus places an
 unmapped normalized event at a product-page boundary and proves no visible row
-is skipped or duplicated. `/v2/diagnostics/events` must accept its old cursor
+is skipped or duplicated. This default product-event exception does not remove
+an explicitly requested `type` from cursor anchor validation.
+`/v2/diagnostics/events` must accept its old cursor
 and continue from the same stable normalized-event anchor, but its remaining
 rows and fields may include the expected new candidate diagnostics.
 The numeric `normalized_event_id` of a pre-existing diagnostic row may change
@@ -277,12 +279,15 @@ Field ownership:
   signature, and the `canonicality_state` type. If any are missing, the API
   refuses to start and its diagnostic names every missing identity.
 - The existing per-chain `status` field also maps the `project` phase
-  lifecycle, redo marker, and newest per-chain
+  lifecycle and redo marker, the Interpret `redo_in_progress` marker, and the
+  newest per-chain
   `bigname_phase.service_heartbeats` timestamp. A phase row that startup
   settled while its chain was unconfigured is not eligible for `ready` until
   genuine phase completion or completed-state revalidation clears that marker.
   It reports `degraded` unless a stronger `stale` condition applies, such as a
-  genuinely failed phase or an expired heartbeat.
+  genuinely failed phase or an expired heartbeat. An active Interpret redo
+  makes the chain `degraded`; `data.status` continues to report the worst
+  readiness across all chains.
   Ethereum Sepolia is ineligible for `ready` unless its `ingest` phase
   remains `completed` and its [verification](glossary.md#verification-level)
   phase is `completed` at a known level at or above the `quick_synced` floor; unknown stored levels fail closed. A failed Ingest or Verify, or an ordinary completed Verify without that
@@ -762,12 +767,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   validation, summary calculation, and pagination. Without a distinct control
   resource, the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Pagination behavior: standard newest-first collection pagination by chain
+- Pagination behavior: standard newest-first keyset pagination by chain
   position. The cursor is bound to the resolved namespace, parent name, scope,
-  and sort. Product event-type filtering is applied after loading the storage
-  page, so `page_size` is an upper bound on returned product rows; a page may
-  contain fewer than `page_size` rows when non-product normalized events are
-  interleaved.
+  and sort. Product event-type filtering is applied before page construction,
+  so `page_size`, `next_cursor`, and `has_more` describe product-visible
+  events. A nonterminal page contains `page_size` rows; only the terminal page
+  may be shorter.
 - Scope behavior: `scope=name` reads name-surface events only,
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
@@ -786,8 +791,19 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   current state. The response omits `meta.as_of` and `meta.as_of_token`, and
   its cursor carries no snapshot validity claim. True as-of history
   enumeration is deferred to the revision-bound storage follow-up.
-- Status semantics: no matching history returns `200` with empty `data`.
-  Missing names return `404 not_found`.
+- Status semantics: no product-visible matches return `200` with empty `data`,
+  `page.next_cursor=null`, and `page.has_more=false`. Missing names return `404
+  not_found`. Request and cursor-binding validation precede the first
+  `redo_in_progress` check, so malformed requests retain `400`. The route
+  captures the collection-wide check before parent lookup, then checks it again
+  inside the repeatable-read page transaction. A missing parent returns `404`
+  only when no redo is active and the captured generations are unchanged;
+  otherwise the route returns retryable `409 stale`. Because the check is
+  collection-wide, an active Interpret redo on any chain returns `409 stale`
+  regardless of the requested namespace or name. The same response applies
+  when either check sees an active redo or a redo began between the checks. A
+  well-formed cursor whose event anchor is gone returns `400 invalid_input` when
+  no redo intervened and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
   moves to `GET /v2/events?registration_id=...`. `scope=registration` on this
@@ -1194,14 +1210,28 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   both. Without a distinct control resource, the sole registry-resource row
   remains visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Pagination behavior: standard collection pagination.
 - Snapshot behavior: address-history rows come from current state. The response
   omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of/finality row-bounding is deferred to the
   revision-bound storage follow-up.
-- Status semantics: no matching activity returns `200` with empty `data`.
-  Malformed addresses return `400 invalid_input`. Unsupported public namespaces
-  return `404 not_found`.
+- Pagination behavior: product event-type filtering runs before newest-first
+  keyset page construction, so `page_size`, `next_cursor`, and `has_more`
+  describe product-visible events. A nonterminal page contains `page_size`
+  rows; only the terminal page may be shorter.
+- Status semantics: no product-visible matches return `200` with empty `data`,
+  `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
+  cursor-binding validation precede the first `redo_in_progress` check, so
+  malformed addresses retain `400 invalid_input` and unsupported public
+  namespaces retain `404 not_found`. The route checks `redo_in_progress` before
+  deriving address relation anchors and rechecks it inside the repeatable-read
+  page transaction. After the transaction commits, the route resolves display
+  names and revalidates the captured redo state before returning data. This
+  check is collection-wide: an active Interpret redo on
+  any chain returns retryable `409 stale` with no `data` page, regardless of the
+  requested namespace. The same response applies when a redo began between the
+  checks. A well-formed cursor
+  whose event anchor is gone returns `400 invalid_input` when no redo intervened
+  and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
 ### `GET /v2/search`
@@ -1328,13 +1358,27 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
   (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L226 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L160 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L162 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L169 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64)
-- Pagination behavior: standard collection pagination.
+- Pagination behavior: standard newest-first keyset pagination. Product
+  event-type filtering runs before page construction, so `page_size`,
+  `next_cursor`, and `has_more` describe product-visible events. A nonterminal
+  page contains `page_size` rows; only the terminal page may be shorter.
 - Snapshot behavior: event rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of/finality row-bounding is deferred to the
   revision-bound storage follow-up.
-- Status semantics: no matching events returns `200` with empty `data`.
-  Malformed filters return `400 invalid_input`.
+- Status semantics: no product-visible matches return `200` with empty `data`,
+  `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding
+  validation precede the first `redo_in_progress` check, so malformed requests
+  retain `400 invalid_input`. The route checks `redo_in_progress` before deriving
+  name, registration, or address anchors and rechecks it inside the
+  repeatable-read page transaction. After that transaction commits, the route
+  resolves display names and revalidates the captured redo state before
+  returning data. This check is collection-wide: an active
+  Interpret redo on any chain returns retryable `409 stale` with no `data` page,
+  regardless of the requested filters or namespace. The same response applies
+  when a redo began between the checks. A
+  well-formed cursor whose event anchor is gone returns `400 invalid_input` when
+  no redo intervened and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/events` compact event search.
 
 ### `GET /v2/resolvers/{chain_id}/{address}`

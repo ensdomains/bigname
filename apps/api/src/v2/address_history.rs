@@ -14,7 +14,8 @@ use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
     CursorPayload, Envelope, Event, HistoryScope, Meta, Page, QueryParamAllowlist, RelationSet,
     StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event, decode, encode,
-    history_storage_scope, validate_latest_collection_selectors,
+    history_storage_scope, map_history_page_error, product_history_event_kinds,
+    validate_latest_collection_selectors,
 };
 
 const ADDRESS_HISTORY_SORT: &str = "chain_position_desc";
@@ -58,6 +59,7 @@ pub(crate) async fn get_address_history(
         .unwrap_or_default();
     let storage_relations = (!storage_relations.is_empty()).then_some(storage_relations.as_slice());
     let storage_scope = history_storage_scope(params.scope);
+    let event_kinds = product_history_event_kinds();
 
     let cursor_binding = AddressHistoryCursorBinding {
         address: &normalized_address,
@@ -84,18 +86,19 @@ pub(crate) async fn get_address_history(
         storage_cursor.as_ref(),
         params.page_size,
         HistorySummaryMode::None,
+        &event_kinds,
+        true,
     )
     .await
-    .map_err(|error| {
-        if error
-            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
-            .is_some()
-        {
-            invalid_cursor_error()
-        } else {
-            V2Error::internal_error("failed to load address history")
-        }
-    })?;
+    .map_err(|error| map_history_page_error(error, "failed to load address history"))?;
+
+    #[cfg(test)]
+    bigname_storage::history_anchor_read_test_hooks::run(
+        &state.pool,
+        bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPage,
+    )
+    .await
+    .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
     let next_cursor = storage_page
         .next_cursor
@@ -118,6 +121,11 @@ pub(crate) async fn get_address_history(
         tracing::error!(error = ?error, "failed to load address-history names from phase projections");
         V2Error::internal_error("failed to load address history")
     })?;
+    if let Some(fence) = storage_page.interpret_redo_fence.as_ref() {
+        bigname_storage::revalidate_interpret_redo_fence(&state.pool, fence)
+            .await
+            .map_err(|error| map_history_page_error(error, "failed to load address history"))?;
+    }
     let data = storage_page
         .rows
         .iter()
