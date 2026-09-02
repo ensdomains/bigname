@@ -379,6 +379,23 @@ async fn registrar_only_then_enrichment_projects_name_addressable_registration()
 #[rustfmt::skip]
 async fn registrar_only_then_enrichment_converges_across_project_batches() -> Result<()> { assert_eq!(registrar_reveal_projection(false).await?, registrar_reveal_projection(true).await?); Ok(()) }
 
+#[tokio::test]
+#[rustfmt::skip]
+async fn born_wrapped_projection_retains_resource_keyed_registrar_expiry() -> Result<()> {
+    let (database, pool) = migrated_pool().await?; seed_chain(&pool).await?;
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 8, 'canonical')").bind(OWNERLESS_RESOURCE).bind(CHAIN).bind(block_hash(8)).execute(&pool).await?;
+    seed_surface(&pool, OWNERLESS_NAMEHASH, "wrapped.eth", CONTROL_RESOURCE, CONTROL_BINDING).await?;
+    for (identity, logical, resource, kind, family, state) in [
+        ("fixture:wrapped-registration", None, OWNERLESS_RESOURCE, "RegistrationGranted", "ens_v1_registrar_l1", json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:fixture","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH})),
+        ("fixture:wrapped-expiry", None, OWNERLESS_RESOURCE, "ExpiryChanged", "ens_v1_registrar_l1", json!({"source_event":"NameRegistered","authority_kind":"registrar","authority_key":"registrar:fixture","registrant":CONTROL_OWNER,"expiry":4242,"namehash":OWNERLESS_NAMEHASH})),
+        ("fixture:wrapped-binding", Some(OWNERLESS_LOGICAL), CONTROL_RESOURCE, "SurfaceBound", "ens_v1_wrapper_l1", json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH})),
+        ("fixture:wrapped-scope", Some(OWNERLESS_LOGICAL), CONTROL_RESOURCE, "PermissionScopeChanged", "ens_v1_wrapper_l1", json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH})),
+    ] { seed_normalized_event(&pool, identity, logical, Some(resource), kind, family, 8, 1, state, json!({})).await?; }
+    run_project(&pool, 10, 8, None).await?;
+    let summary: (String, i64) = sqlx::query_as("SELECT declared_summary #>> '{registration,status}', (declared_summary #>> '{registration,expiry}')::bigint FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
+    assert_eq!(summary, ("active".to_owned(), 4242)); database.cleanup().await?; Ok(())
+}
+
 async fn ownerless_serving_projection_snapshot(
     pool: &PgPool,
     logical_name_id: &str,

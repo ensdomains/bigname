@@ -394,6 +394,8 @@ mod v1_registrar {
         assert_eq!(grants[0].after_state["expiry"], 42);
         assert!(!output.normalized_events.iter().any(|event| event.event_kind == "PermissionChanged" && event.after_state["source_event"] == "NewOwner" && event.after_state["subject"] == CONTROLLER));
         assert!(output.normalized_events.iter().any(|event| event.event_kind == "ResolverChanged" && event.resource_id == grants[0].resource_id));
+        let prematurely_named = output.normalized_events.iter().filter(|event| event.log_index.is_some_and(|index| index < 5) && event.logical_name_id.is_some()).map(|event| (event.log_index, event.event_kind.as_str())).collect::<Vec<_>>();
+        assert!(prematurely_named.is_empty(), "pre-enrichment events acquired a name: {prematurely_named:?}");
         assert!(output.surface_bindings.iter().any(|binding| binding.resource_id == grants[0].resource_id.unwrap()));
         Ok(())
     }

@@ -586,14 +586,17 @@ pub(super) fn append_authority_transition(
         });
     }
     let logical_name_id = linked
-        .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
+        .filter(|authority| authority.surface_known)
         .map(|authority| authority.logical_name_id.clone())
         .or_else(|| {
             previous
-                .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
+                .filter(|authority| authority.surface_known)
                 .map(|authority| authority.logical_name_id.clone())
         });
-    let Some(logical_name_id) = logical_name_id else {
+    let Some(identity_name_id) = linked
+        .or(previous)
+        .map(|authority| authority.logical_name_id.clone())
+    else {
         return;
     };
     let source_event = observation_state
@@ -603,7 +606,7 @@ pub(super) fn append_authority_transition(
     if let Some(previous) = previous.filter(|authority| authority.surface_known) {
         output.events.push(EventDraft {
             event_kind: "SurfaceUnbound".to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
+            logical_name_id: Some(previous.logical_name_id.clone()),
             resource_id: Some(previous.resource_id),
             identity_suffix: format!("SurfaceUnbound:{source_event}:{}", previous.resource_id),
             explicit_before: Some(json!({
@@ -625,7 +628,7 @@ pub(super) fn append_authority_transition(
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
         output.events.push(EventDraft {
             event_kind: "SurfaceBound".to_owned(),
-            logical_name_id: Some(logical_name_id.clone()),
+            logical_name_id: Some(linked.logical_name_id.clone()),
             resource_id: Some(linked.resource_id),
             identity_suffix: format!("SurfaceBound:{source_event}:{}", linked.resource_id),
             explicit_before: Some(json!({})),
@@ -644,11 +647,11 @@ pub(super) fn append_authority_transition(
     }
     output.events.push(EventDraft {
         event_kind: "AuthorityEpochChanged".to_owned(),
-        logical_name_id: Some(logical_name_id.clone()),
+        logical_name_id: logical_name_id.clone(),
         resource_id: linked
             .map(|authority| authority.resource_id)
             .or_else(|| previous.map(|authority| authority.resource_id)),
-        identity_suffix: format!("AuthorityEpochChanged:{source_event}:{logical_name_id}"),
+        identity_suffix: format!("AuthorityEpochChanged:{source_event}:{identity_name_id}"),
         explicit_before: Some(json!({
             "authority_kind":previous.map(authority_kind),
             "authority_key":previous.and_then(|authority| authority.authority_key.clone()),
@@ -666,7 +669,7 @@ pub(super) fn append_authority_transition(
     if let (Some(linked), Some(resolver)) = (linked, resolver) {
         output.events.push(EventDraft {
             event_kind: "ResolverChanged".to_owned(),
-            logical_name_id: Some(logical_name_id),
+            logical_name_id,
             resource_id: Some(linked.resource_id),
             identity_suffix: format!("ResolverChanged:authority:{source_event}:{resolver}"),
             explicit_before: Some(json!({"resolver":Value::Null})),

@@ -237,7 +237,7 @@ fn transfer(
     }
     let mut output = single_event(
         "TokenControlTransferred",
-        Some(linked.logical_name_id.clone()),
+        linked.surface_known.then(|| linked.logical_name_id.clone()),
         Some(linked.resource_id),
         after,
     );
@@ -313,7 +313,7 @@ fn append_transfer_permissions(
             };
             output.events.push(EventDraft {
                 event_kind: "PermissionChanged".to_owned(),
-                logical_name_id: Some(after.logical_name_id.clone()),
+                logical_name_id: after.surface_known.then(|| after.logical_name_id.clone()),
                 resource_id: Some(after.resource_id),
                 identity_suffix: format!("PermissionChanged:transfer:{index}:{action}:{subject}"),
                 explicit_before: Some(before_state),

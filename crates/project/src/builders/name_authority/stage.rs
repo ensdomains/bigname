@@ -81,12 +81,32 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
            ON candidate.surface_binding_id = authority.selected_binding_id",
         "CREATE INDEX ON project_bindings (logical_name_id)",
         "CREATE TEMP TABLE project_authority_events ON COMMIT DROP AS
-         SELECT DISTINCT ON (event.normalized_event_id) event.*
+         SELECT DISTINCT ON (event.normalized_event_id)
+                event.*, authority.logical_name_id AS selected_logical_name_id
          FROM project_events event
          JOIN project_name_authority authority
            ON authority.logical_name_id = event.logical_name_id
            OR (event.logical_name_id IS NULL
-               AND event.resource_id = authority.selected_resource_id)
+               AND (event.resource_id = authority.selected_resource_id
+                    OR (event.source_family = 'ens_v1_registrar_l1'
+                        AND event.event_kind IN (
+                            'RegistrationGranted', 'RegistrationRenewed',
+                            'ExpiryChanged'
+                        )
+                        AND EXISTS (
+                            SELECT 1 FROM project_events selected_wrapper
+                            WHERE selected_wrapper.logical_name_id =
+                                  authority.logical_name_id
+                              AND selected_wrapper.resource_id =
+                                  authority.selected_resource_id
+                              AND selected_wrapper.source_family =
+                                  'ens_v1_wrapper_l1'
+                              AND selected_wrapper.event_kind = 'SurfaceBound'
+                              AND selected_wrapper.transaction_hash =
+                                  event.transaction_hash
+                              AND lower(selected_wrapper.after_state ->> 'node') =
+                                  lower(event.after_state ->> 'namehash')
+                        ))))
          WHERE (
                (
                    authority.unsupported_reason IS NULL
@@ -161,14 +181,17 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                                    SELECT 1
                                    FROM project_events selected_wrapper
                                    JOIN project_events registration
-                                     ON registration.logical_name_id =
-                                        selected_wrapper.logical_name_id
-                                    AND registration.transaction_hash =
+                                     ON registration.transaction_hash =
                                         selected_wrapper.transaction_hash
                                     AND registration.resource_id = event.resource_id
                                     AND registration.source_family =
                                         'ens_v1_registrar_l1'
                                     AND registration.event_kind = 'RegistrationGranted'
+                                    AND (registration.logical_name_id =
+                                         selected_wrapper.logical_name_id
+                                         OR (registration.logical_name_id IS NULL
+                                             AND lower(registration.after_state ->> 'namehash') =
+                                                 lower(selected_wrapper.after_state ->> 'node')))
                                    WHERE selected_wrapper.logical_name_id =
                                          authority.logical_name_id
                                      AND selected_wrapper.resource_id =
@@ -301,11 +324,10 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                )
            )
          ORDER BY event.normalized_event_id",
-        "UPDATE project_authority_events event
-         SET logical_name_id = authority.logical_name_id
-         FROM project_name_authority authority
-         WHERE event.logical_name_id IS NULL
-           AND event.resource_id = authority.selected_resource_id",
+        "UPDATE project_authority_events
+         SET logical_name_id = selected_logical_name_id
+         WHERE logical_name_id IS NULL",
+        "ALTER TABLE project_authority_events DROP COLUMN selected_logical_name_id",
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
         "CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS

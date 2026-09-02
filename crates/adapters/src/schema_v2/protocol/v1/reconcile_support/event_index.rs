@@ -108,6 +108,7 @@ impl EventFields {
 pub(super) struct Registration {
     pub(super) key: TargetKey,
     pub(super) logical_name_id: String,
+    pub(super) surface_known: bool,
     pub(super) resource_id: Uuid,
     pub(super) log_index: i64,
     pub(super) authority_key: Option<String>,
@@ -217,6 +218,7 @@ impl EventIndex {
                         .logical_name_id
                         .clone()
                         .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
+                    surface_known: event.logical_name_id.is_some(),
                     resource_id: event.resource_id?,
                     log_index: event.log_index?,
                     authority_key: event

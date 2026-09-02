@@ -163,7 +163,9 @@ fn reconcile_registration(
     );
     for index in predecessor_events {
         let event = &mut output.normalized_events[index];
-        event.logical_name_id = Some(registration.logical_name_id.clone());
+        event.logical_name_id = registration
+            .surface_known
+            .then(|| registration.logical_name_id.clone());
         refresh_interpreter_state_key(event);
     }
 
@@ -207,7 +209,9 @@ fn reconcile_registration(
             continue;
         }
         let event = &mut output.normalized_events[index];
-        event.logical_name_id = Some(registration.logical_name_id.clone());
+        event.logical_name_id = registration
+            .surface_known
+            .then(|| registration.logical_name_id.clone());
         event.resource_id = Some(registration.resource_id);
         if let Some(authority_key) = registration.authority_key.as_deref() {
             retarget_permission_authority(&mut event.after_state, authority_key);
