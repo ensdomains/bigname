@@ -353,6 +353,7 @@ async fn serving_projection_snapshot(pool: &PgPool) -> Result<Vec<(String, serde
 
 async fn ownerless_serving_projection_snapshot(
     pool: &PgPool,
+    logical_name_id: &str,
 ) -> Result<Vec<(String, serde_json::Value)>> {
     let mut snapshot = serving_projection_snapshot(pool).await?;
     for (table, rows) in &mut snapshot {
@@ -360,14 +361,14 @@ async fn ownerless_serving_projection_snapshot(
             continue;
         };
         rows.retain(|row| match table.as_str() {
-            "name_current" => row["logical_name_id"] == OWNERLESS_LOGICAL,
-            "children_current" => row["child_logical_name_id"] == OWNERLESS_LOGICAL,
+            "name_current" => row["logical_name_id"] == logical_name_id,
+            "children_current" => row["child_logical_name_id"] == logical_name_id,
             "permissions_current"
             | "permissions_current_resource_summary"
             | "record_inventory_current" => row["resource_id"] == OWNERLESS_RESOURCE,
             "resolver_current" => row["resolver_address"] == RESOLVER_ADDRESS,
             "address_names_current" => {
-                row["logical_name_id"] == OWNERLESS_LOGICAL
+                row["logical_name_id"] == logical_name_id
                     || row["resource_id"] == OWNERLESS_RESOURCE
             }
             "primary_names_current" => false,
@@ -911,11 +912,12 @@ async fn registry_self_with_linked_resolver_serves_without_control() -> Result<(
     .await?
     .expect("ownerless topology boundary loads its current inventory");
     assert_eq!(loaded.entries[0]["value"], "readable after version");
-    let incremental_record_change = ownerless_serving_projection_snapshot(&pool).await?;
+    let incremental_record_change =
+        ownerless_serving_projection_snapshot(&pool, OWNERLESS_LOGICAL).await?;
     run_project(&pool, 10, 8, None).await?;
     assert_eq!(
         incremental_record_change,
-        ownerless_serving_projection_snapshot(&pool).await?,
+        ownerless_serving_projection_snapshot(&pool, OWNERLESS_LOGICAL).await?,
         "resource-less ownerless record changes diverged from a fresh Project rebuild across the eight serving tables"
     );
     let address_relations: i64 =
@@ -1316,15 +1318,21 @@ async fn basenames_node_only_record_after_owner_clear_rebuilds_inventory() -> Re
         .await?;
     }
     run_project(&pool, 10, 10, Some(9)).await?;
-    let incremental: String = sqlx::query_scalar(
+    let incremental_value: String = sqlx::query_scalar(
         "SELECT entries -> 0 ->> 'value'
          FROM record_inventory_current WHERE resource_id = $1::uuid",
     )
     .bind(OWNERLESS_RESOURCE)
     .fetch_one(&pool)
     .await?;
+    let incremental = ownerless_serving_projection_snapshot(&pool, LOGICAL_NAME_ID).await?;
     run_project(&pool, 10, 8, None).await?;
-    let fresh: String = sqlx::query_scalar(
+    let fresh = ownerless_serving_projection_snapshot(&pool, LOGICAL_NAME_ID).await?;
+    assert_eq!(
+        incremental, fresh,
+        "Basenames node-only records diverged between incremental and fresh rebuilds for the published inventory and name topology"
+    );
+    let fresh_value: String = sqlx::query_scalar(
         "SELECT entries -> 0 ->> 'value'
          FROM record_inventory_current WHERE resource_id = $1::uuid",
     )
@@ -1332,7 +1340,7 @@ async fn basenames_node_only_record_after_owner_clear_rebuilds_inventory() -> Re
     .fetch_one(&pool)
     .await?;
     assert_eq!(
-        (incremental.as_str(), fresh.as_str()),
+        (incremental_value.as_str(), fresh_value.as_str()),
         ("readable after version", "readable after version"),
         "Basenames node-only records must replace 'still readable' with 'readable after version' in incremental and fresh rebuilds"
     );

@@ -741,10 +741,14 @@ Field ownership:
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
   A V1 ownerless row linked only to the registry resource retained for reads is
   visible through name history with `registration_id=null` when it carries the
-  name's `logical_name_id`. A pre-surface owner row stored before the
-  [name surface](glossary.md#surface-name-surface) existed has no name
-  attribution and is instead reached through `GET /v2/diagnostics/events` via
-  the registry resource recorded internally at
+  name's `logical_name_id`. Name history returns a pre-surface owner row on a
+  registry resource that was ever bound to the name under `scope=both` or
+  `scope=registration`, even when the row was stored before the
+  [name surface](glossary.md#surface-name-surface) existed and carries no name
+  attribution. `scope=name` returns only rows carrying the name's
+  `logical_name_id`. A row on a resource that was never bound to the name is
+  reachable through `GET /v2/diagnostics/events` via the registry resource
+  recorded internally at
   `name_current.provenance.read_reachability.serving_resource_id`.
 - Snapshot behavior: the parent anchor and history rows are selected from
   current state. The response omits `meta.as_of` and `meta.as_of_token`, and
