@@ -17247,7 +17247,17 @@ async fn ancestor_expiry_release_redo_restores_descendant_after_replacement_rene
 {
     assert_ancestor_expiry_release_redo_restores_descendant(
         "project_ancestor_expiry_reorg_renewed",
-        Some(200),
+        Some((2, 200)),
+        "RegistrationGranted",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn ancestor_expiry_subrange_redo_restores_descendant_after_later_renewal() -> Result<()> {
+    assert_ancestor_expiry_release_redo_restores_descendant(
+        "project_ancestor_expiry_subrange_renewed",
+        Some((3, 200)),
         "RegistrationGranted",
     )
     .await
@@ -17265,7 +17275,7 @@ async fn ancestor_expiry_release_redo_restores_reserved_descendant_subtree() -> 
 
 async fn assert_ancestor_expiry_release_redo_restores_descendant(
     fixture_name: &str,
-    replacement_parent_expiry: Option<i64>,
+    replacement_parent_renewal: Option<(i64, i64)>,
     child_registration_kind: &str,
 ) -> Result<()> {
     const CHAIN: &str = "project-ancestor-expiry-reorg";
@@ -17805,11 +17815,11 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
         .bind(block_hash(CHAIN, 1))
         .execute(pool)
         .await?;
-        if let Some(expiry) = replacement_parent_expiry {
+        if let Some((renewal_block, expiry)) = replacement_parent_renewal {
             insert_event(
                 pool,
                 CHAIN,
-                2,
+                renewal_block,
                 Some(PARENT),
                 None,
                 "RegistrationRenewed",
@@ -17826,11 +17836,16 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             sqlx::query(
                 "UPDATE normalized_events SET block_hash = $1
                  WHERE chain_id = $2
-                   AND block_number = 2
+                   AND block_number = $3
                    AND raw_fact_ref ->> 'fixture' = 'replacement-parent-renewal'",
             )
-            .bind(REPLACEMENT_TWO)
+            .bind(if renewal_block == 2 {
+                REPLACEMENT_TWO
+            } else {
+                REPLACEMENT_THREE
+            })
             .bind(CHAIN)
+            .bind(renewal_block)
             .execute(pool)
             .await?;
         }
@@ -17866,7 +17881,11 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
         }),
         RunMode::Redo,
         2,
-        3,
+        if replacement_parent_renewal.is_some_and(|(block, _)| block > 2) {
+            2
+        } else {
+            3
+        },
     )
     .await?;
     run_project(fresh.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
