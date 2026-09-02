@@ -271,6 +271,11 @@ Field ownership:
   If the phase schema has not been created yet, API startup uses an empty
   expected-chain set and this route returns the same empty, `degraded` status
   shape instead of preventing the API process from starting.
+  When the phase schema is present, API startup checks every phase-schema
+  relation, function, and type its serving paths read: relations by name, both
+  guarded [verified lookup](glossary.md#verified-lookup) functions by exact
+  signature, and the `canonicality_state` type. If any are missing, the API
+  refuses to start and its diagnostic names every missing identity.
 - The existing per-chain `status` field also maps the `project` phase
   lifecycle, redo marker, and newest per-chain
   `bigname_phase.service_heartbeats` timestamp. A phase row that startup
@@ -909,7 +914,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   validity claim. True as-of address-name enumeration is deferred to the
   revision-bound storage follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
-  Malformed addresses return `400 invalid_input`. `include=role_summary`
+  Malformed addresses return `400 invalid_input`. Unsupported public namespaces
+  return `404 not_found`. `include=role_summary`
   does not claim a request-wide immutable projection generation, and current-state
   generation changes do not produce `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
@@ -1151,7 +1157,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   validity claim. True as-of/finality row-bounding is deferred to the
   revision-bound storage follow-up.
 - Status semantics: no matching activity returns `200` with empty `data`.
-  Malformed addresses return `400 invalid_input`.
+  Malformed addresses return `400 invalid_input`. Unsupported public namespaces
+  return `404 not_found`.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
 ### `GET /v2/search`

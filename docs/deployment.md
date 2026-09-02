@@ -64,8 +64,10 @@ Preflight every release with `sqlx migrate info --source migrations` against
 the writer URL and confirm no version is pending. Also complete any explicitly
 listed manual concurrent baseline-index step and verify each named index before
 starting the new artifact. Neither the API nor the phase runner reports the
-applied schema version, so a forgotten schema-migration or release-specific
-index step surfaces only as a runtime query failure or unacceptable query plan.
+applied schema version. Missing lookup DDL checked by API startup produces the
+diagnostic described under [Surviving services](#surviving-services); other
+forgotten schema-migrations or release-specific index steps surface only as
+runtime query failures or unacceptable query plans.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
@@ -481,8 +483,9 @@ phase-state reset, rerun the normal pipeline instead.
 ## Surviving services
 
 The API uses one `bigname_phase` request pool plus a reserved readiness
-connection. GraphQL, `/v2/status`, snapshot selection, verified lookup, and all
-projection reads use phase relations. The `/v2/status` phase-runner heartbeat
+connection. GraphQL, `/v2/status`, snapshot selection,
+[verified lookup](glossary.md#verified-lookup), and all projection reads use
+phase relations. The `/v2/status` phase-runner heartbeat
 threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by
 default). V2 record lookup may perform only the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
@@ -496,6 +499,13 @@ Grant them only to the API role, and do not grant that role `CREATE` on
 or `UPDATE` on
 `resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
 projection relations.
+
+API startup tolerates a wholly absent phase schema so `/v2/status` can return
+its empty, `degraded` response. Once the phase schema exists, startup checks
+every phase-schema relation, function, and type its serving paths read:
+relations by name, both guarded functions by exact signature, and the
+`canonicality_state` type. If any are missing, the API refuses to start and its
+diagnostic names every missing identity.
 
 After the phase schema exists, the schema owner provisions the dedicated login
 with these privileges (substitute

@@ -151,14 +151,28 @@ pub(crate) async fn health(
     };
 
     let phase_runner = if database.reachable {
-        match load_phase_runner_health(&health_pool.0, state.phase_heartbeat_max_age_secs).await {
-            Ok(health) => health,
-            Err(error) => {
+        match tokio::time::timeout(
+            HEALTH_DATABASE_CHECK_TIMEOUT,
+            load_phase_runner_health(&health_pool.0, state.phase_heartbeat_max_age_secs),
+        )
+        .await
+        {
+            Ok(Ok(health)) => health,
+            Ok(Err(error)) => {
                 warn!(
                     service = "api",
                     build_sha = BUILD_SHA,
                     ?error,
                     "phase-runner heartbeat readiness probe failed"
+                );
+                unavailable_phase_runner(state.phase_heartbeat_max_age_secs)
+            }
+            Err(_) => {
+                warn!(
+                    service = "api",
+                    build_sha = BUILD_SHA,
+                    timeout_ms = HEALTH_DATABASE_CHECK_TIMEOUT.as_millis(),
+                    "phase-runner heartbeat readiness probe timed out"
                 );
                 unavailable_phase_runner(state.phase_heartbeat_max_age_secs)
             }
