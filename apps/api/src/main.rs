@@ -60,7 +60,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         args.bounds.db_statement_timeout(),
     )
     .await?;
-    startup_preflight::ensure_api_storage_compatible(&pool).await?;
+    startup_preflight::ensure_verified_lookup_ddl_available(&pool).await?;
     let health_pool = bigname_storage::connect_phase_reserved_readiness_pool(
         &args.database,
         "bigname-api-health",

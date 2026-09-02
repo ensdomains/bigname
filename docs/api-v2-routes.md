@@ -271,6 +271,10 @@ Field ownership:
   If the phase schema has not been created yet, API startup uses an empty
   expected-chain set and this route returns the same empty, `degraded` status
   shape instead of preventing the API process from starting.
+  When the phase schema is present, API startup checks the 12 relations and two
+  guarded function overloads required by
+  [verified lookup](glossary.md#verified-lookup); if any are missing, the API
+  refuses to start and its diagnostic names every missing identity.
 - The existing per-chain `status` field also maps the `project` phase
   lifecycle, redo marker, and newest per-chain
   `bigname_phase.service_heartbeats` timestamp. A phase row that startup

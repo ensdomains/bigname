@@ -44,7 +44,9 @@ pub use address_names::{
     load_address_names_current_including_noncanonical_for_relations,
     load_address_names_current_page, load_address_names_current_page_sorted_for_relations,
 };
-pub use api_preflight::{ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl};
+pub use api_preflight::{
+    ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
+};
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
     DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,

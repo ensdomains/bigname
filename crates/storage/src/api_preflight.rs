@@ -22,6 +22,17 @@ pub struct ApiLookupDdlObject {
     pub identity: String,
 }
 
+pub async fn phase_schema_exists(pool: &PgPool) -> Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'bigname_phase'\
+         )",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect phase-schema presence")
+}
+
 pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupDdlObject>> {
     let rows = sqlx::query(
         r#"
