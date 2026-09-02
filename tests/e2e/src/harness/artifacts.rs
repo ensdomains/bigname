@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256, hex};
@@ -6,6 +6,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 use super::rpc::RpcClient;
+
+const ADMITTED_ENS_V2_SEPOLIA_DEPLOYMENT: &str = "sepolia-20260629-r1";
 
 /// Creation bytecode loaded from a pinned upstream hardhat-deploy artifact
 /// under `.refs/ens_v1/deployments/<network>/<name>.json`. Deploying from
@@ -35,13 +37,11 @@ pub fn load_ens_v1_artifact(repo_root: &Path, network: &str, name: &str) -> Resu
     })
 }
 
-/// Creation bytecode loaded from the current pinned ENSv2 Sepolia
-/// hardhat-deploy artifacts under
-/// `.refs/ens_v2/contracts/deployments/sepolia/<name>.json`.
+/// Creation bytecode loaded from the archived ENSv2 Sepolia deployment selected
+/// by this harness.
+/// (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/.deployment.json:L4 @ ens_v2@a971bd64)
 pub fn load_ens_v2_artifact(repo_root: &Path, name: &str) -> Result<Artifact> {
-    let path = repo_root
-        .join(".refs/ens_v2/contracts/deployments/sepolia")
-        .join(format!("{name}.json"));
+    let path = ens_v2_artifact_path(repo_root, name);
     let raw = std::fs::read_to_string(&path).with_context(|| {
         format!("missing pinned ENSv2 artifact {path:?}; run scripts/sync-refs")
     })?;
@@ -55,6 +55,69 @@ pub fn load_ens_v2_artifact(repo_root: &Path, name: &str) -> Result<Artifact> {
         name: format!("ens_v2:sepolia:{name}"),
         creation_code: hex::decode(bytecode).context("ENSv2 artifact bytecode hex decode")?,
     })
+}
+
+fn ens_v2_artifact_path(repo_root: &Path, name: &str) -> PathBuf {
+    repo_root
+        .join(".refs/ens_v2/contracts/deployments")
+        .join(ADMITTED_ENS_V2_SEPOLIA_DEPLOYMENT)
+        .join(format!("{name}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::SystemTime};
+
+    use super::*;
+
+    struct TemporaryRepository {
+        root: std::path::PathBuf,
+    }
+
+    impl TemporaryRepository {
+        fn create() -> Result<Self> {
+            let nonce = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "bigname-e2e-artifact-path-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&root)?;
+            Ok(Self { root })
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for TemporaryRepository {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn ens_v2_loader_reads_the_admitted_archived_sepolia_artifact() -> Result<()> {
+        let root = TemporaryRepository::create()?;
+        for (deployment, bytecode) in [("sepolia", "0101"), ("sepolia-20260629-r1", "0202")] {
+            let directory = root
+                .path()
+                .join(".refs/ens_v2/contracts/deployments")
+                .join(deployment);
+            fs::create_dir_all(&directory)?;
+            fs::write(
+                directory.join("TestArtifact.json"),
+                format!(r#"{{"bytecode":"{bytecode}"}}"#),
+            )?;
+        }
+
+        let artifact = load_ens_v2_artifact(root.path(), "TestArtifact")?;
+        assert_eq!(artifact.creation_code, vec![0x02, 0x02]);
+        assert_eq!(artifact.name, "ens_v2:sepolia:TestArtifact");
+        Ok(())
+    }
 }
 
 /// Forge-built artifact from the pinned Basenames checkout. The committed
