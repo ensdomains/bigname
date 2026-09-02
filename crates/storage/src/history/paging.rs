@@ -304,11 +304,10 @@ pub(super) fn push_history_filters<'a>(
         builder.push_bind(namespace);
     }
 
-    if let Some(registration_id) = filter.registration_id.as_ref() {
-        builder.push(" AND ");
+    if filter.registration_id.is_some() {
+        builder.push(" AND (ne.resource_id IS NULL OR ");
         push_product_registration_id(builder);
-        builder.push(" = ");
-        builder.push_bind(registration_id);
+        builder.push(" IS NOT NULL)");
     }
 
     if !filter.event_kinds.is_empty() {
