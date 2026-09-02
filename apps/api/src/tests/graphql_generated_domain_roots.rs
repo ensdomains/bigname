@@ -122,7 +122,12 @@ async fn generated_domain_names(database: &TestDatabase, where_value: Value) -> 
 async fn graphql_generated_domains_default_to_first_100_ids_from_zero() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
-    let mut expected = vec![GRAPHQL_ALICE_NAMEHASH.to_owned(), GRAPHQL_BOB_NAMEHASH.to_owned()];
+    let mut expected = vec![
+        GRAPHQL_ALICE_NAMEHASH.to_owned(),
+        GRAPHQL_BOB_NAMEHASH.to_owned(),
+        GRAPHQL_CAROL_NAMEHASH.to_owned(),
+        GRAPHQL_DAVE_NAMEHASH.to_owned(),
+    ];
     for index in 0..99_u128 {
         let name = format!("generated-{index:03}.eth");
         let namehash = bigname_lookup::ens_namehash_hex(&name)?;
@@ -191,8 +196,8 @@ async fn graphql_generated_domains_apply_skip_first_and_direction() -> Result<()
     ] {
         let payload = post_graphql(
             database.app_state(),
-            "query Page($skip: Int!, $direction: OrderDirection!) { domains(first: 1, skip: $skip, orderBy: id, orderDirection: $direction) { id } }",
-            json!({"skip": skip, "direction": direction}),
+            "query Page($skip: Int!, $direction: OrderDirection!, $where: Domain_filter!) { domains(first: 1, skip: $skip, orderBy: id, orderDirection: $direction, where: $where) { id } }",
+            json!({"skip": skip, "direction": direction, "where": {"owner": GRAPHQL_OWNER}}),
         )
         .await?;
         assert_eq!(payload["data"]["domains"][0]["id"], json!(expected));
@@ -219,11 +224,29 @@ async fn graphql_generated_domains_reject_t3_filter_members() -> Result<()> {
 async fn graphql_generated_domain_roots_enforce_current_snapshot_blocks() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
-    let (number, hash): (i64, String) = sqlx::query_as(
+    let (old_number, old_hash): (i64, String) = sqlx::query_as(
         "SELECT current_block_number, current_block_hash FROM bigname_phase.chain_phase_state WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
     )
     .fetch_one(&database.lookup_pool)
     .await?;
+    let number = old_number + 1;
+    let hash = format!("0x{}", "22".repeat(32));
+    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state) VALUES ('ethereum-mainnet', $1, $2, $3, now(), 'finalized')")
+        .bind(&hash)
+        .bind(&old_hash)
+        .bind(number)
+        .execute(&database.lookup_pool)
+        .await?;
+    sqlx::query("UPDATE bigname_phase.chain_heads SET latest_block_hash = $1, latest_block_number = $2, safe_block_hash = $1, safe_block_number = $2, finalized_block_hash = $1, finalized_block_number = $2 WHERE chain_id = 'ethereum-mainnet'")
+        .bind(&hash)
+        .bind(number)
+        .execute(&database.lookup_pool)
+        .await?;
+    sqlx::query("UPDATE bigname_phase.chain_phase_state SET current_block_hash = $1, current_block_number = $2, target_block_hash = $1, target_block_number = $2 WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'")
+        .bind(&hash)
+        .bind(number)
+        .execute(&database.lookup_pool)
+        .await?;
     let wrong_hash = format!("0x{}", "ff".repeat(32));
     for block in [
         format!("{{ number: {number} }}"),
@@ -260,8 +283,11 @@ async fn graphql_generated_domain_roots_enforce_current_snapshot_blocks() -> Res
             .await?;
             assert_eq!(payload["errors"][0]["message"], json!(message));
             assert_eq!(payload["errors"][0]["path"], json!([field]));
+            if message == "the requested block number is not the served head" {
+                println!("{field} refusal: {payload}");
+            }
             if field == "domain" {
-                assert_eq!(payload["data"][field], Value::Null);
+                assert_eq!(payload["data"], json!({"domain": null}));
             } else {
                 assert_eq!(payload["data"], Value::Null);
             }

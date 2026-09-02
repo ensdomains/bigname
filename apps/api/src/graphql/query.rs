@@ -8,11 +8,12 @@ use crate::state::AppState;
 
 use super::enums::{DomainOrderBy, OrderDirection, SubgraphErrorPolicy};
 use super::error::internal_error;
-use super::inputs::{BlockHeight, DomainFilter, RegistrationFilter};
+use super::inputs::{BlockHeight, DomainEntityFilter, DomainFilter, RegistrationFilter};
 use super::meta::{SubgraphMeta, resolve_meta};
 use super::name_queries::{
-    count_phase_graphql_name_list, load_phase_graphql_name_list_page_offset,
-    load_phase_graphql_name_row_by_name, load_phase_graphql_name_row_by_namehash,
+    GeneratedDomainIdFilter, GeneratedDomainSort, count_phase_graphql_name_list,
+    load_phase_graphql_name_list_page_offset, load_phase_graphql_name_row_by_name,
+    load_phase_graphql_name_row_by_namehash,
 };
 use super::objects::{Domain, DomainConnection, RegistrationConnection};
 use super::snapshot::{
@@ -45,44 +46,30 @@ impl Query {
         id: ID,
         block: Option<BlockHeight>,
         #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
-    ) -> Result<Option<Domain>> {
-        let state = ctx.data::<AppState>()?;
-        let head = load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "domain").await?;
-        let id = id.as_str();
-        let row = match load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, id)
-            .await
-            .map_err(|error| internal_error("domain", error))?
-        {
-            Some(row) => Some(row),
-            None => load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, id)
-                .await
-                .map_err(|error| internal_error("domain", error))?,
-        };
-        if let Some(row) = row.as_ref() {
-            require_rows_at_head(std::slice::from_ref(row), head.as_ref(), "domain")?;
+    ) -> Option<Domain> {
+        match resolve_domain(ctx, id, block.as_ref(), subgraph_error).await {
+            Ok(domain) => domain,
+            Err(error) => {
+                ctx.add_error(ctx.set_error_path(error.into_server_error(ctx.item.pos)));
+                None
+            }
         }
-        revalidate_graphql_head(state, head.as_ref(), "domain").await?;
-        Ok(row.map(|row| {
-            let mut domain = Domain::from(row.row);
-            domain.served_head = head;
-            domain
-        }))
     }
 
-    /// `domains(where, first, skip, orderBy, orderDirection)` — offset-paged list.
+    /// Generated-style offset-paged Domain list.
     #[allow(clippy::too_many_arguments)]
     async fn domains(
         &self,
         ctx: &Context<'_>,
-        #[graphql(name = "where")] filter: Option<DomainFilter>,
-        first: Option<i32>,
-        skip: Option<i32>,
+        #[graphql(default = 0)] skip: Option<i32>,
+        #[graphql(default = 100)] first: Option<i32>,
         #[graphql(name = "orderBy")] order_by: Option<DomainOrderBy>,
         #[graphql(name = "orderDirection")] order_direction: Option<OrderDirection>,
+        #[graphql(name = "where")] filter: Option<DomainEntityFilter>,
         block: Option<BlockHeight>,
         #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
     ) -> Result<Vec<Domain>> {
-        let storage_filter = domain_filter_to_storage(filter)?;
+        let (storage_filter, id_filter) = domain_entity_filter_to_storage(filter)?;
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "domains").await?;
         let limit = match first {
@@ -94,12 +81,13 @@ impl Query {
             None => DEFAULT_DOMAINS_PAGE_SIZE,
         };
         let offset = (skip.unwrap_or(0).max(0) as u64).min(MAX_DOMAINS_SKIP);
-        let (sort, order) = storage_sort(order_by, order_direction);
+        let (sort, order) = generated_domain_sort(order_by, order_direction);
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let rows = load_phase_graphql_name_list_page_offset(
             &state.pool,
             &storage_filter,
             &snapshot_chain_ids,
+            &id_filter,
             sort,
             order,
             limit,
@@ -185,22 +173,116 @@ impl Query {
     }
 }
 
-fn storage_sort(
+async fn resolve_domain(
+    ctx: &Context<'_>,
+    id: ID,
+    block: Option<&BlockHeight>,
+    subgraph_error: SubgraphErrorPolicy,
+) -> Result<Option<Domain>> {
+    let state = ctx.data::<AppState>()?;
+    let head = load_graphql_entity_head(ctx, block, subgraph_error, "domain").await?;
+    let id = id.as_str();
+    let row = match load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, id)
+        .await
+        .map_err(|error| internal_error("domain", error))?
+    {
+        Some(row) => Some(row),
+        None => load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, id)
+            .await
+            .map_err(|error| internal_error("domain", error))?,
+    };
+    if let Some(row) = row.as_ref() {
+        require_rows_at_head(std::slice::from_ref(row), head.as_ref(), "domain")?;
+    }
+    revalidate_graphql_head(state, head.as_ref(), "domain").await?;
+    Ok(row.map(|row| {
+        let mut domain = Domain::from(row.row);
+        domain.served_head = head;
+        domain
+    }))
+}
+
+fn generated_domain_sort(
     order_by: Option<DomainOrderBy>,
     order_direction: Option<OrderDirection>,
-) -> (NameCurrentListSort, NameCurrentListOrder) {
-    let sort = match order_by.unwrap_or(DomainOrderBy::Name) {
-        DomainOrderBy::CreatedAt => NameCurrentListSort::CreatedAt,
-        DomainOrderBy::ExpiryDate => NameCurrentListSort::ExpiryDate,
-        DomainOrderBy::RegistrationDate => NameCurrentListSort::RegistrationDate,
-        // `id` has no storage sort column; map it to the name sort.
-        DomainOrderBy::Id | DomainOrderBy::Name => NameCurrentListSort::Name,
+) -> (GeneratedDomainSort, NameCurrentListOrder) {
+    let sort = match order_by.unwrap_or(DomainOrderBy::Id) {
+        DomainOrderBy::Id => GeneratedDomainSort::Id,
+        DomainOrderBy::CreatedAt => GeneratedDomainSort::Storage(NameCurrentListSort::CreatedAt),
+        DomainOrderBy::ExpiryDate => GeneratedDomainSort::Storage(NameCurrentListSort::ExpiryDate),
+        DomainOrderBy::RegistrationDate => {
+            GeneratedDomainSort::Storage(NameCurrentListSort::RegistrationDate)
+        }
+        DomainOrderBy::Name => GeneratedDomainSort::Storage(NameCurrentListSort::Name),
     };
     let order = match order_direction.unwrap_or(OrderDirection::Asc) {
         OrderDirection::Asc => NameCurrentListOrder::Asc,
         OrderDirection::Desc => NameCurrentListOrder::Desc,
     };
     (sort, order)
+}
+
+fn domain_entity_filter_to_storage(
+    filter: Option<DomainEntityFilter>,
+) -> Result<(NameCurrentListFilter, GeneratedDomainIdFilter)> {
+    let filter = filter.unwrap_or_default();
+    let contains = filter
+        .name_contains
+        .as_deref()
+        .map(crate::name_filter::normalize_name_contains)
+        .transpose()
+        .map_err(|error| {
+            async_graphql::Error::new(format!(
+                "name_contains must be a valid ENSIP-15 name substring: {}",
+                error.message()
+            ))
+        })?;
+    let id_filter = generated_domain_id_filter(filter.id, filter.id_in);
+    let storage_filter = NameCurrentListFilter {
+        namespace: Some(NAMESPACE.to_owned()),
+        name: filter.name,
+        contains,
+        address: generated_address_membership(
+            filter.owner,
+            filter.owner_in,
+            AddressNameRelation::TokenHolder,
+        ),
+        ..Default::default()
+    };
+    Ok((storage_filter, id_filter))
+}
+
+fn generated_domain_id_filter(id: Option<ID>, id_in: Option<Vec<ID>>) -> GeneratedDomainIdFilter {
+    GeneratedDomainIdFilter {
+        id: id.map(|id| bigname_storage::normalize_evm_b256(id.as_str())),
+        id_in: id_in.map(|ids| {
+            ids.into_iter()
+                .map(|id| bigname_storage::normalize_evm_b256(id.as_str()))
+                .collect()
+        }),
+    }
+}
+
+fn generated_address_membership(
+    single: Option<String>,
+    many: Option<Vec<String>>,
+    relation: AddressNameRelation,
+) -> Option<NameCurrentAddressFilter> {
+    match (single.map(|value| value.to_lowercase()), many) {
+        (Some(single), Some(many)) => {
+            let addresses = many
+                .into_iter()
+                .map(|value| value.to_lowercase())
+                .filter(|value| value == &single)
+                .collect::<Vec<_>>();
+            Some(NameCurrentAddressFilter {
+                address: single,
+                relation: NameCurrentAddressRelationFilter::Relation(relation),
+                addresses: Some(addresses),
+            })
+        }
+        (single, many) => address_membership(single, many, relation),
+    }
 }
 
 fn domain_filter_to_storage(filter: Option<DomainFilter>) -> Result<NameCurrentListFilter> {

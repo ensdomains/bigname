@@ -83,7 +83,7 @@ def schema_surface(schema):
 
 
 def coverage_scope_matches(scope, path):
-    if scope.startswith("field:"):
+    if scope.startswith(("field:", "input:")):
         return path == scope
     if scope.startswith("type:"):
         name = scope.removeprefix("type:")
@@ -322,8 +322,8 @@ def verify(root):
             raise ValueError(f"invalid artifact path {relative}")
         seen.add(relative)
         path = root / relative
-        # coverage.json is the manually maintained ownership policy. The artifact hash records the
-        # capture-time version; coverage_sha256 separately authenticates the checked-in policy.
+        # coverage.json is the manually maintained ownership policy. coverage_sha256 authenticates
+        # it separately, so the ordinary artifact scan does not enforce the same digest twice.
         if not path.is_file() or relative != "coverage.json" and sha(path.read_bytes()) != entry["sha256"]:
             raise ValueError(f"artifact digest mismatch: {relative}")
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} - {"manifest.json"}

@@ -1147,10 +1147,10 @@ jobs:
 
       - name: Validate Manager operations against bigname schema
         run: |
-          # #671 changes only domain(id:) from String! to wire-compatible ID!; the pinned Manager
-          # document declaration migration remains tracked by #670. Assert that this is the only
-          # raw validation difference, then validate every unchanged field selection through a
-          # temporary declaration overlay until that coordination lands.
+          # The generated-style Domain roots require two pinned Manager declaration migrations.
+          # Assert that these are the only raw validation differences, then validate every
+          # unchanged field selection through a temporary declaration overlay until that
+          # coordination lands.
           set +e
           raw_validation="$(npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
             'apps-monorepo/packages/indexer/documents/**/*.graphql' \
@@ -1159,14 +1159,18 @@ jobs:
           set -e
           printf '%s\n' "$raw_validation"
           test "$raw_status" -le 1
-          test "$(printf '%s\n' "$raw_validation" | grep -c 'Detected 1 invalid document')" -eq 1
+          test "$(printf '%s\n' "$raw_validation" | grep -c 'Detected 2 invalid documents')" -eq 1
           test "$(printf '%s\n' "$raw_validation" | grep -Fc 'Variable $id of type String! used in position expecting type ID!.')" -eq 1
-          unexpected="$(printf '%s\n' "$raw_validation" | sed -n '/\[log\]  - /p' | grep -Fv 'Variable $id of type String! used in position expecting type ID!.' || true)"
+          test "$(printf '%s\n' "$raw_validation" | grep -Fc 'Variable $where of type DomainFilter! used in position expecting type Domain_filter.')" -eq 1
+          unexpected="$(printf '%s\n' "$raw_validation" | sed -n '/\[log\]  - /p' | grep -Fv -e 'Variable $id of type String! used in position expecting type ID!.' -e 'Variable $where of type DomainFilter! used in position expecting type Domain_filter.' || true)"
           test -z "$unexpected"
           compat_dir="$(mktemp -d)"
           cp -R apps-monorepo/packages/indexer/documents "$compat_dir/documents"
           find "$compat_dir/documents" -type f -name '*.graphql' \
             -exec sed -i 's/\$id: String!/\$id: ID!/g' {} +
+          domains_document="$compat_dir/documents/queries/Domains.graphql"
+          sed -i 's/\$where: DomainFilter!/\$where: Domain_filter!/' "$domains_document"
+          test "$(grep -rlF '$where: Domain_filter!' "$compat_dir/documents" | wc -l)" -eq 1
           npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
             "$compat_dir/documents/**/*.graphql" \
             apps/api/src/tests/fixtures/subgraph_schema.graphql

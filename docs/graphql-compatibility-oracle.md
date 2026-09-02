@@ -32,9 +32,11 @@ scopes are invalid. A `type:<Type>` disposition remains valid only while the
 complete type is absent locally; it cannot own the remainder of a partial input
 object.
 
-`coverage.json` is the manually maintained ownership policy. Its artifact digest records the version present at capture time,
-but later ownership dispositions do not rewrite that captured digest. The manifest's `coverage_sha256` must match the checked-in
-`coverage.json` bytes; both the offline verifier and Rust fixture gate reject a mismatch.
+`coverage.json` is the manually maintained ownership policy. Its artifact entry
+and the manifest's `coverage_sha256` both record the checked-in bytes and move
+with a reviewed ownership change. The offline verifier and Rust fixture gate
+reject a `coverage_sha256` mismatch; the ordinary artifact scan excludes this
+file to avoid enforcing the same current-policy digest twice.
 Offline fixture verification validates that claims and dispositions agree with the captured upstream index. The Rust
 fixture tests perform the separate local-introspection comparison and apply the field, argument, Query-entity, and enum
 ownership rules above; the command-line capture and verification tool does not duplicate that local census walk.

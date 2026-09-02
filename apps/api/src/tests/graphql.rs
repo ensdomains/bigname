@@ -46,7 +46,7 @@ async fn graphql_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> 
     .await?;
     let filtered = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
         }"#,
         json!({ "where": { "name_contains": "Ꮳ" } }),
@@ -57,7 +57,7 @@ async fn graphql_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> 
 
     let lowercase_cherokee = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
         }"#,
         json!({ "where": { "name_contains": "ꮳꮃꭹ" } }),
@@ -575,7 +575,7 @@ async fn graphql_domains_list_batches_resolver_records_per_domain() -> Result<()
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where, orderBy: name, orderDirection: asc) {
                 name
                 resolver { contentHash addresses { coinType address } }
@@ -626,7 +626,7 @@ async fn graphql_domains_list_batch_mixes_hit_and_clean_miss() -> Result<()> {
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where, orderBy: name, orderDirection: asc) {
                 name
                 resolver { address contentHash texts addresses { coinType address } }
@@ -1159,15 +1159,19 @@ async fn graphql_compatibility_reads_phase_projections() -> Result<()> {
     seed_alice_record_inventory(&database).await?;
     let payload = post_graphql(
         database.app_state(),
-        r#"query PhaseOnly($id: ID!, $where: DomainFilter!) {
+        r#"query PhaseOnly($id: ID!, $domainWhere: Domain_filter!, $connectionWhere: DomainFilter!) {
             domain(id: $id) {
                 name
                 resolver { contentHash addresses { coinType address } }
             }
-            domains(where: $where) { name }
-            domainConnection(first: 0, where: $where) { totalCount }
+            domains(where: $domainWhere) { name }
+            domainConnection(first: 0, where: $connectionWhere) { totalCount }
         }"#,
-        json!({"id": "alice.eth", "where": {"owner": GRAPHQL_OWNER}}),
+        json!({
+            "id": "alice.eth",
+            "domainWhere": {"owner": GRAPHQL_OWNER},
+            "connectionWhere": {"owner": GRAPHQL_OWNER}
+        }),
     )
     .await?;
     assert_eq!(payload["data"]["domain"]["name"], json!("alice.eth"));
@@ -1442,7 +1446,7 @@ async fn graphql_point_list_and_inventory_reject_targets_ahead_of_head() -> Resu
             "domain",
         ),
         (
-            r#"query Domains($where: DomainFilter!) { domains(where: $where) { name } }"#,
+            r#"query Domains($where: Domain_filter!) { domains(where: $where) { name } }"#,
             json!({ "where": { "owner": GRAPHQL_OWNER } }),
             "domains",
         ),
@@ -1596,11 +1600,14 @@ async fn graphql_lists_and_counts_scope_rows_to_the_selected_snapshot_chains() -
 
     let other_chain = post_graphql(
         database.app_state(),
-        r#"query OtherChain($where: DomainFilter!) {
-            domains(where: $where) { name }
-            domainConnection(first: 0, where: $where) { totalCount }
+        r#"query OtherChain($domainWhere: Domain_filter!, $connectionWhere: DomainFilter!) {
+            domains(where: $domainWhere) { name }
+            domainConnection(first: 0, where: $connectionWhere) { totalCount }
         }"#,
-        json!({ "where": { "owner": GRAPHQL_OTHER_CHAIN_HOLDER } }),
+        json!({
+            "domainWhere": {"owner": GRAPHQL_OTHER_CHAIN_HOLDER},
+            "connectionWhere": {"owner": GRAPHQL_OTHER_CHAIN_HOLDER}
+        }),
     )
     .await?;
     assert_eq!(other_chain["data"]["domains"], json!([]));
@@ -1773,7 +1780,7 @@ async fn graphql_does_not_publish_unsupported_phase_rows() -> Result<()> {
     assert_eq!(point["data"]["domain"], Value::Null);
     let list = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) { domains(where: $where) { name } }"#,
+        r#"query Domains($where: Domain_filter!) { domains(where: $where) { name } }"#,
         json!({ "where": { "owner": GRAPHQL_OWNER } }),
     )
     .await?;
@@ -1928,7 +1935,7 @@ async fn graphql_domains_op_offset_paginates_owner_in() -> Result<()> {
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!, $first: Int, $skip: Int, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
+        r#"query Domains($where: Domain_filter!, $first: Int, $skip: Int, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
             domains(where: $where, first: $first, skip: $skip, orderBy: $orderBy, orderDirection: $orderDirection) {
                 id name owner { id }
             }
@@ -1954,7 +1961,7 @@ async fn graphql_domains_op_offset_paginates_owner_in() -> Result<()> {
     // Offset window is disjoint and stable.
     let second = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!, $first: Int, $skip: Int, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
+        r#"query Domains($where: Domain_filter!, $first: Int, $skip: Int, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
             domains(where: $where, first: $first, skip: $skip, orderBy: $orderBy, orderDirection: $orderDirection) { name }
         }"#,
         json!({
@@ -1982,7 +1989,7 @@ async fn graphql_empty_owner_in_matches_nothing() -> Result<()> {
     // A non-empty owner_in returns the owner's names...
     let populated = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) { domains(where: $where) { id } }"#,
+        r#"query Domains($where: Domain_filter!) { domains(where: $where) { id } }"#,
         json!({ "where": { "owner_in": [GRAPHQL_OWNER] } }),
     )
     .await?;
@@ -1998,7 +2005,7 @@ async fn graphql_empty_owner_in_matches_nothing() -> Result<()> {
     // silently widening to the whole namespace. Both the list and the connection count must be empty.
     let empty_list = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) { domains(where: $where) { id } }"#,
+        r#"query Domains($where: Domain_filter!) { domains(where: $where) { id } }"#,
         json!({ "where": { "owner_in": [] } }),
     )
     .await?;
@@ -2302,7 +2309,7 @@ async fn graphql_name_order_uses_stored_normalized_name_bytes() -> Result<()> {
 
     let payload = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where, orderBy: name, orderDirection: asc) { name }
         }"#,
         json!({ "where": { "owner": GRAPHQL_FALLBACK_HOLDER } }),
@@ -2343,7 +2350,7 @@ async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<
         post_graphql(
             state.clone(),
             &format!(
-                r#"query Domains($where: DomainFilter!) {{
+                r#"query Domains($where: Domain_filter!) {{
                     domains(where: $where, orderBy: name, orderDirection: {direction}) {{ name }}
                 }}"#
             ),
@@ -2392,7 +2399,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
     // Descending name order inverts the ascending window the compatibility test pins.
     let desc = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
+        r#"query Domains($where: Domain_filter!, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
             domains(where: $where, orderBy: $orderBy, orderDirection: $orderDirection) { name }
         }"#,
         json!({
@@ -2407,7 +2414,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
     // expiryDate asc ranks NULL expiries last (carol has 1.95e9, dave has none)…
     let expiry_asc = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
+        r#"query Domains($where: Domain_filter!, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
             domains(where: $where, orderBy: $orderBy, orderDirection: $orderDirection) { name }
         }"#,
         json!({
@@ -2422,7 +2429,7 @@ async fn graphql_domains_op_orders_desc_and_ranks_null_expiry() -> Result<()> {
     // …and desc ranks them first ("no expiry" sorts as furthest-future).
     let expiry_desc = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
+        r#"query Domains($where: Domain_filter!, $orderBy: Domain_orderBy, $orderDirection: OrderDirection) {
             domains(where: $where, orderBy: $orderBy, orderDirection: $orderDirection) { name }
         }"#,
         json!({
@@ -2457,7 +2464,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
     // name_contains narrows the holder's two names down to the substring match.
     let contains = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
         }"#,
         json!({ "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER], "name_contains": "aro" } }),
@@ -2469,7 +2476,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
 
     let wrong_case = post_graphql(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
         }"#,
         json!({ "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER], "name_contains": "ARO" } }),
@@ -2480,7 +2487,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
 
     let invalid = post_graphql_allow_errors(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
         }"#,
         json!({ "where": { "name_contains": "%" } }),
@@ -2491,7 +2498,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
 
     let empty = post_graphql_allow_errors(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
         }"#,
         json!({ "where": { "name_contains": "" } }),
@@ -2502,7 +2509,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
 
     let invalid_empty_page = post_graphql_allow_errors(
         database.app_state(),
-        r#"query Domains($where: DomainFilter!) {
+        r#"query Domains($where: Domain_filter!) {
             domains(first: 0, where: $where) { name }
         }"#,
         json!({ "where": { "name_contains": "%" } }),
@@ -2552,7 +2559,7 @@ async fn graphql_name_contains_accepts_label_boundary_fragments() -> Result<()> 
     )
     .await?;
 
-    let query = r#"query Domains($where: DomainFilter!) {
+    let query = r#"query Domains($where: Domain_filter!) {
         domains(where: $where) { name }
     }"#;
     for (fragment, expected_names) in [
