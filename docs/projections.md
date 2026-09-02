@@ -374,8 +374,19 @@ chains retain independent publication decisions.
 effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
-standard registry operators, registrar token and account approvals, resolver
-operators and delegates, and ENSv2 registry operators are not indexed.
+registrar token and account approvals, resolver operators and delegates, and
+ENSv2 registry operators are not indexed.
+
+`account_permission_state_current` separately folds
+`AccountPermissionChanged` events by chain, authority kind, authority contract,
+owner, subject, and relation. It retains both active and revoked latest states;
+`approved=true` carries `registry_control`, while `approved=false` carries no
+effective powers. Project never fans this account mapping out into per-name
+rows. The permission resource summary carries the latest
+[registry-owner binding](glossary.md#registry-owner-binding), ranked from
+admitted ENSv1 and Basenames registry-family owner observations independently
+of the headline authority winner. A latest zero owner clears that binding.
+
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)

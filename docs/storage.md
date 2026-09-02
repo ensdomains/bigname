@@ -1022,12 +1022,13 @@ run does not affect its scope. Serving admission therefore accepts targets at
 or before the selected head rather than requiring every row to equal the latest
 Project block.
 
-The projection families used by the API include:
+Published projection families include:
 
 - `name_current` and identity companions;
 - `address_names_current`;
 - `children_current`;
-- `permissions_current` and its per-resource summary;
+- `permissions_current`, `account_permission_state_current`, and the
+  per-resource permission summary;
 - `resolver_current`;
 - `record_inventory_current`; and
 - `primary_names_current`.
@@ -1040,21 +1041,29 @@ unchanged; Project
 clears only the rebuildable current summary when the served projection timestamp
 passes wrapper expiry. Permission reads join this current summary by
 `resource_id` rather than persisting a second copy in `permissions_current`.
+Registry-wide approvals use the same rule: Project owns the replayable
+[account permission state](glossary.md#account-permission-state) and the
+[registry-owner binding](glossary.md#registry-owner-binding). Revoked account
+rows remain in the current-state table so losing-fork grants and losing-fork
+revocations both rebuild from surviving canonical history. Interpret re-walks
+retained raw facts; Project then rebuilds both state legs without a provider
+refetch. App-facing synthesis from those two state legs is deferred to the
+serving slice.
 
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 `operator_approval_surfaces_not_ingested` maps to partial, best-effort
-permission coverage; `ensv1_wrapper_holder_permissions_not_projected` remains a
-separate unsupported class. Readers reject inconsistent typed combinations and
+permission coverage. Slice 1a retains that broad reason for every authority
+class; the serving slice owns any request-relative narrowing based on a proven
+registry-owner binding. `ensv1_wrapper_holder_permissions_not_projected`
+remains a separate unsupported class. Readers reject inconsistent typed combinations and
 map an unrecognized persisted unsupported reason to unknown partial product
 coverage rather than treating it as wrapper support or returning an internal
-server error. The scoped ENSv1 and Basenames approval declarations widen raw
-intake without changing normalized-event semantics. A retained database must
-complete the manifest-sync-required Ingest redo for the widened address/topic
-intervals before the shared interpreter content-hash rotation permits the
-planned full-history Interpret and Project walk. A fresh deployment instead
-loads the final manifests before its block-zero historical walk, so the new raw
-facts arrive in that initial pass.
+server error. The unchanged scoped ENSv1 and Basenames approval declarations
+already retain the required raw facts. The adapter-owned mapping changes their
+normalized-event semantics, so a retained database requires a full-history
+Interpret re-walk and Project rebuild under the rotated interpreter content
+hash; Fetch and Normalize do not rerun for this change.
 
 ## Snapshot serving
 

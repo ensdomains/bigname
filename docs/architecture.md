@@ -760,7 +760,8 @@ Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTra
 
 Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `RecordChanged`, `RecordVersionChanged`.
 
-Permissions: `PermissionChanged`, `RootPermissionChanged`, `PermissionScopeChanged`.
+Permissions: `AccountPermissionChanged`, `PermissionChanged`,
+`RootPermissionChanged`, `PermissionScopeChanged`.
 
 Reverse and primary: `ReverseChanged`.
 
@@ -1189,11 +1190,13 @@ authority from raw role bitmaps. `GET /v2/permissions` is the current
 resource-anchored permission collection; name- and address-centric views
 summarize or filter the same truth.
 
-The current projection does not ingest standard registry operator, registrar
-token/operator, or resolver operator/delegate approvals. Non-wrapper permission
-summaries are therefore request-relative partial rather than authoritative
-enumerations, including for empty results; the known rows that apply to the resource
-remain visible. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
+The current projection interprets admitted ENSv1 and Basenames registry
+`ApprovalForAll` events as [account permission
+state](glossary.md#account-permission-state). Registrar token/operator,
+resolver operator/delegate, NameWrapper, and ENSv2 registry approvals remain
+unprojected. Non-wrapper permission summaries are therefore request-relative
+partial rather than authoritative enumerations, including for empty results.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 
 For ENSv1 wrapper-backed resources, the current projection publishes no wrapper-holder subject grant derived from fuse state. Fuse changes remain available as `PermissionScopeChanged` history, and any separately observed compatible holder grant is masked by the effective lifecycle state and owner-controlled fuses. A locked name has no broad `resource_control`; individual fuses remove only their matching powers. Once an emancipated or locked position expires, it contributes no wrapper-holder powers because NameWrapper clears the owner and fuse values. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L89 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/README.md:L93 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f) A `.eth` second-level name keeps its lifecycle state and token holder through the 90-day registrar grace period, while owner modification, transfer, and effective-controller membership stop at grace start. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L218 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f) Internal projection inputs for a registrar name wrapped after registration can retain stale pre-wrap control facets; public exact-name reads do not publish those facets as effective control and instead return an explicit unsupported control summary for every current wrapper resource.[^v1-iname-l10][^v1-nw-l421][^v1-nw-l427][^v1-nw-l637][^v1-nw-l666][^v1-nw-l676][^v1-nw-l723][^v1-nw-l827][^v1-nw-l1023][^v1-nw-l132] An empty permission result therefore still does not prove complete wrapper-holder enumeration.
 

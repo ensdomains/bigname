@@ -197,15 +197,20 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
 - `notes` — optional reviewer-facing context.
 
 An [intake-only event](glossary.md#intake-only-event) may be declared for raw
-intake without promising normalized-event production by declaring an empty
-`normalized_events` list. This is not an
-unrestricted adapter-admission bypass. Supported intake-only events retain
-their declared ABI validation and produce no normalized events. Standard
-approval events are watched only at explicitly declared, role-eligible
+intake without promising a manifest-owned normalized-event mapping by declaring
+an empty `normalized_events` list. This is not an unrestricted
+adapter-admission bypass. Standard approval declarations must retain the empty
+list: their ABI decoding is declaration-backed, while any normalized output is
+an adapter-owned mapping versioned by the
+[interpreter content hash](glossary.md#interpreter-content-hash). The admitted
+ENSv1 and Basenames registry `ApprovalForAll` declarations map to
+`AccountPermissionChanged`; registrar, resolver, and NameWrapper approvals
+remain decoded with no normalized output. Standard approval events are watched
+only at explicitly declared, role-eligible
 contract addresses and their declared historical intervals; they are not added
 to generic resolver [all-emitter watches](glossary.md#watch-plan--watched-tuple).
-Raw capture does not imply permission
-interpretation or complete permission coverage.
+Raw capture does not by itself imply permission interpretation or complete
+permission coverage.
 
 ABI fragments should cite upstream in nearby manifest comments or in the public doc section that admits the source family. If an adapter still has an in-code selector or `sol!` definition for a manifest-declared fragment, that code is a compatibility bridge until the adapter consumes the manifest ABI directly.
 
