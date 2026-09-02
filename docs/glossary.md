@@ -1720,6 +1720,7 @@ optional display name does not turn them into current-name results. Superseded
 ENSv1 resources remain queryable in resource audit context after ENSv2 becomes
 authoritative.
 
+<a id="released-v2-authority"></a>
 ## Released v2 authority
 
 the authority tombstone left when an
@@ -1806,6 +1807,7 @@ of protocol authority (for example `ens_v1_registrar_l1`). The unit of manifest
 admission, capability ownership, replay coverage, and provenance attribution.
 
 <a id="surface-binding"></a>
+<a id="surface-name-surface"></a>
 ## Surface (name surface)
 
 an on-chain name identity
