@@ -60,7 +60,7 @@ shard_1_tests=(
     "scenarios::reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted"
     "scenarios::support::tests::canonical_event_readiness_adds_only_requested_record_key"
     "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
-    "scenarios::unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only"
+    "scenarios::unadmitted_controller::unadmitted_controller_registration_retains_resource_keyed_registrar_lease"
     "scenarios::wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity"
     "scenarios::wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry"
     "scenarios::wrapper_registration::wrap_existing_registry_subname_rotates_child_only"
