@@ -124,6 +124,16 @@ pub(super) struct EventDraft {
 pub(super) struct LabelDraft {
     pub raw_label: Vec<u8>,
     pub source_kind: String,
+    /// The caller already emitted the byte-bearing
+    /// [preimage observation](../../../../docs/glossary.md#preimage-observation--label-preimage)
+    /// for this labelhash.
+    pub explicit_preimage_observed: bool,
+}
+
+impl LabelDraft {
+    pub(super) fn skips_automatic_preimage(&self, already_represented: bool) -> bool {
+        self.raw_label.is_empty() || self.explicit_preimage_observed || already_represented
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -153,6 +163,7 @@ pub(super) fn raw_name_observation(
                 .map(|raw_label| LabelDraft {
                     raw_label,
                     source_kind: source_kind.to_owned(),
+                    explicit_preimage_observed: false,
                 })
                 .collect(),
             Vec::new(),

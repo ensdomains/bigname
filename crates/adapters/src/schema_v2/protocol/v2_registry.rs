@@ -266,6 +266,7 @@ fn registry(
             output.labels.push(LabelDraft {
                 raw_label: raw_label.clone(),
                 source_kind: "ParentUpdated_label".to_owned(),
+                explicit_preimage_observed: false,
             });
             if label.is_none()
                 && let Some(parent) = parent.as_deref()
@@ -453,6 +454,7 @@ fn label_event(
     output.labels.push(LabelDraft {
         raw_label: label,
         source_kind: format!("{}_label", selected.event.name),
+        explicit_preimage_observed: false,
     });
     if let Some(name) = name.as_ref() {
         output.names.push(NameDraft {

@@ -432,7 +432,7 @@ pub(super) fn materialize(
         ));
     }
     for label in &interpreted.labels {
-        if label.raw_label.is_empty() || represented.contains(&label.raw_label) {
+        if label.skips_automatic_preimage(represented.contains(&label.raw_label)) {
             continue;
         }
         let labelhash = hash_hex(&label.raw_label);

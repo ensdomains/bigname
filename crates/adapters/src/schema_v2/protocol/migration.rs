@@ -13,7 +13,7 @@ use crate::{
     },
 };
 
-use super::{EventDraft, Interpreted, MigrationObservation, ensure_declared};
+use super::{EventDraft, Interpreted, LabelDraft, MigrationObservation, ensure_declared};
 
 sol! {
     event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation);
@@ -143,6 +143,11 @@ fn bridge_renewed(
         "payment_token":address_hex(event.paymentToken),
         "referrer":hex_string(event.referrer),
         "amount":event.amount.to_string(),
+    });
+    output.labels.push(LabelDraft {
+        raw_label,
+        source_kind: format!("{}_label", selected.event.name),
+        explicit_preimage_observed: true,
     });
     // This scope is a persisted interpreter-state identity. Keep the bridge stream distinct
     // from the launch-bounded ENSv1 registrar stream and stable across candidate/activated
