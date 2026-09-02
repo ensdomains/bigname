@@ -79,14 +79,16 @@ whole connected topology component: every child edge whose parent or child
 enters deletion scope must have its complete per-name event history staged
 before publication. Candidate events and events whose block is no longer on
 readable canonical lineage never contribute builder input or ordinary topology
-expansion. Redo recovery has one narrower exception: a retained orphaned,
-state-derived ENSv2 path-expiry release may recover its own logical name after
-publication deleted that row. When Interpret has already deleted those release
-events, Project marks a still-live ENSv2 lifecycle whose prior expiry crossed
-the displaced branch's timestamps, including a lifecycle renewed by the
-replacement branch, and follows only activated canonical ENSv2 subregistry
-edges from that expiry root to its descendants. The orphaned release is not
-served, and unrelated topology components are not admitted.
+expansion. A Project-only redo may run before Interpret replaces the affected
+range; in that narrow case, a retained orphaned, state-derived ENSv2 path-expiry
+release is a safety net that recovers its own logical name after publication
+deleted that row. In the standard pipeline, Interpret deletes those release
+events before Project runs, so Project instead marks a still-live ENSv2
+lifecycle whose prior expiry crossed the displaced branch's timestamps,
+including a lifecycle renewed by the replacement branch, and follows only
+activated canonical ENSv2 subregistry edges from that expiry root to its
+descendants. The orphaned release is not served, and unrelated topology
+components are not admitted.
 `project_events` remains the single filter for data that builders may serve.
 
 Rows outside an incremental tick's affected scope keep the target block number,
