@@ -2,6 +2,8 @@ use super::{model::PriorEventInput, protocol::v1::unmasked_word, state::State};
 use {serde_json::Value, uuid::Uuid};
 #[path = "state_restore_support.rs"]
 mod support;
+#[path = "state_restore_v1_registry.rs"]
+mod v1_registry;
 #[path = "state_restore_v1_transfer.rs"]
 mod v1_transfer;
 use support::{
@@ -207,11 +209,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
     if !(event.source_family.starts_with("ens_v1_") || event.source_family.starts_with("basenames_")) {
         return;
     }
-    if event.after_state["registry_migrated"] == true
-        && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str)
-    {
-        state.mark_v1_migrated(&event.namespace, namehash);
-    }
+    v1_registry::restore_migration_marker(state, event);
     if event.event_kind == "PreimageObserved" && event.logical_name_id.is_some() && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str) {
         if event
             .after_state
@@ -260,18 +258,6 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     v1_registry_authority(event, namehash, owner_getter, &anchor),
                 );
             }
-        }
-    }
-    if source_event == Some("NewOwner") {
-        let node = event.after_state.get("child_node").and_then(Value::as_str);
-        if event
-            .after_state
-            .get("emitter_role")
-            .and_then(Value::as_str)
-            == Some("registry")
-            && let Some(node) = node
-        {
-            state.mark_v1_migrated(&event.namespace, node);
         }
     }
     if source_event == Some("NewResolver")

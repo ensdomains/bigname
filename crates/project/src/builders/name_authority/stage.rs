@@ -2,9 +2,12 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
-pub(super) async fn bind_resource_events(
-    transaction: &mut Transaction<'_, Postgres>,
-) -> Result<()> {
+pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    bind_resource_events(transaction).await?;
+    ownerless_registry(transaction).await
+}
+
+async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
         "UPDATE project_events event SET logical_name_id = binding.logical_name_id
          FROM project_binding_candidates binding JOIN project_surfaces surface
@@ -19,7 +22,7 @@ pub(super) async fn bind_resource_events(
     Ok(())
 }
 
-pub(super) async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
         "CREATE TEMP TABLE project_latest_registry_owner ON COMMIT DROP AS
          SELECT latest.logical_name_id, latest.resource_id, latest.owner_getter,

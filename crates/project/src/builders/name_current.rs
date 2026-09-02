@@ -7,8 +7,7 @@ pub(super) async fn build(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO project_stage_name_current (
-            logical_name_id, namespace, raw_name, namehash,
+        INSERT INTO project_stage_name_current (logical_name_id, namespace, raw_name, namehash,
             surface_binding_id, resource_id, serving_resource_id,
             token_lineage_id, binding_kind,
             declared_summary, support_status, unsupported_reason, provenance,

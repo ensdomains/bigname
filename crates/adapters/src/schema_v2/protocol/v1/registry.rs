@@ -22,48 +22,9 @@ const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
 mod node;
+mod owner;
 use node::child_node;
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum RegistryOwnerView {
-    Authentic { owner: String },
-    ZeroEquivalent { reason: RegistryOwnerZeroReason },
-    UnavailableUnmasked,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RegistryOwnerZeroReason {
-    LiteralZero,
-    RegistrySelf,
-}
-impl RegistryOwnerZeroReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::LiteralZero => "literal_zero",
-            Self::RegistrySelf => "registry_self",
-        }
-    }
-}
-fn classify_registry_owner(
-    owner_word: &str,
-    registry_address: &str,
-    body_has_unmasked_owner_word: bool,
-    registry_self_is_zero: bool,
-) -> RegistryOwnerView {
-    if body_has_unmasked_owner_word {
-        RegistryOwnerView::UnavailableUnmasked
-    } else if owner_word.eq_ignore_ascii_case(ZERO_ADDRESS) {
-        RegistryOwnerView::ZeroEquivalent {
-            reason: RegistryOwnerZeroReason::LiteralZero,
-        }
-    } else if registry_self_is_zero && owner_word.eq_ignore_ascii_case(registry_address) {
-        RegistryOwnerView::ZeroEquivalent {
-            reason: RegistryOwnerZeroReason::RegistrySelf,
-        }
-    } else {
-        RegistryOwnerView::Authentic {
-            owner: owner_word.to_owned(),
-        }
-    }
-}
+use owner::{RegistryOwnerView, classify as classify_registry_owner};
 mod transfer {
     use super::*;
     sol! { event Transfer(bytes32 indexed node, address owner); }

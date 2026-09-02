@@ -9,8 +9,7 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
-    stage::bind_resource_events(transaction).await?;
-    stage::ownerless_registry(transaction).await?;
+    stage::prepare(transaction).await?;
     sqlx::query(
         r#"
         CREATE TEMP TABLE project_name_authority ON COMMIT DROP AS
