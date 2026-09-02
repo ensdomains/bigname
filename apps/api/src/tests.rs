@@ -318,3 +318,4 @@ include!("tests/v2_search.rs");
 include!("tests/v2_query_params.rs");
 include!("tests/v2_status.rs");
 include!("tests/v2_envelope_conformance.rs");
+include!("tests/api_storage_quick_wins.rs");
