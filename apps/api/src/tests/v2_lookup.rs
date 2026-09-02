@@ -649,9 +649,18 @@ async fn v2_lookup_withholds_retained_identity_and_inventory_for_reservation() -
     sqlx::query(
         "UPDATE name_current
          SET declared_summary = jsonb_set(
-             declared_summary #- '{registration,authority_kind}',
-             '{registration,status}',
-             '\"reserved\"'
+             jsonb_set(
+                 declared_summary
+                     #- '{control,owner}'
+                     #- '{control,registry_owner}'
+                     #- '{control,registrant}'
+                     #- '{registration,registrant}'
+                     #- '{registration,registered_at}',
+                 '{registration,status}',
+                 '\"reserved\"'
+             ),
+             '{registration,authority_kind}',
+             '\"ens_v2_registry\"'
          )
          WHERE raw_name = 'reserved.eth'",
     )
