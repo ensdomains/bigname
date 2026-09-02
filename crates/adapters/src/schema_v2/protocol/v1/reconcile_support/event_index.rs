@@ -75,6 +75,7 @@ impl EventFields {
             target_namehash: state
                 .get("child_node")
                 .or_else(|| state.get("node"))
+                .or_else(|| state.get("namehash"))
                 .and_then(Value::as_str)
                 .map(|value| value.to_ascii_lowercase()),
             resource_id: event.resource_id,

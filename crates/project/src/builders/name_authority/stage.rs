@@ -87,7 +87,19 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
          JOIN project_name_authority authority
            ON authority.logical_name_id = event.logical_name_id
            OR (event.logical_name_id IS NULL
-               AND (event.resource_id = authority.selected_resource_id
+               AND ((event.resource_id = authority.selected_resource_id
+                     AND event.source_family = 'ens_v1_registrar_l1'
+                     AND event.event_kind IN (
+                         'RegistrationGranted', 'RegistrationRenewed',
+                         'RegistrationReleased', 'ExpiryChanged'
+                     )
+                     AND EXISTS (
+                         SELECT 1 FROM project_surfaces selected_surface
+                         WHERE selected_surface.logical_name_id =
+                               authority.logical_name_id
+                           AND lower(selected_surface.namehash) =
+                               lower(event.after_state ->> 'namehash')
+                     ))
                     OR (event.source_family = 'ens_v1_registrar_l1'
                         AND event.event_kind IN (
                             'RegistrationGranted', 'RegistrationRenewed',

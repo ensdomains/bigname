@@ -3501,14 +3501,13 @@ const UNREACHED_EVENT_KINDS: &[(&str, &str, &str)] = &[
     (
         ENS_V1_SEPOLIA.label,
         "RegistrationReleased",
-        "numeric BaseRegistrar registrations are candidate-only ENSv1→ENSv2 migration input and \
-         the dedicated ENSv1→ENSv2 migration corpus exercises their correlation",
+        "the generated registrations remain live beyond the settlement timestamp, so no release \
+         boundary is reached",
     ),
     (
         ENS_V1_SEPOLIA.label,
         "RegistrationRenewed",
-        "numeric BaseRegistrar renewals are candidate-only ENSv1→ENSv2 migration input and the \
-         dedicated ENSv1→ENSv2 migration corpus exercises their correlation",
+        "the generated Sepolia pool emits no numeric BaseRegistrar renewal",
     ),
     (
         ENS_V2_SEPOLIA.label,

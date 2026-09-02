@@ -16,8 +16,8 @@ const RESOLVER: &str = "ens_v1_resolver_l1";
 const GRACE_PERIOD: i64 = 90 * 24 * 60 * 60;
 
 /// Generates the ordinary ENSv1 authority path declared by the checked-in Sepolia manifests.
-/// Dedicated tests cover correlation-dependent BaseRegistrar events; this generated event world
-/// exercises the registry, resolver, wrapper, and registrar Transfer that restores unwrap authority.
+/// This generated event world exercises numeric BaseRegistrar lifecycle plus the registry,
+/// resolver, wrapper, and registrar Transfer that restores unwrap authority.
 pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) -> Vec<Action> {
     let registry = wiring.address(REGISTRY, "registry");
     let registrar = wiring.address(REGISTRAR, "registrar");
@@ -44,20 +44,20 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             stage::REGISTER,
             vec![
                 emission(
-                    registrar,
-                    V1BaseRegistrar::NameRegistered {
-                        id: U256::from_be_bytes(hash.0),
-                        owner: wrapper_address,
-                        expires: U256::from(expiry),
-                    }
-                    .encode_log_data(),
-                ),
-                emission(
                     registry,
                     V1Registry::NewOwner {
                         node: eth_node,
                         label: hash,
                         owner: wrapper_address,
+                    }
+                    .encode_log_data(),
+                ),
+                emission(
+                    registrar,
+                    V1BaseRegistrar::NameRegistered {
+                        id: U256::from_be_bytes(hash.0),
+                        owner: wrapper_address,
+                        expires: U256::from(expiry),
                     }
                     .encode_log_data(),
                 ),

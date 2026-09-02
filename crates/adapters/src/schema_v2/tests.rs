@@ -428,7 +428,7 @@ mod v1_registrar {
         assert_eq!(grants[0].raw_fact_ref["emitting_address"], CONTRACT);
         assert_eq!(grants[0].after_state["expiry"], 42);
         assert!(!output.normalized_events.iter().any(|event| event.event_kind == "PermissionChanged" && event.after_state["source_event"] == "NewOwner" && event.after_state["subject"] == CONTROLLER));
-        assert!(output.normalized_events.iter().any(|event| event.event_kind == "ResolverChanged" && event.resource_id == grants[0].resource_id));
+        assert!(output.normalized_events.iter().any(|event| event.event_kind == "ResolverChanged" && event.after_state["source_event"] == "NewResolver" && event.log_index == Some(3) && event.resource_id == grants[0].resource_id));
         let prematurely_named = output.normalized_events.iter().filter(|event| event.log_index.is_some_and(|index| index < 5) && event.logical_name_id.is_some()).map(|event| (event.log_index, event.event_kind.as_str())).collect::<Vec<_>>();
         assert!(prematurely_named.is_empty(), "pre-enrichment events acquired a name: {prematurely_named:?}");
         assert!(output.surface_bindings.iter().any(|binding| binding.resource_id == grants[0].resource_id.unwrap()));
@@ -446,6 +446,19 @@ mod v1_registrar {
         assert_eq!(divergence.after_state["authority_kind"], "registry_only");
         assert_ne!(divergence.resource_id, Some(registrar_resource));
         assert_eq!(divergence.logical_name_id.as_deref(), Some(format!("ens:{node}").as_str()));
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn whole_transaction_reconciliation_preserves_divergence_before_reclaim() -> anyhow::Result<()> {
+        const DIVERGED: &str = "0x0000000000000000000000000000000000000077";
+        let label = "reconverged"; let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: vec![lifecycle_manifest(), registry_manifest()], discovery_rules: vec![], admissions: admissions().into_iter().chain([registry_admission()]).collect(), prior_events: vec![], blocks: vec![], raw_logs: vec![base_registration(label, 42, 0), raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: DIVERGED.parse()? }.encode_log_data(), 1, 1, REGISTRY), raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: CONTRACT.parse()? }.encode_log_data(), 1, 2, REGISTRY), controller_registration(label, 42, 3)] })?;
+        let registrar_resource = output.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").and_then(|event| event.resource_id).expect("registrar resource");
+        let divergence = output.normalized_events.iter().find(|event| event.log_index == Some(1) && event.event_kind == "AuthorityTransferred" && event.after_state["source_event"] == "Transfer").expect("intermediate registry divergence");
+        assert_eq!(divergence.after_state["authority_kind"], "registry_only");
+        assert_ne!(divergence.resource_id, Some(registrar_resource));
         Ok(())
     }
 

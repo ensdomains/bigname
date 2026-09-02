@@ -565,18 +565,19 @@ fn registration(
     } else {
         registrant
     };
-    emissions.insert(
-        0,
-        emission(
-            wires.registrar,
-            V1BaseRegistrar::NameRegistered {
-                id: U256::from_be_bytes(hash.0),
-                owner: registrar_owner,
-                expires,
-            }
-            .encode_log_data(),
-        ),
-    );
+    let controller = emissions
+        .pop()
+        .expect("registration emits controller event");
+    emissions.push(emission(
+        wires.registrar,
+        V1BaseRegistrar::NameRegistered {
+            id: U256::from_be_bytes(hash.0),
+            owner: registrar_owner,
+            expires,
+        }
+        .encode_log_data(),
+    ));
+    emissions.push(controller);
     action(format!("{label}:register-{path:?}"), stage, emissions)
 }
 

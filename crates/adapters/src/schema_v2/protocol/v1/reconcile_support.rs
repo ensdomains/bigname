@@ -78,17 +78,14 @@ fn reconcile_registration(
         .filter_map(|index| {
             let fields = &events.fields[*index];
             (fields.family == SourceFamily::Registry
-                && matches!(
-                    fields.source_event,
-                    SourceEvent::NewOwner | SourceEvent::Transfer
-                )
+                && fields.source_event == SourceEvent::Transfer
                 && fields
                     .position
                     .is_some_and(|position| position > registration.position))
             .then_some((fields.position?, fields.owner.clone()?))
         })
-        .max_by_key(|(position, _)| *position)
         .filter(|(_, owner)| owner != &registrar_owner)
+        .min_by_key(|(position, _)| *position)
         .map(|(position, _)| position);
     let eligible = |fields: &EventFields| {
         fields.position.is_some_and(|position| {
