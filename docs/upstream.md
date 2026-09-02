@@ -117,6 +117,28 @@ to the applicable entries below.
 > generated argument defaults.
 > **Since**: `2026-09-02`
 
+> **Generated Domain point lookup accepts an ENS name** — `domain(id:)` first treats the supplied `ID` as a namehash,
+> then locally extends the generated point lookup by normalizing an ENS name and looking up its namehash when the entity
+> ID does not match. Namehash precedence prevents a hash-shaped ENS name from shadowing an entity ID.
+> **Upstream**: the ENS subgraph defines `Domain.id` as the namehash
+> (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6), and Graph Node applies the supplied point ID
+> as an equality filter without a name fallback
+> (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the local extension preserves bigname's existing name-string lookup convenience while keeping generated
+> namehash IDs authoritative.
+> **Since**: `2026-09-02`
+
+> **Generated Domain exact-name filtering uses ENS namehash equality** — `Domain_filter.name` normalizes the supplied ENS
+> name and matches its namehash rather than comparing the stored human-readable name bytes directly.
+> **Upstream**: Graph Node maps an equality filter to direct entity-field equality
+> (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe1737), while the ENS subgraph declares
+> the human-readable `Domain.name` separately from the namehash `Domain.id`
+> (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/architecture.md` and `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the existing Manager-facing name semantics treat normalization-equivalent spellings as the same ENS name.
+> **Since**: `2026-09-02`
+
 > **Generated Domain owner filters retain token-holder matching** — the partial `Domain_filter.owner` and `owner_in`
 > members use bigname's existing token-holder address relation, which can differ from the registry owner returned by
 > `Domain.owner`.
