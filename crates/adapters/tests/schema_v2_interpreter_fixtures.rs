@@ -1837,6 +1837,94 @@ fn checked_in_manifests() -> Result<Vec<LoadedManifest>> {
     Ok(manifests)
 }
 
+#[test]
+fn ens_v1_registrar_manifests_assign_lifecycle_to_base_registrar() -> Result<()> {
+    let manifests = checked_in_manifests()?;
+    let registrar = |chain: &str| {
+        manifests
+            .iter()
+            .find(|loaded| {
+                loaded.manifest.source_family == "ens_v1_registrar_l1"
+                    && loaded.manifest.chain == chain
+            })
+            .map(|loaded| &loaded.manifest)
+            .with_context(|| format!("missing ENSv1 registrar manifest for {chain}"))
+    };
+    let events = |chain: &str, fragment: &str| -> Result<Vec<Vec<String>>> {
+        Ok(registrar(chain)?
+            .abi
+            .events
+            .iter()
+            .filter(|event| event.fragment == fragment)
+            .map(|event| event.normalized_events.clone())
+            .collect())
+    };
+
+    assert_eq!(
+        events(
+            "ethereum-mainnet",
+            "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
+        )?,
+        [vec![
+            "RegistrationGranted",
+            "ExpiryChanged",
+            "PermissionChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+            "RegistrationReleased",
+        ]]
+    );
+    assert_eq!(
+        events(
+            "ethereum-sepolia",
+            "event NameRenewed(uint256 indexed id, uint256 expires)"
+        )?,
+        [vec![
+            "RegistrationGranted",
+            "RegistrationRenewed",
+            "ExpiryChanged",
+            "SurfaceUnbound",
+            "SurfaceBound",
+            "AuthorityEpochChanged",
+            "ResolverChanged",
+        ]]
+    );
+    for event in registrar("ethereum-mainnet")?
+        .abi
+        .events
+        .iter()
+        .filter(|event| event.fragment.starts_with("event NameRegistered(string"))
+    {
+        assert_eq!(event.normalized_events, ["PreimageObserved"]);
+    }
+    let controllers = registrar("ethereum-mainnet")?
+        .contracts
+        .iter()
+        .filter(|contract| contract.role.contains("registrar_controller"))
+        .map(|contract| (contract.address.as_str(), contract.start_block))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        controllers,
+        [
+            (
+                "0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5",
+                Some(9_380_471)
+            ),
+            (
+                "0x253553366Da8546fC250F225fe3d25d0C782303b",
+                Some(16_925_618)
+            ),
+            (
+                "0x59E16fcCd424Cc24e280Be16E11Bcd56fb0CE547",
+                Some(22_764_821)
+            ),
+        ]
+    );
+    Ok(())
+}
+
 fn find_checked_in<'a>(
     fixture: &FixtureManifest,
     checked_in: &'a [LoadedManifest],
