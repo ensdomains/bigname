@@ -122,8 +122,9 @@ def render_sdl(schema):
 
 def request(endpoint, query, variables, operation):
     body = canonical({"operationName": operation, "query": query, "variables": variables})
+    headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": GENERATOR}
     try:
-        response = urllib.request.urlopen(urllib.request.Request(endpoint, body, {"Content-Type": "application/json"}), timeout=30)
+        response = urllib.request.urlopen(urllib.request.Request(endpoint, body, headers), timeout=30)
         if response.status < 200 or response.status >= 300:
             raise ValueError(f"upstream HTTP status {response.status}")
         payload = json.loads(response.read())
@@ -298,6 +299,8 @@ def verify(root):
     observed_pins = {"ens_subgraph": provenance["ens_subgraph_commit"], "graph_node": provenance["graph_node_commit"]}
     if observed_pins != pins or manifest.get("upstream_checkouts") != pins:
         raise ValueError("fixture reference pins differ from .refs/MANIFEST.toml; recapture the fixture")
+    if manifest.get("coverage_sha256") != sha((root / "coverage.json").read_bytes()):
+        raise ValueError("coverage digest mismatch")
     seen = set()
     for entry in manifest.get("artifacts", []):
         relative = entry["path"]
@@ -310,8 +313,6 @@ def verify(root):
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} - {"manifest.json"}
     if actual != seen:
         raise ValueError(f"manifest artifact set differs: missing={sorted(seen-actual)}, extra={sorted(actual-seen)}")
-    if manifest.get("coverage_sha256") != sha((root / "coverage.json").read_bytes()):
-        raise ValueError("coverage digest mismatch")
     if manifest.get("seed") not in seen:
         raise ValueError("manifest seed descriptor is missing")
     distractor = json.loads((root / manifest["seed"]).read_bytes()).get("distractor", {})
@@ -327,9 +328,13 @@ def verify(root):
             match = entry.get("path", entry.get("scope", ""))
             if "*" in match or entry.get("status") not in ("deferred", "intentional-extension") or not str(entry.get("owner", "")).startswith("#") or not entry.get("docs"):
                 raise ValueError(f"invalid coverage disposition: {entry}")
-    for name, entry in coverage.get("known_upstream_types", {}).items():
+    known_upstream_types = coverage.get("known_upstream_types", {})
+    for name, entry in known_upstream_types.items():
         if not str(entry.get("owner", "")).startswith("#") or not entry.get("docs") or f"type:{name}" not in surface:
             raise ValueError(f"upstream type census lacks owner or docs: {name}")
+    unknown_upstream_types = sorted(path.removeprefix("type:") for path in surface if path.startswith("type:") and path.removeprefix("type:") not in known_upstream_types)
+    if unknown_upstream_types:
+        raise ValueError("unknown upstream types: " + ", ".join(unknown_upstream_types))
     case_ids = set()
     for case in manifest.get("cases", []):
         case_id = case.get("id")

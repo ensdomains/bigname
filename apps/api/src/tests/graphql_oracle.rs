@@ -240,6 +240,9 @@ fn apply_oracle_coverage(
         .cloned()
         .collect();
     let mut failures = Vec::new();
+    let known = coverage["known_upstream_types"]
+        .as_object()
+        .context("known_upstream_types")?;
     for path in coverage["claimed_paths"]
         .as_array()
         .context("claimed_paths")?
@@ -293,11 +296,16 @@ fn apply_oracle_coverage(
         }
     }
     for path in &upstream_only {
-        if !deferred.iter().any(|entry| {
+        let explicitly_deferred = deferred.iter().any(|entry| {
             entry["scope"]
                 .as_str()
                 .is_some_and(|scope| scope_matches(scope, path))
-        }) {
+        });
+        let wholly_deferred_type = known.keys().any(|name| {
+            upstream_only.contains(&format!("type:{name}"))
+                && scope_matches(&format!("type:{name}"), path)
+        });
+        if !explicitly_deferred && !wholly_deferred_type {
             failures.push(format!("unowned upstream-only path: {path}"));
         }
     }
@@ -319,9 +327,6 @@ fn apply_oracle_coverage(
             failures.push(format!("undocumented local extension: {path}"));
         }
     }
-    let known = coverage["known_upstream_types"]
-        .as_object()
-        .context("known_upstream_types")?;
     for (name, entry) in known {
         if !entry["owner"].as_str().is_some_and(|owner| owner.starts_with('#'))
             || entry["docs"].as_str().is_none_or(str::is_empty)
@@ -330,13 +335,16 @@ fn apply_oracle_coverage(
             failures.push(format!("upstream type census lacks owner or docs: {name}"));
         }
     }
-    for path in upstream_only
-        .iter()
-        .filter(|path| path.starts_with("type:"))
-    {
-        if !known.contains_key(path.trim_start_matches("type:")) {
-            failures.push(format!("unknown upstream entity/type: {path}"));
-        }
+    let unknown_types = upstream
+        .keys()
+        .filter_map(|path| path.strip_prefix("type:"))
+        .filter(|name| !known.contains_key(*name))
+        .collect::<Vec<_>>();
+    if !unknown_types.is_empty() {
+        failures.push(format!(
+            "unknown upstream types: {}",
+            unknown_types.join(", ")
+        ));
     }
     for collection in [dispositions, deferred, extensions] {
         for entry in collection {
@@ -535,6 +543,27 @@ fn graphql_oracle_dispositions_reject_unknown_stale_duplicate_and_wildcard_entri
     ] {
         assert!(apply_oracle_coverage(&upstream, &local, &coverage).is_err());
     }
+}
+
+#[test]
+fn graphql_oracle_census_owns_wholly_deferred_type_surfaces() {
+    let upstream = OracleMap::from([
+        ("type:Future".into(), json!({"kind":"OBJECT"})),
+        ("field:Future.id".into(), json!({"type":"ID!"})),
+        ("type:Later".into(), json!({"kind":"INPUT_OBJECT"})),
+        ("input:Later.id".into(), json!({"type":"ID"})),
+    ]);
+    let coverage = json!({
+        "claimed_paths": [],
+        "schema_signature_differences": [],
+        "upstream_only": [],
+        "local_extensions": [],
+        "known_upstream_types": {
+            "Future": {"owner":"#1", "docs":"x"},
+            "Later": {"owner":"#2", "docs":"x"}
+        }
+    });
+    assert!(apply_oracle_coverage(&upstream, &OracleMap::new(), &coverage).is_ok());
 }
 
 #[test]

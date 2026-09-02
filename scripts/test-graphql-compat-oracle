@@ -2,7 +2,7 @@
 set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 exec python3 - "$repo_root" "$@" <<'PY'
-import hashlib, importlib.util, importlib.machinery, json, os, pathlib, shutil, subprocess, sys, tempfile, threading
+import hashlib, importlib.util, importlib.machinery, json, os, pathlib, re, shutil, subprocess, sys, tempfile, threading, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = pathlib.Path(sys.argv[1]); tool = root / "scripts/graphql-compat-oracle"
@@ -39,11 +39,26 @@ query_fields = [
 ]
 types.append(obj("Query",query_fields)); schema={"types":types,"queryType":{"name":"Query"},"mutationType":None,"subscriptionType":None,"directives":[]}
 
+pinned_sdl=(root/".refs/ens_subgraph/schema.graphql").read_text()
+entity_names=re.findall(r"^type\s+(\w+).*?@entity\b",pinned_sdl,re.MULTILINE)
+interface_names=re.findall(r"^interface\s+(\w+)\b",pinned_sdl,re.MULTILINE)
+existing={typ["name"] for typ in types}
+types += [obj(name,[field("id",nn(S("ID")))]) for name in entity_names if name not in existing]
+types += [{"kind":"INTERFACE","name":name,"fields":[field("id",nn(S("ID")))],"inputFields":None,"enumValues":None,"possibleTypes":[],"interfaces":[]} for name in interface_names]
+types += [definition for name in entity_names+interface_names for definition in (inp(name+"_filter",[input_field("id",S("ID"))]),enum(name+"_orderBy",["id"])) if definition["name"] not in existing]
+types += [{"kind":"SCALAR","name":name,"fields":None,"inputFields":None,"enumValues":None,"possibleTypes":None} for name in ("BigDecimal","Int8","Timestamp")]
+types += [inp("BlockChangedFilter",[input_field("number_gte",nn(S("Int")))]),enum("Aggregation_current",["exclude","include"]),enum("Aggregation_interval",["day","hour"])]
+assert schema["subscriptionType"] is None
+
 class Handler(BaseHTTPRequestHandler):
  deployment_meta_requests=0
+ oracle_header_requests=0
  def log_message(self,*_): pass
  def do_POST(self):
   mode=self.path.strip("/").split("/")[0] or "ok"
+  if mode=="requires-oracle-headers":
+   if self.headers.get("User-Agent")!="graphql-compat-oracle/1" or self.headers.get("Accept")!="application/json": self.send_response(403); self.end_headers(); return
+   Handler.oracle_header_requests+=1
   if mode=="status": self.send_response(503); self.end_headers(); return
   length=int(self.headers.get("Content-Length","0")); raw=self.rfile.read(length)
   if mode=="invalid": self.send_response(200); self.end_headers(); self.wfile.write(b"{"); return
@@ -104,6 +119,11 @@ with tempfile.TemporaryDirectory() as temporary:
  temp=pathlib.Path(temporary); first=temp/"first"; second=temp/"second"; seed(first); seed(second); run_capture(first); run_capture(second); assert tree(first)==tree(second)
  rejected=verify(first,False,False); assert "docs/development.md" in rejected.stderr
  verify(first,allow_stub=True)
+ headers=temp/"headers"; seed(headers)
+ try: urllib.request.urlopen(urllib.request.Request(f"{base}/requires-oracle-headers",b"{}",{"Content-Type":"application/json"}))
+ except urllib.error.HTTPError as error: assert error.code==403
+ else: raise AssertionError("stub accepted a request without the oracle User-Agent")
+ run_capture(headers,mode="requires-oracle-headers"); assert Handler.oracle_header_requests==5
  stub_env={**os.environ,"BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE":"1"}
  compared=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/ok"],env=stub_env,text=True,capture_output=True); assert compared.returncode==0 and "2 passed, 0 failed" in compared.stdout
  wrong_head=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/wrong-block"],env=stub_env,text=True,capture_output=True); assert wrong_head.returncode!=0 and "requested block" in wrong_head.stderr
@@ -124,18 +144,20 @@ with tempfile.TemporaryDirectory() as temporary:
  wrong_deployment=temp/"wrong-deployment"; shutil.copytree(first,wrong_deployment); prov=json.loads((wrong_deployment/"upstream/provenance.json").read_text()); prov.update({"endpoint_template":"https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH","observed_meta_deployment":"QmWrongDeployment","pinned_schema_verification_date":"2026-09-02","pinned_schema_verified_by":"tool-self-test","provisional_stub":False,"upstream_identifier":"QmWrongDeployment"}); (wrong_deployment/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(wrong_deployment,"upstream/provenance.json"); verify(wrong_deployment,False)
  stale_pin=temp/"stale-pin"; shutil.copytree(first,stale_pin); prov=json.loads((stale_pin/"upstream/provenance.json").read_text()); prov["ens_subgraph_commit"]="deadbee"; (stale_pin/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_pin,"upstream/provenance.json"); verify(stale_pin,False)
  census=temp/"census"; shutil.copytree(first,census); coverage=json.loads((census/"coverage.json").read_text()); coverage["known_upstream_types"]["Transfer"]={}; (census/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(census,"coverage.json"); verify(census,False)
+ unknown_census=temp/"unknown-census"; shutil.copytree(first,unknown_census); coverage=json.loads((unknown_census/"coverage.json").read_text()); coverage["known_upstream_types"].pop("AbiChanged"); coverage["known_upstream_types"].pop("Timestamp"); (unknown_census/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(unknown_census,"coverage.json"); result=verify(unknown_census,False); assert "unknown upstream types: AbiChanged, Timestamp" in result.stderr
  stale_census=temp/"stale-census"; shutil.copytree(first,stale_census); coverage=json.loads((stale_census/"coverage.json").read_text()); coverage["known_upstream_types"]["Ghost"]={"owner":"#1","docs":"x"}; (stale_census/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_census,"coverage.json"); verify(stale_census,False)
  duplicate=temp/"duplicate"; shutil.copytree(first,duplicate); manifest=json.loads((duplicate/"manifest.json").read_text()); manifest["cases"].append(manifest["cases"][0]); (duplicate/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); verify(duplicate,False)
  aliased=temp/"aliased"; shutil.copytree(first,aliased); manifest=json.loads((aliased/"manifest.json").read_text()); manifest["cases"][0].update({key:manifest["cases"][1][key] for key in ("entity","kind","query","variables","response")}); (aliased/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); verify(aliased,False)
  wrong_case_block=temp/"case-block"; shutil.copytree(first,wrong_case_block); variables=json.loads((wrong_case_block/"entities/domain/entity-by-id/variables.json").read_text()); variables["block"]["number"]=999; (wrong_case_block/"entities/domain/entity-by-id/variables.json").write_text(json.dumps(variables,sort_keys=True,separators=(",",":"))+"\n"); resign(wrong_case_block,"entities/domain/entity-by-id/variables.json"); verify(wrong_case_block,False)
  version=temp/"version"; shutil.copytree(first,version); manifest=json.loads((version/"manifest.json").read_text()); manifest["fixture_format_version"]=999; (version/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); result=verify(version,False); assert "upgrade" in result.stderr
  sys.dont_write_bytecode=True; loader=importlib.machinery.SourceFileLoader("oracle",str(tool)); spec=importlib.util.spec_from_loader("oracle",loader); module=importlib.util.module_from_spec(spec); loader.exec_module(module)
+ stub_surface=module.schema_surface(schema); known_types=set(json.loads(coverage_source.read_text())["known_upstream_types"]); assert known_types=={path.removeprefix("type:") for path in stub_surface if path.startswith("type:")} and len(known_types)==109
  membership={"types":[obj("Query",[]),{"kind":"INTERFACE","name":"DomainEvent","fields":[],"inputFields":None,"enumValues":None,"possibleTypes":[{"name":"Transfer"}],"interfaces":[]},{**obj("Transfer",[]),"interfaces":[{"name":"DomainEvent"}]}],"queryType":{"name":"Query"},"mutationType":None,"subscriptionType":None,"directives":[]}; surface=module.schema_surface(membership); assert surface["root:query"]=={"type":"Query"} and "implements:Transfer.DomainEvent" in surface and "member:DomainEvent.Transfer" in surface; assert b"type Transfer implements DomainEvent" in module.render_sdl(membership)
  import socket; original=socket.socket; socket.socket=lambda *_args,**_kwargs: (_ for _ in ()).throw(AssertionError("offline verifier opened a socket"))
  try:
   os.environ["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"; module.verify(first)
  finally:
   os.environ.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None); socket.socket=original
- print("graphql compatibility oracle tool tests: 43 passed")
+ print("graphql compatibility oracle tool tests: 45 passed (oracle request headers; 109-type coverage census)")
 server.shutdown()
 PY
