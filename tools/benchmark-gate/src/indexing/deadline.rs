@@ -92,12 +92,21 @@ mod tests {
         assert!(stop < rebuild);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stalled_walk_becomes_a_named_red_instead_of_hanging() {
         let limit = Duration::from_millis(1);
-        let completed = complete_within(limit, tokio::time::sleep(Duration::from_millis(20))).await;
+        let task = tokio::spawn(complete_within(
+            limit,
+            tokio::time::sleep(Duration::from_millis(20)),
+        ));
 
-        assert!(completed.is_none());
+        tokio::task::yield_now().await;
+        tokio::time::advance(limit).await;
+
+        assert!(
+            task.await.expect("deadline task panicked").is_none(),
+            "stalled walk should become the named timeout failure"
+        );
         assert_eq!(
             failure(limit, 500_000, 2, 21_600),
             "Interpret walk exceeded its throughput-derived wall-clock deadline of 0.001s; limit is the smaller of 2 times the duration implied by the 500000 blocks/hour floor and the configured 21600s cap"

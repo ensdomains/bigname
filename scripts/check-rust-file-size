@@ -134,6 +134,8 @@ def exclusion_reason(path: Path) -> str | None:
     stem = path.stem.lower()
     if stem in EXCLUDED_FILE_STEMS:
         return f"excluded file stem: {stem}"
+    if stem.endswith("_tests"):
+        return "source-embedded test module"
 
     return None
 
