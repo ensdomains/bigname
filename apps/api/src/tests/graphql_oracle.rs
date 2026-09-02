@@ -731,6 +731,7 @@ fn graphql_oracle_census_owns_wholly_deferred_type_surfaces() {
     assert_oracle_field_ownership_rules();
     assert_oracle_argument_ownership_rules();
     assert_oracle_enum_value_ownership_rules();
+    assert_oracle_exact_input_ownership_rules();
 }
 
 fn assert_oracle_field_ownership_rules() {
