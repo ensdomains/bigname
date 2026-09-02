@@ -1,6 +1,7 @@
 mod address_matches;
 mod decoders;
 mod paging;
+mod registration_identity;
 mod selectors;
 mod source;
 mod summary;
