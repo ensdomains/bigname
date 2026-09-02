@@ -154,10 +154,9 @@ fn build_detail_record(
     }
     let registration =
         name_record::identity_name_registration_fields(Some(&record.row), &record.row.namespace);
-    // A row without a current registration cannot use state retained for an old
-    // resource as current name data, even if projection state loss leaves it attached.
-    let has_current_registration =
-        name_record::has_current_registration(registration.registration_status);
+    // Current registrations and explicitly classified ownerless registry read paths may
+    // expose their selected resolver resource; other retained state remains audit-only.
+    let has_current_registration = name_record::identity_row_has_current_registration(&record.row);
     let record_inventory = record
         .record_inventory_current
         .as_ref()

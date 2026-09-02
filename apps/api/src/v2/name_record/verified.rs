@@ -17,9 +17,7 @@ use super::super::{
         ensure_verified_record_limit, load_verified_record_lookup_for_resource,
     },
 };
-use super::{
-    NameRecord, build_name_record, has_current_registration, name_registration_fields, string_field,
-};
+use super::{NameRecord, build_name_record, row_has_current_registration, string_field};
 
 pub(super) struct VerifiedNameRecord {
     pub(super) record: NameRecord,
@@ -100,14 +98,9 @@ async fn build_verified_name_record(
     chain_id: Option<u64>,
     selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<VerifiedNameRecord> {
-    // Mirror build_name_record's current-registration guard before deriving the
-    // requested records: retained inventory or resolver state must not steer a
-    // provider lookup for a name with no current registration.
-    let record_inventory = record_inventory.filter(|_| {
-        has_current_registration(
-            name_registration_fields(Some(row), &row.namespace).registration_status,
-        )
-    });
+    // Mirror build_name_record's serving guard before deriving requested records: only a
+    // current registration or classified ownerless registry read path may steer lookup.
+    let record_inventory = record_inventory.filter(|_| row_has_current_registration(row));
     let requested_records = profile_verified_requested_records(record_inventory)?;
     let verified_lookup = load_verified_record_lookup_for_resource(
         state,

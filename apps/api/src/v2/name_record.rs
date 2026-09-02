@@ -36,8 +36,8 @@ mod wrapper;
 
 use inventory::load_name_record_inventory;
 pub(super) use values::{
-    chain_id_from_positions, declared_token_id, has_current_registration,
-    identity_declared_token_id, json_string_at_paths, network_from_parts,
+    chain_id_from_positions, declared_token_id, identity_declared_token_id,
+    identity_row_has_current_registration, json_string_at_paths, network_from_parts,
     row_has_current_registration, string_field, value_to_string,
 };
 use values::{
@@ -200,9 +200,9 @@ pub(crate) fn build_name_record(
     status: Status,
 ) -> V2Result<NameRecord> {
     let registration = name_registration_fields(Some(row), &row.namespace);
-    // A row without a current registration cannot use state retained for an old
-    // resource as current name data, even if projection state loss leaves it attached.
-    let has_current_registration = has_current_registration(registration.registration_status);
+    // Current registrations and explicitly classified ownerless registry read paths may
+    // expose their selected resolver resource; other retained state remains audit-only.
+    let has_current_registration = row_has_current_registration(row);
     let record_inventory = record_inventory.filter(|_| has_current_registration);
     let unsupported_fields = unsupported_fields(record_inventory);
     let field_supported = |field: &str| {

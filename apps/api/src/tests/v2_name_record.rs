@@ -562,6 +562,124 @@ async fn v2_get_name_verified_source_reports_unsupported_without_verified_bounda
 }
 
 #[tokio::test]
+async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_serving() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let execution_block_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_lookup_head(
+        &lookup_pool,
+        21_000_003,
+        execution_block_hash,
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    let namehash = bigname_lookup::ens_namehash_hex("alice.eth")?;
+
+    seed_v2_alice_name_record_fixture(
+        &database,
+        |row| {
+            row.namehash = namehash;
+            row.serving_resource_id = row.resource_id.take();
+            row.surface_binding_id = None;
+            row.token_lineage_id = None;
+            row.binding_kind = None;
+            row.declared_summary["registration"]["status"] = json!("unregistered");
+            row.declared_summary["control"]["status"] = json!("unregistered");
+            row.provenance["read_reachability"] = json!({
+                "basis": "retained_registry_resolver_pointer"
+            });
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+        |_, _, inventory| {
+            inventory.selectors = json!([{
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "cacheable": true
+            }]);
+            inventory.entries = json!([{
+                "record_key": "addr:2147483648",
+                "record_family": "addr",
+                "selector_key": "2147483648",
+                "status": "success",
+                "value": {
+                    "coin_type": "2147483648",
+                    "value": "0x0000000000000000000000000000000000000def"
+                }
+            }]);
+            inventory.provenance["read_rules"] = json!([{
+                "kind": "ensip19_default_address",
+                "source_record_key": "addr:2147483648"
+            }]);
+            inventory.record_version_boundary["chain_position"]["block_hash"] =
+                json!(execution_block_hash);
+            inventory.chain_positions = json!({
+                "ethereum-mainnet": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.resources SET token_lineage_id = NULL
+         WHERE resource_id = $1",
+    )
+    .bind(Uuid::from_u128(0x2200))
+    .execute(&database.pool)
+    .await?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+    let projected = bigname_storage::load_name_current(&database.pool, &logical_name_id)
+        .await
+        .context("ownerless fixture must remain readable through name_current storage")?;
+    assert!(projected.is_some());
+    let executed_address = "0x0000000000000000000000000000000000000e0e";
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_universal_resolver_multicoin_response(executed_address),
+        resolution_universal_resolver_addr60_response(executed_address),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth?source=verified")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ownerless verified name profile request failed")?;
+
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(payload["data"]["status"], json!("ok"));
+    assert_eq!(payload["data"]["addresses"]["60"], json!(executed_address));
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_aborts_transport_failure(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -2318,6 +2436,32 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
     );
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_unclassified_serving_resource_does_not_expose_retained_records() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        let serving_resource_id = row.resource_id.expect("fixture resource");
+        row.surface_binding_id = None;
+        row.resource_id = None;
+        row.serving_resource_id = Some(serving_resource_id);
+        row.token_lineage_id = None;
+        row.binding_kind = None;
+        row.declared_summary["registration"] = json!({
+            "status":"reserved",
+            "authority_kind":"ens_v2_registry"
+        });
+        row.declared_summary["control"] = json!({"status":"unregistered"});
+        row.provenance = json!({});
+    })
+    .await?;
+
+    assert_eq!(payload["data"]["registration_status"], json!("unregistered"));
+    assert!(payload["data"].get("resolver").is_none());
+    assert!(payload["data"].get("addresses").is_none());
+    assert!(payload["data"].get("text_records").is_none());
+
+    Ok(())
 }
 
 #[tokio::test]
