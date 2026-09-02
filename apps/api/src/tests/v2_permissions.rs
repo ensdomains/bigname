@@ -141,6 +141,51 @@ async fn v2_get_permissions_empties_a_released_name_but_keeps_its_resource_audit
     Ok(())
 }
 
+// A reservation can retain resource-scoped grants, but it is not a current registration. Name
+// filtering therefore stays empty while the explicit resource audit remains available.
+#[tokio::test]
+async fn v2_get_permissions_empties_a_reserved_name_but_keeps_its_resource_audit() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let reserved_resource_id = v2_permissions_current_resource_id();
+
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+                 jsonb_set(
+                     declared_summary #- '{control,owner}' #- '{control,registry_owner}',
+                     '{registration,status}', '\"reserved\"'::jsonb
+                 ),
+                 '{registration,authority_kind}', '\"ens_v2_registry\"'::jsonb
+             )
+         WHERE resource_id = $1",
+    )
+    .bind(reserved_resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert_eq!(by_name["data"], json!([]));
+
+    let audited = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?registration_id={reserved_resource_id}"),
+    )
+    .await?;
+    let rows = audited["data"]
+        .as_array()
+        .expect("resource audit must return an array");
+    assert!(!rows.is_empty(), "the reserved resource lost its audit read");
+    assert!(
+        rows.iter()
+            .all(|row| row["authority_context"] == json!("resource_audit"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 // Every permission row says how it may be read. Only a `name` filter that selected the row's
 // current registration claims `current_for_name`; a resource-keyed read never does, even when the
 // row carries an optional display name.
