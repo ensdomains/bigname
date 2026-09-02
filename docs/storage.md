@@ -720,8 +720,9 @@ identities. That same check applies to
 the configured intake-capable source set. A runtime
 start above the redo range does not bypass that identity check. The guard also
 requires one readable `chain_lineage` row at every height in the full execution
-range. The partial unique index on `(chain_id, block_number)` for `canonical`,
-`safe`, and `finalized` rows makes two readable hashes at one height
+range. The schema-v2 baseline's partial unique index on
+`(chain_id, block_number)` for `canonical`, `safe`, and `finalized` rows makes
+two readable hashes at one height
 structurally impossible in the supported schema; the redo check still fails if
 the row is missing or if database integrity has been compromised. Cursors and
 lineage both prove only the facts selected by the [watch

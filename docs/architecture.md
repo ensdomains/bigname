@@ -1355,8 +1355,9 @@ v2 primary-name verification performs no write.
 ## Reorg, redo, and historical ranges
 
 The phase runner stores competing block hashes per chain, including observed and
-orphaned branches, while a partial unique index permits at most one `canonical`,
-`safe`, or `finalized` block at a given chain height. Head publication marks a
+orphaned branches. In the supported phase schema, the schema-v2 baseline's
+partial unique index permits at most one `canonical`, `safe`, or `finalized`
+block at a given chain height. Head publication marks a
 displaced readable lineage branch `orphaned` before making the selected branch
 readable; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
