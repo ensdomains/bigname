@@ -24,6 +24,7 @@ const DENSE_SAME_TRANSACTION: &str =
     include_str!("fixtures/interpreters/dense-same-transaction.json");
 const BINDING_FK_RELEASE: &str = include_str!("fixtures/interpreters/binding-fk-release.json");
 const V2_EXPIRY_RETIREMENT: &str = include_str!("fixtures/interpreters/v2-expiry-retirement.json");
+const V1_RECORD_CLEARS: &str = include_str!("fixtures/interpreters/v1-record-clears.json");
 
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
@@ -134,6 +135,19 @@ struct V2ExpiryFixture {
     expected_project: Value,
 }
 
+#[derive(Deserialize)]
+struct RecordClearSuite {
+    cases: Vec<RecordClearCase>,
+}
+
+#[derive(Deserialize)]
+struct RecordClearCase {
+    case: Case,
+    physical_batches: Vec<BlockRange>,
+    expected_normalized_events: Vec<Value>,
+    expected_terminal_project: Value,
+}
+
 #[derive(Clone, Copy, Deserialize)]
 struct BlockRange {
     from_block: i64,
@@ -228,6 +242,72 @@ fn schema_v2_output_seam_semantically_matches_the_committed_raw_event_tripwire()
             expected_cases.into_keys().collect::<Vec<_>>().join(", ")
         );
     }
+    Ok(())
+}
+
+#[test]
+fn ens_v1_contenthash_clear_after_set_uses_flat_clear() -> Result<()> {
+    assert_record_clear_case("ens_v1_contenthash_clear_after_set")
+}
+
+#[test]
+fn ens_v1_contenthash_set_clear_set_uses_flat_values() -> Result<()> {
+    assert_record_clear_case("ens_v1_contenthash_set_clear_set")
+}
+
+#[test]
+fn basenames_multicoin_address_clear_after_set_uses_flat_clear() -> Result<()> {
+    assert_record_clear_case("basenames_multicoin_address_clear_after_set")
+}
+
+#[test]
+fn basenames_multicoin_address_set_clear_set_uses_flat_values() -> Result<()> {
+    assert_record_clear_case("basenames_multicoin_address_set_clear_set")
+}
+
+fn assert_record_clear_case(case_id: &str) -> Result<()> {
+    let suite: RecordClearSuite = serde_json::from_str(V1_RECORD_CLEARS)?;
+    let fixture = suite
+        .cases
+        .into_iter()
+        .find(|fixture| fixture.case.id == case_id)
+        .with_context(|| format!("record-clear fixture has no case {case_id}"))?;
+    let expected = ExpectedCase {
+        id: fixture.case.id.clone(),
+        normalized_events: fixture.expected_normalized_events.clone(),
+        name_surfaces: Vec::new(),
+        surface_bindings: Vec::new(),
+        resources: Vec::new(),
+        token_lineages: Vec::new(),
+    };
+    let input = batch_input(&fixture.case, &expected, &checked_in_manifests()?)?;
+    let whole = interpret_with_incremental_equivalence(case_id, input.clone())?;
+    let physical = interpret_physical_batches(case_id, input, &fixture.physical_batches)?;
+    assert_eq!(
+        whole,
+        flatten_outputs(&physical),
+        "{case_id}: batch grid drift"
+    );
+
+    let actual = whole
+        .normalized_events
+        .iter()
+        .map(|event| {
+            serde_json::json!({
+                "event_kind": event.event_kind,
+                "source_family": event.source_family,
+                "block_number": event.block_number,
+                "block_hash": event.block_hash,
+                "after_state": event.after_state,
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, fixture.expected_normalized_events);
+    assert!(
+        fixture.expected_terminal_project.get("entry").is_some()
+            && fixture.expected_terminal_project.get("answer").is_some(),
+        "{case_id}: fixture must pin its terminal Project entry and indexed answer"
+    );
     Ok(())
 }
 

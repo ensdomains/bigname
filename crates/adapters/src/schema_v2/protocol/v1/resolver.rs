@@ -84,29 +84,29 @@ pub(super) fn interpret(
                 &raw.data,
                 "AddressChanged log is malformed",
             )?;
-            (
-                "RecordChanged",
-                record_after(
-                    selected,
-                    raw,
-                    "AddressChanged",
-                    hex_string(event.node),
-                    format!("addr:{}", event.coinType),
-                    "addr",
-                    Some(json!(event.coinType.to_string())),
-                    Some(
-                        if event.coinType == alloy_primitives::U256::from(60)
-                            && event.newAddress.len() == 20
-                        {
-                            json!(hex_string(event.newAddress))
-                        } else {
-                            json!({"encoding":"hex","bytes":hex_string(event.newAddress)})
-                        },
-                    ),
-                    None,
-                ),
-                vec![],
-            )
+            let coin_type = event.coinType.to_string();
+            let legacy_address =
+                event.coinType == alloy_primitives::U256::from(60) && event.newAddress.len() == 20;
+            let mut after = record_after(
+                selected,
+                raw,
+                "AddressChanged",
+                hex_string(event.node),
+                format!("addr:{coin_type}"),
+                "addr",
+                Some(json!(coin_type)),
+                legacy_address.then(|| json!(hex_string(&event.newAddress))),
+                None,
+            );
+            if !legacy_address {
+                let fields = after.as_object_mut().expect("record state is an object");
+                fields.insert("coin_type".to_owned(), json!(coin_type));
+                fields.insert(
+                    "address_bytes_hex".to_owned(),
+                    json!(hex_string(event.newAddress)),
+                );
+            }
+            ("RecordChanged", after, vec![])
         }
         "NameChanged" => {
             let event = decode_event_log_data_as::<raw_strings::RawNameChanged>(
@@ -261,21 +261,22 @@ pub(super) fn interpret(
                 &raw.data,
                 "ContenthashChanged log is malformed",
             )?;
-            (
-                "RecordChanged",
-                record_after(
-                    selected,
-                    raw,
-                    "ContenthashChanged",
-                    hex_string(event.node),
-                    "contenthash".to_owned(),
-                    "contenthash",
-                    None,
-                    Some(json!({"encoding":"hex","bytes":hex_string(event.hash)})),
-                    None,
-                ),
-                vec![],
-            )
+            let mut after = record_after(
+                selected,
+                raw,
+                "ContenthashChanged",
+                hex_string(event.node),
+                "contenthash".to_owned(),
+                "contenthash",
+                None,
+                None,
+                None,
+            );
+            after
+                .as_object_mut()
+                .expect("record state is an object")
+                .insert("contenthash_hex".to_owned(), json!(hex_string(event.hash)));
+            ("RecordChanged", after, vec![])
         }
         "ABIChanged" => {
             let event = decode_event_log::<ABIChanged>(

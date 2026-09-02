@@ -1722,6 +1722,40 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
 }
 
 #[tokio::test]
+async fn v2_get_name_records_flattens_projected_byte_address_values() -> Result<()> {
+    let payload = v2_name_records_payload_with_setup(
+        "/v2/names/Alice.eth/records?keys=addr:0",
+        |_, _, inventory| {
+            inventory.selectors = json!([{
+                "record_key": "addr:0",
+                "record_family": "addr",
+                "selector_key": "0",
+                "cacheable": true
+            }]);
+            inventory.entries = json!([{
+                "record_key": "addr:0",
+                "record_family": "addr",
+                "selector_key": "0",
+                "status": "success",
+                "value": {"encoding": "hex", "bytes": "0x001122"}
+            }]);
+        },
+    )
+    .await?;
+
+    assert_eq!(payload["data"]["addresses"]["0"], json!("0x001122"));
+    assert_eq!(
+        payload["data"]["records"]["addr:0"],
+        json!({
+            "status": "ok",
+            "value": "0x001122"
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {

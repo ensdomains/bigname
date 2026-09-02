@@ -662,7 +662,7 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
     );
     assert_eq!(
         pointer(&initial_records, "/data/coin_addresses/0/value"),
-        json!({"encoding": "hex", "bytes": "0xdeadbeef"})
+        json!("0xdeadbeef")
     );
     initial.db.cleanup().await?;
 
