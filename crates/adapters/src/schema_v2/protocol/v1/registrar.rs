@@ -7,7 +7,7 @@ use super::super::{
     EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
-use super::registry::append_authority_transition;
+use super::authority_transition::append_authority_transition;
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, u256_word_hex};
 use crate::schema_v2::{
@@ -437,7 +437,7 @@ fn name_event(
             // Retain the live owner because compacted registry facts can restore after this anchor.
             grant.after_state["authority_owner"] = json!(owner);
             grant.explicit_before = Some(json!({
-                "authority_kind":previous_active.as_ref().map(super::registry::authority_kind),
+                "authority_kind":previous_active.as_ref().map(super::authority_transition::authority_kind),
                 "registrant":prior_registrar.as_ref().and_then(|state| state.owner.clone()),
             }));
         }

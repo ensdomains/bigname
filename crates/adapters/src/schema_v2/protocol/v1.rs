@@ -1,3 +1,4 @@
+mod authority_transition;
 mod reconcile_support;
 mod registrar;
 mod registry;
