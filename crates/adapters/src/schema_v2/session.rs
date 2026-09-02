@@ -459,6 +459,14 @@ fn interpret_raw(
     };
     *state = candidate_state;
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
+    super::sourced_events::materialize(
+        catalog,
+        &selected.source.namespace,
+        raw,
+        interpreted.sourced_events.clone(),
+        state,
+        output,
+    )?;
     super::normalized::materialize_boundary(
         &selected.source,
         &super::model::RawBlockInput {

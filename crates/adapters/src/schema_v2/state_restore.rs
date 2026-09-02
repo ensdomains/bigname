@@ -368,7 +368,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             .get("authority_kind")
             .and_then(Value::as_str)
             == Some("registry_only")
-        && let (Some(resource_id), Some(namehash)) = (
+        && let (Some(_resource_id), Some(namehash)) = (
             event.resource_id,
             event
                 .after_state
@@ -377,27 +377,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                 .and_then(Value::as_str),
         )
     {
-        state.observe_v1_registry(
-            &event.namespace,
-            namehash,
-            event
-                .logical_name_id
-                .clone()
-                .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
-            event.logical_name_id.is_some(),
-            resource_id,
-            event.source_family.clone(),
-            event
-                .after_state
-                .get("owner")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            event
-                .after_state
-                .get("authority_key")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        );
+        state.activate_retained_v1_registry_authority(&event.namespace, namehash);
         return;
     }
     if event.event_kind == "RegistrationReleased"

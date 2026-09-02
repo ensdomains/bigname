@@ -1,11 +1,142 @@
 use serde_json::{Value, json};
 
-use super::super::{BindingClosureDraft, BindingDraft, EventDraft, Interpreted, ResourceDraft};
+use super::super::{
+    BindingClosureDraft, BindingDraft, EventDraft, Interpreted, ResourceDraft, SourcedEventBatch,
+};
 use crate::schema_v2::{
     common::{event_time, stable_uuid},
     model::RawLogInput,
-    state::V1NameState,
+    state::{V1NameState, V1SurfaceMaterialization},
 };
+
+pub(super) fn append_surface_materialization(
+    output: &mut Interpreted,
+    authority_arm: &str,
+    materialization: &V1SurfaceMaterialization,
+    raw: &RawLogInput,
+) {
+    let (source_manifest_id, events) = match materialization {
+        V1SurfaceMaterialization::RegistryAuthority {
+            previous,
+            promoted,
+            resolver,
+            source_manifest_id,
+        } => {
+            debug_assert_eq!(previous.resource_id, promoted.resource_id);
+            output.bindings.push(BindingDraft {
+                logical_name_id: promoted.logical_name_id.clone(),
+                resource_id: promoted.resource_id,
+                binding_kind: "declared_registry_path".to_owned(),
+                authority_arm: authority_arm.to_owned(),
+                surface_binding_id: promoted.authority_key.as_ref().map(|authority_key| {
+                    stable_uuid(&format!(
+                        "binding:{authority_key}:{}",
+                        event_time(raw).unix_timestamp_nanos()
+                    ))
+                }),
+                active_from: None,
+            });
+            let node = promoted
+                .logical_name_id
+                .split_once(':')
+                .map(|(_, node)| node)
+                .unwrap_or(&promoted.logical_name_id);
+            let common = json!({
+                "state_derived":true,
+                "surface_materialization":true,
+                "source_event":"NameRenewed",
+                "node":node,
+                "authority_kind":"registry_only",
+                "authority_key":promoted.authority_key,
+                "binding_kind":"declared_registry_path",
+                "pointer_reason":"surface_materialization_current_resolver",
+            });
+            let mut events = vec![EventDraft {
+                event_kind: "SurfaceBound".to_owned(),
+                logical_name_id: Some(promoted.logical_name_id.clone()),
+                resource_id: Some(promoted.resource_id),
+                identity_suffix: format!(
+                    "SurfaceBound:surface-materialization:{node}:{}",
+                    promoted.resource_id
+                ),
+                explicit_before: Some(json!({})),
+                after_state: merge_observation(
+                    &common,
+                    json!({"active_from":raw.block_timestamp.unix_timestamp()}),
+                ),
+                state_scope: format!("surface-materialization:{node}:{}", promoted.resource_id),
+            }];
+            if let Some(resolver) = resolver {
+                events.push(EventDraft {
+                    event_kind: "ResolverChanged".to_owned(),
+                    logical_name_id: Some(promoted.logical_name_id.clone()),
+                    resource_id: Some(promoted.resource_id),
+                    identity_suffix: format!(
+                        "ResolverChanged:surface-materialization:{node}:{}:{resolver}",
+                        promoted.resource_id
+                    ),
+                    explicit_before: Some(json!({"resolver":Value::Null})),
+                    after_state: merge_observation(&common, json!({"resolver":resolver})),
+                    state_scope: format!(
+                        "surface-materialization:{node}:{}:resolver",
+                        promoted.resource_id
+                    ),
+                });
+            }
+            (*source_manifest_id, events)
+        }
+        V1SurfaceMaterialization::OwnerlessRegistryRead {
+            anchor,
+            resolver,
+            source_manifest_id,
+        } => {
+            let node = anchor
+                .logical_name_id
+                .split_once(':')
+                .map(|(_, node)| node)
+                .unwrap_or(&anchor.logical_name_id);
+            let events = resolver
+                .as_ref()
+                .map(|resolver| {
+                    vec![EventDraft {
+                        event_kind: "ResolverChanged".to_owned(),
+                        logical_name_id: Some(anchor.logical_name_id.clone()),
+                        resource_id: Some(anchor.resource_id),
+                        identity_suffix: format!(
+                            "ResolverChanged:surface-materialization:{node}:{}:{resolver}",
+                            anchor.resource_id
+                        ),
+                        explicit_before: Some(json!({"resolver":Value::Null})),
+                        after_state: json!({
+                            "state_derived":true,
+                            "surface_materialization":true,
+                            "source_event":"NameRenewed",
+                            "node":node,
+                            "authority_kind":"registry_only",
+                            "authority_key":Value::Null,
+                            "binding_kind":"declared_registry_path",
+                            "pointer_reason":"surface_materialization_current_resolver",
+                            "resolver":resolver,
+                        }),
+                        state_scope: format!(
+                            "surface-materialization:{node}:{}:resolver",
+                            anchor.resource_id
+                        ),
+                    }]
+                })
+                .unwrap_or_default();
+            (*source_manifest_id, events)
+        }
+        V1SurfaceMaterialization::AlreadyMaterialized => return,
+    };
+    if !events.is_empty() {
+        debug_assert!(events.iter().all(|event| !event.state_scope.is_empty()));
+        output.sourced_events.push(SourcedEventBatch {
+            source_manifest_id,
+            events,
+        });
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn append_authority_transition(

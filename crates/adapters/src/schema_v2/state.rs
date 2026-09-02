@@ -73,6 +73,7 @@ mod v2_pointers;
 #[path = "state_v2_tests.rs"]
 mod v2_tests;
 
+pub(in crate::schema_v2) use self::surfaces::V1SurfaceMaterialization;
 pub(in crate::schema_v2) use self::topology::v2_expiry_is_live;
 pub(super) use self::v2::{V2NameState, V2NameTransition, V2RawNameState, V2TokenState};
 #[cfg(test)]
@@ -235,15 +236,6 @@ impl State {
             .insert(key.clone(), value.clone())
             .and_then(|state| state.expiry);
         self.update_v1_expiry_index(&key, previous_expiry, expiry);
-        if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
-            registry.logical_name_id = value.logical_name_id.clone();
-            registry.surface_known = surface_known;
-            registry.labelhash = value.labelhash.clone();
-        }
-        if let Some(anchor) = self.v1_registry_read_anchors.get_mut(&key) {
-            anchor.logical_name_id = value.logical_name_id.clone();
-            anchor.surface_known |= surface_known;
-        }
         if make_current {
             self.v1_names.insert(key, value);
         }
@@ -254,6 +246,7 @@ impl State {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn observe_v1_registry(
         &mut self,
         namespace: &str,
@@ -414,10 +407,6 @@ impl State {
             self.v1_names.insert(key, authority);
         }
         previous
-    }
-
-    pub(super) fn mark_v1_migrated(&mut self, namespace: &str, namehash: &str) {
-        self.v1_migrated_nodes.insert(v1_key(namespace, namehash));
     }
 
     pub(super) fn v1_is_migrated(&self, namespace: &str, namehash: &str) -> bool {

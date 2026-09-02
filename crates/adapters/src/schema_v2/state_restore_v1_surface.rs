@@ -20,8 +20,24 @@ pub(super) fn restore_preimage(state: &mut State, event: &PriorEventInput) {
         == Some("shadow")
     {
         state.observe_v1_surface(&event.namespace, namehash);
-    } else {
+    } else if !event.source_family.starts_with("ens_v1_") {
         state.observe_v1_active_surface(&event.namespace, namehash);
+    } else {
+        let logical_name_id = event
+            .logical_name_id
+            .as_deref()
+            .unwrap_or_else(|| unreachable!("checked above"));
+        let labelhash = event
+            .after_state
+            .get("labelhash")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let _ = state.materialize_v1_active_surface(
+            &event.namespace,
+            namehash,
+            logical_name_id,
+            labelhash,
+        );
     }
 }
 
@@ -68,29 +84,35 @@ pub(super) fn restore_registrar(
             let registrar_owner = retained_authority_owner
                 .or(registration_registry_owner)
                 .or(event_registrant);
-            let make_current = current.is_none_or(|current| {
-                let same_family = current.authority_source_family == event.source_family;
-                current.authority_source_family != "ens_v1_wrapper_l1"
-                    && (registration || same_family)
-            });
+            let ens_v1_ownerless = event.source_family.starts_with("ens_v1_")
+                && state.v1_explicit_ownerless_registry_evidence(&event.namespace, namehash);
+            let make_current = !ens_v1_ownerless
+                && current.is_none_or(|current| {
+                    let same_family = current.authority_source_family == event.source_family;
+                    current.authority_source_family != "ens_v1_wrapper_l1"
+                        && (registration || same_family)
+                });
+            let surface_known = event
+                .after_state
+                .get("surface_known")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let registrar_labelhash = event
+                .after_state
+                .get("labelhash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let labelhash = registrar_labelhash.clone().unwrap_or_default();
             state.observe_v1_registrar(
                 &event.namespace,
                 namehash,
                 logical_name_id.clone(),
-                event
-                    .after_state
-                    .get("surface_known")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true),
+                surface_known,
                 resource_id,
                 lineage,
                 event.source_family.clone(),
                 event.source_manifest_id,
-                event
-                    .after_state
-                    .get("labelhash")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                registrar_labelhash.clone(),
                 expiry,
                 registrar_owner,
                 event
@@ -101,6 +123,23 @@ pub(super) fn restore_registrar(
                 false,
                 make_current,
             );
+            if !event.source_family.starts_with("ens_v1_") {
+                state.sync_registry_surface_from_registrar(
+                    &event.namespace,
+                    namehash,
+                    logical_name_id,
+                    surface_known,
+                    registrar_labelhash.as_deref(),
+                );
+            }
+            if surface_known && event.source_family.starts_with("ens_v1_") {
+                let _ = state.materialize_v1_active_surface(
+                    &event.namespace,
+                    namehash,
+                    logical_name_id,
+                    &labelhash,
+                );
+            }
             true
         }
         Some("NameRenewed") if event.event_kind == "RegistrationRenewed" => {
@@ -113,30 +152,36 @@ pub(super) fn restore_registrar(
             ) else {
                 return true;
             };
-            let make_current = state
-                .v1_name(&event.namespace, namehash)
-                .is_none_or(|current| current.authority_source_family == event.source_family);
+            let ens_v1_ownerless = event.source_family.starts_with("ens_v1_")
+                && state.v1_explicit_ownerless_registry_evidence(&event.namespace, namehash);
+            let make_current = !ens_v1_ownerless
+                && state
+                    .v1_name(&event.namespace, namehash)
+                    .is_none_or(|current| current.authority_source_family == event.source_family);
             let retained = state.v1_registrar(&event.namespace, namehash);
+            let surface_known = event
+                .after_state
+                .get("surface_known")
+                .and_then(serde_json::Value::as_bool)
+                .or_else(|| retained.as_ref().map(|state| state.surface_known))
+                .unwrap_or(true);
+            let registrar_labelhash = event
+                .after_state
+                .get("labelhash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| retained.as_ref().and_then(|state| state.labelhash.clone()));
+            let labelhash = registrar_labelhash.clone().unwrap_or_default();
             state.observe_v1_registrar(
                 &event.namespace,
                 namehash,
                 logical_name_id.clone(),
-                event
-                    .after_state
-                    .get("surface_known")
-                    .and_then(serde_json::Value::as_bool)
-                    .or_else(|| retained.as_ref().map(|state| state.surface_known))
-                    .unwrap_or(true),
+                surface_known,
                 resource_id,
                 lineage,
                 event.source_family.clone(),
                 event.source_manifest_id,
-                event
-                    .after_state
-                    .get("labelhash")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| retained.as_ref().and_then(|state| state.labelhash.clone())),
+                registrar_labelhash.clone(),
                 expiry,
                 event
                     .after_state
@@ -157,6 +202,23 @@ pub(super) fn restore_registrar(
                 false,
                 make_current,
             );
+            if !event.source_family.starts_with("ens_v1_") {
+                state.sync_registry_surface_from_registrar(
+                    &event.namespace,
+                    namehash,
+                    logical_name_id,
+                    surface_known,
+                    registrar_labelhash.as_deref(),
+                );
+            }
+            if surface_known && event.source_family.starts_with("ens_v1_") {
+                let _ = state.materialize_v1_active_surface(
+                    &event.namespace,
+                    namehash,
+                    logical_name_id,
+                    &labelhash,
+                );
+            }
             true
         }
         _ => false,

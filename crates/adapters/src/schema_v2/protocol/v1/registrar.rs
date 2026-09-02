@@ -7,7 +7,7 @@ use super::super::{
     EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
-use super::authority_transition::append_authority_transition;
+use super::authority_transition::{append_authority_transition, append_surface_materialization};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, u256_word_hex};
 use crate::schema_v2::{
@@ -348,12 +348,18 @@ fn name_event(
             .as_ref()
             .and_then(|state| state.authority_key.clone())
     });
-    let make_current = state
-        .v1_name(&selected.source.namespace, &raw_namehash)
-        .is_none_or(|current| {
-            let same_family = current.authority_source_family == selected.source.source_family;
-            current.authority_source_family != "ens_v1_wrapper_l1" && (registration || same_family)
-        });
+    let ens_v1_registrar = selected.source.source_family.starts_with("ens_v1_");
+    let explicit_ownerless_registry = ens_v1_registrar
+        && state.v1_explicit_ownerless_registry_evidence(&selected.source.namespace, &raw_namehash);
+    let make_current = !explicit_ownerless_registry
+        && state
+            .v1_name(&selected.source.namespace, &raw_namehash)
+            .is_none_or(|current| {
+                let same_family = current.authority_source_family == selected.source.source_family;
+                current.authority_source_family != "ens_v1_wrapper_l1"
+                    && (registration || same_family)
+            });
+    let labelhash = format!("{explicit_labelhash:#x}");
     state.observe_v1_registrar(
         &selected.source.namespace,
         &raw_namehash,
@@ -363,13 +369,32 @@ fn name_event(
         token_lineage_id,
         selected.source.source_family.clone(),
         Some(selected.source.manifest_id),
-        Some(format!("{explicit_labelhash:#x}")),
+        Some(labelhash.clone()),
         expiry,
         owner.clone(),
         retained_authority_key.clone(),
         false,
         make_current,
     );
+    if !ens_v1_registrar {
+        state.sync_registry_surface_from_registrar(
+            &selected.source.namespace,
+            &raw_namehash,
+            &logical_name_id,
+            surface_known,
+            Some(&labelhash),
+        );
+    }
+    let surface_materialization = if surface_known && ens_v1_registrar {
+        Some(state.materialize_v1_active_surface(
+            &selected.source.namespace,
+            &raw_namehash,
+            &logical_name_id,
+            &labelhash,
+        )?)
+    } else {
+        None
+    };
     let wrapper_renewal = wrapper_renewal::event(
         selected,
         state,
@@ -428,6 +453,14 @@ fn name_event(
         after.clone(),
     );
     output.events.extend(wrapper_renewal);
+    if let Some(materialization) = surface_materialization.as_ref() {
+        append_surface_materialization(
+            &mut output,
+            super::authority_arm(&selected.source.namespace),
+            materialization,
+            raw,
+        );
+    }
     if registration || synthetic_grant {
         if let Some(grant) = output
             .events

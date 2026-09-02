@@ -16,6 +16,7 @@ mod normalized;
 mod protocol;
 pub mod seam;
 mod session;
+mod sourced_events;
 mod state;
 mod state_key;
 mod state_residency;
