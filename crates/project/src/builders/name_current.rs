@@ -273,8 +273,7 @@ pub(super) async fn build(
             LIMIT 1
         ) authority_context ON TRUE
         LEFT JOIN LATERAL (
-            SELECT lower(CASE event.event_kind
-                       WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
+            SELECT lower(CASE event.event_kind WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
                        WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant
@@ -283,6 +282,7 @@ pub(super) async fn build(
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationReleased', 'TokenControlTransferred'
               )
+              AND CASE event.event_kind WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to' WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant' ELSE event.after_state ->> 'registrant' END IS NOT NULL
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
