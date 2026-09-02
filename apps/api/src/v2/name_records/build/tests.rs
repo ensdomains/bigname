@@ -1,4 +1,4 @@
-use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
+use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SurfaceBindingKind};
 use serde_json::json;
 use sqlx::types::time::OffsetDateTime;
 
@@ -9,24 +9,7 @@ use crate::v2::{ErrorCode, support::parse_resolution_record_key};
 fn auto_rejects_derived_answer_from_nonauthoritative_inventory() {
     let timestamp =
         OffsetDateTime::from_unix_timestamp(1_717_171_719).expect("test timestamp must be valid");
-    let row = NameCurrentRow {
-        logical_name_id: "ens:alice.eth".to_owned(),
-        namespace: "ens".to_owned(),
-        canonical_display_name: "alice.eth".to_owned(),
-        normalized_name: "alice.eth".to_owned(),
-        namehash: "0xalice".to_owned(),
-        surface_binding_id: None,
-        resource_id: None,
-        token_lineage_id: None,
-        binding_kind: None,
-        declared_summary: json!({}),
-        provenance: json!({}),
-        coverage: json!({"status":"projected"}),
-        chain_positions: json!({}),
-        canonicality_summary: json!({}),
-        manifest_version: 1,
-        last_recomputed_at: timestamp,
-    };
+    let row = current_name_row(timestamp);
     let inventory = RecordInventoryCurrentRow {
         resource_id: "00000000-0000-0000-0000-000000000606"
             .parse()
@@ -78,24 +61,7 @@ fn auto_rejects_derived_answer_from_nonauthoritative_inventory() {
 fn auto_accepts_exact_success_from_nonauthoritative_inventory() {
     let timestamp =
         OffsetDateTime::from_unix_timestamp(1_717_171_719).expect("test timestamp must be valid");
-    let row = NameCurrentRow {
-        logical_name_id: "ens:alice.eth".to_owned(),
-        namespace: "ens".to_owned(),
-        canonical_display_name: "alice.eth".to_owned(),
-        normalized_name: "alice.eth".to_owned(),
-        namehash: "0xalice".to_owned(),
-        surface_binding_id: None,
-        resource_id: None,
-        token_lineage_id: None,
-        binding_kind: None,
-        declared_summary: json!({}),
-        provenance: json!({}),
-        coverage: json!({"status":"projected"}),
-        chain_positions: json!({}),
-        canonicality_summary: json!({}),
-        manifest_version: 1,
-        last_recomputed_at: timestamp,
-    };
+    let row = current_name_row(timestamp);
     let inventory = exact_success_inventory();
     let record = parse_resolution_record_key("addr:60").expect("test selector must parse");
 
@@ -225,22 +191,42 @@ fn null_resolver_discovery_row() -> NameCurrentRow {
     let timestamp =
         OffsetDateTime::from_unix_timestamp(1_717_171_719).expect("test timestamp must be valid");
     let logical_name_id = "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec";
+    let mut row = current_name_row(timestamp);
+    row.logical_name_id = logical_name_id.to_owned();
+    row.namehash = logical_name_id.trim_start_matches("ens:").to_owned();
+    row.declared_summary["resolver"] = json!({"chain_id": null, "address": null});
+    row.chain_positions = json!({"ethereum":{"chain_id":"ethereum-mainnet"}});
+    row
+}
+
+fn current_name_row(timestamp: OffsetDateTime) -> NameCurrentRow {
     NameCurrentRow {
-        logical_name_id: logical_name_id.to_owned(),
+        logical_name_id: "ens:alice.eth".to_owned(),
         namespace: "ens".to_owned(),
         canonical_display_name: "alice.eth".to_owned(),
         normalized_name: "alice.eth".to_owned(),
-        namehash: logical_name_id.trim_start_matches("ens:").to_owned(),
-        surface_binding_id: None,
-        resource_id: None,
+        namehash: "0xalice".to_owned(),
+        surface_binding_id: Some(
+            "00000000-0000-0000-0000-000000000607"
+                .parse()
+                .expect("test surface binding id"),
+        ),
+        resource_id: Some(
+            "00000000-0000-0000-0000-000000000606"
+                .parse()
+                .expect("test resource id"),
+        ),
         token_lineage_id: None,
-        binding_kind: None,
+        binding_kind: Some(SurfaceBindingKind::DeclaredRegistryPath),
         declared_summary: json!({
-            "resolver": {"chain_id": null, "address": null}
+            "registration": {
+                "status": "active",
+                "authority_kind": "registrar"
+            }
         }),
         provenance: json!({}),
         coverage: json!({"status":"projected"}),
-        chain_positions: json!({"ethereum":{"chain_id":"ethereum-mainnet"}}),
+        chain_positions: json!({}),
         canonicality_summary: json!({}),
         manifest_version: 1,
         last_recomputed_at: timestamp,

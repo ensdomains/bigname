@@ -648,8 +648,11 @@ async fn v2_lookup_withholds_retained_identity_and_inventory_for_reservation() -
     .await?;
     sqlx::query(
         "UPDATE name_current
-         SET declared_summary =
-             jsonb_set(declared_summary, '{registration,status}', '\"reserved\"')
+         SET declared_summary = jsonb_set(
+             declared_summary #- '{registration,authority_kind}',
+             '{registration,status}',
+             '\"reserved\"'
+         )
          WHERE raw_name = 'reserved.eth'",
     )
     .execute(&database.lookup_pool)

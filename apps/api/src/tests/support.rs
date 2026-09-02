@@ -2109,7 +2109,13 @@ async fn seed_schema_v2_basenames_record_lookup(
              resource_id, binding_kind, declared_summary, support_status,
              provenance, chain_positions, canonicality_summary, manifest_version)
          VALUES ($1, 'basenames', 'alice.base.eth', $2, $3, $4,
-                 'declared_registry_path', jsonb_build_object('topology', $5::jsonb),
+                 'declared_registry_path', jsonb_build_object(
+                     'topology', $5::jsonb,
+                     'registration', jsonb_build_object(
+                         'status', 'active',
+                         'authority_kind', 'registrar'
+                     )
+                 ),
                  'supported', $6, $7, $8, 2)",
     )
     .bind(&logical_name_id)
@@ -3592,6 +3598,7 @@ fn compact_name_declared_summary(
     json!({
         "registration": {
             "status": "active",
+            "authority_kind": "registrar",
             "registrant": registrant,
             "expiry": expiry,
             "registered_at": registered_at,
