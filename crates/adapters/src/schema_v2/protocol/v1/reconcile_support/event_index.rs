@@ -51,6 +51,7 @@ pub(super) struct EventFields {
     pub(super) resource_scope: bool,
     pub(super) grant: bool,
     pub(super) revocation: bool,
+    pub(super) named: bool,
 }
 
 impl EventFields {
@@ -82,6 +83,7 @@ impl EventFields {
             permission: event.event_kind == "PermissionChanged",
             owner: state
                 .get("owner")
+                .or_else(|| state.get("to"))
                 .and_then(Value::as_str)
                 .map(|value| value.to_ascii_lowercase()),
             subject: state
@@ -100,6 +102,7 @@ impl EventFields {
             revocation: state
                 .get("revocation_source")
                 .is_some_and(|source| !source.is_null()),
+            named: event.logical_name_id.is_some(),
         }
     }
 }

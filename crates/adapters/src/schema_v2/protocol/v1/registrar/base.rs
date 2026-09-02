@@ -167,7 +167,7 @@ fn name_renewed(
         false,
         previous_active
             .as_ref()
-            .is_none_or(|current| current.authority_source_family != "ens_v1_wrapper_l1"),
+            .is_none_or(|current| current.authority_source_family == selected.source.source_family),
     );
     let after = json!({
         "source_event":"NameRenewed", "namehash":namehash, "labelhash":labelhash_hex,

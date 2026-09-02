@@ -49,21 +49,63 @@ fn reconcile_registration(
     closures: &mut ClosureIndex,
     registration: &Registration,
 ) {
+    if registration.window == RegistrationWindow::WholeTransaction && registration.surface_known {
+        return;
+    }
     let target_candidates = events
         .by_target
         .get(&registration.key)
         .cloned()
         .unwrap_or_default();
+    let registrar_owner = target_candidates
+        .iter()
+        .filter_map(|index| {
+            let fields = &events.fields[*index];
+            (fields.source_event == SourceEvent::Transfer
+                && fields.family == SourceFamily::Other
+                && fields.resource_id == Some(registration.resource_id))
+            .then_some((fields.position?, fields.owner.clone()?))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, owner)| owner)
+        .unwrap_or_else(|| registration.provisional_owner.clone());
+    // Registrar-token ownership and registry ownership may intentionally differ: reclaim writes
+    // the registry owner independently, and that owner can later call setOwner.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+    let divergence_start = target_candidates
+        .iter()
+        .filter_map(|index| {
+            let fields = &events.fields[*index];
+            (fields.family == SourceFamily::Registry
+                && matches!(
+                    fields.source_event,
+                    SourceEvent::NewOwner | SourceEvent::Transfer
+                )
+                && fields
+                    .position
+                    .is_some_and(|position| position > registration.position))
+            .then_some((fields.position?, fields.owner.clone()?))
+        })
+        .max_by_key(|(position, _)| *position)
+        .filter(|(_, owner)| owner != &registrar_owner)
+        .map(|(position, _)| position);
+    let eligible = |fields: &EventFields| {
+        fields.position.is_some_and(|position| {
+            if registration.window == RegistrationWindow::WholeTransaction {
+                !fields.named && divergence_start.is_none_or(|start| position < start)
+            } else {
+                position.2 < registration.log_index
+            }
+        })
+    };
     let pending = target_candidates
         .iter()
         .copied()
         .filter(|index| {
             events.active[*index]
                 && events.fields[*index].family == SourceFamily::Registry
-                && events.fields[*index].position.is_some_and(|position| {
-                    registration.window == RegistrationWindow::WholeTransaction
-                        || position.2 < registration.log_index
-                })
+                && eligible(&events.fields[*index])
         })
         .collect::<Vec<_>>();
     let pending_positions = pending
@@ -181,18 +223,14 @@ fn reconcile_registration(
         }
         let fields = &events.fields[index];
         let targets_registry = fields.family == SourceFamily::Registry
-            && fields.position.is_some_and(|position| {
-                registration.window == RegistrationWindow::WholeTransaction
-                    || position.2 < registration.log_index
-            })
+            && eligible(fields)
             && target_candidates.binary_search(&index).is_ok();
         let targets_resolver = fields.family == SourceFamily::Resolver
             && fields
                 .resource_id
                 .is_none_or(|resource| stale_resources.contains(&resource))
             && fields.position.is_some_and(|position| {
-                (registration.window == RegistrationWindow::WholeTransaction
-                    || position.2 < registration.log_index)
+                eligible(fields)
                     // Resolver retargeting starts strictly after the first qualifying ownership
                     // setup, preserving records written before the incoming authority exists.
                     && first_ownership_log_index
