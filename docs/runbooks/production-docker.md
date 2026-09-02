@@ -161,6 +161,14 @@ when the concurrent indexes are already valid. Do not allow the versioned
 schema-migration to perform either first build against a populated production
 `normalized_events` table.
 
+The release containing
+`20260902120000_project_redo_expiry_roots.sql` adds the bounded
+Interpret-to-Project handoff for logical names from deleted state-derived ENSv2
+path-expiry releases. Apply that schema-migration in step 4 before deploying the
+new binary. Before starting any Project process, confirm both the handoff table
+and its range index exist and that the index is ready and valid with the query
+below.
+
 ```sql
 SELECT
     to_regclass('bigname_phase.project_redo_resolver_evidence') IS NOT NULL
@@ -174,6 +182,20 @@ SELECT
           AND index_state.indisvalid
           AND index_state.indisready
     ) AS redo_handoff_range_index_ready;
+
+SELECT
+    to_regclass('bigname_phase.project_redo_expiry_roots') IS NOT NULL
+        AS expiry_redo_handoff_exists,
+    EXISTS (
+        SELECT 1
+        FROM pg_class index_relation
+        JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+        WHERE index_relation.oid = to_regclass(
+                  'bigname_phase.project_redo_expiry_roots_range_idx'
+              )
+          AND index_state.indisvalid
+          AND index_state.indisready
+    ) AS expiry_redo_handoff_range_index_ready;
 
 SELECT EXISTS (
     SELECT 1

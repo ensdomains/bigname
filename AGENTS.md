@@ -22,10 +22,13 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
   events, and append-only operator diagnostics for event logs from undeclared
   emitters skipped after an ABI decode failure. Before deleting a redo range,
   Interpret may also preserve the small set of resolver references that Project
-  consumes during replay and finitely retired manifest-declared address ranges
-  that keep older observations from reopening retired authority. Those
-  resolver references, retired address ranges, and decode-failure diagnostics
-  are coordination or diagnostic state, not projection or serving data.
+  consumes during replay, logical names from state-derived ENSv2 path-expiry
+  releases that Project consumes as bounded descendant-replay
+  [expiry roots](docs/glossary.md#expiry-root), and finitely retired
+  manifest-declared address ranges that keep older observations from reopening
+  retired authority. Those resolver references, expiry-root names, retired
+  address ranges, and decode-failure diagnostics are coordination or diagnostic
+  state, not projection or serving data.
   At a completed pass boundary, Interpret also owns the
   [`discovery_watch_admissions` coordination snapshot](docs/glossary.md#discovery-watch-admission-snapshot)
   and may atomically install

@@ -322,19 +322,19 @@ async fn current_name_and_permission_counts(pool: &PgPool) -> Result<(i64, i64)>
 
 #[tokio::test]
 #[rustfmt::skip]
-async fn formerly_named_flag_only_renewal_does_not_resurrect_name_or_permissions() -> Result<()> {
+async fn formerly_named_revival_restores_permissions_without_resurrecting_name() -> Result<()> {
     let (incremental_db, incremental) = database("v2_expiry_flag_only_incremental").await?; seed_formerly_named_flag_only_renewal(&incremental).await?;
     let live = run(&incremental, 100, None).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (1, 1));
     let retired = run(&incremental, 101, Some(live)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 0));
-    run(&incremental, 102, Some(retired)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 0));
+    run(&incremental, 102, Some(retired)).await?; assert_eq!(current_name_and_permission_counts(&incremental).await?, (0, 1));
     let (fresh_db, fresh) = database("v2_expiry_flag_only_fresh").await?; seed_formerly_named_flag_only_renewal(&fresh).await?; run(&fresh, 102, None).await?;
-    assert_eq!(current_name_and_permission_counts(&fresh).await?, (0, 0)); assert_eq!(snapshot(&incremental).await?, snapshot(&fresh).await?);
+    assert_eq!(current_name_and_permission_counts(&fresh).await?, (0, 1)); assert_eq!(snapshot(&incremental).await?, snapshot(&fresh).await?);
     let (emitted_db, emitted) = database("v2_expiry_flag_only_emitted_incremental").await?; seed_formerly_named_flag_only_renewal(&emitted).await?; omit_silent_renewal_status(&emitted).await?;
     let emitted_live = run(&emitted, 100, None).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (1, 1));
     let emitted_retired = run(&emitted, 101, Some(emitted_live)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (0, 0));
-    run(&emitted, 102, Some(emitted_retired)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (0, 0));
+    run(&emitted, 102, Some(emitted_retired)).await?; assert_eq!(current_name_and_permission_counts(&emitted).await?, (0, 1));
     let (emitted_fresh_db, emitted_fresh) = database("v2_expiry_flag_only_emitted_fresh").await?; seed_formerly_named_flag_only_renewal(&emitted_fresh).await?; omit_silent_renewal_status(&emitted_fresh).await?; run(&emitted_fresh, 102, None).await?;
-    assert_eq!(current_name_and_permission_counts(&emitted_fresh).await?, (0, 0)); assert_eq!(snapshot(&emitted).await?, snapshot(&emitted_fresh).await?);
+    assert_eq!(current_name_and_permission_counts(&emitted_fresh).await?, (0, 1)); assert_eq!(snapshot(&emitted).await?, snapshot(&emitted_fresh).await?);
     emitted_fresh_db.cleanup().await?; emitted_db.cleanup().await?; fresh_db.cleanup().await?; incremental_db.cleanup().await?; Ok(())
 }
 
@@ -348,6 +348,83 @@ async fn bindingless_registered_renewal_restores_retained_permissions() -> Resul
     let (fresh_db, fresh) = database("v2_expiry_bindingless_fresh").await?; seed_formerly_named_flag_only_renewal(&fresh).await?; make_registered_lifecycle_bindingless(&fresh).await?; run(&fresh, 102, None).await?;
     assert_eq!(current_name_and_permission_counts(&fresh).await?, (0, 1)); assert_eq!(snapshot(&incremental).await?, snapshot(&fresh).await?);
     fresh_db.cleanup().await?; incremental_db.cleanup().await?; Ok(())
+}
+
+#[rustfmt::skip]
+async fn add_contested_name_holder(pool: &PgPool) -> Result<()> {
+    raw_sql(&format!(
+        "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('{GENERIC_LINEAGE}', '{CHAIN}', '{}', 102, 'canonical');
+         INSERT INTO resources (resource_id, token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('{GENERIC_RESOURCE}', '{GENERIC_LINEAGE}', '{CHAIN}', '{}', 102, 'canonical');
+         INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm,
+             active_from, active_to, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '{MAIN}', '{GENERIC_RESOURCE}',
+             'declared_registry_path', 'ens_v2', to_timestamp(1800000001), NULL,
+             '{CHAIN}', '{}', 102, 'canonical')",
+        hash(102), hash(102), hash(102),
+    )).execute(pool).await?;
+    event(
+        pool,
+        MAIN,
+        Some(GENERIC_RESOURCE),
+        102,
+        Some(0),
+        "RegistrationGranted",
+        json!({
+            "source_event":"TokenResource", "status":"registered",
+            "authority_kind":"ens_v2_registry", "registrant":OWNER,
+            "expiry":1_900_000_000_i64, "token_id":"0xcontested-holder",
+            "registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"
+        }),
+    ).await
+}
+
+#[tokio::test]
+async fn contested_name_renewal_revives_losing_resource_permissions() -> Result<()> {
+    let (database, pool) = database("v2_expiry_contested_name_revival").await?;
+    seed_formerly_named_flag_only_renewal(&pool).await?;
+    add_contested_name_holder(&pool).await?;
+
+    let live = run(&pool, 100, None).await?;
+    let retired = run(&pool, 101, Some(live)).await?;
+    assert_eq!(current_name_and_permission_counts(&pool).await?, (0, 0));
+    run(&pool, 102, Some(retired)).await?;
+
+    let current_name_resource: String =
+        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
+            .bind(MAIN)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(current_name_resource, GENERIC_RESOURCE);
+    let permission_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1::uuid")
+            .bind(RESOURCE)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        permission_count, 1,
+        "the losing resource's retained grants were not revived"
+    );
+    let summary: Value = sqlx::query_scalar(
+        "SELECT provenance FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    let stale_fields: Vec<_> = summary
+        .as_object()
+        .expect("summary provenance must be an object")
+        .keys()
+        .filter(|key| key.starts_with("expiry_retirement_"))
+        .cloned()
+        .collect();
+    assert!(
+        stale_fields.is_empty(),
+        "revived resource retained expiry retirement fields: {stale_fields:?}"
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

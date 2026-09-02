@@ -2,6 +2,33 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
+pub(super) async fn include_retracted_roots(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_scope_expiry_names
+         SELECT DISTINCT logical_name_id
+         FROM project_redo_expiry_roots
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to include deleted path-expiry logical names in Project scope",
+            error,
+        )
+    })?;
+    Ok(())
+}
+
 pub(super) async fn include_expiring_names(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

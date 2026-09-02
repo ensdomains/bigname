@@ -1037,6 +1037,47 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
     .bind(DISCOVERED_RESOLVER)
     .execute(scratch.pool())
     .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             'ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+             'ens', 'expired.eth', ARRAY['expired','eth'], decode('00','hex'),
+             '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+             ARRAY['0xexpired','0xeth'], $1, 'active', $2, $3, 501, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id,
+             block_number, block_hash, raw_fact_ref, derivation_kind,
+             canonicality_state, after_state
+         ) VALUES (
+             'retracted-expiry-root-suffix', 'ens',
+             'ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+             'RegistrationReleased', 'ens_v2_registry_l1', 1, $1, $2, 501, $3,
+             '{}'::jsonb, 'ens_v2_registry_resource_surface', 'canonical',
+             jsonb_build_object(
+                 'source_event', 'RegistryPathExpired',
+                 'derived_from', 'interpreter_state',
+                 'terminal_reason', 'registry_name_binding_expired',
+                 'status', 'released'
+             )
+         )",
+    )
+    .bind(registry_manifest_id)
+    .bind(chain)
+    .bind(block_hash(chain, 501))
+    .execute(scratch.pool())
+    .await?;
     run_project(scratch.pool(), chain, 501, 0, 501).await?;
     let projected_before: bool = sqlx::query_scalar(
         "SELECT EXISTS (
@@ -1097,6 +1138,19 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         suffix_evidence_survived,
         "redo restart replaced the original handoff with the re-derived prefix"
     );
+    let expiry_name_survived: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM project_redo_expiry_roots
+             WHERE chain_id = $1 AND event_identity = 'retracted-expiry-root-suffix'
+         )",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        expiry_name_survived,
+        "redo restart replaced the deleted path-expiry name with the re-derived prefix"
+    );
     let finished = restarted_engine
         .run_batch(BatchRequest {
             chain_id: chain.into(),
@@ -1138,12 +1192,16 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         "Project did not rebuild the discovered resolver after suffix evidence retracted"
     );
     let handoff_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM project_redo_resolver_evidence WHERE chain_id = $1",
+        "SELECT (SELECT count(*) FROM project_redo_resolver_evidence WHERE chain_id = $1)
+              + (SELECT count(*) FROM project_redo_expiry_roots WHERE chain_id = $1)",
     )
     .bind(chain)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(handoff_rows, 0, "Project did not consume the redo handoff");
+    assert_eq!(
+        handoff_rows, 0,
+        "Project did not consume both redo handoffs"
+    );
 
     scratch.cleanup().await
 }

@@ -8,9 +8,11 @@ pub(super) async fn build(
     target: &Marker,
 ) -> Result<()> {
     // Permission rows fold resource-keyed history; no output follows historical resolver pointers.
-    sqlx::query(
+    let permissions_query = [
+        "WITH ",
+        expiry_retirement::V2_RESOURCE_REVIVALS_CTE,
         r#"
-        WITH target_time AS (
+        , target_time AS (
             SELECT extract(epoch FROM lineage.block_timestamp) AS epoch_seconds
             FROM chain_lineage lineage
             WHERE lineage.chain_id = $1
@@ -98,15 +100,9 @@ pub(super) async fn build(
                       event.event_kind IN ('RegistrationGranted', 'RegistrationReserved', 'RegistrationRenewed')
                       AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
                       AND (event.event_kind <> 'RegistrationRenewed'
-                           OR (event.after_state ->> 'revived_from_expiry' = 'true' AND (
-                               (event.after_state ->> 'status' = 'reserved' AND event.after_state ->> 'reservation_resource' = 'true')
-                               OR COALESCE((SELECT expiry.logical_name_id IS NULL FROM project_events expiry
-                                   WHERE expiry.resource_id = event.resource_id AND expiry.event_kind = 'RegistrationReleased'
-                                     AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired'
-                                     AND expiry.after_state ->> 'derived_from' = 'interpreter_state'
-                                     AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
-                                     AND (expiry.block_number, expiry.normalized_event_id) < (event.block_number, event.normalized_event_id)
-                                   ORDER BY expiry.block_number DESC, expiry.normalized_event_id DESC LIMIT 1), FALSE))))
+                           OR event.normalized_event_id IN (
+                               SELECT normalized_event_id FROM v2_resource_revivals
+                           ))
                   )
                   OR (event.event_kind = 'RegistrationReleased' AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
                       AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
@@ -377,13 +373,15 @@ pub(super) async fn build(
           )
         ORDER BY event.resource_id, event.subject, event.scope
         "#,
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(&target.hash)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to build permissions_current", error))?;
+    ]
+    .concat();
+    sqlx::query(&permissions_query)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to build permissions_current", error))?;
     let resource_summary_query = [
         r#"
         WITH resource_event_candidates AS (
@@ -493,6 +491,8 @@ pub(super) async fn build(
                      event.normalized_event_id DESC
         ),
         "#,
+        expiry_retirement::V2_RESOURCE_REVIVALS_CTE,
+        ",",
         expiry_retirement::CTE,
         r#",
         resource_authority AS (

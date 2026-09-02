@@ -72,7 +72,7 @@ async fn seed_names(
     .map_err(|error| ProjectError::database("failed to retain retracted name scope", error))?;
     sqlx::query(
         r#"
-        INSERT INTO project_scope_names
+        INSERT INTO project_scope_expiry_names
         SELECT DISTINCT event.logical_name_id
         FROM normalized_events event
         JOIN chain_lineage lineage
@@ -101,6 +101,7 @@ async fn seed_names(
     .map_err(|error| {
         ProjectError::database("failed to retain orphaned expiry name scope", error)
     })?;
+    super::expiry::include_retracted_roots(transaction, chain_id, from_block, to_block).await?;
     super::expiry::include_expiring_names(
         transaction,
         chain_id,
@@ -430,6 +431,21 @@ pub(super) async fn consume(
     .map_err(|error| {
         ProjectError::database(
             "failed to consume resolver evidence during Project publication",
+            error,
+        )
+    })?;
+    sqlx::query(
+        "DELETE FROM project_redo_expiry_roots
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3",
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to consume path-expiry logical names during Project publication",
             error,
         )
     })?;

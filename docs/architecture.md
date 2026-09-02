@@ -1381,13 +1381,15 @@ marks a displaced readable lineage branch `orphaned` and promotes the selected
 branch; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
 identity, discovery, and normalized-event output for its selected range, except
-for two bounded kinds of coordination state carried across redo preparation.
+for three bounded kinds of coordination state carried across redo preparation.
 It preserves the resolver references that Project needs to find projection rows
-affected by disappearing events, and finitely retired manifest-declared address
+affected by disappearing events, logical names from state-derived ENSv2
+path-expiry releases that Project needs as bounded descendant-replay [expiry
+roots](glossary.md#expiry-root), and finitely retired manifest-declared address
 ranges that prevent replay of older observations from reopening retired
-authority. Project consumes the resolver references during redo or later normal
-catch-up publication; Interpret uses the retired address boundary while
-rewriting discovery output.
+authority. Project consumes the resolver references and expiry-root names during
+redo or later normal catch-up publication; Interpret uses the retired address
+boundary while rewriting discovery output.
 
 The live phase uses the same head-publication transaction as ingest. That
 transaction orphans the displaced suffix, clears affected active resolution

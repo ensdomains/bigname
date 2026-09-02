@@ -1,3 +1,46 @@
+pub(super) const V2_RESOURCE_REVIVALS_CTE: &str = r#"
+v2_resource_revivals AS (
+    SELECT renewal.normalized_event_id
+    FROM project_events renewal
+    WHERE renewal.resource_id IS NOT NULL
+      AND renewal.event_kind = 'RegistrationRenewed'
+      AND renewal.source_family IN (
+          'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
+      )
+      AND renewal.after_state ->> 'revived_from_expiry' = 'true'
+      AND EXISTS (
+          SELECT 1
+          FROM project_events expiry
+          WHERE expiry.resource_id = renewal.resource_id
+            AND expiry.event_kind = 'RegistrationReleased'
+            AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired'
+            AND expiry.after_state ->> 'derived_from' = 'interpreter_state'
+            AND expiry.after_state ->> 'terminal_reason' =
+                'registry_name_binding_expired'
+            AND (
+                expiry.block_number < renewal.block_number
+                OR (
+                    expiry.block_number = renewal.block_number
+                    AND CASE
+                        WHEN expiry.transaction_index IS NULL
+                          OR renewal.transaction_index IS NULL
+                          OR expiry.log_index IS NULL
+                          OR renewal.log_index IS NULL
+                            THEN expiry.normalized_event_id < renewal.normalized_event_id
+                        ELSE ROW(
+                            expiry.transaction_index, expiry.log_index,
+                            expiry.normalized_event_id
+                        ) < ROW(
+                            renewal.transaction_index, renewal.log_index,
+                            renewal.normalized_event_id
+                        )
+                    END
+                )
+            )
+      )
+)
+"#;
+
 pub(super) const CTE: &str = r#"
 expiry_retirements AS (
     SELECT DISTINCT ON (event.resource_id) event.resource_id, event.normalized_event_id,
@@ -38,44 +81,8 @@ expiry_retirements AS (
                 restoration.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
                 OR (
                     restoration.event_kind = 'RegistrationRenewed'
-                    AND restoration.after_state ->> 'revived_from_expiry' = 'true'
-                    AND (
-                        (restoration.after_state ->> 'status' = 'reserved'
-                         AND restoration.after_state ->> 'reservation_resource' = 'true')
-                        OR COALESCE((
-                            SELECT expiry.logical_name_id IS NULL
-                            FROM project_events expiry
-                            WHERE expiry.resource_id = restoration.resource_id
-                              AND expiry.event_kind = 'RegistrationReleased'
-                              AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired'
-                              AND expiry.after_state ->> 'derived_from' = 'interpreter_state'
-                              AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
-                              AND (
-                                  expiry.block_number < restoration.block_number
-                                  OR (
-                                      expiry.block_number = restoration.block_number
-                                      AND CASE
-                                          WHEN expiry.transaction_index IS NULL
-                                            OR restoration.transaction_index IS NULL
-                                            OR expiry.log_index IS NULL
-                                            OR restoration.log_index IS NULL
-                                              THEN expiry.normalized_event_id < restoration.normalized_event_id
-                                          ELSE ROW(
-                                              expiry.transaction_index, expiry.log_index,
-                                              expiry.normalized_event_id
-                                          ) < ROW(
-                                              restoration.transaction_index, restoration.log_index,
-                                              restoration.normalized_event_id
-                                          )
-                                      END
-                                  )
-                              )
-                            ORDER BY expiry.block_number DESC NULLS LAST,
-                                     expiry.transaction_index DESC NULLS LAST,
-                                     expiry.log_index DESC NULLS LAST,
-                                     expiry.normalized_event_id DESC
-                            LIMIT 1
-                        ), FALSE)
+                    AND restoration.normalized_event_id IN (
+                        SELECT normalized_event_id FROM v2_resource_revivals
                     )
                 )
             )

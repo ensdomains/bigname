@@ -15647,6 +15647,17 @@ async fn normal_catchup_consumes_redo_evidence_above_the_prior_project_head() ->
     // The re-derived event keeps its identity but changes the resolver address.
     capture_resolver_redo_evidence(scratch.pool(), CHAIN, 4, 4).await?;
     sqlx::query(
+        "INSERT INTO project_redo_expiry_roots (
+             chain_id, event_identity, block_number, logical_name_id
+         ) VALUES (
+             $1, 'catchup-path-expiry-name', 4,
+             'ens:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+         )",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
         "UPDATE normalized_events
          SET after_state = jsonb_build_object('resolver', lower($2))
          WHERE chain_id = $1 AND block_number = 4
@@ -15681,6 +15692,15 @@ async fn normal_catchup_consumes_redo_evidence_above_the_prior_project_head() ->
     assert!(
         second_projected,
         "normal catch-up did not publish the re-derived resolver"
+    );
+    let expiry_handoff_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM project_redo_expiry_roots WHERE chain_id = $1")
+            .bind(CHAIN)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(
+        expiry_handoff_rows, 0,
+        "normal catch-up did not consume the path-expiry name handoff"
     );
 
     // A later redo removes that same event. Its fresh resolver address must replace the
@@ -17596,6 +17616,7 @@ async fn ancestor_expiry_release_redo_restores_descendant_with_later_local_expir
         "project_ancestor_expiry_reorg",
         None,
         "RegistrationGranted",
+        false,
     )
     .await
 }
@@ -17607,6 +17628,7 @@ async fn ancestor_expiry_release_redo_restores_descendant_after_replacement_rene
         "project_ancestor_expiry_reorg_renewed",
         Some((2, 200)),
         "RegistrationGranted",
+        false,
     )
     .await
 }
@@ -17617,6 +17639,7 @@ async fn ancestor_expiry_subrange_redo_restores_descendant_after_later_renewal()
         "project_ancestor_expiry_subrange_renewed",
         Some((3, 200)),
         "RegistrationGranted",
+        false,
     )
     .await
 }
@@ -17627,6 +17650,19 @@ async fn ancestor_expiry_release_redo_restores_reserved_descendant_subtree() -> 
         "project_ancestor_expiry_reserved_reorg",
         None,
         "RegistrationReserved",
+        false,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn orphaned_shortened_ancestor_expiry_restores_descendants_after_interpret_redo() -> Result<()>
+{
+    assert_ancestor_expiry_release_redo_restores_descendant(
+        "project_ancestor_orphan_only_expiry_reorg",
+        None,
+        "RegistrationGranted",
+        true,
     )
     .await
 }
@@ -17635,6 +17671,7 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     fixture_name: &str,
     replacement_parent_renewal: Option<(i64, i64)>,
     child_registration_kind: &str,
+    orphan_only_shortening: bool,
 ) -> Result<()> {
     const CHAIN: &str = "project-ancestor-expiry-reorg";
     const PARENT: &str = "ens:0x8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f";
@@ -17662,6 +17699,7 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     let fresh = ScratchDatabase::create(&format!("{fixture_name}_fresh")).await?;
 
     for pool in [incremental.pool(), fresh.pool()] {
+        declare_sepolia_post_audit_profile(pool, CHAIN).await?;
         for (number, timestamp) in [(0_i64, 0_i64), (1, 10), (2, 30), (3, 40)] {
             sqlx::query(
                 "INSERT INTO chain_lineage (
@@ -17793,13 +17831,32 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             "ens_v2_root_l1",
             json!({
                 "status":"registered",
-                "expiry":20,
+                "expiry":if orphan_only_shortening { 200 } else { 20 },
                 "token_id":"0xparent",
                 "registry":"0xrootregistry"
             }),
             json!({"fixture":"ancestor-expiry-parent-registration"}),
         )
         .await?;
+        if orphan_only_shortening {
+            insert_event(
+                pool,
+                CHAIN,
+                2,
+                Some(PARENT),
+                None,
+                "ExpiryChanged",
+                "ens_v2_root_l1",
+                json!({
+                    "source_event":"ExpiryUpdated",
+                    "expiry":20,
+                    "token_id":"0xparent",
+                    "registry":"0xrootregistry"
+                }),
+                json!({"fixture":"ancestor-expiry-orphaned-shortening"}),
+            )
+            .await?;
+        }
         insert_event(
             pool,
             CHAIN,
@@ -18151,10 +18208,6 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
         .bind(CHAIN)
         .execute(pool)
         .await?;
-        sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1 AND block_number = 2")
-            .bind(CHAIN)
-            .execute(pool)
-            .await?;
         sqlx::query(
             "INSERT INTO chain_lineage (
                  chain_id, block_hash, parent_hash, block_number,
@@ -18168,6 +18221,16 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
         .bind(block_hash(CHAIN, 1))
         .execute(pool)
         .await?;
+        let interpret = InterpretEngine::new(pool.clone())
+            .run_batch(InterpretRequest {
+                chain_id: CHAIN.into(),
+                from_block: 2,
+                to_block: 3,
+                resume_current: None,
+                mode: InterpretRunMode::Redo,
+            })
+            .await?;
+        assert!(interpret.complete);
         if let Some((renewal_block, expiry)) = replacement_parent_renewal {
             insert_event(
                 pool,
@@ -18314,6 +18377,19 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
             .fetch_one(incremental.pool())
             .await?;
     assert_eq!(released_name, "released-sentinel-unchanged.eth");
+
+    for pool in [incremental.pool(), fresh.pool()] {
+        let expiry_handoff_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM project_redo_expiry_roots WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            expiry_handoff_rows, 0,
+            "Project publication did not consume the path-expiry name handoff"
+        );
+    }
 
     incremental.cleanup().await?;
     fresh.cleanup().await

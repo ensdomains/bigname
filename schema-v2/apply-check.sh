@@ -171,7 +171,8 @@ for migration_file in \
     "$ROOT/migrations/20260826120000_interpret_decode_skip_audit.sql" \
     "$ROOT/migrations/20260826120100_manifest_applied_change_count.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
-    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql"
+    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
+    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -319,7 +320,9 @@ for migration_file in \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql" \
     "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
-    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql"
+    "$ROOT/migrations/20260831140000_discovery_watch_admissions.sql" \
+    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql" \
+    "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -517,6 +520,76 @@ END
 $$;
 DELETE FROM normalized_events
 WHERE event_identity = 'redo-handoff-upgrade-sentinel';
+SQL
+} | run_psql
+
+# Exercise the initialized pre-change schema branch for the bounded logical-name
+# handoff. Existing normalized events must survive while the schema-migration
+# adds the table, its closed checks, and its range index.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+INSERT INTO normalized_events (
+    event_identity, namespace, event_kind, source_family,
+    manifest_version, chain_id, derivation_kind, canonicality_state
+) VALUES (
+    'expiry-redo-handoff-upgrade-sentinel', 'schema-v2-check',
+    'SourceManifestUpdated', 'schema-check', 1, 'schema-v2-check',
+    'manifest_sync', 'finalized'
+);
+DROP TABLE project_redo_expiry_roots;
+SQL
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260902120000_project_redo_expiry_roots.sql"
+    cat <<'SQL'
+DO $$
+DECLARE
+    constraint_count bigint;
+    index_is_ready boolean;
+BEGIN
+    IF to_regclass(current_schema() || '.project_redo_expiry_roots') IS NULL THEN
+        RAISE EXCEPTION
+            'initialized-schema upgrade did not create path-expiry name handoff';
+    END IF;
+
+    SELECT count(*)
+    INTO constraint_count
+    FROM pg_constraint constraint_row
+    WHERE constraint_row.conrelid = 'project_redo_expiry_roots'::regclass
+      AND constraint_row.contype IN ('p', 'c');
+    IF constraint_count <> 3 THEN
+        RAISE EXCEPTION
+            'initialized-schema path-expiry name handoff has % required constraints, expected 3',
+            constraint_count;
+    END IF;
+
+    SELECT index_state.indisvalid
+       AND index_state.indisready
+       AND index_state.indislive
+    INTO index_is_ready
+    FROM pg_class index_relation
+    JOIN pg_namespace namespace
+      ON namespace.oid = index_relation.relnamespace
+    JOIN pg_index index_state
+      ON index_state.indexrelid = index_relation.oid
+    WHERE namespace.nspname = current_schema()
+      AND index_relation.relname = 'project_redo_expiry_roots_range_idx';
+    IF index_is_ready IS DISTINCT FROM true THEN
+        RAISE EXCEPTION
+            'initialized-schema path-expiry name handoff index is not ready';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM normalized_events
+        WHERE event_identity = 'expiry-redo-handoff-upgrade-sentinel'
+    ) THEN
+        RAISE EXCEPTION
+            'initialized-schema path-expiry name handoff changed normalized data';
+    END IF;
+END
+$$;
+DELETE FROM normalized_events
+WHERE event_identity = 'expiry-redo-handoff-upgrade-sentinel';
 SQL
 } | run_psql
 
@@ -1118,6 +1191,7 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_generation_failures'),
+            ('project_redo_expiry_roots'),
             ('project_redo_resolver_evidence'),
             ('permissions_current'),
             ('permissions_current_resource_summary'),
@@ -1174,6 +1248,7 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_generation_failures'),
+            ('project_redo_expiry_roots'),
             ('project_redo_resolver_evidence'),
             ('permissions_current'),
             ('permissions_current_resource_summary'),

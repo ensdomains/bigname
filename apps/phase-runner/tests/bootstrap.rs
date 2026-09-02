@@ -835,6 +835,46 @@ async fn interpret_decode_skip_audit_matches_between_baseline_and_schema_migrati
     migrated.cleanup().await
 }
 
+#[tokio::test]
+async fn expiry_root_handoff_matches_between_baseline_and_schema_migration() -> Result<()> {
+    let migrated = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_expiry_root_handoff_migration")
+            .pool_max_connections(2),
+    )
+    .await?;
+    sqlx::raw_sql(
+        "CREATE SCHEMA bigname_phase;
+         CREATE TABLE bigname_phase.normalized_events (stub bigint)",
+    )
+    .execute(migrated.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260902120000_project_redo_expiry_roots.sql"
+    ))
+    .execute(migrated.pool())
+    .await?;
+    let migrated_structure =
+        load_table_structure(migrated.pool(), "project_redo_expiry_roots").await?;
+
+    let installed = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_expiry_root_handoff_baseline")
+            .pool_max_connections(2),
+    )
+    .await?;
+    initialize_schema_v2(installed.pool()).await?;
+    let installed_structure =
+        load_table_structure(installed.pool(), "project_redo_expiry_roots").await?;
+
+    assert!(!installed_structure.is_empty());
+    assert_eq!(
+        migrated_structure, installed_structure,
+        "the expiry-root handoff migration and baseline must stay identical"
+    );
+
+    installed.cleanup().await?;
+    migrated.cleanup().await
+}
+
 /// Both installation paths admit the exact-name kind slice 2E records and the
 /// child kind slice 3B adds, and refuse anything else.
 async fn assert_failure_kind_vocabulary(pool: &sqlx::PgPool) -> Result<()> {
