@@ -1,8 +1,10 @@
 # GraphQL Compatibility Oracle
 
-The oracle compares bigname offline with one pinned ENS subgraph observation. The provisional local-mock fixture
-proves only the operator path; a steward must refresh it before merge. Its `Domain` shape is pinned (upstream:
-.refs/ens_subgraph/schema.graphql:L1-L43 @ ens_subgraph@723f1b6).
+The oracle compares bigname offline with one pinned ENS subgraph observation. The fixture was captured from pinned
+deployment `QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ` at block 23000000 on 2026-09-02, with the
+pinned-schema verification recorded in its provenance. Refreshes follow the [reviewed refresh
+policy](development.md#graphql-compatibility-fixture-refresh). Its `Domain` shape is pinned (upstream:
+.refs/ens_subgraph/schema.graphql:L1-L46 @ ens_subgraph@723f1b6).
 
 ## Covered surface
 
@@ -16,9 +18,9 @@ Each difference has an exact path or bounded scope, status, GitHub issue/task id
 not affect matching; wildcards, conflicts, unknown paths, and stale entries invalidate the fixture.
 
 Upstream-only fields on a shared type require exact field entries; a type-wide entry is valid only when the whole type is
-absent locally. The one bounded exception is an upstream-only `Query` entity field: when its return type is an object with
-an `id` field in `known_upstream_types`, the root field inherits that entity type's owner. An upstream-only argument
-inherits its parent field's disposition, never the parent type's, so a new argument on a claimed field still fails. An
+absent locally. The one bounded exception is an upstream-only `Query` entity field: when its return type, after list and
+non-null wrappers are unwrapped, is a censused object with an `id` field, the root field inherits that type's owner. An
+upstream-only argument inherits its parent field's disposition, never the parent type's, so a new argument on a claimed field still fails. An
 upstream-only enum value inherits the owner of its enum type in `known_upstream_types`; a value whose enum type is absent
 from that census still fails.
 

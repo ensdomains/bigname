@@ -190,6 +190,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Sync pinned upstream checkouts
+        if: matrix.name == 'api'
+        run: |
+          scripts/sync-refs
+          scripts/sync-refs --check
+
       - name: Verify GraphQL oracle tooling (offline)
         if: matrix.name == 'api'
         run: |

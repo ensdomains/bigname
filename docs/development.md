@@ -100,8 +100,8 @@ scripts/graphql-compat-oracle verify-fixtures --offline
 
 The verifier and Rust oracle tests reject local-stub provenance by default. For tool development only, a developer
 may opt into a provisional fixture for one command with
-`BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE=1`; CI must never set this variable. The checked-in gate remains red until
-an operator completes the live refresh above.
+`BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE=1`; CI must never set this variable. The checked-in live fixture passes this
+gate without the escape.
 
 The Rust command creates and seeds its own API database at the captured block. `compare` is an optional check for a
 separately prepared API whose served head equals that block; the API's default local address is

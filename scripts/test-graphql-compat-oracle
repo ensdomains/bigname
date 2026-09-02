@@ -49,7 +49,10 @@ query_fields = [
 ]
 types.append(obj("Query",query_fields)); schema={"types":types,"queryType":{"name":"Query"},"mutationType":None,"subscriptionType":None,"directives":[]}
 
-pinned_sdl=(root/".refs/ens_subgraph/schema.graphql").read_text()
+pinned_schema=root/".refs/ens_subgraph/schema.graphql"
+if not pinned_schema.is_file():
+ raise SystemExit("missing .refs/ens_subgraph/schema.graphql; run scripts/sync-refs")
+pinned_sdl=pinned_schema.read_text()
 entity_names=re.findall(r"^type\s+(\w+).*?@entity\b",pinned_sdl,re.MULTILINE)
 interface_names=re.findall(r"^interface\s+(\w+)\b",pinned_sdl,re.MULTILINE)
 existing={typ["name"] for typ in types}

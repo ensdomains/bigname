@@ -448,7 +448,7 @@ define it without inventing in-process filtering.
 
 `_meta(block:)` reports the served head used by entity reads, including its
 number, timestamp, and parent hash. Its hash is present for an unconstrained or
-hash-constrained selection and may be `null` for a number-constrained selection;
+hash-constrained selection and is `null` for a number-constrained selection;
 the initial oracle pin asserts only the block number in that case. All root fields within one HTTP
 GraphQL request share one request-scoped served-head selection. `deployment` is the interpreter
 [content hash](glossary.md#interpreter-content-hash) for the serving binary.
