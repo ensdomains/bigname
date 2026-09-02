@@ -46,13 +46,14 @@ compatibility layer for this contract.
 Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements `domain`, `domains`, `registrationConnection`, and `domainConnection` over `bigname_phase.name_current`, `bigname_phase.address_names_current`, and `bigname_phase.record_inventory_current` [projections](glossary.md), plus `_meta` for the served publication. Entity reads accept the subgraph-shaped `block` and `subgraphError` arguments, while the current execution boundary remains the [served head](glossary.md#served-head) rather than historical projection reads. All root fields in one HTTP GraphQL request share one served-head selection. Reads admit unchanged rows whose target is at or before that position, carry the same selection into nested record-inventory fields, and verify before returning that the matching completed `project` phase row did not change. Rows whose projection support status is `unsupported` are not exposed; an unsupported record inventory maps to the compatibility surface's existing empty record shapes. GraphQL `createdAt` uses a declared registration or history timestamp; when neither exists, it preserves the non-null response field with Unix epoch `0` because the current phase projection has no legacy surface-creation timestamp. `createdAt` and `expiryDate` are decimal-string `BigInt` values. The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
 
 Manager name inputs have ENS name semantics rather than display-string equality.
-`domain(id: ...)` and `DomainFilter.name` normalize a name, compute its
-namehash, and match that hash, so `ALICE.eth` resolves the same ENS name as
-`alice.eth`. An `id` already shaped as a namehash is matched only within the
-`ens` namespace. `name_contains` is ENSIP-15 normalized at the GraphQL boundary
-and then compared byte-for-byte with the stored normalized name; invalid input
-returns a GraphQL error. A single trailing dot remains preserved after
-normalization as a label boundary. One leading dot is also accepted when it is
+`domain(id: ...)`, generated-root `Domain_filter.name`, and legacy-connection
+`DomainFilter.name` normalize a name, compute its namehash, and match that hash,
+so `ALICE.eth` resolves the same ENS name as `alice.eth`. An `id` already shaped
+as a namehash is matched only within the `ens` namespace. `name_contains` is
+ENSIP-15 normalized at the GraphQL boundary and then compared byte-for-byte with
+the stored normalized name; invalid input returns a GraphQL error. A single
+trailing dot remains preserved after normalization as a label boundary. One
+leading dot is also accepted when it is
 followed by a nonempty fragment that does not begin with another dot. The
 following fragment is normalized as usual, and the leading dot is preserved for
 matching. Thus `.eth`, `eth.`, `.eth.`, and `th.e` are accepted contains
@@ -1400,13 +1401,17 @@ displaced readable lineage branch `orphaned` before making the selected branch
 readable; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
 identity, discovery, and normalized-event output for its selected range, except
-for two bounded kinds of coordination state carried across redo preparation.
+for three bounded kinds of coordination state carried across redo preparation.
 It preserves the resolver references that Project needs to find projection rows
-affected by disappearing events, and finitely retired manifest-declared address
-ranges that prevent replay of older observations from reopening retired
-authority. Project consumes the resolver references during redo or later normal
-catch-up publication; Interpret uses the retired address boundary while
-rewriting discovery output.
+affected by disappearing events, the available logical-name and
+permission-resource identifiers from state-derived ENSv2 path-expiry releases,
+and finitely retired manifest-declared address ranges that prevent replay of
+older observations from reopening retired authority. Project consumes the
+resolver references and preserved release identifiers in the covering redo or
+later normal catch-up publication: logical names seed bounded descendant replay
+as [expiry roots](glossary.md#expiry-root), while permission resources force a
+resource rebuild. Interpret uses the retired address boundary while rewriting
+discovery output.
 
 The live phase uses the same head-publication transaction as ingest. That
 transaction orphans the displaced suffix, clears affected active resolution

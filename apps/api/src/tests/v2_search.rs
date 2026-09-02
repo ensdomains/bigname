@@ -819,7 +819,7 @@ async fn v2_search_bare_request_recovers_when_publication_becomes_ready() -> Res
 }
 
 #[tokio::test]
-async fn v2_search_discloses_interpret_redo_for_bare_and_explicit_namespace_requests()
+async fn v2_search_suppresses_bare_redo_scope_but_refuses_explicit_redo_scope()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
@@ -827,6 +827,12 @@ async fn v2_search_discloses_interpret_redo_for_bare_and_explicit_namespace_requ
     database
         .simulate_interpret_redo_begin("base-mainnet", "recompute_flags")
         .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state SET current_block_number = current_block_number - 1
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
     let state = AppState::new_with_rpc_urls(
         database.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),
@@ -872,30 +878,10 @@ async fn v2_search_discloses_interpret_redo_for_bare_and_explicit_namespace_requ
                 .expect("explicit search request must build"),
         )
         .await?;
-    assert_eq!(explicit_response.status(), StatusCode::OK);
+    assert_eq!(explicit_response.status(), StatusCode::CONFLICT);
     let explicit_payload: Value = read_json(explicit_response).await?;
-    assert_eq!(
-        v2_search_names(
-            explicit_payload["data"]
-                .as_array()
-                .expect("explicit search data")
-        ),
-        vec!["alpha.base.eth"]
-    );
-    assert!(explicit_payload["meta"].get("as_of").is_none());
-    assert_eq!(
-        explicit_payload["meta"]["as_of_completeness"]["8453"],
-        json!({
-            "completeness": "unsupported",
-            "unsupported_reason": "temporarily_unavailable"
-        })
-    );
-    assert!(
-        explicit_payload["meta"]["as_of_completeness"]
-            .get("1")
-            .is_none(),
-        "an explicit Basenames request must not disclose out-of-scope Ethereum"
-    );
+    assert_eq!(explicit_payload["error"]["code"], json!("stale"));
+    assert!(explicit_payload.get("data").is_none());
 
     database.cleanup().await
 }
@@ -1094,6 +1080,41 @@ async fn v2_search_explicit_namespace_rejects_a_position_change_after_the_page_r
 }
 
 #[tokio::test]
+async fn v2_search_explicit_unpublished_scope_rejects_completed_redo_during_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state SET current_block_number = current_block_number - 1
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .body(Body::empty())
+                    .expect("explicit search request must build"),
+            )
+            .await
+    });
+    control.wait_until_reached().await;
+    database.simulate_interpret_redo_begin("ethereum-mainnet", "redo").await?;
+    database.simulate_interpret_redo_finish("ethereum-mainnet").await?;
+    control.resume().await;
+    let response = request_task.await.context("search request task panicked")??;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "payload: {payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_explicit_namespace_rejects_a_head_change_while_suppressed() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
@@ -1154,6 +1175,71 @@ async fn v2_search_explicit_namespace_rejects_a_head_change_while_suppressed() -
 }
 
 #[tokio::test]
+async fn v2_search_explicit_namespace_reports_publication_readiness_change_as_conflict()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let (_selection_guard, selection_control) =
+        crate::v2::search_public_namespace_read_test_hooks::install_at(
+            &database.lookup_pool,
+            crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::AfterExplicitSelection,
+        )
+        .await?;
+    let (_fallback_guard, fallback_control) =
+        crate::v2::search_public_namespace_read_test_hooks::install_at(
+            &database.lookup_pool,
+            crate::v2::search_public_namespace_read_test_hooks::ReadHookPoint::BeforeUnfencedGenerations,
+        )
+        .await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .body(Body::empty())
+                    .expect("explicit search request must build"),
+            )
+            .await
+    });
+
+    selection_control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET current_block_number = current_block_number - 1,
+             current_block_hash = '0xsearch-explicit-unpublished'
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    selection_control.resume().await;
+    fallback_control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state project
+         SET current_block_number = head.latest_block_number,
+             current_block_hash = head.latest_block_hash
+         FROM bigname_phase.chain_heads head
+         WHERE project.chain_id = head.chain_id
+           AND project.chain_id = 'ethereum-mainnet'
+           AND project.phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    fallback_control.resume().await;
+
+    let response = request_task
+        .await
+        .context("explicit search readiness request task panicked")?
+        .context("explicit search readiness request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "payload: {payload}");
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_explicit_namespace_rejects_project_republication_after_the_page_read()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -1196,7 +1282,8 @@ async fn v2_search_explicit_namespace_rejects_project_republication_after_the_pa
 }
 
 #[tokio::test]
-async fn v2_search_rejects_interpret_redo_during_public_read() -> Result<()> {
+async fn v2_search_bare_namespace_returns_conflict_when_interpret_redo_begins_during_read()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
     seed_v2_search_public_authority(&database).await?;
@@ -1242,11 +1329,69 @@ async fn v2_search_rejects_interpret_redo_during_public_read() -> Result<()> {
 
     let response = request_task
         .await
+        .context("bare search Interpret-redo request task panicked")?
+        .context("bare search Interpret-redo request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+    assert!(payload.get("data").is_none(), "no partial page may be served");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_explicit_namespace_returns_stale_when_interpret_redo_begins_during_read()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_v2_search_public_authority(&database).await?;
+    let project_before = database
+        .phase_state_fingerprint("ethereum-mainnet", "project")
+        .await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha&namespace=ens")
+                    .body(Body::empty())
+                    .expect("search request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    database
+        .simulate_interpret_redo_begin("ethereum-mainnet", "redo")
+        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_surfaces
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND raw_name = 'alpha.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(
+        database
+            .phase_state_fingerprint("ethereum-mainnet", "project")
+            .await?,
+        project_before,
+        "the simulated Interpret redo must not update Project"
+    );
+    control.resume().await;
+
+    let response = request_task
+        .await
         .context("search Interpret-redo request task panicked")?
         .context("search Interpret-redo request failed")?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("conflict"));
+    assert_eq!(payload["error"]["code"], json!("stale"));
     assert!(payload.get("data").is_none(), "no partial page may be served");
 
     database.cleanup().await

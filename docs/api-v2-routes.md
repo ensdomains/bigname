@@ -74,7 +74,9 @@ resume from the same normalized-event keyset anchor with identical remaining
 product rows, pages, fields, `has_more`, and summary behavior. Because that
 anchor may be an unmapped event absent from the response, the corpus places an
 unmapped normalized event at a product-page boundary and proves no visible row
-is skipped or duplicated. `/v2/diagnostics/events` must accept its old cursor
+is skipped or duplicated. This default product-event exception does not remove
+an explicitly requested `type` from cursor anchor validation.
+`/v2/diagnostics/events` must accept its old cursor
 and continue from the same stable normalized-event anchor, but its remaining
 rows and fields may include the expected new candidate diagnostics.
 The numeric `normalized_event_id` of a pre-existing diagnostic row may change
@@ -181,6 +183,22 @@ Field ownership:
   serializes as `owner,manager,registrant` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
+  A name result classified as `registration_status=unregistered` always omits
+  `registration_id`. It also omits `resolver` and resolver-record fields unless
+  it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  That classified row serves its resolver without acquiring registration
+  identity or control. Indexed records are served when its serving resource has
+  inventory.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
+  An ownerless ENSv2 reservation does not meet this exception, even if identity
+  attached to a resource or record inventory was retained for audit. This
+  intentionally differs from ENSv2, which stores and returns a reservation
+  resolver until expiry.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
   standard `page` object inside each result. Detail and feed use identical
   pagination semantics; feed only reduces returned fields. Reverse inputs
@@ -193,7 +211,9 @@ Field ownership:
   returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
-  `invalid_name`. Reverse misses return `status=ok` with an empty `records`
+  `invalid_name`. Name-only and exact-scope latest reads return retryable `409
+  stale` when the selected namespace is undergoing an Interpret redo. Reverse
+  misses return `status=ok` with an empty `records`
   array for the input. Lookup record-level reason values are mapped to product
   vocabulary before serialization; current values include `read_failed`,
   `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
@@ -277,12 +297,15 @@ Field ownership:
   signature, and the `canonicality_state` type. If any are missing, the API
   refuses to start and its diagnostic names every missing identity.
 - The existing per-chain `status` field also maps the `project` phase
-  lifecycle, redo marker, and newest per-chain
+  lifecycle and redo marker, the Interpret `redo_in_progress` marker, and the
+  newest per-chain
   `bigname_phase.service_heartbeats` timestamp. A phase row that startup
   settled while its chain was unconfigured is not eligible for `ready` until
   genuine phase completion or completed-state revalidation clears that marker.
   It reports `degraded` unless a stronger `stale` condition applies, such as a
-  genuinely failed phase or an expired heartbeat.
+  genuinely failed phase or an expired heartbeat. An active Interpret redo
+  makes the chain `degraded`; `data.status` continues to report the worst
+  readiness across all chains.
   Ethereum Sepolia is ineligible for `ready` unless its `ingest` phase
   remains `completed` and its [verification](glossary.md#verification-level)
   phase is `completed` at a known level at or above the `quick_synced` floor; unknown stored levels fail closed. A failed Ingest or Verify, or an ordinary completed Verify without that
@@ -416,13 +439,32 @@ Field ownership:
   `namehash`, `status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
+  A row classified as `registration_status=unregistered` always omits
+  `registration_id`. It also omits `resolver` and resolver-record fields unless
+  it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  For that classified row, indexed name detail serves the resolver and records
+  present in its serving resource's inventory. `source=verified` executes lookup
+  through the surviving resolver when the ordinary lookup capability supports
+  it. Neither path acquires registration identity or control. An ownerless ENSv2
+  reservation does not meet this exception, even if identity attached to a
+  resource or record inventory was retained for audit. This intentionally
+  differs from ENSv2, which stores and returns a reservation resolver until
+  expiry.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   For `source=indexed`, a row classified as
   `current_authority_not_projected` remains `status=ok` for the identity and
   registration fields that can be served, but omits `resolver`; retained
   resolver-pointer evidence is not presented as current authority.
-  A registry-only V1 name whose [getter-visible owner](glossary.md#getter-visible-owner) is zero is instead supported and
-  unregistered. When a current event-linked nonzero registry resolver pointer survives, name
-  detail includes that resolver while registration and control fields remain absent.
+  An ownerless ENSv1 or Basenames registry row with a zero [getter-visible
+  owner](glossary.md#getter-visible-owner) is instead supported and unregistered.
+  When a current event-linked nonzero registry resolver pointer survives, name
+  detail includes that resolver while registration and control fields remain
+  absent.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -466,9 +508,59 @@ Field ownership:
   connect, DNS, TLS, connection-reset, and other transport
   failures abort the whole request with `500 internal_error`; they are not
   per-key stale answers and `source=auto` does not return a partial blend.
+  A name with no current registration returns no declared resolver or retained
+  record values and does not execute verified lookup unless it is
+  an ownerless ENSv1 or Basenames registry row whose current registry resolver
+  pointer is retained (a [serving resource](glossary.md#serving-resource)).
+  That classified row serves its resolver and any records present in its serving
+  resource's inventory. Verified lookup runs through the surviving resolver
+  when the ordinary lookup capability supports it. An ownerless ENSv2
+  reservation does not meet this exception. `include=inventory` does not expose
+  inventory retained for a former or audit-only resource. This intentionally
+  omits the resolver that ENSv2 can store and return for an unexpired
+  reservation.
+  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  basis.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   Product records use product reason vocabulary: retained-selector misses use
   `value_not_retained`, and phase-unsupported record families use
   `record_family_not_supported`.
+
+  Representative keyed answers and convenience fields are:
+
+  ```json
+  {
+    "addresses": {
+      "0": "0x001122"
+    },
+    "content_hash": "0xe3010170",
+    "records": {
+      "contenthash": {
+        "status": "ok",
+        "value": "0xe3010170"
+      },
+      "addr:0": {
+        "status": "ok",
+        "value": "0x001122"
+      },
+      "addr:2": {
+        "status": "not_found"
+      }
+    }
+  }
+  ```
+
+  Coin types in record keys and the `addresses` map are decimal strings.
+  Contenthash and address answers are scalar lowercase, `0x`-prefixed hex.
+  This route flattens both projected `{encoding,bytes}` address values and
+  projected scalar address values to that same public string; the exact-name
+  detail route, `profile=detail` lookup, and GraphQL resolver address fields
+  apply the same normalization.
+  A zero-length byte payload makes the exact stored answer `not_found` and
+  omits `value`. Cleared exact values are absent from `addresses` and
+  `content_hash` unless a documented derived-record rule supplies a replacement
+  answer. The ENSIP-19 default-address rule below is one such rule.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
   lookup. [Universal Resolver ancestor
@@ -762,12 +854,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   validation, summary calculation, and pagination. Without a distinct control
   resource, the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Pagination behavior: standard newest-first collection pagination by chain
+- Pagination behavior: standard newest-first keyset pagination by chain
   position. The cursor is bound to the resolved namespace, parent name, scope,
-  and sort. Product event-type filtering is applied after loading the storage
-  page, so `page_size` is an upper bound on returned product rows; a page may
-  contain fewer than `page_size` rows when non-product normalized events are
-  interleaved.
+  and sort. Product event-type filtering is applied before page construction,
+  so `page_size`, `next_cursor`, and `has_more` describe product-visible
+  events. A nonterminal page contains `page_size` rows; only the terminal page
+  may be shorter.
 - Scope behavior: `scope=name` reads name-surface events only,
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
@@ -786,8 +878,19 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   current state. The response omits `meta.as_of` and `meta.as_of_token`, and
   its cursor carries no snapshot validity claim. True as-of history
   enumeration is deferred to the revision-bound storage follow-up.
-- Status semantics: no matching history returns `200` with empty `data`.
-  Missing names return `404 not_found`.
+- Status semantics: no product-visible matches return `200` with empty `data`,
+  `page.next_cursor=null`, and `page.has_more=false`. Missing names return `404
+  not_found`. Request and cursor-binding validation precede the first
+  `redo_in_progress` check, so malformed requests retain `400`. The route
+  captures the collection-wide check before parent lookup, then checks it again
+  inside the repeatable-read page transaction. A missing parent returns `404`
+  only when no redo is active and the captured generations are unchanged;
+  otherwise the route returns retryable `409 stale`. Because the check is
+  collection-wide, an active Interpret redo on any chain returns `409 stale`
+  regardless of the requested namespace or name. The same response applies
+  when either check sees an active redo or a redo began between the checks. A
+  well-formed cursor whose event anchor is gone returns `400 invalid_input` when
+  no redo intervened and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
   moves to `GET /v2/events?registration_id=...`. `scope=registration` on this
@@ -877,7 +980,15 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
-  retained historical ENSv1 registration for audit. Every
+  retained historical ENSv1 registration for audit. An ENSv2 reservation does
+  not select permission rows by `name` because current-registration
+  classification has no owner evidence: the owner-zero branch emits
+  `LabelReserved`, while minting the owner token and granting resource roles
+  occur only in the registered branch.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L472 @ ens_v2@a971bd64)
+  If bigname retains permission evidence attached to a resource for audit, an explicit
+  `registration_id` read remains available with `resource_audit`; that marker
+  does not claim the evidence is live for the reserved name. Every
   permission row carries the required `authority_context` field.
   `current_for_name` means a `name` filter selected the row's current
   registration for that requested name. A row admitted without a `name` filter,
@@ -1202,14 +1313,28 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   both. Without a distinct control resource, the sole registry-resource row
   remains visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Pagination behavior: standard collection pagination.
 - Snapshot behavior: address-history rows come from current state. The response
   omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of/finality row-bounding is deferred to the
   revision-bound storage follow-up.
-- Status semantics: no matching activity returns `200` with empty `data`.
-  Malformed addresses return `400 invalid_input`. Unsupported public namespaces
-  return `404 not_found`.
+- Pagination behavior: product event-type filtering runs before newest-first
+  keyset page construction, so `page_size`, `next_cursor`, and `has_more`
+  describe product-visible events. A nonterminal page contains `page_size`
+  rows; only the terminal page may be shorter.
+- Status semantics: no product-visible matches return `200` with empty `data`,
+  `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
+  cursor-binding validation precede the first `redo_in_progress` check, so
+  malformed addresses retain `400 invalid_input` and unsupported public
+  namespaces retain `404 not_found`. The route checks `redo_in_progress` before
+  deriving address relation anchors and rechecks it inside the repeatable-read
+  page transaction. After the transaction commits, the route resolves display
+  names and revalidates the captured redo state before returning data. This
+  check is collection-wide: an active Interpret redo on
+  any chain returns retryable `409 stale` with no `data` page, regardless of the
+  requested namespace. The same response applies when a redo began between the
+  checks. A well-formed cursor
+  whose event anchor is gone returns `400 invalid_input` when no redo intervened
+  and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
 ### `GET /v2/search`
@@ -1252,7 +1377,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   never a partial page. Explicit-namespace search likewise captures its
   request-scope metadata before reading the page and reloads it afterward; a
   head, completed publication generation, or readiness change returns `409
-  conflict` rather than attributing the page to a later position.
+  conflict` rather than attributing the page to a later position. An explicit
+  namespace returns retryable `409 stale` whenever an Interpret redo is among
+  the failed admission terms, including when the redo begins during the read.
+  A Project publication that becomes ready between admission reads with no
+  redo involved is instead a readiness change and returns `409 conflict`.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
   required; a missing or empty `q` returns `400 invalid_input`. The API treats
   `q` as an ENSIP-15 name fragment, normalizes it, and then applies the selected
@@ -1336,13 +1465,27 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   the sole registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
   (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L226 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L157 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L160 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L162 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L169 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRenewerV1.json:L110-L158 @ ens_v2@a971bd64)
-- Pagination behavior: standard collection pagination.
+- Pagination behavior: standard newest-first keyset pagination. Product
+  event-type filtering runs before page construction, so `page_size`,
+  `next_cursor`, and `has_more` describe product-visible events. A nonterminal
+  page contains `page_size` rows; only the terminal page may be shorter.
 - Snapshot behavior: event rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of/finality row-bounding is deferred to the
   revision-bound storage follow-up.
-- Status semantics: no matching events returns `200` with empty `data`.
-  Malformed filters return `400 invalid_input`.
+- Status semantics: no product-visible matches return `200` with empty `data`,
+  `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding
+  validation precede the first `redo_in_progress` check, so malformed requests
+  retain `400 invalid_input`. The route checks `redo_in_progress` before deriving
+  name, registration, or address anchors and rechecks it inside the
+  repeatable-read page transaction. After that transaction commits, the route
+  resolves display names and revalidates the captured redo state before
+  returning data. This check is collection-wide: an active
+  Interpret redo on any chain returns retryable `409 stale` with no `data` page,
+  regardless of the requested filters or namespace. The same response applies
+  when a redo began between the checks. A
+  well-formed cursor whose event anchor is gone returns `400 invalid_input` when
+  no redo intervened and `stale` when the redo check takes precedence.
 - Replaces (v1): `GET /v1/events` compact event search.
 
 ### `GET /v2/resolvers/{chain_id}/{address}`
@@ -1365,8 +1508,16 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   resolver listings rather than forced to `ok`. This nested collection adds no
   row-local mixed-authority status, so callers use name detail or batch lookup
   for the explicit coverage reason. A row classified as
-  `current_authority_not_projected` is absent from `bound_names`. A positively
-  classified ownerless registry row is different: its event-derived resolver
+  `current_authority_not_projected` is also absent from `bound_names`; retained
+  resolver-pointer evidence does not establish listing membership.
+  An ownerless ENSv2 reservation is likewise absent: a retained reservation
+  resolver or former-resource pointer is not a resolver selected by a current
+  registration. This intentionally narrows ENSv2, which stores and returns a
+  reservation resolver until expiry.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
+  A positively classified ownerless ENSv1 or Basenames registry row is
+  different: its event-derived resolver
   binding is eligible for `bound_names` only where that resolver family's
   existing binding-enumeration capability is supported.
   `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
@@ -1410,7 +1561,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   incremental publications; it may not be ahead, and a same-height target must
   match the selected hash. The projection-phase generation is revalidated after the
   read, and an invalid target or changed generation returns `409 stale`.
-- Status semantics: an otherwise valid current/latest resolver with no overview
+- Status semantics: only a request without `at` and with `finality=latest`
+  applies the latest served-head Interpret-redo check and returns retryable `409
+  stale` while its selected chain is undergoing a redo. Historical `at` reads
+  and requests with `finality=safe|finalized` retain their existing generation
+  validation without that redo check.
+- An otherwise valid current/latest resolver with no overview
   row returns `404 not_found`. For `at`, `safe`, or `finalized`, a missing
   current projection cannot prove historical absence and returns `409 stale`.
   Bound-name listings under `at`, `safe`, or `finalized` are drawn from
@@ -1528,7 +1684,9 @@ so there is no persisted artifact to explain. See
   carries side-by-side `{indexed, verified}` record answers for the former
   `mode=both` workflow. Without `keys`, `comparison` defaults to the first 16
   inventory-derived supported record keys in deterministic order. The indexed
-  `record_inventory` and `record_cache` sections remain complete. When more
+  `record_inventory` and `record_cache` sections remain complete, including
+  retained audit state that product name routes omit when no current
+  registration exists. When more
   than 16 default comparison keys are available, `comparison_explicit_gaps`
   lists each uncompared selector as
   `{record_key, record_family, selector_key, gap_reason}` with
@@ -1539,6 +1697,15 @@ so there is no persisted artifact to explain. See
   spellings (`namespace`, `name`, `display_name`, `registration_id`), while
   pipeline-only identifiers such as `normalized_event_id` keep their pipeline
   names per the tier-3 rule.
+  `record_cache.entries` is an internal projected representation, not the
+  product-route answer envelope. A retained contenthash entry uses
+  `status="success"` with
+  `value={"encoding":"hex","bytes":"0x..."}`; a retained address entry uses
+  `status="success"` with scalar `value="0x..."`. A cleared contenthash or
+  address entry uses `status="not_found"` and omits `value`. Normalized fields
+  such as `contenthash_hex` and `address_bytes_hex` are not product
+  record-answer fields; they can appear inside the complete normalized
+  `after_state` returned by the raw event diagnostics route below.
 - Pagination behavior: none.
 - Status semantics: missing names return `404 not_found`.
 - Replaces (v1): record inventory/cache diagnostics formerly embedded in

@@ -26,6 +26,13 @@ deleted. The production edge does not expose `/v2` until the maintainer-gated
 C3 edge flip. These docs define the currently served internal REST contract,
 not the public-edge rollout state.
 
+## GraphQL compatibility
+
+`POST /graphql` is governed by
+[`consumer-capabilities.md` § GraphQL compatibility](consumer-capabilities.md#graphql-compatibility),
+including its generated-style roots, local extensions, and explicit unsupported
+behavior. This document does not define a second GraphQL contract.
+
 ## Naming Dictionary
 
 Normative one-name-per-concept dictionary from ADR 0006, extended with the
@@ -280,8 +287,9 @@ Rules:
   is older than the newest `chain_heads` marker for that chain. The lookup
   engine returns both positions, and `meta.as_of`/`meta.as_of_token` expose
   those actual lookup positions rather than implying execution at the newer
-  marker. The engine independently requires its project phase to be at the
-  current readable authoritative head before executing. After the live calls it revalidates the
+  marker. The engine independently requires its [`project`
+  phase](architecture.md#intake-architecture) to be at the current readable
+  authoritative head before executing. After the live calls it revalidates the
   exact project generation, projected name topology, selected manifest
   declarations, and canonical positions. A concurrent replacement returns the
   existing `409 stale` response and performs no ledger mutation. `meta.as_of` is
@@ -335,6 +343,26 @@ do not serialize permanently-null placeholders for optionals such as `manager`.
 Known-empty maps on detail records, such as `addresses` and `text_records`,
 serialize as `{}`; omission means the field is outside the requested field
 budget or unsupported by the served source.
+Rows classified as `registration_status=unregistered`, including ownerless
+ENSv2 reservations, have no current registration, so product name detail and
+batch lookup always omit `registration_id`. Resolver and record fields are also
+omitted, the records route exposes no resolver, record values, or audit-only
+inventory, and resolver `bound_names` omits the row unless it is
+an ownerless ENSv1 or Basenames registry row whose current registry resolver
+pointer is retained (a [serving resource](glossary.md#serving-resource)). That
+retained pointer permits resolver and record reads without acquiring registration
+identity or control. Indexed records require retained inventory;
+routes with source selection let verified and auto records follow the ordinary
+lookup capability, and resolver `bound_names` remains subject to the resolver
+family's binding-enumeration capability.
+See [registration status](#status-vocabulary) for the upstream basis.
+The ENSv2 rule is an intentional product
+narrowing: ENSv2 stores a nonzero resolver supplied for an ownerless
+reservation and returns it until expiry. (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @
+ens_v2@a971bd64)
 
 ## Tiers
 
@@ -351,7 +379,8 @@ The lookup route uses the common record shape and in-band per-result statuses.
 `bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. The stored
 head and finality fields come from `chain_heads`; indexed progress is the
 `project` phase's most recent completed publication. Readiness also uses that
-phase's lifecycle state, redo marker, and newest per-chain heartbeat in
+phase's lifecycle state and redo marker, the Interpret `redo_in_progress`
+marker, and newest per-chain heartbeat in
 `service_heartbeats`. A phase row that startup settled while its chain was
 unconfigured is not eligible for `ready` until genuine phase completion or
 completed-state revalidation clears that marker. It reports `degraded` unless
@@ -365,7 +394,8 @@ evidence, maps to `stale`. An idle, running, paused, or missing Ingest or Verify
 maps to `degraded`. An expired runner heartbeat remains `stale` while either
 required phase is incomplete. Chains without this requirement omit those
 Ingest and Verify evidence checks. A
-failed Project or expired heartbeat maps to `stale`; a paused, redoing, or missing-heartbeat Project maps
+failed Project or expired heartbeat maps to `stale`; an active Interpret redo
+or a paused, redoing, or missing-heartbeat Project maps
 to `degraded`. A running Project with a completed publication remains eligible
 for `ready` when its block and time lag are within the configured thresholds,
 its interpreter content hash matches this API build, and a same-height
@@ -535,13 +565,15 @@ Explicit-namespace search captures its request-scope metadata before reading
 the page and reloads it afterward. A head, completed publication generation, or
 readiness change returns the same retryable `409 conflict` instead of
 attributing the page to a position selected after the rows were read.
+Publication becoming ready between admission reads is such a readiness change,
+not evidence of an Interpret redo.
 Their namespace-omitted cursors bind that derived namespace list and fail closed if it
 changes. Search with an explicit recognized `namespace` bypasses public
-namespace derivation and reads that namespace's current rows without a
-deployment-readiness gate, including the Interpret redo check, preserving the
-pre-derivation behavior. Name-only lookup likewise keeps its existing name
-snapshot selection and does not derive the public set; only address inputs
-invoke public reverse derivation.
+namespace derivation. It still requires the selected namespace's
+`redo_in_progress` value to be false and returns `409 stale` while an Interpret
+redo is active. Name-only lookup likewise keeps its existing name snapshot
+selection and does not derive the public set; only address inputs invoke public
+reverse derivation.
 The chains accounted for by `meta.as_of` and `meta.as_of_completeness` are
 selected by the namespace parameter and input kinds, not by the namespaces
 eligible to serve rows or the rows returned. An explicit namespace does not
@@ -560,11 +592,31 @@ ADR 0006 rollout step 3 includes that read-layer work.
 
 ## Status Vocabulary
 
-`unregistered` describes the absence of current registration or control; it does not assert that
-resolver data is absent. A supported projected name may therefore have
-`registration_status=unregistered` while serving an event-linked resolver and its indexed or
-verified records. The internal reason `current_authority_not_projected` is reserved for authority
-selection that is unresolved or unsupported, not for a registry event stream that positively
+`unregistered` describes the absence of current registration or control; it
+does not assert that resolver data is absent. A supported row may therefore have
+`registration_status=unregistered` when it is
+an ownerless ENSv1 or Basenames registry row whose current registry resolver
+pointer is retained (a [serving resource](glossary.md#serving-resource)). It
+serves indexed records when retained inventory exists; routes with source
+selection can also serve verified records under the ordinary lookup capability.
+The current ENSv1 registry and the Basenames registry emit the supplied owner
+from `setOwner`.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L100-L103 @ basenames@1809bbc)
+Both map registry self-ownership to zero in `owner()`.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L165-L170 @ basenames@1809bbc)
+In both registries, the resolver write and read use the resolver field,
+separately from the owner field.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L7-L10 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L140 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/Registry.sol:L16-L22 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L132-L134 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L178-L180 @ basenames@1809bbc)
+The internal reason
+`current_authority_not_projected` is reserved for authority selection that is
+unresolved or unsupported, not for a registry event stream that positively
 proves current authority is absent.
 
 One result-status vocabulary is used everywhere except the `/v2/status` ops
@@ -596,6 +648,50 @@ Rules:
   different value.
 - `completeness` is `full`, `partial`, or `unsupported`.
 - Empty arrays and empty maps mean known-empty, not unknown.
+
+### Resolver record answers and values
+
+A keyed resolver record answer contains `status`. It contains `value` only
+when `status` is `ok`; `unsupported_reason`, `failure_reason`, and `meta` are
+present only where the route contract permits them.
+
+For a successful `contenthash` answer, `value` is a lowercase,
+`0x`-prefixed hex string containing the bytes returned by the resolver. The API
+does not decode those bytes into a URI or media-type-specific representation.
+For a successful `addr:<coin_type>` answer, both `<coin_type>` and the selector
+are decimal strings and `value` is a lowercase, `0x`-prefixed hex string. For
+multicoin records, that string contains the resolver-returned native binary
+address bytes without chain-specific textual re-encoding.
+
+ENSv1 and Basenames store the supplied contenthash and address byte payloads
+verbatim and emit the same bytes. Contenthash reads, and address reads when no
+default-address fallback applies, return the stored bytes. An empty payload is
+therefore the stored value after a clear, and those reads return the same empty
+bytes.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L28 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99 @ basenames@1809bbc)
+Bigname represents that zero-length exact stored contenthash or address answer
+as `{"status":"not_found"}` and omits `value`. A records route may then apply a
+documented derived-record rule, such as the ENSIP-19 default-address rule; when
+it does, the final keyed answer and convenience field follow that derived
+answer and carry its metadata. A clear is distinct from any non-empty all-zero
+byte payload; this contract does not define a new meaning for a non-empty
+20-byte all-zero `addr:60` value.
+
+The `addresses` convenience map uses the same scalar hex string for each
+decimal coin type, and `content_hash` uses the same contenthash scalar string.
+Cleared exact values are omitted from both convenience fields unless a
+documented derived-record rule supplies a replacement answer. Diagnostics and
+Project use the internal status `success` for a retained value; product routes
+publish that status as `ok`.
+
+The exact-name detail route, resolver-records route, `profile=detail` lookup, and
+GraphQL resolver address fields flatten both projected `{encoding,bytes}`
+address values and projected scalar address values to the same scalar hex
+string. The supported internal shapes therefore do not create a second public
+multicoin-address shape.
 
 ## Finality And Snapshots
 
@@ -657,6 +753,11 @@ the selected position; a target at the same height must have the same hash. The
 selected `chain_heads` rows and completed schema-v2 projection generations must
 remain unchanged across the read. An ahead, same-height wrong-hash, or
 publication-generation mismatch returns `409 stale`.
+Name-only and exact-scope lookup, explicit-namespace search, and resolver reads
+without `at` at `finality=latest` apply the same `redo_in_progress` readiness
+check and return `409 stale`. Historical resolver reads selected with `at` and
+resolver reads at `finality=safe|finalized` retain their existing generation
+validation without that redo check.
 
 `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
 does not accept `at` or `finality`; when a served head is available, its
@@ -684,6 +785,31 @@ dataset is frozen. A legacy collection cursor's snapshot component is ignored.
 Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
 
+The `/v2/events`, name-history, and address-history collections use a
+collection-wide `redo_in_progress` check. An active Interpret redo on any chain
+returns retryable `409 stale` for all three collections, regardless of the
+requested namespace or name. Events validates the request and cursor binding
+before its first check, while address history also validates its namespace
+first. Name history validates the request and cursor binding, then captures the
+check before parent lookup. A missing parent returns `404
+not_found` only when no redo is active and the captured generations are
+unchanged; otherwise it returns `409 stale`. Each route checks before deriving
+identity and event anchors written by Interpret and checks again inside the
+repeatable-read page transaction. Events and address history then resolve
+display names and revalidate the captured redo state before returning data;
+name history has no post-transaction display-name read. An active redo at any
+check, or a redo
+that began between them, returns `409 stale` instead of exposing a partially
+reconstructed normalized-event range. A
+well-formed cursor whose event anchor is gone therefore returns `stale` when the
+redo check takes precedence and `400 invalid_input` otherwise. Product
+event-type filtering precedes keyset pagination, so page rows and continuation
+metadata describe only product-visible events. For requests without an explicit
+`type`, cursor anchor validation omits the implicit product event-type filter,
+so a still-existing non-product anchor continues to the next product-visible
+row. An explicit `type` remains part of anchor validation. Cursor bytes remain
+unstable.
+
 A full Interpret and Project re-walk that must not change product behavior at a
 fixed readable chain head does not invalidate an outstanding collection cursor
 merely because an internal normalized-event row ID changes. On `/v2/events`,
@@ -691,9 +817,7 @@ name history, address history, and every other product cursor surface backed by
 normalized-event row identity, a cursor issued before the re-walk must resume
 after publication from the same underlying normalized-event keyset anchor, with
 identical remaining product rows, pages, fields, `has_more`, and summary
-behavior. The anchor need not itself map to a product row. The acceptance corpus
-therefore includes an unmapped normalized event interleaved at a page boundary
-and proves that no visible row is skipped or duplicated. The diagnostic-events
+behavior, including when the anchor is a non-product event. The diagnostic-events
 route must also accept its pre-re-walk cursor and continue from the same stable
 normalized-event anchor, but its remaining diagnostic rows and fields may
 reflect newly admitted candidate data. A pre-existing diagnostic row's numeric

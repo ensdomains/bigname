@@ -83,7 +83,7 @@ def schema_surface(schema):
 
 
 def coverage_scope_matches(scope, path):
-    if scope.startswith("field:"):
+    if scope.startswith(("field:", "input:")):
         return path == scope
     if scope.startswith("type:"):
         name = scope.removeprefix("type:")
@@ -270,7 +270,7 @@ def capture(args):
         if token and any(token.encode() in path.read_bytes() for path in staged.rglob("*") if path.is_file()):
             raise ValueError("credential-bearing output rejected")
         artifacts = [artifact(path, staged) for path in sorted(staged.rglob("*")) if path.is_file()]
-        manifest = {"artifacts": artifacts, "canonical_json": "UTF-8, sorted keys, compact separators, LF", "cases": [{"entity": "Domain", "id": "domain.entity-by-id", "kind": "entity", "query": "entities/domain/entity-by-id/query.graphql", "required_schema_paths": ["root:query", "field:Query.domain", "field:Domain.id", "field:Domain.owner"], "response": "entities/domain/entity-by-id/upstream-response.json", "variables": "entities/domain/entity-by-id/variables.json"}, {"entity": "Domain", "id": "domain.filter.name-eq", "kind": "filter", "query": "entities/domain/filters/name-eq/query.graphql", "required_schema_paths": ["root:query", "field:Query.domains", "input:DomainFilter.name"], "response": "entities/domain/filters/name-eq/upstream-response.json", "variables": "entities/domain/filters/name-eq/variables.json"}], "coverage_sha256": sha((staged / "coverage.json").read_bytes()), "fixture_format_version": FORMAT, "generated_at": stamp, "generator_version": GENERATOR, "gzip": "RFC 1952, mtime=0", "seed": "seed.json", "upstream_checkouts": pins}
+        manifest = {"artifacts": artifacts, "canonical_json": "UTF-8, sorted keys, compact separators, LF", "cases": [{"entity": "Domain", "id": "domain.entity-by-id", "kind": "entity", "query": "entities/domain/entity-by-id/query.graphql", "required_schema_paths": ["root:query", "field:Query.domain", "field:Domain.id", "field:Domain.owner"], "response": "entities/domain/entity-by-id/upstream-response.json", "variables": "entities/domain/entity-by-id/variables.json"}, {"entity": "Domain", "id": "domain.filter.name-eq", "kind": "filter", "query": "entities/domain/filters/name-eq/query.graphql", "required_schema_paths": ["root:query", "field:Query.domains", "input:Domain_filter.name"], "response": "entities/domain/filters/name-eq/upstream-response.json", "variables": "entities/domain/filters/name-eq/variables.json"}], "coverage_sha256": sha((staged / "coverage.json").read_bytes()), "fixture_format_version": FORMAT, "generated_at": stamp, "generator_version": GENERATOR, "gzip": "RFC 1952, mtime=0", "seed": "seed.json", "upstream_checkouts": pins}
         (staged / "manifest.json").write_bytes(canonical(manifest))
         install_tree(staged, output)
     except BaseException:
@@ -286,7 +286,8 @@ def verify(root):
     if manifest.get("fixture_format_version") != FORMAT:
         raise ValueError(f"fixture format {manifest.get('fixture_format_version')} is unsupported; upgrade graphql-compat-oracle")
     coverage_bytes = (root / "coverage.json").read_bytes()
-    if manifest.get("coverage_sha256") != sha(coverage_bytes):
+    coverage_digest = sha(coverage_bytes)
+    if manifest.get("coverage_sha256") != coverage_digest:
         raise ValueError("coverage_sha256 mismatch: manifest does not match coverage.json")
     provenance = json.loads((root / "upstream/provenance.json").read_bytes())
     required = ("endpoint_template", "upstream_identifier", "retrieved_at", "pin_kind", "block_number", "observed_meta_block_number", "observed_meta_block_hash", "ens_subgraph_commit", "graph_node_commit", "pinned_schema_verified_by", "pinned_schema_verification_date", "provisional_stub")
@@ -322,9 +323,9 @@ def verify(root):
             raise ValueError(f"invalid artifact path {relative}")
         seen.add(relative)
         path = root / relative
-        # coverage.json is the manually maintained ownership policy. The artifact hash records the
-        # capture-time version; coverage_sha256 separately authenticates the checked-in policy.
-        if not path.is_file() or relative != "coverage.json" and sha(path.read_bytes()) != entry["sha256"]:
+        if relative == "coverage.json" and entry["sha256"] != manifest["coverage_sha256"]:
+            raise ValueError("coverage.json artifact digest differs from coverage_sha256")
+        if not path.is_file() or sha(path.read_bytes()) != entry["sha256"]:
             raise ValueError(f"artifact digest mismatch: {relative}")
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} - {"manifest.json"}
     if actual != seen:

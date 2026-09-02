@@ -687,10 +687,7 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
     );
     assert_eq!(
         pointer(&records, "/data/coin_addresses/0/value"),
-        json!({
-            "encoding": "hex",
-            "bytes": MULTICOIN_HEX,
-        })
+        json!(MULTICOIN_HEX)
     );
     assert_eq!(pointer(&records, "/data/content_hash/status"), "success");
     assert_eq!(

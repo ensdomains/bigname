@@ -84,7 +84,7 @@ pub(crate) async fn get_diagnostic_events(
         })
         .transpose()?;
 
-    let storage_page = bigname_storage::load_event_history_page(
+    let storage_page = bigname_storage::load_event_history_page_with_redo_policy(
         &state.pool,
         parsed.storage_filter,
         true,
@@ -92,6 +92,7 @@ pub(crate) async fn get_diagnostic_events(
         params.page_size,
         HistorySummaryMode::None,
         true,
+        false,
     )
     .await
     .map_err(|error| {

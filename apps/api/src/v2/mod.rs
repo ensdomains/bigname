@@ -33,6 +33,8 @@ pub(crate) mod support;
 mod vocab;
 
 pub(crate) use address_history::get_address_history;
+#[cfg(test)]
+pub(crate) use address_history::{AddressHistoryCursorBinding, address_history_cursor_payload};
 pub(crate) use address_names::{AddressNameGrant, get_address_names};
 pub(crate) use chains::{numeric_to_slug, slug_to_numeric, snapshot_slot_for_slug};
 pub(crate) use cursor::{Payload as CursorPayload, decode, encode};
@@ -49,9 +51,12 @@ pub(crate) use error::{V2Error, V2Result};
 pub(crate) use events::{
     Event, build_event, events_cursor_payload, events_storage_cursor, get_events,
 };
+#[cfg(test)]
+pub(crate) use history::history_cursor_payload;
 pub(crate) use history::{
     format_timestamp, get_history, history_event_type, history_storage_scope,
-    v2_exact_name_snapshot_scope, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
+    map_history_page_error, product_history_event_kinds, v2_exact_name_snapshot_scope,
+    v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 pub(crate) use lookup::get_lookup;
 #[cfg(test)]

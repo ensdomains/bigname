@@ -174,6 +174,46 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     assert_eq!(status_value(state.clone()).await?, json!("ready"));
 
     sqlx::query(
+        "INSERT INTO chain_phase_state (
+             chain_id, phase_name, phase_status, current_block_number,
+             current_block_hash, target_block_number, target_block_hash,
+             input_content_hash, started_at, finished_at
+         ) VALUES (
+             'ethereum-mainnet', 'interpret', 'completed', 120,
+             '0xphase-head', 120, '0xphase-head', $1, now(), now()
+         )",
+    )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    database
+        .simulate_interpret_redo_begin("ethereum-mainnet", "recompute_flags")
+        .await?;
+    let payload = status_payload(state.clone()).await?;
+    assert_eq!(payload["data"]["chains"]["1"]["status"], json!("degraded"));
+    assert_eq!(payload["data"]["status"], json!("degraded"));
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = redo_previous_phase_status,
+             started_at = redo_previous_started_at,
+             finished_at = redo_previous_finished_at,
+             redo_in_progress = false,
+             redo_mode = NULL,
+             redo_previous_phase_status = NULL,
+             redo_previous_last_error = NULL,
+             redo_previous_started_at = NULL,
+             redo_previous_finished_at = NULL,
+             redo_from_block_number = NULL,
+             redo_to_block_number = NULL
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'interpret'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let payload = status_payload(state.clone()).await?;
+    assert_eq!(payload["data"]["chains"]["1"]["status"], json!("ready"));
+    assert_eq!(payload["data"]["status"], json!("ready"));
+
+    sqlx::query(
         "UPDATE chain_phase_state SET input_content_hash = 'old-interpreter' \
          WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
     )
@@ -612,12 +652,16 @@ async fn startup_and_v2_status_reject_a_partially_missing_phase_schema() -> Resu
 }
 
 async fn status_value(state: AppState) -> Result<Value> {
+    let payload = status_payload(state).await?;
+    Ok(payload["data"]["chains"]["1"]["status"].clone())
+}
+
+async fn status_payload(state: AppState) -> Result<Value> {
     let response = app_router(state)
         .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-    Ok(payload["data"]["chains"]["1"]["status"].clone())
+    read_json(response).await
 }
 
 async fn sepolia_status_value(state: AppState) -> Result<Value> {

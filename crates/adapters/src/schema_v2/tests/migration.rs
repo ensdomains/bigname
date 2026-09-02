@@ -1103,6 +1103,239 @@ fn resolver_and_ttl_clears_are_optional_boundary_evidence() -> anyhow::Result<()
 }
 
 #[test]
+fn migration_bridge_renewal_persists_chain_observed_label_preimage() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let raw_label = scenario["label"].as_str().unwrap();
+    let labelhash = keccak256(raw_label.as_bytes());
+    let base_token = decimal_u256(&scenario["base_token_id"])?;
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let block = scenario["renewal_block"].as_i64().unwrap();
+    let sender = Address::from([0x22; 20]);
+    let (_, session) = interpret_test_batch_incremental(
+        batch(
+            vec![raw_at_transaction(
+                super::v2_registry::LabelReserved {
+                    tokenId: v2_token,
+                    labelHash: labelhash,
+                    label: raw_label.to_owned(),
+                    expiry: 1_822_787_383,
+                    sender,
+                }
+                .encode_log_data(),
+                226,
+                0,
+                1,
+                addresses["eth_registry"].as_str().unwrap(),
+            )],
+            &fixture,
+            true,
+        ),
+        None,
+    )?;
+    let (output, _) = interpret_test_batch_incremental(
+        batch(
+            vec![
+                raw_at_transaction(
+                    super::v2_registry::ExpiryUpdated {
+                        tokenId: v2_token,
+                        newExpiry: scenario["decoded_v2_expiry"].as_u64().unwrap(),
+                        sender,
+                    }
+                    .encode_log_data(),
+                    block,
+                    0,
+                    1,
+                    addresses["eth_registry"].as_str().unwrap(),
+                ),
+                base_renewed_at(
+                    addresses,
+                    base_token,
+                    scenario["v1_expiry"].as_u64().unwrap(),
+                    block,
+                    2,
+                ),
+                bridge_renewed_at(
+                    addresses,
+                    v2_token,
+                    raw_label,
+                    scenario["duration"].as_u64().unwrap(),
+                    scenario["decoded_v2_expiry"].as_u64().unwrap(),
+                    block,
+                    3,
+                ),
+            ],
+            &fixture,
+            true,
+        ),
+        Some(session),
+    )?;
+
+    let bridge_observations = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "PreimageObserved" && event.log_index == Some(3))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bridge_observations.len(),
+        1,
+        "one bridge log must retain one preimage event: {bridge_observations:#?}"
+    );
+    let bridge_observation = bridge_observations[0];
+    let expected_logical_name_id = format!(
+        "ens:{}",
+        super::common::namehash(&[raw_label.to_owned(), "eth".to_owned()])
+    );
+    assert_eq!(
+        bridge_observation.logical_name_id.as_deref(),
+        Some(expected_logical_name_id.as_str())
+    );
+    let bridge_resource_id = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationRenewed" && event.log_index == Some(3))
+        .and_then(|event| event.resource_id)
+        .expect("correlated bridge renewal resource");
+    assert_eq!(bridge_observation.resource_id, Some(bridge_resource_id));
+    assert_eq!(bridge_observation.derivation_kind, "ens_v2_migration");
+    let matching = output
+        .label_preimages
+        .iter()
+        .filter(|preimage| preimage.raw_label == raw_label.as_bytes())
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    let preimage = matching[0];
+    assert_eq!(preimage.labelhash, format!("{labelhash:#x}"));
+    assert_eq!(preimage.source_kind, "NameRenewed_label");
+
+    let reference_label = "chain-observation-priority";
+    let reference_output = interpret_test_batch(batch(
+        vec![raw_at_transaction(
+            super::v2_registry::ParentUpdated {
+                parent: Address::from([0x44; 20]),
+                label: reference_label.to_owned(),
+                sender: Address::from([0x22; 20]),
+            }
+            .encode_log_data(),
+            block,
+            0,
+            1,
+            addresses["eth_registry"].as_str().unwrap(),
+        )],
+        &fixture,
+        true,
+    ))?;
+    let reference_labelhash = format!("{:#x}", keccak256(reference_label.as_bytes()));
+    let reference_observations = reference_output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "PreimageObserved"
+                && event.after_state["labelhash"] == reference_labelhash
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reference_observations.len(),
+        1,
+        "non-bridge label events must keep their automatic observation: {:#?}",
+        reference_output.normalized_events
+    );
+    assert_eq!(
+        reference_observations[0].derivation_kind,
+        "raw_log_preimage_observation"
+    );
+    let reference = reference_output
+        .label_preimages
+        .iter()
+        .find(|preimage| preimage.raw_label == reference_label.as_bytes())
+        .expect("selected registry event label preimage");
+    assert_eq!(preimage.source_priority, reference.source_priority);
+    Ok(())
+}
+
+#[test]
+fn incomplete_bridge_renewal_does_not_persist_preimage_evidence() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["R-01"];
+    let addresses = &fixture["addresses"];
+    let raw_label = scenario["label"].as_str().unwrap();
+    let labelhash = format!("{:#x}", keccak256(raw_label.as_bytes()));
+    let v2_token = decimal_u256(&scenario["v2_token_id"])?;
+    let block = scenario["renewal_block"].as_i64().unwrap();
+    let log_index = 3;
+    let sender = Address::from([0x22; 20]);
+    let (_, session) = interpret_test_batch_incremental(
+        batch(
+            vec![raw_at_transaction(
+                super::v2_registry::LabelReserved {
+                    tokenId: v2_token,
+                    labelHash: keccak256(raw_label.as_bytes()),
+                    label: raw_label.to_owned(),
+                    expiry: 1_822_787_383,
+                    sender,
+                }
+                .encode_log_data(),
+                226,
+                0,
+                1,
+                addresses["eth_registry"].as_str().unwrap(),
+            )],
+            &fixture,
+            true,
+        ),
+        None,
+    )?;
+    let (output, _) = interpret_test_batch_incremental(
+        batch(
+            vec![bridge_renewed_at(
+                addresses,
+                v2_token,
+                raw_label,
+                scenario["duration"].as_u64().unwrap(),
+                scenario["decoded_v2_expiry"].as_u64().unwrap(),
+                block,
+                log_index,
+            )],
+            &fixture,
+            true,
+        ),
+        Some(session),
+    )?;
+
+    let matching_rows = output
+        .label_preimages
+        .iter()
+        .filter(|preimage| preimage.labelhash == labelhash)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_rows.len(),
+        0,
+        "an incomplete synchronized renewal must not persist its bridge label"
+    );
+    assert!(output.normalized_events.iter().all(|event| {
+        event.event_kind != "RegistrationRenewed" || event.log_index != Some(log_index)
+    }));
+
+    let matching_events = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "PreimageObserved"
+                && event.log_index == Some(log_index)
+                && event.after_state["labelhash"] == labelhash
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_events.len(),
+        0,
+        "an incomplete synchronized renewal must not retain its preimage event: {:#?}",
+        output.normalized_events
+    );
+    Ok(())
+}
+
+#[test]
 fn cross_family_registrar_renewal_preserves_resource_anchored_multiplicity() -> anyhow::Result<()> {
     let fixture = fixture()?;
     let scenario = &fixture["scenarios"]["R-01"];

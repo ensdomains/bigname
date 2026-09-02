@@ -3,17 +3,17 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=86
-expected_runnable=83
+expected_total=87
+expected_runnable=84
 expected_ignored=3
 expected_shard_1_runnable=42
 expected_shard_1_ignored=2
-expected_shard_1_filtered=42
+expected_shard_1_filtered=43
 expected_shard_1_predicted_seconds=1093.991
-expected_shard_2_runnable=41
+expected_shard_2_runnable=42
 expected_shard_2_ignored=1
 expected_shard_2_filtered=44
-expected_shard_2_predicted_seconds=1093.152
+expected_shard_2_predicted_seconds=1093.382
 
 expected_ignored_tests=(
     "scenarios::provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback"
@@ -69,6 +69,7 @@ shard_1_tests=(
 )
 
 shard_2_tests=(
+    "harness::artifacts::tests::ens_v2_loader_reads_the_admitted_archived_sepolia_artifact"
     "harness::db::tests::concurrent_harness_databases_clone_the_migrated_template"
     "harness::db::tests::replace_database_rejects_missing_database_path"
     "harness::fault_proxy::tests::ordered_one_shot_faults_advance_one_response_at_a_time"

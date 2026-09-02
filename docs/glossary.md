@@ -785,6 +785,18 @@ copies the stored expiry when a claim passes zero, and emits every renewal's
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2_sepolia_20260629@ccaeb58)
 
+## Expiry root
+
+an ENSv2 logical name from which Project follows current
+canonical subregistry edges during a bounded redo to recover descendant
+projection scope. Project selects a still-live registration or reservation when
+its expiry crossed the displaced branch's timestamps or its lifecycle changed
+between the affected range's start and the Project target. Interpret also
+preserves the root identity before deleting a state-derived path-expiry release,
+because the losing branch may already have deleted the ancestor's descendant
+projections. Being an expiry root does not itself change serving status or
+authority.
+
 ## Migration controller
 
 an ENSv2 contract that accepts a transferred ENSv1

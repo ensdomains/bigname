@@ -125,6 +125,39 @@ pub async fn load_phase_resolver_bound_name_rows(
         WHERE nc.support_status IN ('supported', 'unsupported')
           AND nc.unsupported_reason IS DISTINCT FROM 'current_authority_not_projected'
           {DEFAULT_NAME_CURRENT_READ_FILTER}
+          AND (
+              (
+                  nc.surface_binding_id IS NOT NULL
+                  AND nc.declared_summary #>> '{{registration,status}}' IS DISTINCT FROM 'released'
+                  AND NULLIF(btrim(COALESCE(
+                          nc.declared_summary #>> '{{registration,released_at}}', ''
+                      )), '') IS NULL
+                  AND (
+                      nc.declared_summary #>> '{{registration,authority_kind}}' = 'registrar'
+                      OR (
+                          nc.declared_summary #>> '{{registration,authority_kind}}'
+                              IN ('registry_only', 'ens_v2_registry')
+                          AND NULLIF(btrim(COALESCE(
+                              nc.declared_summary #>> '{{control,owner}}',
+                              nc.declared_summary #>> '{{control,registry_owner}}', ''
+                          )), '') IS NOT NULL
+                      )
+                      OR (
+                          nc.declared_summary #>> '{{registration,authority_kind}}' = 'wrapper'
+                          AND nc.namespace <> 'basenames'
+                      )
+                  )
+              )
+              OR (
+                  nc.surface_binding_id IS NULL
+                  AND nc.resource_id IS NULL
+                  AND nc.serving_resource_id IS NOT NULL
+                  AND nc.binding_kind IS NULL
+                  AND nc.namespace IN ('ens', 'basenames')
+                  AND nc.provenance #>> '{{read_reachability,basis}}' =
+                      'retained_registry_resolver_pointer'
+              )
+          )
           AND nc.declared_summary #>> '{{resolver,chain_id}}' = $1
           AND lower(nc.declared_summary #>> '{{resolver,address}}') = lower($2)
           AND (
@@ -216,6 +249,10 @@ fn decode_identity_name(row: PgRow) -> Result<IdentityNameCurrentRow> {
     let normalized = normalize_phase_name(&phase_id, &raw_name)?;
     let labelhash = phase_labelhash(&normalized);
     let labelhash_count = i32::try_from(normalized.normalized_labels.len()).ok();
+    let binding_kind = row
+        .try_get::<Option<String>, _>("binding_kind")?
+        .map(|value| SurfaceBindingKind::parse(&value))
+        .transpose()?;
     Ok(IdentityNameCurrentRow {
         logical_name_id: phase_id,
         namespace: row.try_get("namespace")?,
@@ -224,11 +261,14 @@ fn decode_identity_name(row: PgRow) -> Result<IdentityNameCurrentRow> {
         namehash: row.try_get("namehash")?,
         labelhash,
         labelhash_count,
+        surface_binding_id: row.try_get("surface_binding_id")?,
         resource_id,
         serving_resource_id: row.try_get("serving_resource_id")?,
+        binding_kind,
         record_inventory_boundary_key: None,
         coverage: phase_coverage(&row)?,
         declared_summary,
+        provenance: row.try_get("provenance")?,
         chain_positions: row.try_get("chain_positions")?,
         last_recomputed_at: row.try_get("last_recomputed_at")?,
     })

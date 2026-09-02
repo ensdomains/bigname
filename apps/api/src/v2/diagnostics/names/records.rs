@@ -165,7 +165,7 @@ async fn build_name_records_diagnostic(
     comparison_explicit_gaps: Vec<RecordComparisonGap>,
     selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<NameRecordsDiagnostic> {
-    let indexed = build_indexed_name_records(row, record_inventory, Some(records), false)?;
+    let indexed = build_indexed_name_records(row, record_inventory, Some(records), false, true)?;
     let verified_records = build_bounded_ephemeral_verified_record_answers(
         state,
         row,
@@ -239,6 +239,7 @@ async fn build_bounded_ephemeral_verified_record_answers(
             Some(chunk),
             verified_lookup,
             false,
+            true,
         )?;
         answers.extend(verified.records.unwrap_or_default());
     }

@@ -34,6 +34,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "name_surfaces",
     "normalized_events",
     "project_generation_failures",
+    "project_redo_expiry_roots",
     "project_redo_resolver_evidence",
     "permissions_current",
     "permissions_current_resource_summary",

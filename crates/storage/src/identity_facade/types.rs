@@ -2,7 +2,9 @@ use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{address_names::AddressNameRelation, primary_name::PrimaryNameClaimStatus};
+use crate::{
+    SurfaceBindingKind, address_names::AddressNameRelation, primary_name::PrimaryNameClaimStatus,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityNameRecordRow {
@@ -20,10 +22,13 @@ pub struct IdentityNameCurrentRow {
     pub namehash: String,
     pub labelhash: Option<String>,
     pub labelhash_count: Option<i32>,
+    pub surface_binding_id: Option<Uuid>,
     pub resource_id: Option<Uuid>,
     pub serving_resource_id: Option<Uuid>,
+    pub binding_kind: Option<SurfaceBindingKind>,
     pub record_inventory_boundary_key: Option<String>,
     pub declared_summary: Value,
+    pub provenance: Value,
     pub coverage: Value,
     pub chain_positions: Value,
     pub last_recomputed_at: OffsetDateTime,
@@ -140,6 +145,7 @@ pub struct IndexingStatusChainRow {
     pub any_phase_settled_while_unconfigured: bool,
     pub provider_trusted_verification_required: bool,
     pub project_generation_current: bool,
+    pub interpret_redo_in_progress: bool,
     pub project_redo_in_progress: bool,
     pub phase_runner_heartbeat_age_seconds: Option<i64>,
 }

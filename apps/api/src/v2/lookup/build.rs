@@ -154,13 +154,13 @@ fn build_detail_record(
     }
     let registration =
         name_record::identity_name_registration_fields(Some(&record.row), &record.row.namespace);
-    // The projection deletes a released name's inventory row and resolver
-    // pointer; never serve either even if state loss leaves them attached.
-    let released_tombstone = registration.registration_status == RegistrationStatus::Released;
+    // Current registrations and explicitly classified ownerless registry read paths may
+    // expose their selected resolver resource; other retained state remains audit-only.
+    let has_current_registration = name_record::identity_row_has_current_registration(&record.row);
     let record_inventory = record
         .record_inventory_current
         .as_ref()
-        .filter(|_| !released_tombstone);
+        .filter(|_| has_current_registration);
     let addresses = identity_addresses(record_inventory, primary_coin_type);
     let text_records = identity_text_records(record_inventory);
     let content_hash = identity_content_hash(record_inventory);
@@ -175,7 +175,7 @@ fn build_detail_record(
         .as_ref()
         .filter(|_| !unsupported_fields.contains("primary_address"))
         .and_then(|addresses| addresses.get(primary_coin_type).cloned());
-    let resolver = (!released_tombstone
+    let resolver = (has_current_registration
         && string_field(record.row.coverage.get("unsupported_reason")).as_deref()
             != Some(PARTIAL_SERVE_UNSUPPORTED_REASON))
     .then(|| name_record::resolver(&record.row.declared_summary))
@@ -186,7 +186,9 @@ fn build_detail_record(
         display_name: record.row.canonical_display_name.clone(),
         namespace: record.row.namespace.clone(),
         namehash: record.row.namehash.clone(),
-        registration_id: record.row.resource_id.map(|value| value.to_string()),
+        registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
+            .then(|| record.row.resource_id.map(|value| value.to_string()))
+            .flatten(),
         token_id,
         owner: registration.owner,
         manager: None,

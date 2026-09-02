@@ -120,7 +120,7 @@ async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor
 }
 
 #[tokio::test]
-async fn v2_lookup_name_only_inputs_bypass_public_derivation_and_interpret_redo_fence()
+async fn v2_lookup_name_only_refuses_while_interpret_redo_is_in_progress()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_lookup_base_head(&database).await?;
@@ -167,11 +167,9 @@ async fn v2_lookup_name_only_inputs_bypass_public_derivation_and_interpret_redo_
         .await?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
-    assert_eq!(payload["data"][0]["status"], json!("not_found"));
-    assert!(payload["meta"]["as_of"].get("8453").is_some());
-    assert!(payload["meta"]["as_of"].get("1").is_none());
-    assert!(payload["meta"].get("as_of_completeness").is_none());
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert!(payload.get("data").is_none());
 
     database.cleanup().await
 }
@@ -256,7 +254,7 @@ async fn v2_lookup_bare_reverse_returns_conflict_when_every_public_namespace_is_
 }
 
 #[tokio::test]
-async fn v2_lookup_mixed_batch_keeps_reverse_suppression_disclosed() -> Result<()> {
+async fn v2_lookup_exact_scope_fallback_refuses_while_interpret_redo_is_in_progress() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
@@ -288,33 +286,9 @@ async fn v2_lookup_mixed_batch_keeps_reverse_suppression_disclosed() -> Result<(
     .await?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
-    assert_eq!(lookup_record_names(&payload), vec!["alice.eth", "bob.eth"]);
-    assert_eq!(payload["data"][1]["status"], json!("not_found"));
-    assert!(payload["meta"]["as_of"]["1"].is_object());
-    assert!(payload["meta"]["as_of"].get("8453").is_none());
-    assert_eq!(
-        payload["meta"]["as_of_completeness"]["8453"],
-        json!({
-            "completeness": "unsupported",
-            "unsupported_reason": "temporarily_unavailable"
-        })
-    );
-    let token = payload["meta"]["as_of_token"]
-        .as_str()
-        .expect("mixed lookup must include an as_of_token");
-    let bigname_storage::SnapshotAt::ResolvedPositions(positions) =
-        crate::v2::decode_at_token(token).expect("mixed lookup token must decode")
-    else {
-        panic!("mixed lookup token must contain resolved positions");
-    };
-    assert!(
-        positions
-            .as_map()
-            .values()
-            .any(|position| position.chain_id == "base-mainnet"),
-        "the token must retain the suppressed chain position used by the forward input"
-    );
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert!(payload.get("data").is_none());
 
     database.cleanup().await
 }
@@ -624,6 +598,88 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
         record["unsupported_fields"],
         json!(["addresses", "content_hash", "primary_address", "text_records"])
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:reserved.eth",
+        "reserved.eth",
+        "reserved.eth",
+        "namehash:reserved.eth",
+        Uuid::from_u128(0x5a0411),
+        Uuid::from_u128(0x5a0412),
+        Uuid::from_u128(0x5a0413),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             jsonb_set(
+                 declared_summary
+                     #- '{control,owner}'
+                     #- '{control,registry_owner}'
+                     #- '{control,registrant}'
+                     #- '{registration,registrant}'
+                     #- '{registration,registered_at}',
+                 '{registration,status}',
+                 '\"reserved\"'
+             ),
+             '{registration,authority_kind}',
+             '\"ens_v2_registry\"'
+         )
+         WHERE raw_name = 'reserved.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES
+             ('ethereum-mainnet', '0xorphaned-audit-inventory', 39,
+              '2026-04-17T00:00:39Z', 'canonical')",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE record_inventory_current inventory
+         SET chain_positions = inventory.chain_positions || jsonb_build_object(
+             'target_block_number', 39,
+             'target_block_hash', '0xorphaned-audit-inventory'
+         ),
+         canonicality_summary = inventory.canonicality_summary || jsonb_build_object(
+             'target_block_number', 39,
+             'target_block_hash', '0xorphaned-audit-inventory'
+         )
+         FROM name_current name
+         WHERE name.resource_id = inventory.resource_id
+           AND name.raw_name = 'reserved.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "reserved.eth"}]}),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert!(record.get("registration_id").is_none());
+    assert!(record.get("resolver").is_none());
+    assert!(record.get("addresses").is_none());
+    assert!(record.get("text_records").is_none());
+    assert!(record.get("content_hash").is_none());
+    assert!(record.get("primary_address").is_none());
 
     database.cleanup().await?;
     Ok(())

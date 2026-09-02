@@ -24,6 +24,7 @@ const DENSE_SAME_TRANSACTION: &str =
     include_str!("fixtures/interpreters/dense-same-transaction.json");
 const BINDING_FK_RELEASE: &str = include_str!("fixtures/interpreters/binding-fk-release.json");
 const V2_EXPIRY_RETIREMENT: &str = include_str!("fixtures/interpreters/v2-expiry-retirement.json");
+const V1_RECORD_CLEARS: &str = include_str!("fixtures/interpreters/v1-record-clears.json");
 
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
@@ -35,6 +36,9 @@ sol! {
         uint256 cost,
         uint256 expires
     );
+    event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
+    event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+    event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
 }
 #[derive(Deserialize)]
 struct Corpus {
@@ -135,6 +139,19 @@ struct V2ExpiryFixture {
     expected_project: Value,
 }
 
+#[derive(Deserialize)]
+struct RecordClearSuite {
+    cases: Vec<RecordClearCase>,
+}
+
+#[derive(Deserialize)]
+struct RecordClearCase {
+    case: Case,
+    physical_batches: Vec<BlockRange>,
+    expected_normalized_events: Vec<Value>,
+    expected_terminal_project: Value,
+}
+
 #[derive(Clone, Copy, Deserialize)]
 struct BlockRange {
     from_block: i64,
@@ -230,6 +247,72 @@ fn schema_v2_output_seam_semantically_matches_the_committed_raw_event_tripwire()
             expected_cases.into_keys().collect::<Vec<_>>().join(", ")
         );
     }
+    Ok(())
+}
+
+#[test]
+fn ens_v1_contenthash_clear_after_set_uses_flat_clear() -> Result<()> {
+    assert_record_clear_case("ens_v1_contenthash_clear_after_set")
+}
+
+#[test]
+fn ens_v1_contenthash_set_clear_set_uses_flat_values() -> Result<()> {
+    assert_record_clear_case("ens_v1_contenthash_set_clear_set")
+}
+
+#[test]
+fn basenames_multicoin_address_clear_after_set_uses_flat_clear() -> Result<()> {
+    assert_record_clear_case("basenames_multicoin_address_clear_after_set")
+}
+
+#[test]
+fn basenames_multicoin_address_set_clear_set_uses_flat_values() -> Result<()> {
+    assert_record_clear_case("basenames_multicoin_address_set_clear_set")
+}
+
+fn assert_record_clear_case(case_id: &str) -> Result<()> {
+    let suite: RecordClearSuite = serde_json::from_str(V1_RECORD_CLEARS)?;
+    let fixture = suite
+        .cases
+        .into_iter()
+        .find(|fixture| fixture.case.id == case_id)
+        .with_context(|| format!("record-clear fixture has no case {case_id}"))?;
+    let expected = ExpectedCase {
+        id: fixture.case.id.clone(),
+        normalized_events: fixture.expected_normalized_events.clone(),
+        name_surfaces: Vec::new(),
+        surface_bindings: Vec::new(),
+        resources: Vec::new(),
+        token_lineages: Vec::new(),
+    };
+    let input = batch_input(&fixture.case, &expected, &checked_in_manifests()?)?;
+    let whole = interpret_with_incremental_equivalence(case_id, input.clone())?;
+    let physical = interpret_physical_batches(case_id, input, &fixture.physical_batches)?;
+    assert_eq!(
+        whole,
+        flatten_outputs(&physical),
+        "{case_id}: batch grid drift"
+    );
+
+    let actual = whole
+        .normalized_events
+        .iter()
+        .map(|event| {
+            serde_json::json!({
+                "event_kind": event.event_kind,
+                "source_family": event.source_family,
+                "block_number": event.block_number,
+                "block_hash": event.block_hash,
+                "after_state": event.after_state,
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, fixture.expected_normalized_events);
+    assert!(
+        fixture.expected_terminal_project.get("entry").is_some()
+            && fixture.expected_terminal_project.get("answer").is_some(),
+        "{case_id}: fixture must pin its terminal Project entry and indexed answer"
+    );
     Ok(())
 }
 
@@ -513,6 +596,149 @@ fn v2_expiry_retirement_is_an_empty_block_restore_and_redo_stable_delta() -> Res
             .iter()
             .map(|event| &event.event_identity)
             .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn named_v2_expiry_retains_registration_for_markerless_silent_renewal() -> Result<()> {
+    const CHAIN: &str = "adapter-test";
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000079";
+    let manifest = ManifestInput {
+        manifest_id: 186,
+        manifest_version: 1,
+        namespace: "ens".to_owned(),
+        source_family: "ens_v2_registry_l1".to_owned(),
+        chain_id: CHAIN.to_owned(),
+        deployment_label: "fixture".to_owned(),
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+        payload_json: serde_json::json!({"abi":{"events":[
+            {"name":"LabelRegistered","fragment":"event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)","emitter_roles":["registry"],"normalized_events":["RegistrationGranted"]},
+            {"name":"TokenResource","fragment":"event TokenResource(uint256 indexed tokenId, uint256 indexed resource)","emitter_roles":["registry"],"normalized_events":["TokenResourceLinked"]},
+            {"name":"ExpiryUpdated","fragment":"event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)","emitter_roles":["registry"],"normalized_events":["ExpiryChanged","RegistrationRenewed"]}
+        ]}}).to_string(),
+    };
+    let admission = AddressAdmissionInput {
+        address: REGISTRY.to_owned(),
+        contract_instance_id: Uuid::from_u128(186),
+        source_manifest_id: Some(186),
+        role: Some("registry".to_owned()),
+        discovery_edge_kind: None,
+        discovery_from_contract_instance_id: None,
+        discovery_observation_key: None,
+        active_from_block: Some(0),
+        active_to_block: None,
+    };
+    let mut token_bytes = *keccak256(b"retained");
+    token_bytes[28..].copy_from_slice(&0_u32.to_be_bytes());
+    let token = U256::from_be_bytes(token_bytes);
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let input = |raw_logs, blocks| BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission.clone()],
+        prior_events: Vec::new(),
+        blocks,
+        raw_logs,
+    };
+    let block = |number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+    };
+    let raw = |encoded: alloy_primitives::LogData, number, index| RawLogInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+        transaction_hash: format!("transaction-{number}"),
+        transaction_index: 0,
+        log_index: index,
+        emitting_address: REGISTRY.to_owned(),
+        topics: encoded
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect(),
+        data: encoded.data.to_vec(),
+    };
+    let (expired, session) = prepare_schema_v2_batch_incremental(
+        input(
+            vec![
+                raw(
+                    LabelRegistered {
+                        tokenId: token,
+                        labelHash: keccak256(b"retained"),
+                        label: "retained".to_owned(),
+                        owner: sender,
+                        expiry: 2,
+                        sender,
+                    }
+                    .encode_log_data(),
+                    1,
+                    0,
+                ),
+                raw(
+                    TokenResource {
+                        tokenId: token,
+                        resource: U256::from(186),
+                    }
+                    .encode_log_data(),
+                    1,
+                    1,
+                ),
+            ],
+            vec![block(1), block(2)],
+        ),
+        None,
+        StateCacheCapacity::Unlimited,
+    )?
+    .finish(Vec::new())?;
+    assert!(expired.normalized_events.iter().any(|event| {
+        event.block_number == Some(2)
+            && event.event_kind == "RegistrationReleased"
+            && event.logical_name_id.is_some()
+            && event.after_state["source_event"] == "RegistryPathExpired"
+    }));
+
+    let (renewed, _) = prepare_schema_v2_batch_incremental(
+        input(
+            vec![raw(
+                ExpiryUpdated {
+                    tokenId: token,
+                    newExpiry: 10,
+                    sender,
+                }
+                .encode_log_data(),
+                3,
+                0,
+            )],
+            vec![block(3)],
+        ),
+        Some(session),
+        StateCacheCapacity::Unlimited,
+    )?
+    .finish(Vec::new())?;
+    let renewal = renewed
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationRenewed"
+                && event.after_state["revived_from_expiry"] == true
+        })
+        .context("named registration did not survive expiry for silent renewal")?;
+    assert!(renewal.logical_name_id.is_some());
+    assert!(renewal.after_state.get("status").is_none());
+    assert!(renewal.after_state.get("reservation_resource").is_none());
+    assert!(
+        renewed
+            .normalized_events
+            .iter()
+            .all(|event| event.event_kind != "RegistrationReserved")
     );
     Ok(())
 }

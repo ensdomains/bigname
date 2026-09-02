@@ -14,6 +14,7 @@ pub mod inspect;
 pub mod interpret_phase;
 pub mod label_preimages;
 pub mod live_phase;
+pub mod manifest_startup;
 pub mod metrics;
 pub mod phase;
 pub mod phase_lock;

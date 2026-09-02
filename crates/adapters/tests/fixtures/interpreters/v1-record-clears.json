@@ -1,0 +1,130 @@
+{
+  "cases": [
+    {
+      "case": {
+        "id": "ens_v1_contenthash_clear_after_set",
+        "runner": "unwrapped_authority",
+        "manifests": [{
+          "namespace": "ens",
+          "source_family": "ens_v1_resolver_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml",
+          "role": "public_resolver",
+          "address": "0xF29100983E058B709F3D539b0c765937B804AC15",
+          "contract_instance_id": "66000000-0000-0000-0000-000000000001"
+        }],
+        "blocks": [
+          {"hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","number":1000,"timestamp":1700001000},
+          {"hash":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","number":1001,"timestamp":1700001001}
+        ],
+        "logs": [
+          {"chain":"ethereum-mainnet","block_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","block_number":1000,"transaction_hash":"0x0101010101010101010101010101010101010101010101010101010101010101","transaction_index":0,"log_index":0,"emitting_address":"0xF29100983E058B709F3D539b0c765937B804AC15","topics":["0xe379c1624ed7e714cc0937528a32359d69d5281337765313dba4e081b72d7578","0x1111111111111111111111111111111111111111111111111111111111111111"],"data":"0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000004e301017000000000000000000000000000000000000000000000000000000000"},
+          {"chain":"ethereum-mainnet","block_hash":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","block_number":1001,"transaction_hash":"0x0202020202020202020202020202020202020202020202020202020202020202","transaction_index":0,"log_index":0,"emitting_address":"0xF29100983E058B709F3D539b0c765937B804AC15","topics":["0xe379c1624ed7e714cc0937528a32359d69d5281337765313dba4e081b72d7578","0x1111111111111111111111111111111111111111111111111111111111111111"],"data":"0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"}
+        ]
+      },
+      "physical_batches": [{"from_block":1000,"to_block":1000},{"from_block":1001,"to_block":1001}],
+      "expected_normalized_events": [
+        {"event_kind":"RecordChanged","source_family":"ens_v1_resolver_l1","block_number":1000,"block_hash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","after_state":{"source_event":"ContenthashChanged","resolver":"0xf29100983e058b709f3d539b0c765937b804ac15","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000001","node":"0x1111111111111111111111111111111111111111111111111111111111111111","record_key":"contenthash","record_family":"contenthash","selector_key":null,"value_retained":false,"contenthash_hex":"0xe3010170"}},
+        {"event_kind":"RecordChanged","source_family":"ens_v1_resolver_l1","block_number":1001,"block_hash":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","after_state":{"source_event":"ContenthashChanged","resolver":"0xf29100983e058b709f3d539b0c765937b804ac15","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000001","node":"0x1111111111111111111111111111111111111111111111111111111111111111","record_key":"contenthash","record_family":"contenthash","selector_key":null,"value_retained":false,"contenthash_hex":"0x"}}
+      ],
+      "expected_terminal_project": {"entry":{"record_key":"contenthash","record_family":"contenthash","status":"not_found"},"answer":{"status":"not_found","value":null},"last_change":{"block_number":1001,"block_hash":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+    },
+    {
+      "case": {
+        "id": "ens_v1_contenthash_set_clear_set",
+        "runner": "unwrapped_authority",
+        "manifests": [{
+          "namespace": "ens",
+          "source_family": "ens_v1_resolver_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml",
+          "role": "public_resolver",
+          "address": "0xF29100983E058B709F3D539b0c765937B804AC15",
+          "contract_instance_id": "66000000-0000-0000-0000-000000000001"
+        }],
+        "blocks": [
+          {"hash":"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","number":1010,"timestamp":1700001010},
+          {"hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","number":1011,"timestamp":1700001011},
+          {"hash":"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","number":1012,"timestamp":1700001012}
+        ],
+        "logs": [
+          {"chain":"ethereum-mainnet","block_hash":"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","block_number":1010,"transaction_hash":"0x0303030303030303030303030303030303030303030303030303030303030303","transaction_index":0,"log_index":0,"emitting_address":"0xF29100983E058B709F3D539b0c765937B804AC15","topics":["0xe379c1624ed7e714cc0937528a32359d69d5281337765313dba4e081b72d7578","0x1212121212121212121212121212121212121212121212121212121212121212"],"data":"0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000004e301017000000000000000000000000000000000000000000000000000000000"},
+          {"chain":"ethereum-mainnet","block_hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","block_number":1011,"transaction_hash":"0x0404040404040404040404040404040404040404040404040404040404040404","transaction_index":0,"log_index":0,"emitting_address":"0xF29100983E058B709F3D539b0c765937B804AC15","topics":["0xe379c1624ed7e714cc0937528a32359d69d5281337765313dba4e081b72d7578","0x1212121212121212121212121212121212121212121212121212121212121212"],"data":"0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000"},
+          {"chain":"ethereum-mainnet","block_hash":"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","block_number":1012,"transaction_hash":"0x0505050505050505050505050505050505050505050505050505050505050505","transaction_index":0,"log_index":0,"emitting_address":"0xF29100983E058B709F3D539b0c765937B804AC15","topics":["0xe379c1624ed7e714cc0937528a32359d69d5281337765313dba4e081b72d7578","0x1212121212121212121212121212121212121212121212121212121212121212"],"data":"0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000004e501017200000000000000000000000000000000000000000000000000000000"}
+        ]
+      },
+      "physical_batches": [{"from_block":1010,"to_block":1010},{"from_block":1011,"to_block":1011},{"from_block":1012,"to_block":1012}],
+      "expected_normalized_events": [
+        {"event_kind":"RecordChanged","source_family":"ens_v1_resolver_l1","block_number":1010,"block_hash":"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","after_state":{"source_event":"ContenthashChanged","resolver":"0xf29100983e058b709f3d539b0c765937b804ac15","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000001","node":"0x1212121212121212121212121212121212121212121212121212121212121212","record_key":"contenthash","record_family":"contenthash","selector_key":null,"value_retained":false,"contenthash_hex":"0xe3010170"}},
+        {"event_kind":"RecordChanged","source_family":"ens_v1_resolver_l1","block_number":1011,"block_hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","after_state":{"source_event":"ContenthashChanged","resolver":"0xf29100983e058b709f3d539b0c765937b804ac15","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000001","node":"0x1212121212121212121212121212121212121212121212121212121212121212","record_key":"contenthash","record_family":"contenthash","selector_key":null,"value_retained":false,"contenthash_hex":"0x"}},
+        {"event_kind":"RecordChanged","source_family":"ens_v1_resolver_l1","block_number":1012,"block_hash":"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","after_state":{"source_event":"ContenthashChanged","resolver":"0xf29100983e058b709f3d539b0c765937b804ac15","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000001","node":"0x1212121212121212121212121212121212121212121212121212121212121212","record_key":"contenthash","record_family":"contenthash","selector_key":null,"value_retained":false,"contenthash_hex":"0xe5010172"}}
+      ],
+      "expected_terminal_project": {"entry":{"record_key":"contenthash","record_family":"contenthash","status":"success","value":{"encoding":"hex","bytes":"0xe5010172"}},"answer":{"status":"success","value":"0xe5010172"},"first_value":"0xe3010170","last_change":{"block_number":1012,"block_hash":"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}
+    },
+    {
+      "case": {
+        "id": "basenames_multicoin_address_clear_after_set",
+        "runner": "unwrapped_authority",
+        "manifests": [{
+          "namespace": "basenames",
+          "source_family": "basenames_base_resolver",
+          "chain": "base-mainnet",
+          "deployment_epoch": "basenames_v1",
+          "file_path": "manifests/mainnet/base/basenames/basenames_base_resolver/v1.toml",
+          "role": "resolver",
+          "address": "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD",
+          "contract_instance_id": "66000000-0000-0000-0000-000000000002"
+        }],
+        "blocks": [
+          {"hash":"0x1313131313131313131313131313131313131313131313131313131313131313","number":1020,"timestamp":1700001020},
+          {"hash":"0x1414141414141414141414141414141414141414141414141414141414141414","number":1021,"timestamp":1700001021}
+        ],
+        "logs": [
+          {"chain":"base-mainnet","block_hash":"0x1313131313131313131313131313131313131313131313131313131313131313","block_number":1020,"transaction_hash":"0x0606060606060606060606060606060606060606060606060606060606060606","transaction_index":0,"log_index":0,"emitting_address":"0xC6d566A56A1aFf6508b41f6c90ff131615583BCD","topics":["0x65412581168e88a1e60c6459d7f44ae83ad0832e670826c05a4e2476b57af752","0x2121212121212121212121212121212121212121212121212121212121212121"],"data":"0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000030011220000000000000000000000000000000000000000000000000000000000"},
+          {"chain":"base-mainnet","block_hash":"0x1414141414141414141414141414141414141414141414141414141414141414","block_number":1021,"transaction_hash":"0x0707070707070707070707070707070707070707070707070707070707070707","transaction_index":0,"log_index":0,"emitting_address":"0xC6d566A56A1aFf6508b41f6c90ff131615583BCD","topics":["0x65412581168e88a1e60c6459d7f44ae83ad0832e670826c05a4e2476b57af752","0x2121212121212121212121212121212121212121212121212121212121212121"],"data":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000"}
+        ]
+      },
+      "physical_batches": [{"from_block":1020,"to_block":1020},{"from_block":1021,"to_block":1021}],
+      "expected_normalized_events": [
+        {"event_kind":"RecordChanged","source_family":"basenames_base_resolver","block_number":1020,"block_hash":"0x1313131313131313131313131313131313131313131313131313131313131313","after_state":{"source_event":"AddressChanged","resolver":"0xc6d566a56a1aff6508b41f6c90ff131615583bcd","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000002","node":"0x2121212121212121212121212121212121212121212121212121212121212121","record_key":"addr:0","record_family":"addr","selector_key":"0","value_retained":false,"coin_type":"0","address_bytes_hex":"0x001122"}},
+        {"event_kind":"RecordChanged","source_family":"basenames_base_resolver","block_number":1021,"block_hash":"0x1414141414141414141414141414141414141414141414141414141414141414","after_state":{"source_event":"AddressChanged","resolver":"0xc6d566a56a1aff6508b41f6c90ff131615583bcd","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000002","node":"0x2121212121212121212121212121212121212121212121212121212121212121","record_key":"addr:0","record_family":"addr","selector_key":"0","value_retained":false,"coin_type":"0","address_bytes_hex":"0x"}}
+      ],
+      "expected_terminal_project": {"entry":{"record_key":"addr:0","record_family":"addr","selector_key":"0","status":"not_found"},"answer":{"status":"not_found","value":null},"last_change":{"block_number":1021,"block_hash":"0x1414141414141414141414141414141414141414141414141414141414141414"}}
+    },
+    {
+      "case": {
+        "id": "basenames_multicoin_address_set_clear_set",
+        "runner": "unwrapped_authority",
+        "manifests": [{
+          "namespace": "basenames",
+          "source_family": "basenames_base_resolver",
+          "chain": "base-mainnet",
+          "deployment_epoch": "basenames_v1",
+          "file_path": "manifests/mainnet/base/basenames/basenames_base_resolver/v1.toml",
+          "role": "resolver",
+          "address": "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD",
+          "contract_instance_id": "66000000-0000-0000-0000-000000000002"
+        }],
+        "blocks": [
+          {"hash":"0x1515151515151515151515151515151515151515151515151515151515151515","number":1030,"timestamp":1700001030},
+          {"hash":"0x1616161616161616161616161616161616161616161616161616161616161616","number":1031,"timestamp":1700001031},
+          {"hash":"0x1717171717171717171717171717171717171717171717171717171717171717","number":1032,"timestamp":1700001032}
+        ],
+        "logs": [
+          {"chain":"base-mainnet","block_hash":"0x1515151515151515151515151515151515151515151515151515151515151515","block_number":1030,"transaction_hash":"0x0808080808080808080808080808080808080808080808080808080808080808","transaction_index":0,"log_index":0,"emitting_address":"0xC6d566A56A1aFf6508b41f6c90ff131615583BCD","topics":["0x65412581168e88a1e60c6459d7f44ae83ad0832e670826c05a4e2476b57af752","0x2222222222222222222222222222222222222222222222222222222222222222"],"data":"0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000030011220000000000000000000000000000000000000000000000000000000000"},
+          {"chain":"base-mainnet","block_hash":"0x1616161616161616161616161616161616161616161616161616161616161616","block_number":1031,"transaction_hash":"0x0909090909090909090909090909090909090909090909090909090909090909","transaction_index":0,"log_index":0,"emitting_address":"0xC6d566A56A1aFf6508b41f6c90ff131615583BCD","topics":["0x65412581168e88a1e60c6459d7f44ae83ad0832e670826c05a4e2476b57af752","0x2222222222222222222222222222222222222222222222222222222222222222"],"data":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000"},
+          {"chain":"base-mainnet","block_hash":"0x1717171717171717171717171717171717171717171717171717171717171717","block_number":1032,"transaction_hash":"0x1010101010101010101010101010101010101010101010101010101010101010","transaction_index":0,"log_index":0,"emitting_address":"0xC6d566A56A1aFf6508b41f6c90ff131615583BCD","topics":["0x65412581168e88a1e60c6459d7f44ae83ad0832e670826c05a4e2476b57af752","0x2222222222222222222222222222222222222222222222222222222222222222"],"data":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000004aabbccdd00000000000000000000000000000000000000000000000000000000"}
+        ]
+      },
+      "physical_batches": [{"from_block":1030,"to_block":1030},{"from_block":1031,"to_block":1031},{"from_block":1032,"to_block":1032}],
+      "expected_normalized_events": [
+        {"event_kind":"RecordChanged","source_family":"basenames_base_resolver","block_number":1030,"block_hash":"0x1515151515151515151515151515151515151515151515151515151515151515","after_state":{"source_event":"AddressChanged","resolver":"0xc6d566a56a1aff6508b41f6c90ff131615583bcd","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000002","node":"0x2222222222222222222222222222222222222222222222222222222222222222","record_key":"addr:0","record_family":"addr","selector_key":"0","value_retained":false,"coin_type":"0","address_bytes_hex":"0x001122"}},
+        {"event_kind":"RecordChanged","source_family":"basenames_base_resolver","block_number":1031,"block_hash":"0x1616161616161616161616161616161616161616161616161616161616161616","after_state":{"source_event":"AddressChanged","resolver":"0xc6d566a56a1aff6508b41f6c90ff131615583bcd","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000002","node":"0x2222222222222222222222222222222222222222222222222222222222222222","record_key":"addr:0","record_family":"addr","selector_key":"0","value_retained":false,"coin_type":"0","address_bytes_hex":"0x"}},
+        {"event_kind":"RecordChanged","source_family":"basenames_base_resolver","block_number":1032,"block_hash":"0x1717171717171717171717171717171717171717171717171717171717171717","after_state":{"source_event":"AddressChanged","resolver":"0xc6d566a56a1aff6508b41f6c90ff131615583bcd","resolver_contract_instance_id":"66000000-0000-0000-0000-000000000002","node":"0x2222222222222222222222222222222222222222222222222222222222222222","record_key":"addr:0","record_family":"addr","selector_key":"0","value_retained":false,"coin_type":"0","address_bytes_hex":"0xaabbccdd"}}
+      ],
+      "expected_terminal_project": {"entry":{"record_key":"addr:0","record_family":"addr","selector_key":"0","status":"success","value":"0xaabbccdd"},"answer":{"status":"success","value":"0xaabbccdd"},"first_value":"0x001122","last_change":{"block_number":1032,"block_hash":"0x1717171717171717171717171717171717171717171717171717171717171717"}}
+    }
+  ]
+}

@@ -15,7 +15,7 @@ use super::support::normalize_inferred_route_name;
 use super::{
     CursorPayload, Envelope, HistoryEventType, Meta, Page, QueryParamAllowlist, QueryParams,
     StrictQueryParams, V2Error, V2Result, decode, encode, format_timestamp, history_event_type,
-    validate_latest_collection_selectors,
+    map_history_page_error, product_history_event_kinds, validate_latest_collection_selectors,
 };
 
 const EVENTS_SORT: &str = "chain_position_desc";
@@ -78,7 +78,10 @@ pub(crate) async fn get_events(
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let namespace = resolve_events_namespace(&params)?;
-    let parsed = parse_events_filter(&params, &namespace)?;
+    let mut parsed = parse_events_filter(&params, &namespace)?;
+    if params.event_type.is_none() {
+        parsed.storage_filter.event_kinds = product_history_event_kinds();
+    }
 
     let storage_cursor = params
         .cursor
@@ -89,7 +92,7 @@ pub(crate) async fn get_events(
         })
         .transpose()?;
 
-    let storage_page = bigname_storage::load_event_history_page(
+    let storage_page = bigname_storage::load_event_history_page_with_redo_policy(
         &state.pool,
         parsed.storage_filter,
         true,
@@ -97,18 +100,18 @@ pub(crate) async fn get_events(
         params.page_size,
         HistorySummaryMode::None,
         false,
+        true,
     )
     .await
-    .map_err(|error| {
-        if error
-            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
-            .is_some()
-        {
-            invalid_cursor_error()
-        } else {
-            V2Error::internal_error("failed to load events")
-        }
-    })?;
+    .map_err(|error| map_history_page_error(error, "failed to load events"))?;
+
+    #[cfg(test)]
+    bigname_storage::history_anchor_read_test_hooks::run(
+        &state.pool,
+        bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPage,
+    )
+    .await
+    .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
     let next_cursor = storage_page
         .next_cursor
@@ -131,6 +134,11 @@ pub(crate) async fn get_events(
         tracing::error!(error = ?error, "failed to load event names from phase projections");
         V2Error::internal_error("failed to load events")
     })?;
+    if let Some(fence) = storage_page.interpret_redo_fence.as_ref() {
+        bigname_storage::revalidate_interpret_redo_fence(&state.pool, fence)
+            .await
+            .map_err(|error| map_history_page_error(error, "failed to load events"))?;
+    }
     let data = storage_page
         .rows
         .iter()
@@ -316,6 +324,7 @@ pub(crate) fn parse_events_filter(
                     relation: None,
                 }),
             event_kinds,
+            bind_cursor_anchor_to_event_kinds: params.event_type.is_some(),
             from_block: params.from_block,
             to_block: params.to_block,
         },

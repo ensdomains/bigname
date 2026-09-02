@@ -303,15 +303,20 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
 }
 
 include!("tests/graphql.rs");
+include!("tests/graphql_generated_domain_roots.rs");
 include!("tests/graphql_contract.rs");
 include!("tests/graphql_oracle.rs");
+include!("tests/graphql_oracle_input_scopes.rs");
 include!("tests/v2_name_record.rs");
 include!("tests/v2_diagnostics_names.rs");
 include!("tests/v2_history.rs");
+include!("tests/v2_history_redo.rs");
+include!("tests/v2_history_paging.rs");
 include!("tests/v2_diag_events.rs");
 include!("tests/v2_address_names.rs");
 include!("tests/v2_permissions.rs");
 include!("tests/v2_resolvers.rs");
+include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
 include!("tests/v2_lookup.rs");
 include!("tests/v2_search.rs");

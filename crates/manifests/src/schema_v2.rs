@@ -56,6 +56,28 @@ pub async fn sync_schema_v2_repository(
     pool: &PgPool,
     repository: &ManifestRepository,
 ) -> Result<SchemaV2ManifestSyncSummary> {
+    validate_loaded_repository(repository)?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to start schema-v2 manifest sync transaction")?;
+    let summary = sync_schema_v2_repository_in_transaction(&mut transaction, repository).await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit schema-v2 manifest sync")?;
+    Ok(summary)
+}
+
+pub async fn sync_schema_v2_repository_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &ManifestRepository,
+) -> Result<SchemaV2ManifestSyncSummary> {
+    validate_loaded_repository(repository)?;
+    sync_loaded_schema_v2_repository(transaction, repository).await
+}
+
+fn validate_loaded_repository(repository: &ManifestRepository) -> Result<()> {
     match repository.summary().status {
         ManifestLoadStatus::Loaded => {}
         status => bail!(
@@ -64,14 +86,16 @@ pub async fn sync_schema_v2_repository(
             repository.root().display()
         ),
     }
+    Ok(())
+}
 
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to start schema-v2 manifest sync transaction")?;
+async fn sync_loaded_schema_v2_repository(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &ManifestRepository,
+) -> Result<SchemaV2ManifestSyncSummary> {
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SCHEMA_V2_MANIFEST_SYNC_LOCK)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .context("failed to take schema-v2 manifest sync advisory lock")?;
     let mut omitted_admission_addresses = BTreeSet::new();
@@ -101,17 +125,17 @@ pub async fn sync_schema_v2_repository(
             }
         }
     }
-    sync_state::lock_phase_writers(&mut transaction, repository).await?;
-    let previous_authority = sync_state::active_authority(&mut transaction).await?;
-    let previous_admission_floors = sync_state::active_admission_floors(&mut transaction).await?;
+    sync_state::lock_phase_writers(transaction, repository).await?;
+    let previous_authority = sync_state::active_authority(transaction).await?;
+    let previous_admission_floors = sync_state::active_admission_floors(transaction).await?;
     let desired_authority = sync_state::repository_authority(repository)?;
-    let existing = load_manifest_states(&mut transaction).await?;
-    let previous_declarations = active_manifest_address_declarations(&mut transaction).await?;
+    let existing = load_manifest_states(transaction).await?;
+    let previous_declarations = active_manifest_address_declarations(transaction).await?;
 
     sqlx::query(
         "UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE rollout_status = 'active'",
     )
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await
     .context("failed to stage active schema-v2 manifests for replacement")?;
 
@@ -125,33 +149,29 @@ pub async fn sync_schema_v2_repository(
     let mut notices = Vec::new();
     for loaded in repository.manifests() {
         let file_path = loaded.relative_path.to_string_lossy().into_owned();
-        let manifest_id = upsert_manifest(&mut transaction, loaded, &file_path).await?;
+        let manifest_id = upsert_manifest(transaction, loaded, &file_path).await?;
         let state = manifest_state(manifest_id, loaded)?;
         desired_keys.insert(state.key.clone());
         match existing.get(&state.key) {
-            None => write_manifest_event(&mut transaction, json!({}), &state).await?,
+            None => write_manifest_event(transaction, json!({}), &state).await?,
             Some(before) if !before.authority_matches(&state) => {
                 let repaired_history = !before.history_matches();
-                write_manifest_event(&mut transaction, before.event_state(), &state).await?;
+                write_manifest_event(transaction, before.event_state(), &state).await?;
                 if repaired_history {
                     repaired_history_chains.insert(state.key.chain_id.clone());
                     repaired_basenames_execution_history |= is_basenames_execution(&state.key);
                 }
             }
             Some(before) if !before.history_matches() => {
-                write_manifest_event(
-                    &mut transaction,
-                    before.latest_event_state_or_empty(),
-                    &state,
-                )
-                .await?;
+                write_manifest_event(transaction, before.latest_event_state_or_empty(), &state)
+                    .await?;
                 repaired_history_chains.insert(state.key.chain_id.clone());
                 repaired_basenames_execution_history |= is_basenames_execution(&state.key);
             }
             Some(_) => {}
         }
         let counts = replace_manifest_children(
-            &mut transaction,
+            transaction,
             manifest_id,
             loaded,
             &mut repaired_floor_chains,
@@ -174,21 +194,21 @@ pub async fn sync_schema_v2_repository(
         } else {
             before.latest_event_state_or_empty()
         };
-        write_manifest_event(&mut transaction, before_state, &after).await?;
+        write_manifest_event(transaction, before_state, &after).await?;
         if repaired_history {
             repaired_history_chains.insert(before.key.chain_id.clone());
             repaired_basenames_execution_history |= is_basenames_execution(&before.key);
         }
     }
-    deactivate_retired_manifest_addresses(&mut transaction, &previous_declarations).await?;
+    deactivate_retired_manifest_addresses(transaction, &previous_declarations).await?;
     repair_retired_omitted_admission_floors(
-        &mut transaction,
+        transaction,
         &omitted_admission_addresses,
         &mut repaired_floor_chains,
     )
     .await?;
     sync_state::invalidate_changed_derived_epochs(
-        &mut transaction,
+        transaction,
         &previous_authority,
         &desired_authority,
         &previous_admission_floors,
@@ -197,10 +217,6 @@ pub async fn sync_schema_v2_repository(
         repaired_basenames_execution_history,
     )
     .await?;
-    transaction
-        .commit()
-        .await
-        .context("failed to commit schema-v2 manifest sync")?;
     Ok(SchemaV2ManifestSyncSummary {
         manifest_count: repository.manifests().len(),
         declaration_count,
