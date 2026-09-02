@@ -1238,6 +1238,114 @@ async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Re
 }
 
 #[tokio::test]
+async fn v2_get_name_withholds_expired_resource_identity_and_inventory_for_reservation() -> Result<()>
+{
+    // Model a reservation-selected row with inventory retained for the expired
+    // resource. A reservation has no current registration.
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        row.declared_summary["registration"] = json!({
+            "status": "reserved",
+            "expiry": 4_000_000_000_u64,
+            "latest_event_kind": "RegistrationReserved"
+        });
+        row.declared_summary["control"] = json!({"status": "reserved"});
+    })
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("registration_status"), Some(&json!("unregistered")));
+    assert!(data.get("registration_id").is_none());
+    assert!(data.get("resolver").is_none());
+    assert!(data.get("addresses").is_none());
+    assert!(data.get("text_records").is_none());
+    assert!(data.get("content_hash").is_none());
+    assert!(data.get("primary_address").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_withholds_retained_inventory_for_reservation() -> Result<()> {
+    let payload = v2_name_records_payload_with_row_and_setup(
+        "/v2/names/Alice.eth/records?include=inventory",
+        |row| {
+            row.declared_summary["registration"] = json!({
+                "status": "reserved",
+                "expiry": 4_000_000_000_u64,
+                "latest_event_kind": "RegistrationReserved"
+            });
+            row.declared_summary["control"] = json!({"status": "reserved"});
+        },
+        |_, _, _| {},
+    )
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("resolver"), Some(&Value::Null));
+    assert_eq!(data.get("addresses"), Some(&json!({})));
+    assert_eq!(data.get("text_records"), Some(&json!({})));
+    assert_eq!(data.get("content_hash"), Some(&Value::Null));
+    assert!(data.get("inventory").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_verified_ignores_reservation_audit_selectors() -> Result<()> {
+    let payload = v2_name_records_payload_with_row_and_setup(
+        "/v2/names/Alice.eth/records?source=verified&include=inventory",
+        |row| {
+            row.declared_summary["registration"] = json!({
+                "status": "reserved",
+                "expiry": 4_000_000_000_u64,
+                "latest_event_kind": "RegistrationReserved"
+            });
+            row.declared_summary["control"] = json!({"status": "reserved"});
+        },
+        |_, _, inventory| {
+            inventory.selectors = Value::Array(
+                (0..=200)
+                    .map(|index| {
+                        json!({
+                            "record_key": format!("text:audit-{index}"),
+                            "record_family": "text",
+                            "selector_key": format!("audit-{index}"),
+                            "cacheable": true
+                        })
+                    })
+                    .collect(),
+            );
+        },
+    )
+    .await?;
+
+    let data = payload["data"].as_object().expect("data must be an object");
+    assert_eq!(data.get("resolver"), Some(&Value::Null));
+    assert_eq!(data.get("addresses"), Some(&json!({})));
+    assert_eq!(data.get("text_records"), Some(&json!({})));
+    assert_eq!(data.get("content_hash"), Some(&Value::Null));
+    assert!(data.get("records").is_none());
+    assert!(data.get("inventory").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_records_verified_keeps_empty_records_for_active_name() -> Result<()> {
+    let payload = v2_name_records_payload_with_row_and_setup(
+        "/v2/names/Alice.eth/records?source=verified",
+        |_| {},
+        |_, _, inventory| {
+            inventory.selectors = json!([]);
+            inventory.entries = json!([]);
+            inventory.explicit_gaps = json!([]);
+            inventory.unsupported_families = json!([]);
+        },
+    )
+    .await?;
+
+    assert_eq!(payload["data"]["records"], json!({}));
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_tombstone(
 ) -> Result<()> {
     // The fixture retains the inventory row, declared resolver, and a live
@@ -4724,8 +4832,9 @@ async fn v2_name_records_payload_with_row_and_setup(
         .await
         .context("v2 name records request failed")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
 
     database.cleanup().await?;
     Ok(payload)

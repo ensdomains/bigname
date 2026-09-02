@@ -187,7 +187,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     add!(MAIN, None, 100, Some(0), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 100, Some(1), "RegistrationGranted", granted("TokenResource", TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 100, Some(3), "ResolverChanged", json!({"source_event":"ResolverUpdated","resolver":OWNER}));
-    exact_events(pool, exact, 100, &["PermissionChanged"]).await?; let mut rival = granted("LabelRegistered", "0x77", 1_999_999_999); rival["registrant"] = Value::String(SUBJECT.into()); rival.as_object_mut().expect("rival state").remove("authority_kind"); add!(MAIN, None, 100, Some(13), "RegistrationGranted", rival); add!(MAIN, None, 100, Some(14), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released","token_id":"0x77","registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(MAIN, None, 100, Some(12), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(MAIN, None, 100, None, "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
+    exact_events(pool, exact, 100, &["PermissionChanged"]).await?; let mut rival = granted("LabelRegistered", "0x77", 1_999_999_999); rival["registrant"] = Value::String(SUBJECT.into()); rival.as_object_mut().expect("rival state").remove("authority_kind"); add!(MAIN, None, 100, Some(13), "RegistrationGranted", rival); add!(MAIN, None, 100, Some(14), "RegistrationReleased", json!({"source_event":"LabelUnregistered","sender":OWNER,"token_id":"0x77","registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(MAIN, None, 100, Some(12), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(MAIN, None, 100, None, "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
     add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(MAIN, Some(STALE_RESOURCE), 100, Some(4), "RegistrationReleased", expired(STALE_TOKEN, 1_700_000_100));
     add!(RESERVATION, None, 100, Some(5), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
     add!(RESERVATION, None, 100, Some(6), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_900_000_000_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
@@ -196,8 +196,8 @@ async fn seed(pool: &PgPool) -> Result<()> {
     add!(STALE, Some(STALE_RESOURCE), 100, Some(8), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_700_000_100_i64,"token_id":STALE_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); exact_events(pool, exact, 100, &["RegistrationReleased"]).await?;
     add!(STALE, Some(STALE_RESOURCE), 100, Some(9), "PermissionChanged", permission.clone()); add!(DETACHED, Some(DETACHED_RESOURCE), 100, Some(10), "RegistrationReserved", json!({"source_event":"LabelReserved","status":"reserved","expiry":1_800_000_000_i64,"token_id":DETACHED_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(DETACHED, Some(DETACHED_RESOURCE), 100, Some(11), "PermissionChanged", permission);
     exact_events(pool, exact, 101, &["SurfaceUnbound", "RegistrationReleased", "ResolverChanged", "SubregistryChanged"]).await?;
-    add!(MAIN, Some(RESOURCE), 101, Some(9), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
-    add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(9), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000)); add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(10), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"})); add!(MAIN, Some(RESOURCE), 101, Some(11), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"registered","expiry":1_900_000_000_i64,"token_id":TOKEN,"revived_from_expiry":true}));
+    add!(MAIN, Some(RESOURCE), 101, Some(9), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released","terminal_reason":"registry_name_binding_changed","token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
+    add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(9), "RegistrationGranted", granted("LabelRegistered", TOKEN, 1_800_000_000)); add!(GENERIC, Some(GENERIC_RESOURCE), 101, Some(10), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released","terminal_reason":"registry_name_binding_changed","token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"})); add!(MAIN, Some(RESOURCE), 101, Some(11), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"registered","expiry":1_900_000_000_i64,"token_id":TOKEN,"revived_from_expiry":true}));
     add!(RESERVATION, None, 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000));
     add!(MIXED, Some(RESOURCE), 101, None, "RegistrationReleased", expired(TOKEN, 1_800_000_000)); add!(DETACHED, Some(DETACHED_RESOURCE), 101, None, "RegistrationReleased", expired(DETACHED_TOKEN, 1_800_000_000));
     add!(MAIN, Some(RESOURCE), 102, Some(1), "ExpiryChanged", json!({"source_event":"ExpiryUpdated","expiry":1_900_000_000_i64,"token_id":TOKEN}));
@@ -205,7 +205,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
     add!(STALE, Some(STALE_RESOURCE), 102, Some(2), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":STALE_TOKEN,"revived_from_expiry":true,"reservation_resource":true})); add!(DETACHED, Some(DETACHED_RESOURCE), 102, Some(3), "RegistrationRenewed", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":DETACHED_TOKEN,"revived_from_expiry":true,"reservation_resource":true}));
     add!(RESERVATION, None, 102, Some(2), "RegistrationReserved", json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":1_900_000_000_i64,"token_id":TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
     add!(MAIN, Some(RESOURCE), 103, None, "RegistrationReleased", expired(TOKEN, 1_900_000_000)); add!(DETACHED, Some(DETACHED_RESOURCE), 103, None, "RegistrationReleased", expired(DETACHED_TOKEN, 1_900_000_000)); add!(MAIN, Some(VERSION_RESOURCE), 103, Some(0), "RegistrationGranted", granted("LabelRegistered", VERSION_TOKEN, 2_000_000_000));
-    add!(MAIN, Some(VERSION_RESOURCE), 104, Some(0), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released"}));
+    add!(MAIN, Some(VERSION_RESOURCE), 104, Some(0), "RegistrationReleased", json!({"source_event":"LabelUnregistered","status":"released","terminal_reason":"registry_name_binding_changed","token_id":VERSION_TOKEN,"registry_contract_instance_id":"00000000-0000-0000-0000-000000000001"}));
     sqlx::query("UPDATE normalized_events SET logical_name_id = NULL WHERE resource_id = $1::uuid AND event_kind IN ('RegistrationReleased', 'RegistrationRenewed')").bind(DETACHED_RESOURCE).execute(pool).await?;
     Ok(())
 }
@@ -359,11 +359,17 @@ async fn explicit_v2_release_does_not_retire_effective_permissions() -> Result<(
         sqlx::query(
             "UPDATE normalized_events
              SET after_state = jsonb_build_object(
-                 'source_event', 'LabelUnregistered', 'status', 'released'
+                 'source_event', 'LabelUnregistered',
+                 'status', 'released',
+                 'terminal_reason', 'registry_name_binding_changed',
+                 'token_id', $2,
+                 'registry_contract_instance_id',
+                     '00000000-0000-0000-0000-000000000001'
              )
              WHERE resource_id = $1::uuid AND event_kind = 'RegistrationReleased'",
         )
         .bind(RESOURCE)
+        .bind(TOKEN)
         .execute(pool)
         .await?;
     }

@@ -181,6 +181,13 @@ Field ownership:
   serializes as `owner,manager,registrant` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
+  A name result classified as `registration_status=unregistered`, including an
+  ENSv2 reservation with no current owner evidence, omits `registration_id`,
+  `resolver`, and resolver-record fields even if identity attached to a resource
+  or record inventory was retained for audit. This intentionally differs from
+  ENSv2, which stores and returns a reservation resolver until expiry.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
   standard `page` object inside each result. Detail and feed use identical
   pagination semantics; feed only reduces returned fields. Reverse inputs
@@ -411,6 +418,13 @@ Field ownership:
   `namehash`, `status`, and `unsupported_reason`; registration, control,
   lifecycle, resolver, record, relation, permission, and primary-name fields
   from both source families are omitted.
+  A row classified as `registration_status=unregistered`, including an ENSv2
+  reservation with no current owner evidence, omits `registration_id`,
+  `resolver`, and resolver-record fields even if identity attached to a resource
+  or record inventory was retained for audit. This intentionally differs from
+  ENSv2, which stores and returns a reservation resolver until expiry.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   For `source=indexed`, a row classified as
   `current_authority_not_projected` remains `status=ok` for the identity and
   registration fields that can be served, but omits `resolver`; retained
@@ -458,6 +472,13 @@ Field ownership:
   connect, DNS, TLS, connection-reset, and other transport
   failures abort the whole request with `500 internal_error`; they are not
   per-key stale answers and `source=auto` does not return a partial blend.
+  A name with no current registration, including an ownerless ENSv2
+  reservation, returns no declared resolver or retained record values and does
+  not execute verified lookup. `include=inventory` does not expose inventory
+  retained for a former or audit-only resource. This intentionally omits the
+  resolver that ENSv2 can store and return for an unexpired reservation.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   Product records use product reason vocabulary: retained-selector misses use
   `value_not_retained`, and phase-unsupported record families use
   `record_family_not_supported`.
@@ -801,11 +822,12 @@ Field ownership:
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
   retained historical ENSv1 registration for audit. An ENSv2 reservation does
-  not select permission rows by `name`: it has no current registration, and
-  upstream rejects a nonzero role bitmap for an owner-zero reservation while
-  granting roles only in the registered branch.
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L435-L472 @ ens_v2@a971bd64)
-  If bigname retains resource-keyed permission evidence for audit, an explicit
+  not select permission rows by `name` because current-registration
+  classification has no owner evidence: the owner-zero branch emits
+  `LabelReserved`, while minting the owner token and granting resource roles
+  occur only in the registered branch.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L472 @ ens_v2@a971bd64)
+  If bigname retains permission evidence attached to a resource for audit, an explicit
   `registration_id` read remains available with `resource_audit`; that marker
   does not claim the evidence is live for the reserved name. Every
   permission row carries the required `authority_context` field.
@@ -1279,6 +1301,12 @@ Field ownership:
   for the explicit coverage reason. A row classified as
   `current_authority_not_projected` is also absent from `bound_names`; retained
   resolver-pointer evidence does not establish listing membership.
+  An ownerless ENSv2 reservation is likewise absent: a retained reservation
+  resolver or former-resource pointer is not a resolver selected by a current
+  registration. This intentionally narrows ENSv2, which stores and returns a
+  reservation resolver until expiry.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
   while the corresponding `include=nodes`, `include=aliases`, and
   `include=roles` arrays are deterministic samples of at most 100 items. A
@@ -1438,7 +1466,9 @@ so there is no persisted artifact to explain. See
   carries side-by-side `{indexed, verified}` record answers for the former
   `mode=both` workflow. Without `keys`, `comparison` defaults to the first 16
   inventory-derived supported record keys in deterministic order. The indexed
-  `record_inventory` and `record_cache` sections remain complete. When more
+  `record_inventory` and `record_cache` sections remain complete, including
+  retained audit state that product name routes omit when no current
+  registration exists. When more
   than 16 default comparison keys are available, `comparison_explicit_gaps`
   lists each uncompared selector as
   `{record_key, record_family, selector_key, gap_reason}` with

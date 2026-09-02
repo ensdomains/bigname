@@ -190,7 +190,8 @@ pub(crate) async fn get_name_records(
         None if params.source == RequestSource::Verified => {
             default_records = default_requested_records(record_inventory.as_ref());
             ensure_verified_record_limit(&default_records)?;
-            Some(default_records.as_slice())
+            (super::name_record::row_has_current_registration(&row) || !default_records.is_empty())
+                .then_some(default_records.as_slice())
         }
         None => None,
     };
@@ -216,6 +217,7 @@ pub(crate) async fn get_name_records(
                     record_inventory.as_ref(),
                     requested_records,
                     include_inventory,
+                    false,
                 )?,
             ),
             RequestSource::Verified => {
@@ -243,6 +245,7 @@ pub(crate) async fn get_name_records(
                         requested_records,
                         verified_lookup,
                         include_inventory,
+                        false,
                     )?,
                 )
             }
@@ -256,6 +259,7 @@ pub(crate) async fn get_name_records(
                             record_inventory.as_ref(),
                             requested_records,
                             include_inventory,
+                            false,
                         )?,
                     )
                 } else {
@@ -412,7 +416,7 @@ async fn load_name_records_snapshot_state(
         )
     })?;
 
-    let record_inventory =
+    let record_inventory = if super::name_record::row_has_current_registration(&row) {
         load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
             .await
             .map_err(|error| {
@@ -420,7 +424,10 @@ async fn load_name_records_snapshot_state(
                     snapshot_selection_api_error(error),
                     SnapshotReadResource::NameRecords,
                 )
-            })?;
+            })?
+    } else {
+        None
+    };
     Ok((selected_snapshot, row, record_inventory))
 }
 
@@ -459,6 +466,9 @@ pub(crate) async fn load_verified_record_lookup_for_resource(
     selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
+    if !super::name_record::row_has_current_registration(row) {
+        return Ok(Some(VerifiedRecordLookup::NotSupported));
+    }
     load_verified_record_lookup_with_persistence(
         state,
         row,

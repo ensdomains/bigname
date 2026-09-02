@@ -559,6 +559,45 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
 }
 
 #[tokio::test]
+async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET surface_binding_id = NULL,
+             resource_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL,
+             declared_summary =
+                 jsonb_set(declared_summary, '{registration,status}', '\"active\"')
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let names = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound names must be an array")
+        .iter()
+        .map(|row| row["name"].as_str().expect("bound name must be text"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["beta.eth"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_resolver_serves_phase_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;

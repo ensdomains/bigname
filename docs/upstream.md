@@ -95,6 +95,23 @@ only then deploy the matching API as required by the
 
 Intentional differences between our docs/manifests and upstream. Every divergence lives here so that citations reading "differently than upstream" are legible instead of looking like bugs. If a divergence is not in this list, it should be treated as drift and closed — either by updating our doc or by adding the entry.
 
+> **Ownerless ENSv2 reservation resolver serving narrowing** — bigname retains
+> reservation resolver facts for diagnostics, but product name, record, batch
+> lookup, and resolver-listing routes classify an ownerless reservation as no
+> current registration and do not serve that resolver or its record inventory.
+> **Upstream**: `PermissionedRegistry` stores the supplied resolver before its
+> owner-zero reservation branch and emits `ResolverUpdated` for a nonzero value
+> `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)`;
+> `getResolver` returns the stored value until the entry expires
+> `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)`.
+> **Our rule**: `docs/api-v2.md` § Field Budgets,
+> `docs/api-v2-routes.md` name and resolver routes, and `docs/storage.md` §
+> Projection storage rules.
+> **Why**: product routes use current-registration ownership as their serving
+> boundary. Diagnostics preserve the retained facts for comparison without
+> presenting them as current name data.
+> **Since**: `2026-09-02`
+
 > **Pre-surface-only ENSv1 resolver selection is not projected** — when a resolver was selected before bigname materialized a [name surface](glossary.md#surface-name-surface) and was never selected again afterward, bigname retains the record facts but has no linked current-resolver pointer and does not publish a record inventory for the name.
 > **Upstream**: ENSv1 reads the resolver stored for the node without requiring a later selection event `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)`, and its text resolver reads storage keyed by record version, node, and key `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Resolver and records and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.

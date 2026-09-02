@@ -115,6 +115,26 @@ pub async fn load_phase_resolver_bound_name_rows(
         WHERE nc.support_status IN ('supported', 'unsupported')
           AND nc.unsupported_reason IS DISTINCT FROM 'current_authority_not_projected'
           {DEFAULT_NAME_CURRENT_READ_FILTER}
+          AND nc.surface_binding_id IS NOT NULL
+          AND nc.declared_summary #>> '{{registration,status}}' IS DISTINCT FROM 'released'
+          AND NULLIF(btrim(COALESCE(
+                  nc.declared_summary #>> '{{registration,released_at}}', ''
+              )), '') IS NULL
+          AND (
+              nc.declared_summary #>> '{{registration,authority_kind}}' = 'registrar'
+              OR (
+                  nc.declared_summary #>> '{{registration,authority_kind}}'
+                      IN ('registry_only', 'ens_v2_registry')
+                  AND NULLIF(btrim(COALESCE(
+                      nc.declared_summary #>> '{{control,owner}}',
+                      nc.declared_summary #>> '{{control,registry_owner}}', ''
+                  )), '') IS NOT NULL
+              )
+              OR (
+                  nc.declared_summary #>> '{{registration,authority_kind}}' = 'wrapper'
+                  AND nc.namespace <> 'basenames'
+              )
+          )
           AND nc.declared_summary #>> '{{resolver,chain_id}}' = $1
           AND lower(nc.declared_summary #>> '{{resolver,address}}') = lower($2)
           AND ($3::TEXT IS NULL OR nc.namespace = $3)

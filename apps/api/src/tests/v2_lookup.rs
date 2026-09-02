@@ -630,6 +630,50 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
 }
 
 #[tokio::test]
+async fn v2_lookup_withholds_retained_identity_and_inventory_for_reservation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:reserved.eth",
+        "reserved.eth",
+        "reserved.eth",
+        "namehash:reserved.eth",
+        Uuid::from_u128(0x5a0411),
+        Uuid::from_u128(0x5a0412),
+        Uuid::from_u128(0x5a0413),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary =
+             jsonb_set(declared_summary, '{registration,status}', '\"reserved\"')
+         WHERE raw_name = 'reserved.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "reserved.eth"}]}),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+    assert_eq!(record["registration_status"], json!("unregistered"));
+    assert!(record.get("registration_id").is_none());
+    assert!(record.get("resolver").is_none());
+    assert!(record.get("addresses").is_none());
+    assert!(record.get("text_records").is_none());
+    assert!(record.get("content_hash").is_none());
+    assert!(record.get("primary_address").is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_flattens_phase_writer_byte_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

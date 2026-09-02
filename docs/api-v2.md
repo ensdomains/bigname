@@ -324,6 +324,17 @@ do not serialize permanently-null placeholders for optionals such as `manager`.
 Known-empty maps on detail records, such as `addresses` and `text_records`,
 serialize as `{}`; omission means the field is outside the requested field
 budget or unsupported by the served source.
+Rows classified as `registration_status=unregistered`, including ownerless
+ENSv2 reservations, have no current registration. Product name detail and
+batch lookup therefore omit `registration_id`, resolver, and record fields;
+the records route exposes no resolver, record values, or audit-only inventory,
+and resolver `bound_names` omits the row. This is an intentional product
+narrowing: ENSv2 stores a nonzero resolver supplied for an ownerless
+reservation and returns it until expiry. (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @
+ens_v2@a971bd64)
 
 ## Tiers
 

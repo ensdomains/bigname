@@ -830,7 +830,7 @@ preimages can share one retained [interpreter state
 key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
 named-resource resolver hint and diverge from a fresh walk
 ([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
-in as an ignored collision probe). Project's resource-keyed record inventory
+in as an ignored collision probe). Project's record inventory attached to a resource
 follows the resource's latest retained linked `ResolverChanged` event whose
 name has a readable canonical surface staged at the target. If a later linked
 event's name lacks such a surface, an earlier linked event with one is the
@@ -860,6 +860,17 @@ removes the `name_current` row when ENSv2 is the selected authority, or when no
 authority is selected and the row reports `current_authority_not_projected`;
 for a resource-backed binding, the release's `resource_id` must also match the
 binding's resource.
+If a different ENSv2 reservation survives that expiry, the row's lifecycle
+summary follows the reservation, but `surface_binding_id`, `resource_id`,
+`token_lineage_id`, and `binding_kind` are all null: a reservation does not
+write a surface binding, and the expired registration's identity and record
+inventory are not current name data. This is an intentional serving narrowing:
+ENSv2 stores a nonzero resolver supplied for an ownerless reservation and
+returns it until expiry. (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @
+ens_v2@a971bd64)
 A surviving row whose ENSv1 and ENSv2 evidence cannot select one authority
 instead remains explicitly unsupported. For a removed row, retained inventory
 is reachable only through history. ENSv2 stores resolver records by node and

@@ -147,8 +147,9 @@ pub(super) async fn include_expiring_names(
                    event.after_state
             FROM registration_events event
             WHERE event.lifecycle_key IS NOT NULL
-              AND event.after_state ->> 'status' IN (
-                  'registered', 'reserved', 'released'
+              AND event.event_kind IN (
+                  'RegistrationGranted', 'RegistrationReserved',
+                  'RegistrationRenewed', 'RegistrationReleased'
               )
             ORDER BY event.logical_name_id, event.lifecycle_key,
                      event.block_number DESC,
@@ -173,7 +174,10 @@ pub(super) async fn include_expiring_names(
         FROM lifecycle_heads lifecycle
         JOIN expiry_heads expiry USING (logical_name_id, lifecycle_key)
         CROSS JOIN affected_times affected
-        WHERE lifecycle.after_state ->> 'status' IN ('registered', 'reserved')
+        WHERE lifecycle.event_kind IN (
+                  'RegistrationGranted', 'RegistrationReserved',
+                  'RegistrationRenewed'
+              )
           AND ((expiry.expiry > affected.prior_seconds
                 AND expiry.expiry <= affected.target_seconds)
                OR EXISTS (

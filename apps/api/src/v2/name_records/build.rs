@@ -7,6 +7,7 @@ use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
 use serde_json::Value;
 use tracing::error;
 
+use crate::v2::name_record::row_has_current_registration;
 use crate::v2::support::{ResolutionRecordKey, build_lookup_resolution_verified_state};
 
 use super::super::vocab::{
@@ -37,6 +38,8 @@ pub(crate) fn build_authority_unsupported_name_records(
     requested_records: Option<&[ResolutionRecordKey]>,
     include_inventory: bool,
 ) -> V2Result<Option<NameRecords>> {
+    let has_current_registration = row_has_current_registration(row);
+    let record_inventory = record_inventory.filter(|_| has_current_registration);
     let Some(reason) = authority_unsupported_reason(row)? else {
         return Ok(None);
     };
@@ -55,7 +58,7 @@ pub(crate) fn build_authority_unsupported_name_records(
         text_records: BTreeMap::new(),
         content_hash: None,
         records,
-        inventory: include_inventory
+        inventory: (include_inventory && has_current_registration)
             .then(|| inventory_summary(record_inventory, requested_records)),
     }))
 }
@@ -85,7 +88,10 @@ pub(crate) fn build_indexed_name_records(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     requested_records: Option<&[ResolutionRecordKey]>,
     include_inventory: bool,
+    retain_audit_state: bool,
 ) -> V2Result<NameRecords> {
+    let has_current_registration = retain_audit_state || row_has_current_registration(row);
+    let record_inventory = record_inventory.filter(|_| has_current_registration);
     let record_answers = requested_records
         .map(|records| {
             records
@@ -115,12 +121,14 @@ pub(crate) fn build_indexed_name_records(
 
     Ok(NameRecords {
         namespace: row.namespace.clone(),
-        resolver: resolver(&row.declared_summary),
+        resolver: has_current_registration
+            .then(|| resolver(&row.declared_summary))
+            .flatten(),
         addresses: values.addresses,
         text_records: values.text_records,
         content_hash: values.content_hash,
         records: record_answers,
-        inventory: include_inventory
+        inventory: (include_inventory && has_current_registration)
             .then(|| inventory_summary(record_inventory, requested_records)),
     })
 }
@@ -131,6 +139,7 @@ pub(crate) fn indexed_records_requiring_verified_fallback(
     requested_records: &[ResolutionRecordKey],
     admit_null_resolver_discovery: bool,
 ) -> V2Result<Vec<ResolutionRecordKey>> {
+    let record_inventory = record_inventory.filter(|_| row_has_current_registration(row));
     let mut fallback_records = Vec::new();
     for record in requested_records {
         if indexed_satisfying_record_answer(
@@ -155,6 +164,8 @@ pub(crate) fn build_auto_name_records(
     include_inventory: bool,
     admit_null_resolver_discovery: bool,
 ) -> V2Result<(Source, NameRecords)> {
+    let has_current_registration = row_has_current_registration(row);
+    let record_inventory = record_inventory.filter(|_| has_current_registration);
     let mut fallback_records = Vec::new();
     let mut answers = BTreeMap::new();
 
@@ -195,12 +206,14 @@ pub(crate) fn build_auto_name_records(
         source,
         NameRecords {
             namespace: row.namespace.clone(),
-            resolver: resolver(&row.declared_summary),
+            resolver: has_current_registration
+                .then(|| resolver(&row.declared_summary))
+                .flatten(),
             addresses: values.addresses,
             text_records: values.text_records,
             content_hash: values.content_hash,
             records: Some(answers),
-            inventory: include_inventory
+            inventory: (include_inventory && has_current_registration)
                 .then(|| inventory_summary(record_inventory, Some(requested_records))),
         },
     ))
@@ -212,7 +225,10 @@ pub(crate) fn build_verified_name_records(
     requested_records: Option<&[ResolutionRecordKey]>,
     verified_lookup: Option<VerifiedRecordLookup>,
     include_inventory: bool,
+    retain_audit_state: bool,
 ) -> V2Result<NameRecords> {
+    let has_current_registration = retain_audit_state || row_has_current_registration(row);
+    let record_inventory = record_inventory.filter(|_| has_current_registration);
     let records = requested_records
         .map(|records| {
             verified_record_answers(
@@ -230,12 +246,14 @@ pub(crate) fn build_verified_name_records(
 
     Ok(NameRecords {
         namespace: row.namespace.clone(),
-        resolver: resolver(&row.declared_summary),
+        resolver: has_current_registration
+            .then(|| resolver(&row.declared_summary))
+            .flatten(),
         addresses: values.addresses,
         text_records: values.text_records,
         content_hash: values.content_hash,
         records,
-        inventory: include_inventory
+        inventory: (include_inventory && has_current_registration)
             .then(|| inventory_summary(record_inventory, requested_records)),
     })
 }

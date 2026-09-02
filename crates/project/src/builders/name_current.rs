@@ -7,7 +7,7 @@ pub(super) async fn build(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        WITH v2_registration_events AS (
+        WITH v2_lifecycle_events AS (
             SELECT event.*, COALESCE(event.resource_id::text, (
                 SELECT linked.resource_id::text FROM project_events linked
                 WHERE linked.logical_name_id = event.logical_name_id AND linked.resource_id IS NOT NULL
@@ -16,7 +16,7 @@ pub(super) async fn build(
                 ORDER BY linked.block_number DESC NULLS LAST, linked.normalized_event_id DESC LIMIT 1
             ), NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':')) AS lifecycle_key
             FROM project_events event
-            WHERE event.event_kind IN ('RegistrationGranted', 'RegistrationReserved', 'RegistrationReleased') AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
+            WHERE event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
         )
         INSERT INTO project_stage_name_current (
             logical_name_id, namespace, raw_name, namehash,
@@ -24,9 +24,7 @@ pub(super) async fn build(
             declared_summary, support_status, unsupported_reason, provenance,
             chain_positions, canonicality_summary, manifest_version
         )
-        SELECT surface.logical_name_id, surface.namespace, surface.raw_name,
-               surface.namehash, binding.surface_binding_id, binding.resource_id,
-               resource.token_lineage_id, binding.binding_kind,
+        SELECT surface.logical_name_id, surface.namespace, surface.raw_name, surface.namehash, row_identity.surface_binding_id, row_identity.resource_id, CASE WHEN row_identity.resource_id IS NULL THEN NULL ELSE resource.token_lineage_id END, row_identity.binding_kind,
                jsonb_build_object(
                    'registration', jsonb_build_object(
                        'status', CASE selected_registration.event_kind
@@ -36,7 +34,7 @@ pub(super) async fn build(
                        END,
                        'authority_kind', authority_context.authority_kind, 'authority_key', authority_context.authority_key,
                        'registrant', registrant.registrant, 'expiry', CASE
-                           WHEN selected_registration.is_v2_lifecycle AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id
+                           WHEN selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id
                                THEN selected_registration.after_state -> 'expiry'
                            ELSE COALESCE(to_jsonb(expiry.expiry_seconds), CASE
                                WHEN selected_registration.is_v2_lifecycle THEN selected_registration.after_state -> 'expiry' END)
@@ -46,6 +44,7 @@ pub(super) async fn build(
                        'released_at', selected_registration.after_state -> 'released_at',
                        'latest_event_kind', CASE
                            WHEN selected_registration.event_kind = 'RegistrationReserved' THEN selected_registration.event_kind
+                           WHEN selected_registration.is_v2_lifecycle THEN COALESCE(v2_registration_latest.event_kind, selected_registration.event_kind)
                            ELSE COALESCE(registration_latest.event_kind,
                                selected_registration.event_kind)
                        END
@@ -79,13 +78,13 @@ pub(super) async fn build(
                    'resolver', jsonb_build_object(
                        'chain_id', CASE
                            WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
-                            AND NOT (COALESCE(selected_registration.event_kind, '') = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2')
+                            AND NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
                                THEN resolver.chain_id
                            ELSE NULL
                        END,
                        'address', CASE
                            WHEN resolver.resolver_address IS NOT NULL AND resolver.resolver_address <> '0x0000000000000000000000000000000000000000'
-                            AND NOT (COALESCE(selected_registration.event_kind, '') = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2')
+                            AND NOT (COALESCE(selected_registration.event_kind, '') IN ('RegistrationReleased', 'RegistrationReserved') AND selected_authority.selected_authority_arm = 'ens_v2')
                                THEN resolver.resolver_address
                            ELSE NULL
                        END,
@@ -204,46 +203,35 @@ pub(super) async fn build(
         FROM project_surfaces surface
         LEFT JOIN project_name_authority selected_authority USING (logical_name_id)
         LEFT JOIN project_bindings binding USING (logical_name_id)
-        LEFT JOIN project_resources resource ON resource.resource_id = binding.resource_id
         LEFT JOIN LATERAL (
             SELECT event.* FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
-              AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
-                  'RegistrationReserved'
-              )
-            ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+            WHERE event.logical_name_id = surface.logical_name_id AND COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2'
+              AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'RegistrationReserved')
+            ORDER BY event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST, event.normalized_event_id DESC
             LIMIT 1
         ) registration ON TRUE
         LEFT JOIN LATERAL (
-            SELECT event.event_kind
-            FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2' OR binding.resource_id IS NULL OR event.resource_id = binding.resource_id)
-              AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
-                  'RegistrationReserved',
-                  'ExpiryChanged'
-              )
-            ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+            SELECT event.event_kind FROM project_authority_events event
+            WHERE event.logical_name_id = surface.logical_name_id AND COALESCE(selected_authority.selected_authority_arm, 'ens_v2') <> 'ens_v2'
+              AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'RegistrationReserved', 'ExpiryChanged')
+            ORDER BY event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST, event.normalized_event_id DESC
             LIMIT 1
         ) registration_latest ON TRUE
         LEFT JOIN LATERAL (
-            SELECT event.event_kind, event.after_state, event.resource_id
-            FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM v2_registration_events event
+            SELECT event.event_kind, event.after_state, event.resource_id, event.lifecycle_key
+            FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM v2_lifecycle_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (
                   event.event_kind IN ('RegistrationGranted', 'RegistrationReserved') OR
                   (event.event_kind = 'RegistrationReleased' AND ((event.after_state ->> 'source_event' = 'RegistryPathExpired' AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
-                        OR EXISTS (SELECT 1 FROM v2_registration_events active WHERE active.logical_name_id = event.logical_name_id AND active.lifecycle_key = event.lifecycle_key
+                        OR EXISTS (SELECT 1 FROM v2_lifecycle_events active WHERE active.logical_name_id = event.logical_name_id AND active.lifecycle_key = event.lifecycle_key
                             AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND ROW(COALESCE(active.block_number, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
-                            AND NOT EXISTS (SELECT 1 FROM v2_registration_events expiry WHERE expiry.logical_name_id = event.logical_name_id AND expiry.lifecycle_key = event.lifecycle_key
+                            AND NOT EXISTS (SELECT 1 FROM v2_lifecycle_events expiry WHERE expiry.logical_name_id = event.logical_name_id AND expiry.lifecycle_key = event.lifecycle_key
                                 AND expiry.event_kind = 'RegistrationReleased' AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state' AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND ROW(COALESCE(expiry.block_number, -1), expiry.normalized_event_id) BETWEEN ROW(COALESCE(active.block_number, -1), active.normalized_event_id) AND ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
                             )))
               ))
-              AND NOT EXISTS (SELECT 1 FROM v2_registration_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key
+              AND NOT EXISTS (SELECT 1 FROM v2_lifecycle_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key
                     AND ((event.event_kind = 'RegistrationReleased' AND later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')) OR (event.event_kind <> 'RegistrationReleased' AND later.event_kind = 'RegistrationReleased'))
                     AND ROW(COALESCE(later.block_number, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
               )
@@ -252,20 +240,32 @@ pub(super) async fn build(
             LIMIT 1
         ) registration_current ON TRUE
         CROSS JOIN LATERAL (
-            SELECT CASE WHEN arm.is_v2 THEN registration_current.event_kind ELSE registration.event_kind END AS event_kind,
-                   CASE WHEN arm.is_v2 THEN registration_current.after_state ELSE registration.after_state END AS after_state,
-                   CASE WHEN arm.is_v2 THEN registration_current.resource_id ELSE registration.resource_id END AS resource_id,
-                   arm.is_v2 AS is_v2_lifecycle
-            FROM (SELECT COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AS is_v2) arm
-        ) selected_registration
+            SELECT CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.event_kind END ELSE registration.event_kind END AS event_kind,
+                   CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.after_state END ELSE registration.after_state END AS after_state,
+                   CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.resource_id END ELSE registration.resource_id END AS resource_id,
+                   CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.lifecycle_key END END AS lifecycle_key, arm.is_v2 AS is_v2_lifecycle
+            FROM (SELECT COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AS is_v2, NOT (registration_current.event_kind = 'RegistrationReleased' AND binding.resource_id IS NOT NULL AND registration_current.resource_id IS DISTINCT FROM binding.resource_id) AS use_event) arm
+        ) selected_registration CROSS JOIN LATERAL (
+            SELECT CASE WHEN identity.mismatch THEN NULL ELSE binding.surface_binding_id END AS surface_binding_id,
+                   CASE WHEN identity.mismatch THEN NULL ELSE binding.resource_id END AS resource_id, CASE WHEN identity.mismatch THEN NULL ELSE binding.binding_kind END AS binding_kind,
+                   CASE WHEN identity.has_lifecycle THEN selected_registration.resource_id ELSE binding.resource_id END AS event_resource_id FROM (SELECT selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AS has_lifecycle,
+                   selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id AS mismatch) identity) row_identity
         LEFT JOIN LATERAL (
+            SELECT event.event_kind FROM v2_lifecycle_events event
+            WHERE selected_registration.is_v2_lifecycle AND event.logical_name_id = surface.logical_name_id
+              AND event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)
+              AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'RegistrationReserved', 'ExpiryChanged')
+            ORDER BY event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST, event.normalized_event_id DESC LIMIT 1
+        ) v2_registration_latest ON TRUE
+        LEFT JOIN project_resources resource ON resource.resource_id = row_identity.event_resource_id LEFT JOIN LATERAL (
             SELECT event.*, lineage.block_timestamp
             FROM project_authority_events event
             LEFT JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
              AND lineage.block_number = event.block_number
              AND lineage.block_hash = event.block_hash
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind = 'RegistrationGranted'
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
@@ -276,7 +276,7 @@ pub(super) async fn build(
             SELECT event.after_state ->> 'authority_kind' AS authority_kind,
                    event.after_state ->> 'authority_key' AS authority_key
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'RegistrationGranted', 'AuthorityEpochChanged'
               )
@@ -291,7 +291,7 @@ pub(super) async fn build(
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'RegistrationGranted', 'TokenControlTransferred'
               )
@@ -311,7 +311,7 @@ pub(super) async fn build(
                        ELSE NULL
                    END AS expiry_seconds
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
               )
@@ -350,7 +350,7 @@ pub(super) async fn build(
                            THEN (event.after_state ->> 'fuses')::bigint
                    END AS fuses
             FROM project_authority_events event
-            WHERE event.resource_id = binding.resource_id
+            WHERE event.resource_id = resource.resource_id
               AND event.event_kind = 'PermissionScopeChanged'
               AND event.source_family = 'ens_v1_wrapper_l1'
             ORDER BY event.block_number DESC NULLS LAST,
@@ -368,7 +368,7 @@ pub(super) async fn build(
                            THEN (event.after_state ->> 'expiry')::numeric
                    END AS expiry_seconds
             FROM project_authority_events event
-            WHERE event.resource_id = binding.resource_id
+            WHERE event.resource_id = resource.resource_id
               AND event.event_kind = 'ExpiryChanged'
               AND (
                     event.source_family = 'ens_v1_wrapper_l1'
@@ -426,7 +426,7 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT event.*
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id)) AND event.after_state ? 'status'
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text))) AND event.after_state ? 'status'
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
@@ -443,7 +443,7 @@ pub(super) async fn build(
                        )
                    END) AS registry_owner
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'AuthorityTransferred', 'AuthorityEpochChanged'
               )
@@ -456,7 +456,7 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT event.event_kind AS latest_event_kind
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'TokenControlTransferred', 'AuthorityTransferred',
                   'AuthorityEpochChanged'
@@ -469,7 +469,7 @@ pub(super) async fn build(
         ) control ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.* FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR (selected_registration.resource_id IS NULL AND (binding.resource_id IS NULL OR event.resource_id = binding.resource_id)) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'AuthorityTransferred', 'TokenControlTransferred',
                   'AuthorityEpochChanged'
@@ -486,7 +486,7 @@ pub(super) async fn build(
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind = 'ResolverChanged'
-              AND (NOT selected_registration.is_v2_lifecycle OR (binding.resource_id IS NULL AND event.resource_id IS NULL) OR (selected_registration.resource_id IS NULL AND binding.resource_id IS NOT NULL AND event.resource_id = binding.resource_id) OR (selected_registration.resource_id IS NOT NULL AND event.resource_id = selected_registration.resource_id))
+              AND (NOT selected_registration.is_v2_lifecycle OR (binding.resource_id IS NULL AND event.resource_id IS NULL) OR (binding.resource_id IS NOT NULL AND EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text))))
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
@@ -535,7 +535,7 @@ pub(super) async fn build(
              AND lineage.block_number = event.block_number
              AND lineage.block_hash = event.block_hash
             WHERE event.logical_name_id = surface.logical_name_id
-              AND event.resource_id = binding.resource_id
+              AND event.resource_id = resource.resource_id
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,

@@ -6,7 +6,21 @@ use crate::v2::support::{
     direct_json_field, record_json_path, record_json_string_at_paths,
     record_network_from_chain_positions,
 };
+use crate::v2::vocab::RegistrationStatus;
 use crate::v2::{chains::slug_to_numeric, format_timestamp};
+
+pub(in crate::v2) fn has_current_registration(status: RegistrationStatus) -> bool {
+    !matches!(
+        status,
+        RegistrationStatus::Released | RegistrationStatus::Unregistered
+    )
+}
+
+pub(in crate::v2) fn row_has_current_registration(row: &NameCurrentRow) -> bool {
+    has_current_registration(
+        super::name_registration_fields(Some(row), &row.namespace).registration_status,
+    )
+}
 
 pub(super) fn json_chain_id(value: &Value) -> Option<u64> {
     match value {

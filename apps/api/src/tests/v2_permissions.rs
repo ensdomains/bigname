@@ -142,8 +142,8 @@ async fn v2_get_permissions_empties_a_released_name_but_keeps_its_resource_audit
 }
 
 // This deliberately retains resource-keyed audit evidence while changing the name summary to the
-// reservation shape. A reservation is not a current registration, so that retained evidence must
-// remain audit-only and cannot become `current_for_name`.
+// reservation shape and removing current-owner evidence. The API therefore classifies the name as
+// unregistered, so the retained evidence remains audit-only and cannot become `current_for_name`.
 #[tokio::test]
 async fn v2_get_permissions_keeps_retained_resource_audit_out_of_reserved_name_scope() -> Result<()>
 {

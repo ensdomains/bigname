@@ -36,8 +36,8 @@ mod wrapper;
 
 use inventory::load_name_record_inventory;
 pub(super) use values::{
-    chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
-    value_to_string,
+    chain_id_from_positions, has_current_registration, json_string_at_paths, network_from_parts,
+    row_has_current_registration, string_field, value_to_string,
 };
 use values::{
     json_address_at_paths, json_chain_id, json_timestamp_at_paths, json_value_present, network,
@@ -197,10 +197,10 @@ pub(crate) fn build_name_record(
     status: Status,
 ) -> V2Result<NameRecord> {
     let registration = name_registration_fields(Some(row), &row.namespace);
-    // The projection deletes a released name's inventory row and resolver
-    // pointer; never serve either even if state loss leaves them attached.
-    let released_tombstone = registration.registration_status == RegistrationStatus::Released;
-    let record_inventory = record_inventory.filter(|_| !released_tombstone);
+    // A row without a current registration cannot use state retained for an old
+    // resource as current name data, even if projection state loss leaves it attached.
+    let has_current_registration = has_current_registration(registration.registration_status);
+    let record_inventory = record_inventory.filter(|_| has_current_registration);
     let unsupported_fields = unsupported_fields(record_inventory);
     let field_supported = |field: &str| {
         !unsupported_fields
@@ -244,14 +244,16 @@ pub(crate) fn build_name_record(
         .flatten();
     let (wrapper_state, wrapper_fuses) = wrapper_metadata(&row.declared_summary)?
         .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
-    let resolver = (!released_tombstone
+    let resolver = (has_current_registration
         && string_field(row.coverage.get("unsupported_reason")).as_deref()
             != Some(PARTIAL_SERVE_UNSUPPORTED_REASON))
     .then(|| resolver(&row.declared_summary))
     .flatten();
 
     Ok(NameRecord {
-        registration_id: row.resource_id.map(|value| value.to_string()),
+        registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
+            .then(|| row.resource_id.map(|value| value.to_string()))
+            .flatten(),
         token_id: declared_token_id(row),
         owner: registration.owner.clone(),
         manager: None,
