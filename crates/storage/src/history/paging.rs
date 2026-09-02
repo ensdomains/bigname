@@ -338,7 +338,9 @@ fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgres>) {
                 'ens_v1_registry_l1', 'basenames_base_registry'
             ) AND (
                 (
-                    ne.event_kind = 'AuthorityTransferred'
+                    ne.event_kind IN (
+                        'AuthorityTransferred', 'AuthorityEpochChanged'
+                    )
                     AND lower(COALESCE(ne.after_state ->> 'owner_getter', '')) =
                         '0x0000000000000000000000000000000000000000'
                 )
