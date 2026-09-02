@@ -13,7 +13,8 @@ LIVE_ENDPOINT_PREFIX = "https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/su
 LIVE_SUBGRAPH_ID = "5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH"
 LIVE_DEPLOYMENT_ID = "QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ"
 TYPE_REF = "kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }"
-INTROSPECTION = "query OracleIntrospection { __schema { queryType { name } mutationType { name } subscriptionType { name } directives { name isRepeatable locations args { name defaultValue type { %s } } } types { kind name interfaces { name } possibleTypes { name } fields(includeDeprecated:true) { name isDeprecated type { %s } args(includeDeprecated:true) { name defaultValue isDeprecated type { %s } } } inputFields { name defaultValue isDeprecated type { %s } } enumValues(includeDeprecated:true) { name isDeprecated } } } }" % (TYPE_REF, TYPE_REF, TYPE_REF, TYPE_REF)
+# The pin declares `isRepeatable: Boolean!` but omits it from directive objects; deployment QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ at block 23000000 resolved it as null. (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L85 @ graph_node@aefe1737) (upstream: .refs/graph_node/graphql/src/introspection/resolver.rs:L252-L263 @ graph_node@aefe1737)
+INTROSPECTION = "query OracleIntrospection { __schema { queryType { name } mutationType { name } subscriptionType { name } directives { name locations args { name defaultValue type { %s } } } types { kind name interfaces { name } possibleTypes { name } fields(includeDeprecated:true) { name isDeprecated type { %s } args(includeDeprecated:true) { name defaultValue isDeprecated type { %s } } } inputFields { name defaultValue isDeprecated type { %s } } enumValues(includeDeprecated:true) { name isDeprecated } } } }" % (TYPE_REF, TYPE_REF, TYPE_REF, TYPE_REF)
 META = "query OracleMeta($block: Block_height!) { _meta(block: $block) { block { number hash } deployment hasIndexingErrors } }"
 POINT = """query OracleDomain($id: ID!, $block: Block_height!) {
   _meta(block: $block) { block { number hash } hasIndexingErrors }
@@ -85,7 +86,7 @@ def render_sdl(schema):
     lines = []
     for directive in sorted(schema.get("directives") or [], key=lambda value: value["name"]):
         args = [f"{arg['name']}: {ref_name(arg['type'])}" + ("" if arg.get("defaultValue") is None else f" = {arg['defaultValue']}") for arg in sorted(directive.get("args") or [], key=lambda value: value["name"])]
-        lines += [f"directive @{directive['name']}" + (f"({', '.join(args)})" if args else "") + (" repeatable" if directive.get("isRepeatable") else "") + " on " + " | ".join(directive["locations"]), ""]
+        lines += [f"directive @{directive['name']}" + (f"({', '.join(args)})" if args else "") + " on " + " | ".join(directive["locations"]), ""]
     for item in sorted(schema["types"], key=lambda value: value.get("name") or ""):
         name, kind = item.get("name"), item["kind"]
         if not name or name.startswith("__"):

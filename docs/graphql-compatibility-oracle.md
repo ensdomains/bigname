@@ -8,7 +8,7 @@ proves only the operator path; a steward must refresh it before merge. Its `Doma
 
 The fixture separates three concepts:
 
-1. The **[upstream census](glossary.md#graphql-upstream-census)** is the complete generated SDL and semantic index, not a claim of complete implementation.
+1. The **[upstream census](glossary.md#graphql-upstream-census)** is the generated SDL and semantic index of every captured schema member, not a claim of complete implementation.
 2. The **[claimed compatibility surface](glossary.md#graphql-claimed-compatibility-surface)** is the exact paths and cases in `coverage.json`; missing or changed claims break compatibility.
 3. The **[dispositioned remainder](glossary.md#graphql-dispositioned-remainder)** keeps upstream-only work and extensions visible without requiring whole-schema equality.
 
@@ -17,10 +17,22 @@ not affect matching; wildcards, conflicts, unknown paths, and stale entries inva
 
 Broader entity/event fixtures, filter matrix, historical reads, errors, and reports are deferred; only the Domain point and name-equality responses are claimed.
 
+The steward's live introspection observed the Graph Node logging types `LogLevel`, `_LogArgument_`, `_LogMeta_`, and
+`_Log_`. They are infrastructure rather than ENS schema, so coverage assigns them to `#670/T0`; they are captured but
+not claimed. The pinned Graph Node defines those four types (upstream:
+.refs/graph_node/graph/src/schema/logs.graphql:L5-L70 @ graph_node@aefe1737). Graph Node also adds the fixed `_logs`
+field to every generated query root (upstream: .refs/graph_node/graph/src/schema/api.rs:L1080-L1107 @
+graph_node@aefe1737), with its seven-argument signature (upstream:
+.refs/graph_node/graph/src/schema/api.rs:L1313-L1418 @ graph_node@aefe1737); coverage assigns that infrastructure
+field to the same owner without claiming it.
+
 ## Schema comparison
 
 The index compares roots; type kind/membership; fields, arguments, recursive shapes, defaults, enums, and deprecation.
 It ignores order, descriptions, locations, formatting, and deprecation-reason prose.
+Directive repeatability is also outside the captured and compared surface because the hosted deployment's resolver
+does not satisfy the pinned introspection field contract; the [divergence](upstream.md#known-divergences) is recorded
+with the reference-indexer comparisons.
 
 | Difference | Result |
 | --- | --- |
@@ -53,6 +65,13 @@ _meta(block: $block) {
 Capture rejects a mismatched metadata block and preserves its hash, including numeric-pin `null` (upstream:
 .refs/graph_node/graph/src/schema/meta.graphql:L36-L73 @ graph_node@aefe1737). Bigname's durable [served
 head](glossary.md#served-head) equals the fixture block; no historical read is claimed.
+
+Today the response comparison runs against a bigname database seeded from the fixture itself. It therefore proves
+response shape — the schema surface plus exact response equality for the claimed cases — against that seeded state,
+not data-level equivalence with a live bigname deployment. Once a Mainnet bigname deployment follows chain head, the
+fixture is recaptured at that served head under the [reviewed refresh
+policy](development.md#graphql-compatibility-fixture-refresh), and live `compare` against that deployment becomes the
+operating-path proof.
 
 The captured point response supplies the isolated test name, creation time, and owner, while provenance supplies the
 served block. Neither response case can supply a nonmatching row, so `capture` also writes a manifest-digested

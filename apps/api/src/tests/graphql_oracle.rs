@@ -15,8 +15,9 @@ const ORACLE_INTROSPECTION: &str = r#"query OracleIntrospection {
 }"#;
 
 #[test]
-fn graphql_oracle_local_introspection_includes_deprecated_input_fields() {
+fn graphql_oracle_local_introspection_uses_comparable_surface() {
     assert!(ORACLE_INTROSPECTION.contains("inputFields(includeDeprecated: true)"));
+    assert!(!ORACLE_INTROSPECTION.contains("isRepeatable"));
 }
 
 fn oracle_root() -> OraclePathBuf {

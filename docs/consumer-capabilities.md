@@ -401,9 +401,10 @@ are bigname additions to the subgraph-shaped surface. `domain(id:)` accepts an
 `ID!` containing the same ENS name or namehash strings accepted previously.
 The reviewed [GraphQL compatibility oracle](graphql-compatibility-oracle.md)
 currently claims one `Domain` point case and one `name` equality-filter case.
-Its complete captured SDL is a [GraphQL upstream
+Its captured SDL and semantic index form a [GraphQL upstream
 census](glossary.md#graphql-upstream-census), not a claim of complete entity
-coverage.
+coverage. Directive repeatability is excluded at the documented [schema-comparison
+boundary](graphql-compatibility-oracle.md#schema-comparison).
 
 The schema includes graph-node-compatible `BigInt` and `Bytes` scalars,
 `Block_height`, `_SubgraphErrorPolicy_`, and `_meta`/`_Meta_`/`_Block_` shapes.

@@ -30,9 +30,16 @@ types += [
  obj("Transfer",[field("id",nn(S("ID"))),field("domain",nn(O("Domain")))]),
  obj("_Block_",[field("hash",S("Bytes")),field("number",nn(S("Int"))),field("parentHash",S("Bytes")),field("timestamp",S("Int"))]),
  obj("_Meta_",[field("block",nn(O("_Block_"))),field("deployment",nn(S("String"))),field("hasIndexingErrors",nn(S("Boolean")))]), enum("_SubgraphErrorPolicy_",["allow","deny"]),
+ # Graph Node injects its pinned logging schema into subgraph schemas. (upstream: .refs/graph_node/graph/src/schema/api.rs:L447-L464 @ graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/schema/logs.graphql:L5-L70 @ graph_node@aefe1737)
+ enum("LogLevel",["CRITICAL","ERROR","WARNING","INFO","DEBUG"]),
+ obj("_LogArgument_",[field("key",nn(S("String"))),field("value",nn(S("String")))]),
+ obj("_LogMeta_",[field("module",nn(S("String"))),field("line",nn(S("Int"))),field("column",nn(S("Int")))]),
+ obj("_Log_",[field("id",nn(S("String"))),field("subgraphId",nn(S("String"))),field("timestamp",nn(S("String"))),field("level",nn(E("LogLevel"))),field("text",nn(S("String"))),field("arguments",nn(lst(nn(O("_LogArgument_"))))),field("meta",nn(O("_LogMeta_")))]),
 ]
 query_fields = [
  field("_meta",O("_Meta_"),[("block",I("Block_height"),None)]),
+ # Graph Node adds this fixed logging field and signature to every query root. (upstream: .refs/graph_node/graph/src/schema/api.rs:L1080-L1107 @ graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/schema/api.rs:L1313-L1418 @ graph_node@aefe1737)
+ field("_logs",nn(lst(nn(O("_Log_")))),[("level",E("LogLevel"),None),("from",S("String"),None),("to",S("String"),None),("search",S("String"),None),("first",S("Int"),"100"),("skip",S("Int"),"0"),("orderDirection",E("OrderDirection"),"desc")]),
  field("domain",O("Domain"),[("block",I("Block_height"),None),("id",nn(S("ID")),None),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny")]),
  field("domains",nn(lst(nn(O("Domain")))),[("block",I("Block_height"),None),("first",S("Int"),None),("orderBy",E("Domain_orderBy"),None),("orderDirection",E("OrderDirection"),None),("skip",S("Int"),None),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny"),("where",I("Domain_filter"),None)]),
  field("transfers",nn(lst(nn(O("Transfer")))),[("first",S("Int"),None)]),
@@ -63,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
   length=int(self.headers.get("Content-Length","0")); raw=self.rfile.read(length)
   if mode=="invalid": self.send_response(200); self.end_headers(); self.wfile.write(b"{"); return
   body=json.loads(raw); op=body.get("operationName"); block=body.get("variables",{}).get("block",{}).get("number",414)
+  if op=="OracleIntrospection" and mode=="null-repeatability" and "isRepeatable" in body["query"]:
+   encoded=b'{"errors":[{"message":"Null value resolved for non-null field `isRepeatable`"}],"data":null}\n'; self.send_response(200); self.send_header("Content-Length",str(len(encoded))); self.end_headers(); self.wfile.write(encoded); return
   # Graph Node's pinned __Type.inputFields has no arguments. (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L35 @ graph_node@aefe1737)
   if op=="OracleIntrospection" and "inputFields(" in body["query"]:
    encoded=b'{"errors":[{"message":"Unknown argument includeDeprecated on field inputFields"}]}\n'; self.send_response(200); self.send_header("Content-Length",str(len(encoded))); self.end_headers(); self.wfile.write(encoded); return
@@ -124,6 +133,7 @@ with tempfile.TemporaryDirectory() as temporary:
  except urllib.error.HTTPError as error: assert error.code==403
  else: raise AssertionError("stub accepted a request without the oracle User-Agent")
  run_capture(headers,mode="requires-oracle-headers"); assert Handler.oracle_header_requests==5
+ repeatability=temp/"null-repeatability"; seed(repeatability); run_capture(repeatability,mode="null-repeatability")
  stub_env={**os.environ,"BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE":"1"}
  compared=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/ok"],env=stub_env,text=True,capture_output=True); assert compared.returncode==0 and "2 passed, 0 failed" in compared.stdout
  wrong_head=subprocess.run([tool,"compare","--fixtures",first,"--bigname-endpoint",f"{base}/wrong-block"],env=stub_env,text=True,capture_output=True); assert wrong_head.returncode!=0 and "requested block" in wrong_head.stderr
@@ -151,13 +161,14 @@ with tempfile.TemporaryDirectory() as temporary:
  wrong_case_block=temp/"case-block"; shutil.copytree(first,wrong_case_block); variables=json.loads((wrong_case_block/"entities/domain/entity-by-id/variables.json").read_text()); variables["block"]["number"]=999; (wrong_case_block/"entities/domain/entity-by-id/variables.json").write_text(json.dumps(variables,sort_keys=True,separators=(",",":"))+"\n"); resign(wrong_case_block,"entities/domain/entity-by-id/variables.json"); verify(wrong_case_block,False)
  version=temp/"version"; shutil.copytree(first,version); manifest=json.loads((version/"manifest.json").read_text()); manifest["fixture_format_version"]=999; (version/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":"))+"\n"); result=verify(version,False); assert "upgrade" in result.stderr
  sys.dont_write_bytecode=True; loader=importlib.machinery.SourceFileLoader("oracle",str(tool)); spec=importlib.util.spec_from_loader("oracle",loader); module=importlib.util.module_from_spec(spec); loader.exec_module(module)
- stub_surface=module.schema_surface(schema); known_types=set(json.loads(coverage_source.read_text())["known_upstream_types"]); assert known_types=={path.removeprefix("type:") for path in stub_surface if path.startswith("type:")} and len(known_types)==109
+ stub_surface=module.schema_surface(schema); coverage_contract=json.loads(coverage_source.read_text()); known_types=set(coverage_contract["known_upstream_types"]); assert known_types=={path.removeprefix("type:") for path in stub_surface if path.startswith("type:")} and len(known_types)==113; assert "isRepeatable" not in module.INTROSPECTION
+ expected_logs_surface={"field:Query._logs","arg:Query._logs(level)","arg:Query._logs(from)","arg:Query._logs(to)","arg:Query._logs(search)","arg:Query._logs(first)","arg:Query._logs(skip)","arg:Query._logs(orderDirection)"}; assert expected_logs_surface <= set(stub_surface); assert any(entry["scope"]=="root:Query._logs" and entry["owner"]=="#670/T0" for entry in coverage_contract["upstream_only"])
  membership={"types":[obj("Query",[]),{"kind":"INTERFACE","name":"DomainEvent","fields":[],"inputFields":None,"enumValues":None,"possibleTypes":[{"name":"Transfer"}],"interfaces":[]},{**obj("Transfer",[]),"interfaces":[{"name":"DomainEvent"}]}],"queryType":{"name":"Query"},"mutationType":None,"subscriptionType":None,"directives":[]}; surface=module.schema_surface(membership); assert surface["root:query"]=={"type":"Query"} and "implements:Transfer.DomainEvent" in surface and "member:DomainEvent.Transfer" in surface; assert b"type Transfer implements DomainEvent" in module.render_sdl(membership)
  import socket; original=socket.socket; socket.socket=lambda *_args,**_kwargs: (_ for _ in ()).throw(AssertionError("offline verifier opened a socket"))
  try:
   os.environ["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"; module.verify(first)
  finally:
   os.environ.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None); socket.socket=original
- print("graphql compatibility oracle tool tests: 45 passed (oracle request headers; 109-type coverage census)")
+ print("graphql compatibility oracle tool tests: 47 passed (oracle request headers; null-repeatability capture; 113-type coverage census; logging surface disposition)")
 server.shutdown()
 PY

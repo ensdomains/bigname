@@ -1173,7 +1173,10 @@ coverage consumer for this counter.
 
 <a id="graphql-dispositioned-remainder"></a> **GraphQL dispositioned remainder** — differences outside the claim, owned as deferred work or extensions.
 
-<a id="graphql-upstream-census"></a> **GraphQL upstream census** — one deployment's full schema, without claiming complete implementation.
+<a id="graphql-upstream-census"></a> **GraphQL upstream census** — one deployment's captured schema roots, types,
+fields, arguments, enums, interfaces, unions, and directive definitions, without claiming complete implementation.
+Directive repeatability is excluded at the [GraphQL compatibility oracle's schema-comparison
+boundary](graphql-compatibility-oracle.md#schema-comparison).
 
 **Hash-pinned** — anchored to an exact block hash rather than a block number or
 `latest` tag, so a chain reorganization cannot silently change what was read.

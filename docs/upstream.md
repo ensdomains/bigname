@@ -95,6 +95,12 @@ only then deploy the matching API as required by the
 
 Intentional differences between our docs/manifests and upstream. Every divergence lives here so that citations reading "differently than upstream" are legible instead of looking like bugs. If a divergence is not in this list, it should be treated as drift and closed — either by updating our doc or by adding the entry.
 
+> **Graph Node directive repeatability is declared but not resolved** — deployment `QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ` at block 23,000,000 resolved `__Directive.isRepeatable` as null for each of its five directives, producing five non-null-field errors and null data. The same introspection without that field returned 113 types and no errors.
+> **Upstream**: the pinned Graph Node introspection schema declares `isRepeatable: Boolean!` (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L85 @ graph_node@aefe1737), but its directive-object resolver supplies only `name`, `description`, `locations`, and `args` (upstream: .refs/graph_node/graphql/src/introspection/resolver.rs:L252-L263 @ graph_node@aefe1737).
+> **Our rule**: `docs/graphql-compatibility-oracle.md` § Schema comparison omits directive repeatability from capture and comparison.
+> **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
+> **Since**: `2026-09-02`
+
 > **Pre-surface-only ENSv1 resolver selection is not projected** — when a resolver was selected before bigname materialized a [name surface](glossary.md#surface-name-surface) and was never selected again afterward, bigname retains the record facts but has no linked current-resolver pointer and does not publish a record inventory for the name.
 > **Upstream**: ENSv1 reads the resolver stored for the node without requiring a later selection event `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)`, and its text resolver reads storage keyed by record version, node, and key `(upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Resolver and records and `docs/api-v2-routes.md` § `GET /v2/names/{name}/records`.

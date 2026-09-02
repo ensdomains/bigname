@@ -56,6 +56,7 @@
     "InterfaceChanged": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T9"},
     "InterfaceChanged_filter": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3"},
     "InterfaceChanged_orderBy": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3"},
+    "LogLevel": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0"},
     "MulticoinAddrChanged": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T9"},
     "MulticoinAddrChanged_filter": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3"},
     "MulticoinAddrChanged_orderBy": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3"},
@@ -121,6 +122,9 @@
     "WrappedTransfer_filter": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3"},
     "WrappedTransfer_orderBy": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3"},
     "_Block_": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0"},
+    "_LogArgument_": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0"},
+    "_LogMeta_": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0"},
+    "_Log_": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0"},
     "_Meta_": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0"},
     "_SubgraphErrorPolicy_": {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0"}
   },
@@ -164,6 +168,7 @@
   "upstream_only": [
     {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T3", "scope": "type:Domain_filter", "status": "deferred"},
     {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T9", "scope": "type:Transfer", "status": "deferred"},
+    {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T0", "scope": "root:Query._logs", "status": "deferred"},
     {"docs": "graphql-compatibility-oracle.md#covered-surface", "owner": "#670/T9", "scope": "root:Query.transfers", "status": "deferred"}
   ]
 }
