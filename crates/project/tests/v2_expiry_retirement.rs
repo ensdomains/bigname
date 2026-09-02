@@ -246,6 +246,124 @@ async fn fresh(prefix: &str, target: i64) -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
+#[tokio::test]
+async fn live_binding_wins_over_a_later_rival_reservation() -> Result<()> {
+    const RIVAL_RESOURCE: &str = "6bbcd73c-268d-5f08-9641-0b252d51e70e";
+    const RIVAL_LINEAGE: &str = "99f3b71b-4ee1-5e32-9fca-8d5b15ef9d61";
+    let (database, pool) = database("v2_live_binding_rival_reservation").await?;
+    seed(&pool).await?;
+    raw_sql(&format!(
+        "INSERT INTO token_lineages
+             (token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('{RIVAL_LINEAGE}', '{CHAIN}', '{}', 100, 'canonical');
+         INSERT INTO resources
+             (resource_id, token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('{RIVAL_RESOURCE}', '{RIVAL_LINEAGE}', '{CHAIN}', '{}', 100, 'canonical')",
+        hash(100),
+        hash(100),
+    ))
+    .execute(&pool)
+    .await?;
+    event(
+        &pool,
+        MAIN,
+        Some(RIVAL_RESOURCE),
+        100,
+        Some(15),
+        "RegistrationReserved",
+        json!({
+            "source_event": "LabelReserved",
+            "status": "reserved",
+            "expiry": 1_900_000_000_i64,
+            "token_id": STALE_TOKEN,
+            "registry_contract_instance_id": "00000000-0000-0000-0000-000000000002",
+        }),
+    )
+    .await?;
+
+    run(&pool, 100, None).await?;
+    let current: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT surface_binding_id::text, resource_id::text, binding_kind::text,
+                    declared_summary -> 'registration' ->> 'status',
+                    (SELECT count(*) FROM permissions_current permission
+                     WHERE permission.resource_id = name_current.resource_id)
+             FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(MAIN)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        current,
+        (
+            Some("6347b94d-744e-5e3c-a8a9-38cefbcf0e25".into()),
+            Some(RESOURCE.into()),
+            Some("declared_registry_path".into()),
+            Some("active".into()),
+            1,
+        ),
+        "the exact-name row and its name-filtered permission resource must keep the live binding",
+    );
+
+    event(
+        &pool,
+        MAIN,
+        Some(RESOURCE),
+        100,
+        Some(16),
+        "RegistrationReleased",
+        json!({
+            "source_event": "LabelUnregistered",
+            "status": "released",
+            "terminal_reason": "registry_name_binding_changed",
+            "token_id": TOKEN,
+            "registry_contract_instance_id": "00000000-0000-0000-0000-000000000001",
+        }),
+    )
+    .await?;
+    event(
+        &pool,
+        MAIN,
+        Some(RIVAL_RESOURCE),
+        100,
+        Some(17),
+        "RegistrationReleased",
+        json!({
+            "source_event": "LabelUnregistered",
+            "status": "released",
+            "terminal_reason": "registry_name_binding_changed",
+            "token_id": STALE_TOKEN,
+            "registry_contract_instance_id": "00000000-0000-0000-0000-000000000002",
+        }),
+    )
+    .await?;
+    run(&pool, 100, None).await?;
+    let terminal: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT resource_id::text, declared_summary -> 'registration' ->> 'status',
+                declared_summary -> 'registration' ->> 'latest_event_kind'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(MAIN)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        terminal,
+        (
+            Some(RESOURCE.into()),
+            Some("released".into()),
+            Some("RegistrationReleased".into()),
+        ),
+        "a terminal rival lifecycle must not reactivate the selected binding",
+    );
+
+    database.cleanup().await
+}
+
 #[rustfmt::skip]
 async fn seed_formerly_named_flag_only_renewal(pool: &PgPool) -> Result<()> {
     for (block, timestamp) in [(100, 1_700_000_100_i64), (101, 1_800_000_000), (102, 1_800_000_001)] {

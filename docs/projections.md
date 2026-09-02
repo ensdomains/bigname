@@ -267,6 +267,9 @@ coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
 in [`architecture.md`](architecture.md#identity-model).
+For ENSv2, a selected binding's non-terminal lifecycle remains the exact-name
+registration until it becomes terminal, even if another lifecycle has a later
+grant or reservation event.
 `name_current.resource_id` identifies the current control or registration resource. The nullable
 `name_current.serving_resource_id` identifies a separate, event-derived resolver and record-serving
 [serving resource](glossary.md#serving-resource) when no control binding is open. It is not a binding, registration,

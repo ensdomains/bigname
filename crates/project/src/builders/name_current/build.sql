@@ -266,7 +266,10 @@
                     AND ROW(COALESCE(later.block_number, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
               )
             ORDER BY event.lifecycle_key, event.block_number DESC NULLS LAST, event.normalized_event_id DESC) event
-            ORDER BY (event.event_kind = 'RegistrationReleased'), event.block_number DESC NULLS LAST, event.normalized_event_id DESC
+            ORDER BY (binding.resource_id IS NOT NULL AND event.lifecycle_key IS NOT DISTINCT FROM binding.resource_id::text AND event.event_kind <> 'RegistrationReleased') DESC,
+                     (event.event_kind = 'RegistrationReleased'),
+                     (binding.resource_id IS NOT NULL AND event.lifecycle_key IS NOT DISTINCT FROM binding.resource_id::text) DESC,
+                     event.block_number DESC NULLS LAST, event.normalized_event_id DESC
             LIMIT 1
         ) registration_current ON TRUE
         CROSS JOIN LATERAL (

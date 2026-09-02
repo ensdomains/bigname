@@ -497,6 +497,28 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
 }
 
 #[tokio::test]
+async fn v2_name_and_name_filtered_permissions_select_the_same_live_registration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let expected = v2_permissions_current_resource_id().to_string();
+
+    let name = v2_name_record_payload_for_database(&database, "/v2/names/Perms.eth").await?;
+    assert_eq!(name["data"]["registration_status"], json!("active"));
+    assert_eq!(name["data"]["registration_id"], json!(expected));
+
+    let permissions =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    let rows = permissions["data"].as_array().expect("permissions data");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| {
+        row["registration_id"] == name["data"]["registration_id"]
+            && row["authority_context"] == json!("current_for_name")
+    }));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_non_name_filters_do_not_require_snapshot_metadata() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
