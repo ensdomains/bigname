@@ -81,8 +81,9 @@ The seven A3 additions exercise:
   renewal against non-empty persisted state, and numeric registrar events plus
   plaintext controller enrichment across a losing registration branch that is
   orphaned before a winning branch restores canonical state
-  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133 @ ens_v1@91c966f);
+  (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L15-L20 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L108-L139 @ ens_v1@91c966f);
 - a non-`.eth` ENSv1 `NameWrapped` → `FusesSet` lifecycle, with
   committed `wrapped`, `emancipated`, `locked`, and owner-controlled-fuse
   outputs. The fixture covers a zero bitmap, `PARENT_CANNOT_CONTROL`,

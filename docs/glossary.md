@@ -1552,6 +1552,8 @@ a difference between deployment profiles in whether admitted controller events
 reveal the human-readable `.eth` label. The difference affects when an exact
 name surface can be created and bound; it does not change whether BaseRegistrar
 events establish registration existence or authoritative expiry.
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L108-L139 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
 
 <a id="plaintext-gap-disposition"></a>
 ## Plaintext-gap disposition
@@ -1561,6 +1563,8 @@ label-bearing controller intake. Numeric BaseRegistrar events still retain the
 registration resource, token lineage, owner, and expiry. Until another admitted
 source proves the label, that registration remains resource-keyed and is not
 addressable through an exact name surface.
+(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L15-L20 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
 
 ## Redo-marker scope
 

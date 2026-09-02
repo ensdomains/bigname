@@ -45,7 +45,7 @@ async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lea
     .fetch_one(&run.db.pool)
     .await?;
 
-    // The registrar-plane facts persist raw: the ERC721 mint and the
+    // The BaseRegistrar logs persist raw: the ERC721 mint and the
     // uint256-id NameRegistered both live in the transaction's log set.
     let registrar_raw_logs: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM raw_logs raw \
