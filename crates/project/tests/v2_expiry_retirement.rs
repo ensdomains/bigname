@@ -510,6 +510,102 @@ async fn expiry_retirement_provenance_carries_release_manifest_and_position() ->
 }
 
 #[tokio::test]
+async fn same_block_block_only_expiry_remains_terminal_after_its_reservation() -> Result<()> {
+    let (database, pool) = database("v2_expiry_same_block_terminal_provenance").await?;
+    seed(&pool).await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL
+         WHERE resource_id = $1::uuid
+           AND event_kind = 'RegistrationReleased'
+           AND after_state ->> 'source_event' = 'RegistryPathExpired'",
+    )
+    .bind(STALE_RESOURCE)
+    .execute(&pool)
+    .await?;
+
+    run(&pool, 100, None).await?;
+    let state: (i64, Value) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM permissions_current WHERE resource_id = $1::uuid),
+                provenance
+         FROM permissions_current_resource_summary
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(STALE_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state.0, 0, "same-block expiry did not retire permissions");
+    assert!(
+        state.0 == 0 && state.1.get("expiry_retirement_event_id").is_some(),
+        "terminal same-block expiry lost its retirement citation: {}",
+        state.1
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn expiry_retirement_provenance_does_not_outlive_an_eligible_renewal() -> Result<()> {
+    let (database, pool) = database("v2_expiry_retirement_rebound_provenance").await?;
+    seed_formerly_named_flag_only_renewal(&pool).await?;
+    make_registered_lifecycle_bindingless(&pool).await?;
+
+    let retired = run(&pool, 101, None).await?;
+    let retired_provenance: Value = sqlx::query_scalar(
+        "SELECT provenance FROM permissions_current_resource_summary
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        retired_provenance
+            .get("expiry_retirement_event_id")
+            .is_some()
+    );
+
+    run(&pool, 102, Some(retired)).await?;
+    let permission_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1::uuid")
+            .bind(RESOURCE)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        permission_count, 1,
+        "eligible renewal did not restore permissions"
+    );
+
+    let summary: (Value, Value) = sqlx::query_as(
+        "SELECT provenance, chain_positions
+         FROM permissions_current_resource_summary
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    let stale_fields: Vec<_> = summary
+        .0
+        .as_object()
+        .expect("summary provenance must be an object")
+        .keys()
+        .filter(|key| key.starts_with("expiry_retirement_"))
+        .cloned()
+        .collect();
+    assert!(
+        stale_fields.is_empty(),
+        "restored resource summary retained stale expiry-retirement provenance fields: {stale_fields:?}"
+    );
+    assert!(
+        !summary.1.to_string().contains(hash(101)),
+        "restored resource summary chain positions retained the retirement position"
+    );
+    assert_eq!(summary.1["block_number"], 100);
+    assert_eq!(summary.1["block_hash"], hash(100));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 #[rustfmt::skip]
 #[allow(clippy::type_complexity)]
 async fn expiry_permissions_and_names_converge_through_revival_and_version_bump() -> Result<()> {

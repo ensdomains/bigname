@@ -321,12 +321,17 @@ summary is an authoritative permission enumeration. API contract tests inject
 an independently proven full summary to verify that resource-bound public
 requests are not globally forced to partial.
 
-When a state-derived ENSv2 path-expiry release retires effective permission
-rows, the resource summary keeps the selected registration-authority event's
-provenance unchanged. Separate `expiry_retirement_*` fields identify the
-release event, its source manifest and source family, its manifest version, and
-its block/transaction/log position. The retirement citation therefore explains
-why the rows are absent without rewriting which event established authority.
+When a state-derived ENSv2 path-expiry release remains the resource's terminal
+lifecycle event and retires effective permission rows, the resource summary
+keeps the selected registration-authority event's provenance unchanged.
+Separate `expiry_retirement_*` fields identify the release event, its source
+manifest and source family, its manifest version, and its
+block/transaction/log position. A later ENSv2 grant or reservation removes
+these fields. A later `RegistrationRenewed` removes them only when
+`revived_from_expiry=true` and the lifecycle rules restore either a reservation
+resource or a resource whose expiry release has no logical-name link. The
+retirement citation therefore explains why the rows are absent without
+rewriting which event established authority.
 
 For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
 holder grant. A separately observed compatible holder grant is masked by the

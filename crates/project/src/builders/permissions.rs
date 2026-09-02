@@ -1,3 +1,5 @@
+mod expiry_retirement;
+
 use crate::{Marker, ProjectError, Result};
 use sqlx::{Postgres, Transaction};
 pub(super) async fn build(
@@ -382,7 +384,7 @@ pub(super) async fn build(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to build permissions_current", error))?;
-    sqlx::query(
+    let resource_summary_query = [
         r#"
         WITH resource_event_candidates AS (
             SELECT event.resource_id,
@@ -490,15 +492,9 @@ pub(super) async fn build(
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
         ),
-        expiry_retirements AS (
-            SELECT DISTINCT ON (event.resource_id) event.resource_id, event.normalized_event_id, event.source_manifest_id,
-                   event.source_family, event.manifest_version, event.block_number, event.block_hash, event.transaction_index, event.log_index
-            FROM project_events event
-            WHERE event.resource_id IS NOT NULL AND event.event_kind = 'RegistrationReleased' AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
-              AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired'
-            ORDER BY event.resource_id, event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST, event.normalized_event_id DESC
-        ),
+        "#,
+        expiry_retirement::CTE,
+        r#",
         resource_authority AS (
             SELECT resource.*,
                    CASE COALESCE(
@@ -617,12 +613,14 @@ pub(super) async fn build(
              '0x0000000000000000000000000000000000000000000000000000000000000000'
         ORDER BY resource.resource_id
         "#,
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(&target.hash)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to build resource permissions", error))?;
+    ]
+    .concat();
+    sqlx::query(&resource_summary_query)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to build resource permissions", error))?;
     Ok(())
 }
