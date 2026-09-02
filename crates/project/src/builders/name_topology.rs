@@ -393,7 +393,9 @@ async fn project_basenames_transport(
                 ),
                 'version_boundaries', jsonb_build_object(
                     'topology_version_boundary', boundary.value,
-                    'record_version_boundary', boundary.value
+                    'record_version_boundary', COALESCE(
+                        inventory.record_version_boundary, boundary.value
+                    )
                 ),
                 'transport', jsonb_build_object(
                     'source_chain_id', 'base-mainnet',
@@ -533,6 +535,8 @@ async fn project_basenames_transport(
                      event.event_identity DESC
             LIMIT 1
         ) boundary ON TRUE
+        LEFT JOIN project_stage_record_inventory_current inventory
+          ON inventory.resource_id = binding.resource_id
         WHERE name.logical_name_id = surface.logical_name_id
           AND surface.namespace = 'basenames'
           AND $1 = 'base-mainnet'

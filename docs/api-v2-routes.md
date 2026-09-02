@@ -556,9 +556,17 @@ Field ownership:
   is supported `ens_v1_resolver_l1` from an applicable exact declaration and
   the classifying manifest's namespace matches the pointer's namespace. Under
   that guard, absence from the projected inventory is authoritative
-  `not_found`. Other ENSv2-family pointers and Basenames pointers do not
-  attribute this node-keyed history; the Basenames question remains unresolved
-  in [#621](https://github.com/ensdomains/bigname/issues/621).
+  `not_found`. A node-keyed `basenames_base_resolver` row with no
+  `logical_name_id` is likewise attributable only through a
+  `basenames_base_registry` pointer on the same chain, node, and resolver
+  emitter. Basenames keeps the current resolver by node, authorizes its
+  registrar controller and reverse registrar independently of the node owner,
+  and stores text by record version, node, and key.
+  (upstream: .refs/basenames/src/L2/Registry.sol:L173-L180 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193-L199 @ basenames@1809bbc)
+  (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/ResolverBase.sol:L7-L24 @ basenames@1809bbc)
+  (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L7-L36 @ basenames@1809bbc)
+  Other ENSv2-family pointers do not attribute this node-keyed history.
   An inventory in any other coverage state is not authoritative, and the
   request falls through to verified lookup or an explicit unsupported answer
   rather than reporting absence from the index as absence on chain.
@@ -732,7 +740,12 @@ Field ownership:
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
   A V1 ownerless row linked only to the registry resource retained for reads is
-  visible through name history with `registration_id=null`.
+  visible through name history with `registration_id=null` when it carries the
+  name's `logical_name_id`. A pre-surface owner row stored before the
+  [name surface](glossary.md#surface-name-surface) existed has no name
+  attribution and is instead reached through `GET /v2/diagnostics/events` via
+  the registry resource recorded internally at
+  `name_current.provenance.read_reachability.serving_resource_id`.
 - Snapshot behavior: the parent anchor and history rows are selected from
   current state. The response omits `meta.as_of` and `meta.as_of_token`, and
   its cursor carries no snapshot validity claim. True as-of history

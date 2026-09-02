@@ -255,6 +255,36 @@ async fn seed_normalized_event(
     after_state: serde_json::Value,
     raw_fact_ref: serde_json::Value,
 ) -> Result<()> {
+    seed_namespaced_normalized_event(
+        pool,
+        "ens",
+        identity,
+        logical_name_id,
+        resource,
+        event_kind,
+        source_family,
+        block_number,
+        log_index,
+        after_state,
+        raw_fact_ref,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_namespaced_normalized_event(
+    pool: &PgPool,
+    namespace: &str,
+    identity: &str,
+    logical_name_id: Option<&str>,
+    resource: Option<&str>,
+    event_kind: &str,
+    source_family: &str,
+    block_number: i64,
+    log_index: i64,
+    after_state: serde_json::Value,
+    raw_fact_ref: serde_json::Value,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO normalized_events (
              event_identity, namespace, logical_name_id, resource_id, event_kind,
@@ -262,11 +292,12 @@ async fn seed_normalized_event(
              transaction_hash, transaction_index, log_index, derivation_kind,
              canonicality_state, after_state, raw_fact_ref
          ) VALUES (
-             $1, 'ens', $2, $3::uuid, $4, $5, 1, $6, $7, $8,
-             $9, 0, $10, 'ens_v1_unwrapped_authority', 'canonical', $11, $12
+             $1, $2, $3, $4::uuid, $5, $6, 1, $7, $8, $9,
+             $10, 0, $11, 'ens_v1_unwrapped_authority', 'canonical', $12, $13
          )",
     )
     .bind(identity)
+    .bind(namespace)
     .bind(logical_name_id)
     .bind(resource)
     .bind(event_kind)
@@ -1098,6 +1129,213 @@ async fn registry_self_with_linked_resolver_serves_without_control() -> Result<(
     let incremental = serving_projection_snapshot(&pool).await?;
     run_project(&pool, 15, 8, None).await?;
     assert_eq!(incremental, serving_projection_snapshot(&pool).await?);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Basenames record writes remain possible after ownership clears because the resolver separately
+/// authorizes its registrar controller and reverse registrar.
+/// (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193-L199 @ basenames@1809bbc)
+#[tokio::test]
+async fn basenames_node_only_record_after_owner_clear_rebuilds_inventory() -> Result<()> {
+    const LOGICAL_NAME_ID: &str =
+        "basenames:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1, 'basenames', 'ownerless-fixture.base.eth',
+             ARRAY['ownerless-fixture', 'base', 'eth'], '\\x00', $2,
+             ARRAY[
+                 '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+             ], 'test', 'active', $3, $4, 8, 'canonical'
+         )",
+    )
+    .bind(LOGICAL_NAME_ID)
+    .bind(OWNERLESS_NAMEHASH)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             authority_arm, active_from, active_to, chain_id, block_hash, block_number,
+             canonicality_state
+         ) VALUES (
+             $1::uuid, $2, $3::uuid, 'declared_registry_path', 'basenames',
+             '2026-08-01T00:00:08Z', '2026-08-01T00:00:09Z', $4, $5, 8, 'canonical'
+         )",
+    )
+    .bind(OWNERLESS_BINDING)
+    .bind(LOGICAL_NAME_ID)
+    .bind(OWNERLESS_RESOURCE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    for (identity, logical_name_id, resource, event_kind, source_family, block, log, state) in [
+        (
+            "fixture:basenames-ownerless-resolver",
+            Some(LOGICAL_NAME_ID),
+            Some(OWNERLESS_RESOURCE),
+            "ResolverChanged",
+            "basenames_base_registry",
+            8,
+            1,
+            json!({"node": OWNERLESS_NAMEHASH, "resolver": RESOLVER_ADDRESS}),
+        ),
+        (
+            "fixture:basenames-ownerless-record",
+            Some(LOGICAL_NAME_ID),
+            None,
+            "RecordChanged",
+            "basenames_base_resolver",
+            8,
+            2,
+            json!({
+                "node": OWNERLESS_NAMEHASH,
+                "record_family": "text",
+                "record_key": "text:description",
+                "selector_key": "description",
+                "value": "still readable"
+            }),
+        ),
+        (
+            "fixture:basenames-ownerless-clear",
+            None,
+            Some(OWNERLESS_RESOURCE),
+            "AuthorityTransferred",
+            "basenames_base_registry",
+            9,
+            1,
+            json!({
+                "node": OWNERLESS_NAMEHASH,
+                "owner": "0x0000000000000000000000000000000000000000",
+                "owner_getter": "0x0000000000000000000000000000000000000000",
+                "owner_getter_reason": "literal_zero",
+                "authority_kind": null
+            }),
+        ),
+    ] {
+        seed_namespaced_normalized_event(
+            &pool,
+            "basenames",
+            identity,
+            logical_name_id,
+            resource,
+            event_kind,
+            source_family,
+            block,
+            log,
+            state,
+            json!({"emitting_address": if event_kind == "RecordChanged" {
+                RESOLVER_ADDRESS
+            } else {
+                REGISTRY_ADDRESS
+            }}),
+        )
+        .await?;
+    }
+    run_project(&pool, 9, 8, None).await?;
+    let initial: String = sqlx::query_scalar(
+        "SELECT entries -> 0 ->> 'value'
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(initial, "still readable");
+    let ownerless_serving: (Option<String>, Option<String>, String) = sqlx::query_as(
+        "SELECT serving_resource_id::text,
+                declared_summary #>> '{registration,status}', support_status
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(LOGICAL_NAME_ID)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        ownerless_serving,
+        (
+            Some(OWNERLESS_RESOURCE.to_owned()),
+            Some("unregistered".to_owned()),
+            "supported".to_owned()
+        )
+    );
+
+    for (identity, event_kind, log, state) in [
+        (
+            "fixture:basenames-ownerless-version",
+            "RecordVersionChanged",
+            1,
+            json!({"node": OWNERLESS_NAMEHASH, "record_version": "1"}),
+        ),
+        (
+            "fixture:basenames-ownerless-record-after-version",
+            "RecordChanged",
+            2,
+            json!({
+                "node": OWNERLESS_NAMEHASH,
+                "record_family": "text",
+                "record_key": "text:description",
+                "selector_key": "description",
+                "value": "readable after version"
+            }),
+        ),
+    ] {
+        seed_namespaced_normalized_event(
+            &pool,
+            "basenames",
+            identity,
+            None,
+            None,
+            event_kind,
+            "basenames_base_resolver",
+            10,
+            log,
+            state,
+            json!({"emitting_address": RESOLVER_ADDRESS}),
+        )
+        .await?;
+    }
+    run_project(&pool, 10, 10, Some(9)).await?;
+    let incremental: String = sqlx::query_scalar(
+        "SELECT entries -> 0 ->> 'value'
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    run_project(&pool, 10, 8, None).await?;
+    let fresh: String = sqlx::query_scalar(
+        "SELECT entries -> 0 ->> 'value'
+         FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(OWNERLESS_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (incremental.as_str(), fresh.as_str()),
+        ("readable after version", "readable after version"),
+        "Basenames node-only records must replace 'still readable' with 'readable after version' in incremental and fresh rebuilds"
+    );
 
     database.cleanup().await?;
     Ok(())

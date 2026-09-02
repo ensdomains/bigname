@@ -2190,6 +2190,67 @@ async fn basenames_ownerless_serving_retains_verified_transport_support() -> Res
         resolution_verified_support_boundary(&row, None).is_some(),
         "ownerless Basenames serving must retain execution manifest provenance, both chain positions, and transport topology: {row:?}"
     );
+
+    insert_namespaced_event(
+        scratch.pool(),
+        "basenames",
+        BASE_CHAIN,
+        4,
+        None,
+        None,
+        "RecordVersionChanged",
+        "basenames_base_resolver",
+        1,
+        json!({"node":"0xalice-base", "record_version":"1"}),
+        json!({"emitting_address":BASENAMES_RESOLVER}),
+    )
+    .await?;
+    insert_namespaced_event(
+        scratch.pool(),
+        "basenames",
+        BASE_CHAIN,
+        4,
+        None,
+        None,
+        "RecordChanged",
+        "basenames_base_resolver",
+        1,
+        json!({
+            "node":"0xalice-base",
+            "record_family":"text",
+            "record_key":"text:description",
+            "selector_key":"description",
+            "value":"readable after version"
+        }),
+        json!({"emitting_address":BASENAMES_RESOLVER}),
+    )
+    .await?;
+    run_project(
+        scratch.pool(),
+        BASE_CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(BASE_CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    let (inventory_boundary, inventory_value): (Value, String) = sqlx::query_as(
+        "SELECT record_version_boundary, entries -> 0 ->> 'value'
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(BASENAMES_RESOURCE)?)
+    .fetch_one(scratch.pool())
+    .await?;
+    let row = load_name_current_row(scratch.pool(), "basenames:0xalice-base").await?;
+    assert_eq!(inventory_value, "readable after version");
+    assert_eq!(
+        row.declared_summary["topology"]["version_boundaries"]["record_version_boundary"],
+        inventory_boundary,
+        "verified Basenames lookup requires topology and inventory to select the same record boundary"
+    );
     scratch.cleanup().await
 }
 

@@ -94,20 +94,29 @@ pub(super) async fn build(
             -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)
             SELECT pointer.resource_id AS attributed_resource_id, event.*
             FROM pointers pointer
-            JOIN project_events event
-              ON event.chain_id = $1
-             AND event.logical_name_id IS NULL
-             AND event.source_family = 'ens_v1_resolver_l1'
-             AND lower(event.after_state ->> 'node') = pointer.namehash
-             AND lower(COALESCE(
+             JOIN project_events event
+               ON event.chain_id = $1
+              AND event.logical_name_id IS NULL
+              AND lower(event.after_state ->> 'node') = pointer.namehash
+              AND lower(COALESCE(
                     NULLIF(event.after_state ->> 'resolver', ''),
                     NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
                  )) = pointer.resolver_address
             WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
-              AND pointer.pointer_source_family IN (
-                  'ens_v1_registry_l1',
-                  'ens_v1_registrar_l1',
-                  'ens_v1_wrapper_l1'
+              AND (
+                  (
+                      event.source_family = 'ens_v1_resolver_l1'
+                      AND pointer.pointer_source_family IN (
+                          'ens_v1_registry_l1',
+                          'ens_v1_registrar_l1',
+                          'ens_v1_wrapper_l1'
+                      )
+                  )
+                  OR (
+                      event.source_family = 'basenames_base_resolver'
+                      AND pointer.pointer_source_family =
+                          'basenames_base_registry'
+                  )
               )
             UNION ALL
             -- The guarded ENSv2-origin exception uses the exact declaration already selected by

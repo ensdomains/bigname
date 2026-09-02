@@ -378,10 +378,17 @@ to its emitting resolver. A selected `ens_v2_registry_l1` or `ens_v2_root_l1`
 pointer may also join when its target resolver's final classification is
 supported `ens_v1_resolver_l1` from an applicable exact declaration and the
 classifying manifest's namespace matches the pointer's namespace. Incremental
-staging applies the same guarded exception. The sibling question for
-`basenames_base_resolver` records with no logical-name attribution and a
-Basenames pointer remains unresolved in
-[#621](https://github.com/ensdomains/bigname/issues/621). Pointer position is
+staging applies the same guarded exception. A `basenames_base_resolver` event
+with no logical-name attribution may join only when the selected pointer is
+`basenames_base_registry`, with the same chain, node-to-namehash, and resolver
+emitter match. Basenames keeps the current resolver by node, permits its
+registrar controller and reverse registrar to write independently of the node
+owner, and stores text by record version, node, and key.
+(upstream: .refs/basenames/src/L2/Registry.sol:L173-L180 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/L2Resolver.sol:L193-L199 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/ResolverBase.sol:L7-L24 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L7-L36 @ basenames@1809bbc)
+Pointer position is
 not a write-time lower bound: selecting a resolver exposes its retained
 pre-pointer writes, switching away hides them,
 and switching back restores them. The latest `RecordVersionChanged` from that

@@ -125,7 +125,21 @@ pub(super) async fn include_changed_record_consumers(
                    event.logical_name_id = surface.logical_name_id
                    OR (
                        event.logical_name_id IS NULL
-                       AND event.source_family = 'ens_v1_resolver_l1'
+                       AND (
+                           event.source_family = 'ens_v1_resolver_l1'
+                           OR (
+                               event.source_family = 'basenames_base_resolver'
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM normalized_events pointer
+                                   WHERE pointer.normalized_event_id =
+                                       (inventory.provenance ->>
+                                           'resolver_pointer_event_id')::bigint
+                                     AND pointer.source_family =
+                                         'basenames_base_registry'
+                               )
+                           )
+                       )
                        AND lower(event.after_state ->> 'node') =
                            lower(surface.namehash)
                    )

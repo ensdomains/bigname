@@ -2,6 +2,10 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
+pub(crate) mod node_record_events;
+
+use node_record_events::SCOPED_NODE_RECORD_EVENT_IDS_SQL;
+
 const PROJECTION_TABLES: &[&str] = &[
     "name_current",
     "children_current",
@@ -265,54 +269,7 @@ async fn create_scoped_event_ids(
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
         -- Defensive symmetry with create_identity_views; inventory closure guarantees the names.
-        SELECT record.normalized_event_id FROM (
-            SELECT logical_name_id FROM project_scope_names
-            UNION
-            SELECT logical_name_id FROM project_scope_children
-        ) scope
-        JOIN name_surfaces surface USING (logical_name_id)
-        JOIN chain_lineage surface_lineage ON surface_lineage.chain_id = surface.chain_id
-         AND (surface_lineage.block_number, surface_lineage.block_hash) = (surface.block_number, surface.block_hash)
-        JOIN (
-            SELECT DISTINCT event.resource_id, event.logical_name_id,
-                   lower(event.after_state ->> 'resolver') AS resolver_address
-            FROM project_scope_resources resource_scope
-            JOIN normalized_events event USING (resource_id)
-            JOIN chain_lineage lineage USING (chain_id, block_number, block_hash)
-            WHERE event.chain_id = $1 AND event.block_number <= $2
-              AND event.resource_id IS NOT NULL AND event.logical_name_id IS NOT NULL
-              AND event.event_kind = 'ResolverChanged' AND event.consumer_visibility = 'activated'
-              AND (
-                  event.source_family IN (
-                      'ens_v1_registry_l1',
-                      'ens_v1_registrar_l1',
-                      'ens_v1_wrapper_l1'
-                  ) OR (
-                      event.source_family IN (
-                          'ens_v2_registry_l1', 'ens_v2_root_l1'
-                      )
-                      AND EXISTS (
-                          SELECT 1
-                          FROM project_declared_resolver_addresses declaration
-                          WHERE declaration.namespace = event.namespace
-                            AND declaration.resolver_address =
-                                lower(event.after_state ->> 'resolver')
-                      )
-                  )
-              )
-              AND event.canonicality_state IN ('canonical', 'safe', 'finalized') AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        ) pointer USING (logical_name_id)
-        JOIN normalized_events record ON record.chain_id = $1 AND record.logical_name_id IS NULL
-         AND record.source_family = 'ens_v1_resolver_l1' AND lower(record.after_state ->> 'node') = lower(surface.namehash)
-         AND lower(COALESCE(NULLIF(record.after_state ->> 'resolver', ''),
-             NULLIF(record.raw_fact_ref ->> 'emitting_address', ''))) = pointer.resolver_address
-        JOIN chain_lineage record_lineage ON record_lineage.chain_id = record.chain_id
-         AND (record_lineage.block_number, record_lineage.block_hash) = (record.block_number, record.block_hash)
-        WHERE surface.chain_id = $1 AND surface.block_number <= $2
-          AND surface.canonicality_state IN ('canonical', 'safe', 'finalized') AND surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND pointer.resolver_address NOT IN ('0x0000000000000000000000000000000000000000', '')
-          AND record.block_number <= $2 AND record.consumer_visibility = 'activated' AND record.event_kind IN ('RecordChanged', 'RecordVersionChanged')
-          AND record.canonicality_state IN ('canonical', 'safe', 'finalized') AND record_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        __SCOPED_NODE_RECORD_EVENT_IDS_SQL__
         UNION
         -- Candidate-only resources supply just the resolver evidence consumed by this build.
         -- They remain outside delete-and-publish resource scope.
@@ -455,8 +412,12 @@ async fn create_scoped_event_ids(
          AND lower(resolver.after_state ->> 'node') =
              lower(reverse.after_state ->> 'reverse_node')
         ON CONFLICT DO NOTHING
-        "#;
-    sqlx::query(scoped_event_ids)
+        "#
+    .replace(
+        "__SCOPED_NODE_RECORD_EVENT_IDS_SQL__",
+        SCOPED_NODE_RECORD_EVENT_IDS_SQL,
+    );
+    sqlx::query(&scoped_event_ids)
         .bind(chain_id)
         .bind(target_block)
         .execute(&mut **transaction)
