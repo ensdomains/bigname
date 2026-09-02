@@ -19,7 +19,8 @@ not affect matching; wildcards, conflicts, unknown paths, and stale entries inva
 
 Upstream-only fields on a shared type require exact field entries; a type-wide entry is valid only when the whole type is
 absent locally. The one bounded exception is an upstream-only `Query` entity field: when its return type, after list and
-non-null wrappers are unwrapped, is a censused object with an `id` field, the root field inherits that type's owner. An
+non-null wrappers are unwrapped, is a censused object with an `id` field, the root field inherits that type's owner unless
+that return type is claimed. An
 upstream-only argument inherits its parent field's disposition, never the parent type's, so a new argument on a claimed field still fails. An
 upstream-only enum value inherits the owner of its enum type in `known_upstream_types`; a value whose enum type is absent
 from that census still fails.

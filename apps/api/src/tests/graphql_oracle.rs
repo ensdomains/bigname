@@ -238,6 +238,7 @@ fn oracle_field_is_deferred(
     upstream_only: &OracleSet<String>,
     deferred: &[Value],
     known: &serde_json::Map<String, Value>,
+    claimed: &OracleSet<String>,
 ) -> bool {
     if deferred.iter().any(|entry| {
         entry["scope"]
@@ -264,8 +265,10 @@ fn oracle_field_is_deferred(
     let Some(return_type) = upstream[path]["type"].as_str().map(oracle_named_type) else {
         return false;
     };
+    let return_type_path = format!("type:{return_type}");
     known.contains_key(return_type)
-        && upstream[&format!("type:{return_type}")]["kind"] == json!("OBJECT")
+        && !claimed.contains(&return_type_path)
+        && upstream[&return_type_path]["kind"] == json!("OBJECT")
         && upstream.contains_key(&format!("field:{return_type}.id"))
 }
 
@@ -275,9 +278,10 @@ fn oracle_upstream_path_is_deferred(
     upstream_only: &OracleSet<String>,
     deferred: &[Value],
     known: &serde_json::Map<String, Value>,
+    claimed: &OracleSet<String>,
 ) -> bool {
     if path.starts_with("field:") {
-        return oracle_field_is_deferred(path, upstream, upstream_only, deferred, known);
+        return oracle_field_is_deferred(path, upstream, upstream_only, deferred, known, claimed);
     }
     if let Some(parent) = oracle_parent_field(path) {
         return oracle_field_is_deferred(
@@ -286,6 +290,7 @@ fn oracle_upstream_path_is_deferred(
             upstream_only,
             deferred,
             known,
+            claimed,
         );
     }
     if let Some(enum_type) = path
@@ -339,7 +344,7 @@ fn apply_oracle_coverage(
             failures.push(format!("invalid claimed path: {value}"));
             continue;
         };
-        if !claimed.insert(path) {
+        if !claimed.insert(path.to_owned()) {
             failures.push(format!("duplicate claimed path: {path}"));
             continue;
         }
@@ -399,7 +404,14 @@ fn apply_oracle_coverage(
     }
     let mut unowned = 0;
     for path in &upstream_only {
-        if !oracle_upstream_path_is_deferred(path, upstream, &upstream_only, deferred, known) {
+        if !oracle_upstream_path_is_deferred(
+            path,
+            upstream,
+            &upstream_only,
+            deferred,
+            known,
+            &claimed,
+        ) {
             unowned += 1;
             failures.push(format!("unowned upstream-only path: {path}"));
         }
@@ -702,6 +714,40 @@ fn assert_oracle_field_ownership_rules() {
     ]);
     let local = OracleMap::from([query, account]);
     assert!(apply_oracle_coverage(&upstream, &local, &coverage).is_ok());
+
+    let claimed_return_upstream = OracleMap::from([
+        ("type:Query".into(), json!({"kind":"OBJECT"})),
+        ("type:Domain".into(), json!({"kind":"OBJECT"})),
+        ("field:Domain.id".into(), json!({"type":"ID!"})),
+        (
+            "field:Query.futureDomains".into(),
+            json!({"type":"[Domain!]!"}),
+        ),
+    ]);
+    let claimed_return_local = OracleMap::from([
+        ("type:Query".into(), json!({"kind":"OBJECT"})),
+        ("type:Domain".into(), json!({"kind":"OBJECT"})),
+        ("field:Domain.id".into(), json!({"type":"ID!"})),
+    ]);
+    let claimed_return_coverage = json!({
+        "claimed_paths": ["type:Domain"],
+        "schema_signature_differences": [],
+        "upstream_only": [],
+        "local_extensions": [],
+        "known_upstream_types": {
+            "Domain": {"owner":"#1", "docs":"x"},
+            "Query": {"owner":"#2", "docs":"x"}
+        }
+    });
+    let claimed_return_error = apply_oracle_coverage(
+        &claimed_return_upstream,
+        &claimed_return_local,
+        &claimed_return_coverage,
+    )
+    .expect_err("claimed return type auto-owned an upstream-only Query field")
+    .to_string();
+    assert!(claimed_return_error
+        .contains("unowned upstream-only path: field:Query.futureDomains"));
 
     let claimed_domain = OracleMap::from([
         ("type:Domain".into(), json!({"kind":"OBJECT"})),

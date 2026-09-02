@@ -40,11 +40,15 @@ query_fields = [
  field("_meta",O("_Meta_"),[("block",I("Block_height"),None)]),
  # Graph Node adds this fixed logging field and signature to every query root. (upstream: .refs/graph_node/graph/src/schema/api.rs:L1080-L1107 @ graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/schema/api.rs:L1313-L1418 @ graph_node@aefe1737)
  field("_logs",nn(lst(nn(O("_Log_")))),[("level",E("LogLevel"),None),("from",S("String"),None),("to",S("String"),None),("search",S("String"),None),("first",S("Int"),"100"),("skip",S("Int"),"0"),("orderDirection",E("OrderDirection"),"desc")]),
+ field("account",O("Account"),[("block",I("Block_height"),None),("id",nn(S("ID")),None),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny")]),
+ field("accounts",nn(lst(nn(O("Account")))),[("block",I("Block_height"),None),("first",S("Int"),"100"),("orderBy",E("Account_orderBy"),None),("orderDirection",E("OrderDirection"),None),("skip",S("Int"),"0"),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny"),("where",I("Account_filter"),None)]),
  field("domain",O("Domain"),[("block",I("Block_height"),None),("id",nn(S("ID")),None),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny")]),
  field("domains",nn(lst(nn(O("Domain")))),[("block",I("Block_height"),None),("first",S("Int"),"100"),("orderBy",E("Domain_orderBy"),None),("orderDirection",E("OrderDirection"),None),("skip",S("Int"),"0"),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny"),("where",I("Domain_filter"),None)]),
  field("domainEvent",O("DomainEvent"),[("id",nn(S("ID")),None)]),field("domainEvents",nn(lst(nn(O("DomainEvent"))))),
  field("registrationEvent",O("RegistrationEvent"),[("id",nn(S("ID")),None)]),field("registrationEvents",nn(lst(nn(O("RegistrationEvent"))))),
+ field("resolver",O("Resolver"),[("block",I("Block_height"),None),("id",nn(S("ID")),None),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny")]),
  field("resolverEvent",O("ResolverEvent"),[("id",nn(S("ID")),None)]),field("resolverEvents",nn(lst(nn(O("ResolverEvent"))))),
+ field("resolvers",nn(lst(nn(O("Resolver")))),[("block",I("Block_height"),None),("first",S("Int"),"100"),("orderBy",E("Resolver_orderBy"),None),("orderDirection",E("OrderDirection"),None),("skip",S("Int"),"0"),("subgraphError",nn(E("_SubgraphErrorPolicy_")),"deny"),("where",I("Resolver_filter"),None)]),
  field("transfers",nn(lst(nn(O("Transfer")))),[("first",S("Int"),None)]),
 ]
 types.append(obj("Query",query_fields)); schema={"types":types,"queryType":{"name":"Query"},"mutationType":None,"subscriptionType":None,"directives":[]}

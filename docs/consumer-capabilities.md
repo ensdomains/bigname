@@ -451,7 +451,7 @@ number, timestamp, and parent hash. Its hash is present for an unconstrained or
 hash-constrained selection and is `null` for a number-constrained selection;
 the initial oracle pin asserts only the block number in that case. All root fields within one HTTP
 GraphQL request share one request-scoped served-head selection. `deployment` is the interpreter
-[content hash](glossary.md#interpreter-content-hash) for the serving binary.
+[content hash](glossary.md) for the serving binary.
 When a head is eligible to serve, `hasIndexingErrors` derives from durable
 indexing state: a non-current or rebuilding [Project publication](glossary.md#projection),
 a phase that settled while unconfigured, or an unmet required verification
