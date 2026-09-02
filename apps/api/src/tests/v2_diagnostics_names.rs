@@ -945,6 +945,7 @@ fn diagnostic_name_current_row(
         namehash: format!("namehash:{normalized_name}"),
         surface_binding_id: Some(surface_binding_id),
         resource_id: Some(resource_id),
+        serving_resource_id: None,
         token_lineage_id: Some(token_lineage_id),
         binding_kind: Some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
         declared_summary: json!({

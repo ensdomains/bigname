@@ -35,6 +35,56 @@ async fn schema_migrations_apply_to_an_empty_database_before_the_phase_baseline(
 }
 
 #[tokio::test]
+async fn serving_resource_reference_migrates_an_initialized_phase_schema() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_serving_resource_migration")
+            .pool_max_connections(2)
+            .parse_context("failed to parse serving-resource schema-migration database URL")
+            .admin_connect_context("failed to connect serving-resource migration admin pool")
+            .pool_connect_context("failed to connect serving-resource migration pool"),
+    )
+    .await?;
+    initialize_schema_v2(database.pool()).await?;
+    sqlx::raw_sql("ALTER TABLE bigname_phase.name_current DROP COLUMN serving_resource_id CASCADE")
+        .execute(database.pool())
+        .await?;
+
+    let migration =
+        include_str!("../../../migrations/20260828120000_name_current_serving_resource.sql");
+    sqlx::raw_sql(migration).execute(database.pool()).await?;
+    sqlx::raw_sql(migration).execute(database.pool()).await?;
+    let definition: (bool, bool, Option<String>) = sqlx::query_as(
+        "SELECT EXISTS (
+             SELECT 1 FROM pg_constraint
+             WHERE conrelid = 'bigname_phase.name_current'::regclass
+               AND contype = 'f'
+               AND confrelid = 'bigname_phase.resources'::regclass
+               AND conkey = ARRAY[(
+                   SELECT attnum FROM pg_attribute
+                   WHERE attrelid = 'bigname_phase.name_current'::regclass
+                     AND attname = 'serving_resource_id'
+               )]::smallint[]
+         ),
+         to_regclass('bigname_phase.name_current_serving_resource_idx') IS NOT NULL,
+         col_description('bigname_phase.name_current'::regclass,
+             (SELECT attnum FROM pg_attribute
+              WHERE attrelid = 'bigname_phase.name_current'::regclass
+                AND attname = 'serving_resource_id'))",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(definition.0);
+    assert!(definition.1);
+    assert!(
+        definition
+            .2
+            .as_deref()
+            .is_some_and(|comment| { comment.contains("does not establish a current authority") })
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() -> Result<()> {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_expiry_scope_index_migration")

@@ -31,7 +31,7 @@ pub fn resolution_supports_avatar_readback(
 
 pub fn resolution_record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, Value)> {
     Some((
-        row.resource_id?,
+        row.record_serving_resource_id()?,
         build_supported_resolution_declared_boundary(row)?,
     ))
 }
@@ -44,18 +44,24 @@ pub fn resolution_record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(U
 pub fn resolution_record_inventory_lookup_key_any_chain(
     row: &NameCurrentRow,
 ) -> Option<(Uuid, Value)> {
-    let binding_supported = match row.namespace.as_str() {
-        ENS_NAMESPACE => matches!(
-            row.binding_kind,
-            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        ),
-        BASENAMES_NAMESPACE => row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath),
-        _ => false,
-    };
+    let binding_supported = event_linked_ownerless_registry_serving(row)
+        || match row.namespace.as_str() {
+            ENS_NAMESPACE => matches!(
+                row.binding_kind,
+                Some(
+                    SurfaceBindingKind::DeclaredRegistryPath
+                        | SurfaceBindingKind::ResolverAliasPath
+                )
+            ),
+            BASENAMES_NAMESPACE => {
+                row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
+            }
+            _ => false,
+        };
     if !binding_supported {
         return None;
     }
-    let resource_id = row.resource_id?;
+    let resource_id = row.record_serving_resource_id()?;
     let chain_position = build_resolution_boundary_chain_position(row)?;
     Some((
         resource_id,
@@ -76,7 +82,7 @@ pub fn resolution_record_inventory_lookup_key_for_revalidation(
         return Ok(None);
     };
     let resource_id = row
-        .resource_id
+        .record_serving_resource_id()
         .with_context(|| "supported resolution revalidation requires resource_id".to_owned())?;
     Ok(Some((resource_id, record_version_boundary)))
 }
@@ -300,8 +306,9 @@ fn build_legacy_basenames_verified_support_boundary(
 
 fn can_derive_legacy_basenames_direct_topology(row: &NameCurrentRow) -> bool {
     if row.namespace != BASENAMES_NAMESPACE
-        || row.binding_kind != Some(SurfaceBindingKind::DeclaredRegistryPath)
-        || row.resource_id.is_none()
+        || !(row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
+            || event_linked_ownerless_registry_serving(row))
+        || row.record_serving_resource_id().is_none()
         || !row_has_basenames_execution_v2_manifest(row)
     {
         return false;
@@ -343,11 +350,11 @@ fn row_has_basenames_execution_v2_manifest(row: &NameCurrentRow) -> bool {
 
 fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<Value> {
     if row.namespace != ENS_NAMESPACE
-        || !matches!(
+        || !(matches!(
             row.binding_kind,
             Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        )
-        || row.resource_id.is_none()
+        ) || event_linked_ownerless_registry_serving(row))
+        || row.record_serving_resource_id().is_none()
     {
         return None;
     }
@@ -361,15 +368,21 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
 }
 
 fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<Value> {
-    let binding_supported = match row.namespace.as_str() {
-        ENS_NAMESPACE => matches!(
-            row.binding_kind,
-            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        ),
-        BASENAMES_NAMESPACE => row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath),
-        _ => false,
-    };
-    if !binding_supported || row.resource_id.is_none() {
+    let binding_supported = event_linked_ownerless_registry_serving(row)
+        || match row.namespace.as_str() {
+            ENS_NAMESPACE => matches!(
+                row.binding_kind,
+                Some(
+                    SurfaceBindingKind::DeclaredRegistryPath
+                        | SurfaceBindingKind::ResolverAliasPath
+                )
+            ),
+            BASENAMES_NAMESPACE => {
+                row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
+            }
+            _ => false,
+        };
+    if !binding_supported || row.record_serving_resource_id().is_none() {
         return None;
     }
 
@@ -386,15 +399,21 @@ fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<
 fn build_supported_resolution_declared_boundary_for_revalidation(
     row: &NameCurrentRow,
 ) -> Option<Value> {
-    let binding_supported = match row.namespace.as_str() {
-        ENS_NAMESPACE => matches!(
-            row.binding_kind,
-            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        ),
-        BASENAMES_NAMESPACE => row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath),
-        _ => false,
-    };
-    if !binding_supported || row.resource_id.is_none() {
+    let binding_supported = event_linked_ownerless_registry_serving(row)
+        || match row.namespace.as_str() {
+            ENS_NAMESPACE => matches!(
+                row.binding_kind,
+                Some(
+                    SurfaceBindingKind::DeclaredRegistryPath
+                        | SurfaceBindingKind::ResolverAliasPath
+                )
+            ),
+            BASENAMES_NAMESPACE => {
+                row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
+            }
+            _ => false,
+        };
+    if !binding_supported || row.record_serving_resource_id().is_none() {
         return None;
     }
 
@@ -444,7 +463,7 @@ fn build_resolution_version_boundary(
     );
     boundary.insert(
         "resource_id".to_owned(),
-        row.resource_id
+        row.record_serving_resource_id()
             .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
@@ -455,6 +474,19 @@ fn build_resolution_version_boundary(
         Value::Object(chain_position_value(chain_position)),
     );
     Value::Object(boundary)
+}
+
+fn event_linked_ownerless_registry_serving(row: &NameCurrentRow) -> bool {
+    row.resource_id.is_none()
+        && row.surface_binding_id.is_none()
+        && row.binding_kind.is_none()
+        && row.serving_resource_id.is_some()
+        && json_string_field(
+            json_field(&row.provenance, "read_reachability")
+                .and_then(|value| json_field(value, "basis")),
+        )
+        .as_deref()
+            == Some("retained_registry_resolver_pointer")
 }
 
 fn boundary_chain_id_matches(boundary: &Value, expected_chain_id: &str) -> bool {

@@ -11,6 +11,11 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
+path = "apps/api/src/v2/name_record.rs"
+loc = 601
+justification = "Exact-name record serving keeps indexed inventory, verified fallback, and ownerless V1 resolver reads in one route boundary; this branch crosses 600 LOC while preserving #627's nearby ENSIP-19 read rules."
+
+[[files]]
 path = "crates/manifests/src/schema_v2_persistence.rs"
 loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
@@ -26,19 +31,29 @@ loc = 685
 justification = "ENSv2 topology removal and rebound groups remain adjacent while the fixed expiry event group and pointer clears live in the bounded sibling module."
 
 [[files]]
-path = "crates/adapters/src/schema_v2/state_restore.rs"
-loc = 615
-justification = "Normalized-event restore keeps destructive lifecycle mutations and projection-only ENSv2 expiry deltas in one event-kind fold so cold restore cannot silently diverge from live interpretation."
+path = "crates/adapters/src/schema_v2/identity.rs"
+loc = 604
+justification = "Name-surface materialization distinguishes active from shadow V1 surfaces so a later registry resolver can link only to a serving-visible name; the four-line active-surface notification keeps that identity decision at its operating boundary."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
+loc = 819
+justification = "Registry event decoding and its atomic control/read transition remain together so literal owner history, getter-visible ownership, resolver linkage, and emitted permissions cannot drift across separate event handlers; the file remains below the review threshold."
+
+[[files]]
+path = "crates/adapters/src/schema_v2/state.rs"
+loc = 699
+justification = "The V1 interpreter keeps control state, literal registry owner history, and the resource retained for resolver reads together because restore and incremental interpretation must update them atomically; the file remains below the review threshold."
 
 [[files]]
 path = "crates/project/src/builders/name_authority.rs"
 loc = 683
-justification = "The exact-name authority selector keeps proof, released tombstone, and released-regime arm rules in one auditable query; the released-regime clause belongs next to the tombstone rules whose positions it shares, and the file stays under the review threshold."
+justification = "The exact-name authority selector keeps proof, released-state, source deployment period, and proven-zero-owner registry rules in one auditable query so known-absent authority cannot be confused with selector failure; the file remains below the review threshold."
 
 [[files]]
 path = "crates/project/src/builders/name_current.rs"
-loc = 639
-justification = "Current-name selection keeps authority-scoped lifecycle summaries and the narrowly provenance-gated ENSv2 expiry tombstone in one query so mixed-authority fallbacks and history-only retirement remain reviewable together."
+loc = 637
+justification = "Exact-name projection selects control authority and the independently retained resource for resolver reads in one row construction so an ownerless resolver cannot acquire a binding or registration; the file remains below the review threshold."
 
 [[files]]
 path = "crates/project/src/builders/permissions.rs"

@@ -284,5 +284,5 @@ pub(super) async fn state_values(
 }
 
 #[cfg(test)]
-#[rustfmt::skip]
-mod tests { #[test] fn prior_restore_orders_same_block_state_by_normalized_emission() { assert!(include_str!("prior.rs").contains("ORDER BY ranked.block_number, ranked.normalized_event_id")); } }
+#[path = "prior_tests.rs"]
+mod tests;

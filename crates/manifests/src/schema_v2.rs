@@ -15,6 +15,9 @@ mod persistence;
 mod retirement;
 #[path = "schema_v2_sync_state.rs"]
 mod sync_state;
+#[cfg(test)]
+#[path = "schema_v2/tests.rs"]
+mod tests;
 #[path = "schema_v2_watch.rs"]
 mod watch;
 #[path = "schema_v2_watch_floors.rs"]

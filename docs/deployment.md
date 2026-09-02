@@ -64,8 +64,10 @@ Preflight every release with `sqlx migrate info --source migrations` against
 the writer URL and confirm no version is pending. Also complete any explicitly
 listed manual concurrent baseline-index step and verify each named index before
 starting the new artifact. Neither the API nor the phase runner reports the
-applied schema version, so a forgotten schema-migration or release-specific
-index step surfaces only as a runtime query failure or unacceptable query plan.
+applied schema version. Missing lookup DDL checked by API startup produces the
+diagnostic described under [Surviving services](#surviving-services); other
+forgotten schema-migrations or release-specific index steps surface only as
+runtime query failures or unacceptable query plans.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
@@ -207,6 +209,11 @@ re-walk](glossary.md#re-derivation-boundary); never relabel the row in place.
 Changing only the provider endpoint is allowed because endpoints are not part
 of persisted source identity and will not trigger the runtime reset guard.
 
+Each chain must have exactly one block-provider intake source that Live follows; the Coinbase SQL historical source is not a block provider.
+Adding a second such source is not failover configuration: before configuring
+it, define how Live selects one source, because after the Ingest handoff
+Interpret fails closed rather than choosing between sources.
+
 **Endpoint-rotation gate:** never reuse an endpoint that served intake during
 the retained walk as `verification-only`, even under a different key. The
 stronger level covers only facts retained since the last full source re-walk
@@ -317,6 +324,27 @@ requires readable lineage at every height through the effective redo end. That
 cursor coverage and lineage prove only the facts selected by the [watch
 plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded,
 not facts required by a later watch plan.
+
+The [manifest-authority marker](glossary.md#manifest-authority-marker) records
+the active authority set's fingerprint.
+The interpreter content hash and the manifest-authority fingerprint are independent deploy gates.
+The interpreter hash covers inputs that can change
+Interpret or Project output, including manifest `[[abi.events]]` declarations;
+when it changes, complete the full-history Interpret redo and the stamped
+Project redo before deploying the matching API.
+`read_features` can change the manifest-authority fingerprint while the interpreter content hash remains byte-identical.
+On an initialized chain, that authority change still blocks
+ordinary derived work until the exact token-attested full-range Interpret redo
+and downstream stamped Project redo complete; if it widened the watch plan,
+complete the stamped Ingest redo first.
+When the active Ethereum Mainnet `basenames_execution` authority changes,
+Ethereum Mainnet follows the rule above and, in addition, the Base Project phase
+is invalidated on its own ([cross-chain
+exception](manifests.md#discovery-admission)): complete an explicit full-range
+Project redo on `base-mainnet` (the runner prints the required range); it needs
+no stamp, no attestation token, and no Base Interpret redo, and it does not
+appear in the pending-redo listing.
+An unchanged interpreter hash therefore does not waive authority-transition re-derivation.
 
 Manifest synchronization records a [manifest-authority
 marker](glossary.md#manifest-authority-marker) when its authority changes. Every
@@ -481,8 +509,9 @@ phase-state reset, rerun the normal pipeline instead.
 ## Surviving services
 
 The API uses one `bigname_phase` request pool plus a reserved readiness
-connection. GraphQL, `/v2/status`, snapshot selection, verified lookup, and all
-projection reads use phase relations. The `/v2/status` phase-runner heartbeat
+connection. GraphQL, `/v2/status`, snapshot selection,
+[verified lookup](glossary.md#verified-lookup), and all projection reads use
+phase relations. The `/v2/status` phase-runner heartbeat
 threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by
 default). V2 record lookup may perform only the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
@@ -496,6 +525,13 @@ Grant them only to the API role, and do not grant that role `CREATE` on
 or `UPDATE` on
 `resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
 projection relations.
+
+API startup tolerates a wholly absent phase schema so `/v2/status` can return
+its empty, `degraded` response. Once the phase schema exists, startup checks
+every phase-schema relation, function, and type its serving paths read:
+relations by name, both guarded functions by exact signature, and the
+`canonicality_state` type. If any are missing, the API refuses to start and its
+diagnostic names every missing identity.
 
 After the phase schema exists, the schema owner provisions the dedicated login
 with these privileges (substitute
@@ -514,6 +550,7 @@ GRANT SELECT ON TABLE
     bigname_phase.chain_phase_state,
     bigname_phase.service_heartbeats,
     bigname_phase.normalized_events,
+    bigname_phase.migration_event_associations,
     bigname_phase.name_current,
     bigname_phase.address_names_current,
     bigname_phase.children_current,

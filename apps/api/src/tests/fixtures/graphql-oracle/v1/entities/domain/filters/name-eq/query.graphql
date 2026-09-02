@@ -1,0 +1,6 @@
+query OracleDomainName($name: String!, $block: Block_height!) {
+  _meta(block: $block) { block { number hash } hasIndexingErrors }
+  domains(first: 2, orderBy: id, orderDirection: asc, where: { name: $name }, block: $block) {
+    id name createdAt expiryDate owner { id }
+  }
+}

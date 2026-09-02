@@ -560,6 +560,13 @@ ADR 0006 rollout step 3 includes that read-layer work.
 
 ## Status Vocabulary
 
+`unregistered` describes the absence of current registration or control; it does not assert that
+resolver data is absent. A supported projected name may therefore have
+`registration_status=unregistered` while serving an event-linked resolver and its indexed or
+verified records. The internal reason `current_authority_not_projected` is reserved for authority
+selection that is unresolved or unsupported, not for a registry event stream that positively
+proves current authority is absent.
+
 One result-status vocabulary is used everywhere except the `/v2/status` ops
 route:
 

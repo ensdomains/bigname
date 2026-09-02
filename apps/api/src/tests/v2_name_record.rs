@@ -2213,6 +2213,114 @@ async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_record
 }
 
 #[tokio::test]
+async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_records_fixture_with_row(
+        &database,
+        |row| {
+            let serving_resource_id = row.resource_id.expect("fixture control resource");
+            row.surface_binding_id = None;
+            row.resource_id = None;
+            row.serving_resource_id = Some(serving_resource_id);
+            row.token_lineage_id = None;
+            row.binding_kind = None;
+            row.declared_summary["registration"] = json!({"status":"unregistered"});
+            row.declared_summary["control"] = json!({"status":"unregistered"});
+            row.declared_summary["coverage"] = json!({
+                "status":"projected",
+                "exhaustiveness":"not_asserted",
+                "enumeration_basis":"event_linked_registry_resolver",
+                "unsupported_reason":null
+            });
+            row.provenance["read_reachability"] = json!({
+                "serving_resource_id":serving_resource_id,
+                "basis":"retained_registry_resolver_pointer",
+                "owner_getter_reason":"registry_self",
+                "pointer_event_id":102
+            });
+            row.coverage = json!({
+                "status":"projected",
+                "exhaustiveness":"not_asserted",
+                "enumeration_basis":"event_linked_registry_resolver",
+                "unsupported_reason":null
+            });
+        },
+        |_, _, _| {},
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.resources SET token_lineage_id = NULL
+         WHERE resource_id = $1",
+    )
+    .bind(Uuid::from_u128(0x2200))
+    .execute(&database.pool)
+    .await?;
+
+    for uri in [
+        "/v2/names/Alice.eth",
+        "/v2/names/Alice.eth/records?source=indexed&keys=text:description",
+        "/v2/names/Alice.eth/records?source=auto&keys=text:description&include=inventory",
+    ] {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("ownerless resolver request failed")?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = read_json(response).await?;
+        assert_eq!(
+            payload["data"]["resolver"]["address"],
+            json!("0x0000000000000000000000000000000000000abc")
+        );
+        assert_eq!(payload["data"]["registration_id"], Value::Null);
+        if uri.contains("/records") {
+            assert_eq!(payload["meta"]["source"], json!("indexed"));
+            assert_eq!(
+                payload["data"]["records"]["text:description"],
+                json!({"status":"ok","value":"Alice profile"})
+            );
+            assert_ne!(
+                payload["data"]["records"]["text:description"]["unsupported_reason"],
+                json!("inventory_not_available")
+            );
+        } else {
+            assert_eq!(payload["data"]["registration_status"], json!("unregistered"));
+            assert!(
+                payload["data"].get("token_id").is_none(),
+                "ownerless exact-name payload must not imply token control: {payload}"
+            );
+            assert_eq!(
+                payload["data"]["text_records"]["description"],
+                json!("Alice profile"),
+                "ownerless exact-name payload: {payload}"
+            );
+        }
+    }
+
+    let lookup = v2_lookup_json(
+        &database,
+        json!({"profile":"detail","inputs":[{"id":"ownerless","name":"alice.eth"}]}),
+    )
+    .await?;
+    let lookup_record = &lookup["data"][0]["record"];
+    assert_eq!(lookup_record["registration_status"], json!("unregistered"));
+    assert!(
+        lookup_record.get("token_id").is_none(),
+        "ownerless batch lookup must not imply token control: {lookup}"
+    );
+    assert_eq!(
+        lookup_record["resolver"]["address"],
+        json!("0x0000000000000000000000000000000000000abc")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_name_records_rejects_too_many_keys() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let keys = (0..=200)
@@ -3308,6 +3416,16 @@ async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
 async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> Result<()> {
     let (database, payload) =
         v2_subnames_payload("/v2/names/Parent.eth/subnames?page_size=3").await?;
+    let stored_owner: Option<String> = sqlx::query_scalar(
+        "SELECT owner FROM bigname_phase.children_current
+         WHERE decoded_name = 'gamma.parent.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(
+        stored_owner.as_deref(),
+        Some("0x00000000000000000000000000000000000000cc")
+    );
 
     assert_eq!(payload["page"]["page_size"], json!(3));
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -3345,6 +3463,10 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     assert_eq!(data[0]["expires_at"], json!("2027-01-02T03:04:05Z"));
     assert_eq!(data[1]["registration_status"], json!("released"));
     assert_eq!(data[2]["registration_status"], json!("unregistered"));
+    assert!(
+        data[2].get("owner").is_none(),
+        "a generic no-registration row must not inherit the children projection owner"
+    );
     assert!(data[0].get("subname_count").is_none());
     assert!(data[0].get("resolver").is_none());
     assert!(data[0].get("addresses").is_none());
@@ -3354,6 +3476,57 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_keeps_zero_owner_for_ownerless_resolver_child() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    let child_updated = sqlx::query(
+        "UPDATE bigname_phase.children_current
+         SET owner = '0x0000000000000000000000000000000000000000', registrant = NULL
+         WHERE decoded_name = 'gamma.parent.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(child_updated.rows_affected(), 1);
+    let name_updated = sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET surface_binding_id = NULL, resource_id = NULL, token_lineage_id = NULL,
+             binding_kind = NULL,
+             serving_resource_id = (SELECT resource_id FROM bigname_phase.name_current
+                                    WHERE raw_name = 'alpha.parent.eth'),
+             declared_summary = jsonb_build_object(
+                 'registration', jsonb_build_object('status', 'unregistered'),
+                 'control', jsonb_build_object('status', 'unregistered'),
+                 'coverage', jsonb_build_object(
+                     'status', 'projected',
+                     'exhaustiveness', 'not_asserted',
+                     'enumeration_basis', 'event_linked_registry_resolver',
+                     'unsupported_reason', NULL))
+         WHERE raw_name = 'gamma.parent.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(name_updated.rows_affected(), 1);
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        "/v2/names/parent.eth/subnames?page_size=10",
+    )
+    .await?;
+    let child = payload["data"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["name"] == "gamma.parent.eth"))
+        .expect("ownerless child must remain enumerable");
+    assert_eq!(
+        child["owner"],
+        json!("0x0000000000000000000000000000000000000000")
+    );
+    assert_eq!(child["registrant"], Value::Null);
+    assert_eq!(child["registration_status"], json!("unregistered"));
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -5199,6 +5372,13 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.children_current
+         SET owner = '0x00000000000000000000000000000000000000cc'
+         WHERE decoded_name = 'gamma.parent.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
     database
         .seed_snapshot_selector_chain_positions(&json!({
             "ethereum": {
@@ -5457,6 +5637,7 @@ fn v2_subnames_name_current_row(
         namehash: namehash.to_owned(),
         surface_binding_id,
         resource_id,
+        serving_resource_id: None,
         token_lineage_id,
         binding_kind: surface_binding_id
             .is_some()

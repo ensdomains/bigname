@@ -128,15 +128,16 @@ async fn upsert_phase_name_current_rows(
             r#"
             INSERT INTO bigname_phase.name_current (
                 logical_name_id, namespace, raw_name, namehash, surface_binding_id,
-                resource_id, token_lineage_id, binding_kind, declared_summary,
+                resource_id, serving_resource_id, token_lineage_id, binding_kind, declared_summary,
                 support_status, unsupported_reason, provenance, chain_positions,
                 canonicality_summary, manifest_version, last_recomputed_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (logical_name_id) DO UPDATE SET
                 raw_name = EXCLUDED.raw_name,
                 surface_binding_id = EXCLUDED.surface_binding_id,
                 resource_id = EXCLUDED.resource_id,
+                serving_resource_id = EXCLUDED.serving_resource_id,
                 token_lineage_id = EXCLUDED.token_lineage_id,
                 binding_kind = EXCLUDED.binding_kind,
                 declared_summary = EXCLUDED.declared_summary,
@@ -155,6 +156,7 @@ async fn upsert_phase_name_current_rows(
         .bind(namehash)
         .bind(row.surface_binding_id)
         .bind(row.resource_id)
+        .bind(row.serving_resource_id)
         .bind(row.token_lineage_id)
         .bind(row.binding_kind.map(|value| value.as_str()))
         .bind(&row.declared_summary)
@@ -189,7 +191,7 @@ async fn upsert_phase_record_inventory_current_rows(
         }
         let projected_chain_positions: Option<Value> = sqlx::query_scalar(
             "SELECT chain_positions FROM bigname_phase.name_current
-             WHERE resource_id = $1
+             WHERE COALESCE(serving_resource_id, resource_id) = $1
              ORDER BY last_recomputed_at DESC
              LIMIT 1",
         )
@@ -2988,6 +2990,7 @@ fn exact_name_row(
         namehash: "namehash:alice.eth".to_owned(),
         surface_binding_id: Some(surface_binding_id),
         resource_id: Some(resource_id),
+        serving_resource_id: None,
         token_lineage_id: Some(token_lineage_id),
         binding_kind: Some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
         declared_summary: json!({
@@ -3290,6 +3293,7 @@ fn address_name_name_current_row(
         namehash: namehash.to_owned(),
         surface_binding_id: Some(surface_binding_id),
         resource_id: Some(resource_id),
+        serving_resource_id: None,
         token_lineage_id,
         binding_kind: Some(bigname_storage::SurfaceBindingKind::DeclaredRegistryPath),
         declared_summary,

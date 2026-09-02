@@ -86,7 +86,7 @@ publication.
 ## Identity
 
 Stable identity follows [ADR 0002](adrs/0002-surface-resource-identity.md) and
-the continuity rules in [`architecture.md`](architecture.md#identity-strategy).
+the continuity rules in [`architecture.md`](architecture.md#identity-model).
 
 - deterministic namehash-based IDs identify chain-native name surfaces;
 - opaque UUIDs identify backing resources, bindings, and token lineages where
@@ -163,7 +163,7 @@ mandatory full Interpret and Project redos.
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `project_redo_expiry_roots` | Interpret, then Project consumption | Logical names or permission resources from state-derived ENSv2 path-expiry releases preserved before Interpret deletes a redo range; bounded projection-redo coordination only, never serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
-| `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
+| `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
@@ -192,6 +192,14 @@ chain's rows from `discovery_watch_admissions`; changing its active authority
 fingerprint or advancing its lineage-orphaning epoch also starts a fresh scope.
 Rollback leaves discovery writes, the snapshot, and the required Ingest stamp
 unchanged together. Neither Project nor API code reads the snapshot.
+
+Projection rows have foreign keys into `name_surfaces`, `surface_bindings`,
+`resources`, and `token_lineages`. An offline rebuild must therefore remove
+projection rows before removing any identity rows, rebuild or preserve the
+identity rows first, and rebuild projections afterward. If an operator clears
+projections before that rebuild completes, serving remains unavailable until
+Project has published a coherent replacement; a failed partial rebuild is not
+a serveable intermediate state.
 
 Each `interpret_decode_skips` row records the chain, block and transaction
 identity, log index, emitter, selected [source family](glossary.md#source-family)
@@ -619,14 +627,20 @@ replacement handoff.
 `chain_phase_state.redo_manifest_authority_fingerprint` binds the numeric
 Ingest redo checkpoint and its per-source marker map to the chain's active
 manifest payloads, excluding `normalizer_version`. Those payloads include the
-roots, contracts, addresses, and watched block ranges that determine the raw
-facts Ingest must load. An exact-range resume preserves evidence only when the
-stored fingerprint matches the fingerprint of the current active payloads. A
-missing or different fingerprint clears the resumable evidence and reports
-that the active manifest/watch-plan inputs changed; rerunning the redo then
-loads the full range under those inputs. Existing active redo rows receive no
-backfill, so their first post-upgrade resume fails closed and requires that
-full-range reload.
+roots, contracts, addresses, and watched block ranges contributed directly by
+the manifests. Watch-relevant discovery-edge admissions are not fingerprinted.
+An exact-range resume preserves evidence only when the stored fingerprint
+matches the fingerprint of the current active payloads. Today no production
+Interpret path can write a watch-relevant discovery edge while an interrupted
+Ingest redo retains its checkpoint: phase-start compatibility checks gate those
+writers. Manifest synchronization may run after the interrupted session's locks
+are gone, but any widening stamp clears the redo cursor, fingerprint, and
+per-source boundary markers before another attempt can resume. A missing or
+different fingerprint likewise clears the resumable evidence and reports that
+the active manifest/watch-plan inputs changed; rerunning the redo then loads the
+full range under those inputs. Existing active redo rows receive no backfill,
+so their first post-upgrade resume fails closed and requires that full-range
+reload.
 
 `chain_phase_state.redo_attempt_generation` has this contract: This nonnegative, row-local counter increments when an explicit redo begins, when the phase runner installs or extends a required redo stamp for a downstream phase (Interpret/Project), and when the shared required-Ingest installer records genuinely new manifest or discovery demand. New same-range demand advances the generation because an older attempt may already have passed those blocks under a narrower filter. Repeated observation of an unchanged discovery-watch admission never calls the installer and therefore does not advance the generation.
 A batch carries that generation together with the persisted redo mode and the actual execution
@@ -706,8 +720,12 @@ normalized kind, seed basis, and start block to match the persisted cursor
 identities. That same check applies to
 the configured intake-capable source set. A runtime
 start above the redo range does not bypass that identity check. The guard also
-requires exactly one readable
-`chain_lineage` row at every height in the full execution range. Cursors and
+requires one readable `chain_lineage` row at every height in the full execution
+range. The schema-v2 baseline's partial unique index on
+`(chain_id, block_number)` for `canonical`, `safe`, and `finalized` rows makes
+two readable hashes at one height
+structurally impossible in the supported schema; the redo check still fails if
+the row is missing or if database integrity has been compromised. Cursors and
 lineage both prove only the facts selected by the [watch
 plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded;
 neither proves facts added by a later watch plan. Manifest synchronization
@@ -748,8 +766,9 @@ persisted admission-floor repair, or stored manifest event-history repair,
 including invalidations that stamp no Ingest work. An interpreter content hash
 rotation with neither a current manifest-authority marker nor an active audited
 redo remains flagless.
-A missing lineage height, an ambiguous readable height, or an uncovered part of
-a source's finite target remains a fatal presence failure.
+A missing lineage height, more than one readable row after loss of the schema
+constraint, or an uncovered part of a source's finite target remains a fatal
+presence failure.
 
 The interpret engine loads the prior identity state required by the range,
 folds physical batches without changing semantic order, and revalidates the
@@ -847,15 +866,27 @@ resolver has a final supported `ens_v1_resolver_l1` classification from an
 applicable exact declaration, and that classifying manifest's namespace
 matches the pointer's namespace. Incremental staging applies the same guarded
 exception by requiring the pointer namespace and exact declared resolver
-address to match. When an ended
+address to match. A `basenames_base_resolver` event without logical-name
+attribution may join only through a `basenames_base_registry` pointer on the
+same chain, node, and resolver emitter. Basenames keeps the current resolver by
+node, authorizes its registrar controller and reverse registrar independently
+of the node owner, and stores text by record version, node, and key.
+(upstream: .refs/basenames/src/L2/Registry.sol:L173-L180 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/L2Resolver.sol:L193-L199 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/ResolverBase.sol:L7-L24 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L7-L36 @ basenames@1809bbc)
+When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
-resource-less. This does not restore a current binding: for ENSv1, name and record reads
-join inventory through `name_current.resource_id`, which remains null for an
-explicitly released row. An explicitly released ENSv2 name instead keeps a
-row for a [released v2 authority](glossary.md#released-v2-authority) whose
-`resource_id` still references the released resource;
-the tombstone's summary nulls resolver state, so inventory attributed to that
+resource-less. This does not restore a current binding. Registry-only ENSv1 and
+Basenames names are different when a current nonzero resolver pointer remains
+event-linked: `name_current.resource_id` stays null while the
+[`serving_resource_id`](glossary.md#serving-resource) joins resolver and
+inventory reads without creating control. An explicitly released ENSv2 name
+instead keeps a row for a [released v2
+authority](glossary.md#released-v2-authority) whose `resource_id` still
+references the released resource, but its `serving_resource_id` is null; the
+tombstone's summary nulls resolver state, so inventory attributed to that
 resource stays out of current serving. A state-derived ENSv2 expiry release
 removes the `name_current` row when ENSv2 is the selected authority, or when no
 authority is selected and the row reports `current_authority_not_projected`;
@@ -863,9 +894,9 @@ for a resource-backed binding, the release's `resource_id` must also match the
 binding's resource.
 If a different ENSv2 reservation survives that expiry, the row's lifecycle
 summary follows the reservation, but `surface_binding_id`, `resource_id`,
-`token_lineage_id`, and `binding_kind` are all null: a reservation does not
-write a surface binding, and the expired registration's identity and record
-inventory are not current name data. This is an intentional serving narrowing:
+`serving_resource_id`, `token_lineage_id`, and `binding_kind` are all null: a
+reservation does not write a surface binding, and the expired registration's
+identity and record inventory are not current name data. This is an intentional serving narrowing:
 ENSv2 stores a nonzero resolver supplied for an ownerless reservation and
 returns it until expiry. (upstream:
 .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
@@ -1013,7 +1044,9 @@ Projection rows carry:
 - manifest and source-family evidence;
 - support status and an explicit unsupported reason when applicable;
 - canonical chain-position or target-publication evidence; and
-- the last recomputation time.
+- the [Project-owned maintenance fields](glossary.md#projection) defined for
+  that family. `primary_names_current` carries rolling hydration-selection
+  fields rather than a last-recomputation time.
 
 An unchanged row may retain an earlier publication target when a later Project
 run does not affect its scope. Serving admission therefore accepts targets at

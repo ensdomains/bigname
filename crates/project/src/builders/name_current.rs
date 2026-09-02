@@ -20,24 +20,42 @@ pub(super) async fn build(
         )
         INSERT INTO project_stage_name_current (
             logical_name_id, namespace, raw_name, namehash,
-            surface_binding_id, resource_id, token_lineage_id, binding_kind,
+            surface_binding_id, resource_id, serving_resource_id,
+            token_lineage_id, binding_kind,
             declared_summary, support_status, unsupported_reason, provenance,
             chain_positions, canonicality_summary, manifest_version
         )
-        SELECT surface.logical_name_id, surface.namespace, surface.raw_name, surface.namehash, row_identity.surface_binding_id, row_identity.resource_id, CASE WHEN row_identity.resource_id IS NULL THEN NULL ELSE resource.token_lineage_id END, row_identity.binding_kind,
+        SELECT surface.logical_name_id, surface.namespace, surface.raw_name,
+               surface.namehash, row_identity.surface_binding_id, row_identity.resource_id,
+               serving.serving_resource_id,
+               CASE WHEN row_identity.resource_id IS NULL THEN NULL
+                   ELSE resource.token_lineage_id END,
+               row_identity.binding_kind,
                jsonb_build_object(
                    'registration', jsonb_build_object(
-                       'status', CASE selected_registration.event_kind
-                           WHEN 'RegistrationReleased' THEN 'released' WHEN 'RegistrationReserved' THEN 'reserved'
-                           WHEN 'RegistrationGranted' THEN 'active' WHEN 'RegistrationRenewed' THEN 'active'
-                           ELSE CASE WHEN binding.resource_id IS NOT NULL THEN 'active' ELSE NULL END
+                       'status', CASE
+                           WHEN selected_authority.known_ownerless_registry
+                               THEN 'unregistered'
+                           ELSE CASE selected_registration.event_kind
+                               WHEN 'RegistrationReleased' THEN 'released'
+                               WHEN 'RegistrationReserved' THEN 'reserved'
+                               WHEN 'RegistrationGranted' THEN 'active'
+                               WHEN 'RegistrationRenewed' THEN 'active'
+                               ELSE CASE WHEN binding.resource_id IS NOT NULL
+                                   THEN 'active' ELSE NULL END
+                           END
                        END,
-                       'authority_kind', authority_context.authority_kind, 'authority_key', authority_context.authority_key,
-                       'registrant', registrant.registrant, 'expiry', CASE
-                           WHEN selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id
+                       'authority_kind', authority_context.authority_kind,
+                       'authority_key', authority_context.authority_key,
+                       'registrant', registrant.registrant,
+                       'expiry', CASE
+                           WHEN selected_registration.is_v2_lifecycle
+                            AND selected_registration.event_kind IS NOT NULL
+                            AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id
                                THEN selected_registration.after_state -> 'expiry'
                            ELSE COALESCE(to_jsonb(expiry.expiry_seconds), CASE
-                               WHEN selected_registration.is_v2_lifecycle THEN selected_registration.after_state -> 'expiry' END)
+                               WHEN selected_registration.is_v2_lifecycle
+                                   THEN selected_registration.after_state -> 'expiry' END)
                        END,
                        'registered_at', registration_grant.block_timestamp,
                        'created_at', created.block_timestamp,
@@ -48,11 +66,21 @@ pub(super) async fn build(
                            ELSE COALESCE(registration_latest.event_kind,
                                selected_registration.event_kind)
                        END
-                   ) || CASE WHEN selected_registration.event_kind = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2'
+                   ) || CASE
+                       WHEN selected_authority.known_ownerless_registry
+                           THEN jsonb_build_object(
+                               'authority_kind', NULL, 'authority_key', NULL,
+                               'registrant', NULL, 'expiry', NULL
+                           )
+                       WHEN selected_registration.event_kind = 'RegistrationReleased'
+                        AND selected_authority.selected_authority_arm = 'ens_v2'
                        THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
                            'registrant', NULL, 'expiry', NULL) ELSE '{}'::jsonb END,
                    'control', CASE
-                       WHEN selected_registration.event_kind = 'RegistrationReleased' AND selected_authority.selected_authority_arm = 'ens_v2'
+                       WHEN selected_authority.known_ownerless_registry
+                           THEN jsonb_build_object('status', 'unregistered')
+                       WHEN selected_registration.event_kind = 'RegistrationReleased'
+                        AND selected_authority.selected_authority_arm = 'ens_v2'
                            THEN jsonb_build_object('status', 'unregistered')
                        WHEN COALESCE(resource.provenance ->> 'authority_kind',
                            registration_grant.after_state ->> 'authority_kind') IN ('wrapper', 'name_wrapper')
@@ -112,6 +140,8 @@ pub(super) async fn build(
                        END,
                        'unsupported_reason', to_jsonb(support.unsupported_reason),
                        'enumeration_basis', CASE
+                           WHEN serving.serving_resource_id IS NOT NULL
+                               THEN 'event_linked_registry_resolver'
                            WHEN corpus.has_ens_v2 THEN 'exact_name_profile'
                            ELSE 'exact_name'
                        END
@@ -160,6 +190,13 @@ pub(super) async fn build(
                        'deployment_profile', selected_authority.deployment_profile,
                        'resource_authority_context', selected_authority.resource_authority_context,
                        'unsupported_reason', selected_authority.unsupported_reason
+                   )),
+                   'read_reachability', jsonb_strip_nulls(jsonb_build_object(
+                       'serving_resource_id', serving.serving_resource_id,
+                       'basis', serving.read_reachability_basis,
+                       'owner_getter_reason', serving.owner_getter_reason,
+                       'pointer_event_id', serving.pointer_event_id,
+                       'pointer_event_identity', serving.pointer_event_identity
                    ))
                ) || jsonb_strip_nulls(jsonb_build_object(
                    'resolver_pointer_source_family', resolver.source_family
@@ -202,6 +239,7 @@ pub(super) async fn build(
                )
         FROM project_surfaces surface
         LEFT JOIN project_name_authority selected_authority USING (logical_name_id)
+        LEFT JOIN project_name_serving serving USING (logical_name_id)
         LEFT JOIN project_bindings binding USING (logical_name_id)
         LEFT JOIN LATERAL (
             SELECT event.* FROM project_authority_events event
@@ -483,10 +521,31 @@ pub(super) async fn build(
         LEFT JOIN LATERAL (
             SELECT event.*,
                    lower(event.after_state ->> 'resolver') AS resolver_address
-            FROM project_authority_events event
+            FROM (
+                SELECT selected.* FROM project_authority_events selected
+                UNION ALL
+                SELECT pointer.* FROM project_events pointer
+                WHERE pointer.normalized_event_id = serving.pointer_event_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM project_authority_events selected
+                      WHERE selected.normalized_event_id = pointer.normalized_event_id
+                  )
+            ) event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind = 'ResolverChanged'
-              AND (NOT selected_registration.is_v2_lifecycle OR (binding.resource_id IS NULL AND event.resource_id IS NULL) OR (binding.resource_id IS NOT NULL AND EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text))))
+              AND (
+                  event.normalized_event_id = serving.pointer_event_id
+                  OR NOT selected_registration.is_v2_lifecycle
+                  OR (binding.resource_id IS NULL AND event.resource_id IS NULL)
+                  OR (binding.resource_id IS NOT NULL AND EXISTS (
+                      SELECT 1 FROM v2_lifecycle_events selected_event
+                      WHERE selected_event.normalized_event_id = event.normalized_event_id
+                        AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(
+                            selected_registration.lifecycle_key,
+                            row_identity.event_resource_id::text
+                        )
+                  ))
+              )
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,

@@ -256,7 +256,11 @@ pub(crate) fn build_name_record(
         registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
             .then(|| row.resource_id.map(|value| value.to_string()))
             .flatten(),
-        token_id: declared_token_id(row),
+        token_id: if has_name_binding(row) {
+            declared_token_id(row)
+        } else {
+            None
+        },
         owner: registration.owner.clone(),
         manager: None,
         registrant: registration.registrant,
@@ -435,6 +439,7 @@ pub(super) fn declared_token_id(row: &NameCurrentRow) -> Option<String> {
 pub(super) fn identity_declared_token_id(
     row: &bigname_storage::IdentityNameCurrentRow,
 ) -> Option<String> {
+    row.resource_id?;
     let labelhash = row.labelhash.as_deref().filter(|value| {
         row.labelhash_count
             .is_none_or(|label_count| label_count == 2)

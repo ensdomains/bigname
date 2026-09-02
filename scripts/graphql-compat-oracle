@@ -1,0 +1,434 @@
+#!/usr/bin/env python3
+"""Capture and verify the pinned GraphQL compatibility fixture."""
+
+import argparse, datetime as dt, gzip, hashlib, json, os, shutil, sys, tempfile, tomllib
+from pathlib import Path
+import urllib.error, urllib.request
+
+FORMAT = 1
+GENERATOR = "graphql-compat-oracle/1"
+DEFAULT_FIXTURES = Path("apps/api/src/tests/fixtures/graphql-oracle/v1")
+ALLOW_PROVISIONAL = "BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"
+LIVE_ENDPOINT_PREFIX = "https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/"
+LIVE_SUBGRAPH_ID = "5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH"
+LIVE_DEPLOYMENT_ID = "QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ"
+TYPE_REF = "kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name ofType { kind name } } } } }"
+# The pin declares `isRepeatable: Boolean!` but omits it from directive objects; deployment QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ at block 23000000 resolved it as null. (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L85 @ graph_node@aefe1737) (upstream: .refs/graph_node/graphql/src/introspection/resolver.rs:L252-L263 @ graph_node@aefe1737)
+INTROSPECTION = "query OracleIntrospection { __schema { queryType { name } mutationType { name } subscriptionType { name } directives { name locations args { name defaultValue type { %s } } } types { kind name interfaces { name } possibleTypes { name } fields(includeDeprecated:true) { name isDeprecated type { %s } args(includeDeprecated:true) { name defaultValue isDeprecated type { %s } } } inputFields { name defaultValue isDeprecated type { %s } } enumValues(includeDeprecated:true) { name isDeprecated } } } }" % (TYPE_REF, TYPE_REF, TYPE_REF, TYPE_REF)
+META = "query OracleMeta($block: Block_height!) { _meta(block: $block) { block { number hash } deployment hasIndexingErrors } }"
+POINT = """query OracleDomain($id: ID!, $block: Block_height!) {
+  _meta(block: $block) { block { number hash } hasIndexingErrors }
+  domain(id: $id, block: $block) { id name createdAt expiryDate owner { id } }
+}
+"""
+FILTER = """query OracleDomainName($name: String!, $block: Block_height!) {
+  _meta(block: $block) { block { number hash } hasIndexingErrors }
+  domains(first: 2, orderBy: id, orderDirection: asc, where: { name: $name }, block: $block) {
+    id name createdAt expiryDate owner { id }
+  }
+}
+"""
+
+
+def canonical(value): return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+
+
+def sha(data): return hashlib.sha256(data).hexdigest()
+
+
+def is_live_endpoint_template(template):
+    return template == LIVE_ENDPOINT_PREFIX + LIVE_SUBGRAPH_ID
+
+
+def is_bytes32_hex(value):
+    return isinstance(value, str) and len(value) == 66 and value.startswith("0x") and all(character in "0123456789abcdefABCDEF" for character in value[2:])
+
+
+def reference_pins():
+    refs = tomllib.loads((Path(__file__).resolve().parent.parent / ".refs/MANIFEST.toml").read_text())["refs"]; return {name: refs[name]["commit"][:length] for name, length in {"ens_subgraph": 7, "graph_node": 8}.items()}
+
+
+def ref_name(node):
+    if node["kind"] == "NON_NULL":
+        return ref_name(node["ofType"]) + "!"
+    if node["kind"] == "LIST":
+        return "[" + ref_name(node["ofType"]) + "]"
+    return node["name"]
+
+
+def schema_surface(schema):
+    result = {}
+    for kind in ("query", "mutation", "subscription"):
+        if name := (schema.get(f"{kind}Type") or {}).get("name"):
+            result[f"root:{kind}"] = {"type": name}
+    for item in sorted(schema["types"], key=lambda value: value.get("name") or ""):
+        name = item.get("name")
+        if not name or name.startswith("__"):
+            continue
+        result[f"type:{name}"] = {"kind": item["kind"]}
+        for interface in sorted(item.get("interfaces") or [], key=lambda value: value["name"]):
+            result[f"implements:{name}.{interface['name']}"] = {"present": True}
+        for member in sorted(item.get("possibleTypes") or [], key=lambda value: value["name"]):
+            result[f"member:{name}.{member['name']}"] = {"present": True}
+        for field in sorted(item.get("fields") or [], key=lambda value: value["name"]):
+            prefix = f"field:{name}.{field['name']}"
+            result[prefix] = {"deprecated": field.get("isDeprecated", False), "type": ref_name(field["type"])}
+            for arg in sorted(field.get("args") or [], key=lambda value: value["name"]):
+                result[f"arg:{name}.{field['name']}({arg['name']})"] = {"default": arg.get("defaultValue"), "deprecated": arg.get("isDeprecated", False), "type": ref_name(arg["type"])}
+        for field in sorted(item.get("inputFields") or [], key=lambda value: value["name"]):
+            result[f"input:{name}.{field['name']}"] = {"default": field.get("defaultValue"), "deprecated": field.get("isDeprecated", False), "type": ref_name(field["type"])}
+        for value in sorted(item.get("enumValues") or [], key=lambda value: value["name"]):
+            result[f"enum:{name}.{value['name']}"] = {"deprecated": value.get("isDeprecated", False)}
+    return result
+
+
+def coverage_scope_matches(scope, path):
+    if scope.startswith("field:"):
+        return path == scope
+    if scope.startswith("type:"):
+        name = scope.removeprefix("type:")
+        return path == scope or any(path.startswith(f"{prefix}{name}.") for prefix in ("field:", "arg:", "input:", "enum:", "implements:", "member:"))
+    if scope.startswith("root:"):
+        root = scope.removeprefix("root:")
+        return path == f"field:{root}" or path.startswith(f"arg:{root}(")
+    return False
+
+
+def render_sdl(schema):
+    lines = []
+    for directive in sorted(schema.get("directives") or [], key=lambda value: value["name"]):
+        args = [f"{arg['name']}: {ref_name(arg['type'])}" + ("" if arg.get("defaultValue") is None else f" = {arg['defaultValue']}") for arg in sorted(directive.get("args") or [], key=lambda value: value["name"])]
+        lines += [f"directive @{directive['name']}" + (f"({', '.join(args)})" if args else "") + " on " + " | ".join(directive["locations"]), ""]
+    for item in sorted(schema["types"], key=lambda value: value.get("name") or ""):
+        name, kind = item.get("name"), item["kind"]
+        if not name or name.startswith("__"):
+            continue
+        if kind == "SCALAR":
+            lines += [f"scalar {name}", ""]
+        elif kind == "ENUM":
+            lines += [f"enum {name} {{"] + [f"  {v['name']}" for v in sorted(item.get("enumValues") or [], key=lambda v: v["name"])] + ["}", ""]
+        elif kind == "INPUT_OBJECT":
+            lines.append(f"input {name} {{")
+            for field in sorted(item.get("inputFields") or [], key=lambda value: value["name"]):
+                default = "" if field.get("defaultValue") is None else f" = {field['defaultValue']}"
+                lines.append(f"  {field['name']}: {ref_name(field['type'])}{default}")
+            lines += ["}", ""]
+        elif kind in ("OBJECT", "INTERFACE"):
+            interfaces = sorted(value["name"] for value in item.get("interfaces") or [])
+            implements = " implements " + " & ".join(interfaces) if interfaces else ""
+            lines.append(f"{'type' if kind == 'OBJECT' else 'interface'} {name}{implements} {{")
+            for field in sorted(item.get("fields") or [], key=lambda value: value["name"]):
+                args = []
+                for arg in sorted(field.get("args") or [], key=lambda value: value["name"]):
+                    default = "" if arg.get("defaultValue") is None else f" = {arg['defaultValue']}"
+                    args.append(f"{arg['name']}: {ref_name(arg['type'])}{default}")
+                rendered = f"({', '.join(args)})" if args else ""
+                lines.append(f"  {field['name']}{rendered}: {ref_name(field['type'])}")
+            lines += ["}", ""]
+        elif kind == "UNION":
+            lines += [f"union {name} = " + " | ".join(sorted(v["name"] for v in item.get("possibleTypes") or [])), ""]
+    roots = [(kind, (schema.get(f"{kind}Type") or {}).get("name")) for kind in ("query", "mutation", "subscription")]
+    if any(name for _, name in roots):
+        lines += ["schema {"] + [f"  {kind}: {name}" for kind, name in roots if name] + ["}", ""]
+    return ("\n".join(lines).rstrip() + "\n").encode()
+
+
+def request(endpoint, query, variables, operation):
+    body = canonical({"operationName": operation, "query": query, "variables": variables})
+    headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": GENERATOR}
+    try:
+        response = urllib.request.urlopen(urllib.request.Request(endpoint, body, headers), timeout=30)
+        if response.status < 200 or response.status >= 300:
+            raise ValueError(f"upstream HTTP status {response.status}")
+        payload = json.loads(response.read())
+    except (urllib.error.URLError, json.JSONDecodeError) as error:
+        raise ValueError(f"upstream request failed: {error}") from error
+    if payload.get("errors"):
+        raise ValueError(f"upstream GraphQL errors for {operation}")
+    if not isinstance(payload.get("data"), dict):
+        raise ValueError(f"upstream response missing data for {operation}")
+    return payload
+
+
+def observed_meta(payload, block):
+    meta = payload["data"].get("_meta")
+    if not isinstance(meta, dict) or not isinstance(meta.get("block"), dict):
+        raise ValueError("upstream response missing _meta")
+    if meta["block"].get("number") != block:
+        raise ValueError(f"requested block {block}, observed {meta['block'].get('number')}")
+    if meta.get("hasIndexingErrors") is not False:
+        raise ValueError("upstream _meta.hasIndexingErrors must be false")
+    return meta
+
+
+def verify_claimed_schema(root, endpoint):
+    upstream = json.loads((root / "upstream/schema-surface.json").read_bytes()); coverage = json.loads((root / "coverage.json").read_bytes())
+    local = schema_surface(request(endpoint, INTROSPECTION, {}, "OracleIntrospection")["data"]["__schema"])
+    failures = [path for path in coverage["claimed_paths"] if path not in upstream or local.get(path) != upstream[path]]
+    if failures: raise ValueError("claimed schema mismatch: " + ", ".join(failures))
+    print(f"schema claimed paths: {len(coverage['claimed_paths'])} matched")
+
+
+def artifact(path, root): return {"path": path.relative_to(root).as_posix(), "sha256": sha(path.read_bytes())}
+
+
+def install_tree(staged, output):
+    backup = output.with_name(output.name + ".previous")
+    if backup.exists():
+        shutil.rmtree(backup)
+    if output.exists():
+        os.replace(output, backup)
+    try:
+        os.replace(staged, output)
+    except BaseException:
+        if backup.exists():
+            os.replace(backup, output)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+
+
+def capture(args):
+    pins = reference_pins()
+    template = args.upstream_endpoint_template
+    if not is_bytes32_hex(args.domain_id):
+        raise ValueError("domain ID must be a 32-byte 0x-prefixed hex namehash")
+    if template != "stub://local-mock" and not is_live_endpoint_template(template):
+        raise ValueError("live endpoint must use the operator refresh template in docs/development.md")
+    if template != "stub://local-mock":
+        if not args.pinned_schema_verified_by or not args.pinned_schema_verification_date:
+            raise ValueError("live capture requires pinned-schema verifier and verification date")
+        try:
+            dt.date.fromisoformat(args.pinned_schema_verification_date)
+        except ValueError as error:
+            raise ValueError("pinned-schema verification date must use YYYY-MM-DD") from error
+    token = os.environ.get("THE_GRAPH_API_KEY")
+    if "${THE_GRAPH_API_KEY}" in template and not token:
+        raise ValueError("THE_GRAPH_API_KEY is required by the endpoint template")
+    endpoint = template.replace("${THE_GRAPH_API_KEY}", token or "")
+    if template == "stub://local-mock":
+        endpoint = os.environ.get("GRAPHQL_ORACLE_STUB_URL", "")
+        if not endpoint.startswith("http://127.0.0.1:"):
+            raise ValueError("stub capture requires GRAPHQL_ORACLE_STUB_URL on 127.0.0.1")
+    if token and token in template:
+        raise ValueError("endpoint template contains the supplied credential")
+    variables = {"block": {"number": args.block_number}}
+    meta_payload = request(endpoint, META, variables, "OracleMeta")
+    meta = observed_meta(meta_payload, args.block_number)
+    if not isinstance(meta.get("deployment"), str) or not meta["deployment"]:
+        raise ValueError("upstream _meta.deployment is required to identify the capture")
+    if template != "stub://local-mock" and meta["deployment"] != LIVE_DEPLOYMENT_ID:
+        raise ValueError("live endpoint returned an unreviewed ENS subgraph deployment")
+    introspection = request(endpoint, INTROSPECTION, {}, "OracleIntrospection")
+    schema = introspection["data"].get("__schema")
+    if not isinstance(schema, dict) or not isinstance(schema.get("types"), list):
+        raise ValueError("upstream introspection data is missing")
+    point_vars = {**variables, "id": args.domain_id}
+    point = request(endpoint, POINT, point_vars, "OracleDomain")
+    observed_meta(point, args.block_number)
+    domain = point["data"].get("domain")
+    required = (domain or {}).get("id"), (domain or {}).get("name"), (domain or {}).get("createdAt"), ((domain or {}).get("owner") or {}).get("id")
+    if any(value is None for value in required) or domain.get("expiryDate") is not None:
+        raise ValueError("point Domain must have required fields and a null nullable expiryDate")
+    if domain["id"].lower() != args.domain_id.lower():
+        raise ValueError("point Domain ID differs from the requested namehash")
+    filter_vars = {**variables, "name": domain["name"]}
+    filtered = request(endpoint, FILTER, filter_vars, "OracleDomainName")
+    observed_meta(filtered, args.block_number)
+    if filtered["data"].get("domains") != [domain]:
+        raise ValueError("name filter must identify exactly the point Domain")
+    final_meta = observed_meta(request(endpoint, META, variables, "OracleMeta"), args.block_number)
+    if final_meta.get("deployment") != meta["deployment"] or final_meta["block"] != meta["block"]:
+        raise ValueError("upstream deployment identity changed during capture")
+    output = Path(args.output)
+    coverage = output / "coverage.json"
+    if not coverage.is_file():
+        raise ValueError(f"capture requires manually maintained {coverage}")
+    parent = output.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=output.name + ".capture-", dir=parent))
+    try:
+        shutil.copy2(coverage, staged / "coverage.json")
+        files = {
+            "seed.json": canonical({"distractor": {"createdAt": "1", "name": "graphql-oracle-distractor.eth" if domain["name"] != "graphql-oracle-distractor.eth" else "graphql-oracle-distractor-2.eth", "owner": domain["owner"]}}),
+            "upstream/schema-surface.json": canonical(schema_surface(schema)),
+            "upstream/schema.graphql.gz": gzip.compress(render_sdl(schema), mtime=0),
+            "entities/domain/entity-by-id/query.graphql": POINT.encode(),
+            "entities/domain/entity-by-id/variables.json": canonical(point_vars),
+            "entities/domain/entity-by-id/upstream-response.json": canonical(point),
+            "entities/domain/filters/name-eq/query.graphql": FILTER.encode(),
+            "entities/domain/filters/name-eq/variables.json": canonical(filter_vars),
+            "entities/domain/filters/name-eq/upstream-response.json": canonical(filtered),
+        }
+        stamp = dt.datetime.fromtimestamp(int(os.environ.get("SOURCE_DATE_EPOCH", dt.datetime.now(dt.UTC).timestamp())), dt.UTC).isoformat().replace("+00:00", "Z")
+        provenance = {"block_number": args.block_number, "endpoint_template": template, "ens_subgraph_commit": pins["ens_subgraph"], "graph_node_commit": pins["graph_node"], "observed_meta_block_hash": meta["block"].get("hash"), "observed_meta_block_number": meta["block"]["number"], "observed_meta_deployment": meta.get("deployment"), "pin_kind": "number", "pinned_schema_verification_date": args.pinned_schema_verification_date, "pinned_schema_verified_by": args.pinned_schema_verified_by, "provisional_stub": template == "stub://local-mock", "retrieved_at": stamp, "upstream_identifier": meta.get("deployment")}
+        files["upstream/provenance.json"] = canonical(provenance)
+        for relative, data in files.items():
+            path = staged / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        if token and any(token.encode() in path.read_bytes() for path in staged.rglob("*") if path.is_file()):
+            raise ValueError("credential-bearing output rejected")
+        artifacts = [artifact(path, staged) for path in sorted(staged.rglob("*")) if path.is_file()]
+        manifest = {"artifacts": artifacts, "canonical_json": "UTF-8, sorted keys, compact separators, LF", "cases": [{"entity": "Domain", "id": "domain.entity-by-id", "kind": "entity", "query": "entities/domain/entity-by-id/query.graphql", "required_schema_paths": ["root:query", "field:Query.domain", "field:Domain.id", "field:Domain.owner"], "response": "entities/domain/entity-by-id/upstream-response.json", "variables": "entities/domain/entity-by-id/variables.json"}, {"entity": "Domain", "id": "domain.filter.name-eq", "kind": "filter", "query": "entities/domain/filters/name-eq/query.graphql", "required_schema_paths": ["root:query", "field:Query.domains", "input:DomainFilter.name"], "response": "entities/domain/filters/name-eq/upstream-response.json", "variables": "entities/domain/filters/name-eq/variables.json"}], "coverage_sha256": sha((staged / "coverage.json").read_bytes()), "fixture_format_version": FORMAT, "generated_at": stamp, "generator_version": GENERATOR, "gzip": "RFC 1952, mtime=0", "seed": "seed.json", "upstream_checkouts": pins}
+        (staged / "manifest.json").write_bytes(canonical(manifest))
+        install_tree(staged, output)
+    except BaseException:
+        if staged.exists():
+            shutil.rmtree(staged)
+        raise
+
+
+def verify(root):
+    pins = reference_pins()
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    if manifest.get("fixture_format_version") != FORMAT:
+        raise ValueError(f"fixture format {manifest.get('fixture_format_version')} is unsupported; upgrade graphql-compat-oracle")
+    coverage_bytes = (root / "coverage.json").read_bytes()
+    if manifest.get("coverage_sha256") != sha(coverage_bytes):
+        raise ValueError("coverage_sha256 mismatch: manifest does not match coverage.json")
+    provenance = json.loads((root / "upstream/provenance.json").read_bytes())
+    required = ("endpoint_template", "upstream_identifier", "retrieved_at", "pin_kind", "block_number", "observed_meta_block_number", "observed_meta_block_hash", "ens_subgraph_commit", "graph_node_commit", "pinned_schema_verified_by", "pinned_schema_verification_date", "provisional_stub")
+    missing = [key for key in required if key not in provenance]
+    if missing:
+        raise ValueError(f"provenance missing fields: {', '.join(missing)}")
+    if provenance["block_number"] != provenance["observed_meta_block_number"]:
+        raise ValueError("provenance block does not match observed metadata")
+    if provenance["pin_kind"] != "number" or not provenance["upstream_identifier"] or provenance["observed_meta_deployment"] != provenance["upstream_identifier"]:
+        raise ValueError("provenance does not identify one number-pinned deployment")
+    if provenance["provisional_stub"] != (provenance["endpoint_template"] == "stub://local-mock"):
+        raise ValueError("provisional stub provenance is inconsistent")
+    if provenance["provisional_stub"] and os.environ.get(ALLOW_PROVISIONAL) != "1":
+        raise ValueError("provisional GraphQL fixture rejected; run the operator refresh procedure in docs/development.md")
+    if not provenance["provisional_stub"] and not is_live_endpoint_template(provenance["endpoint_template"]):
+        raise ValueError("non-upstream GraphQL fixture rejected; run the operator refresh procedure in docs/development.md")
+    if not provenance["provisional_stub"]:
+        if provenance["observed_meta_deployment"] != LIVE_DEPLOYMENT_ID:
+            raise ValueError("live fixture identifies an unreviewed ENS subgraph deployment")
+        if not all(isinstance(provenance.get(key), str) and provenance[key] for key in ("pinned_schema_verified_by", "pinned_schema_verification_date")):
+            raise ValueError("live fixture lacks pinned-schema verification provenance")
+        try:
+            dt.date.fromisoformat(provenance["pinned_schema_verification_date"])
+        except ValueError as error:
+            raise ValueError("pinned-schema verification date must use YYYY-MM-DD") from error
+    observed_pins = {"ens_subgraph": provenance["ens_subgraph_commit"], "graph_node": provenance["graph_node_commit"]}
+    if observed_pins != pins or manifest.get("upstream_checkouts") != pins:
+        raise ValueError("fixture reference pins differ from .refs/MANIFEST.toml; recapture the fixture")
+    seen = set()
+    for entry in manifest.get("artifacts", []):
+        relative = entry["path"]
+        if relative in seen or relative.startswith("/") or ".." in Path(relative).parts:
+            raise ValueError(f"invalid artifact path {relative}")
+        seen.add(relative)
+        path = root / relative
+        # coverage.json is the manually maintained ownership policy. The artifact hash records the
+        # capture-time version; coverage_sha256 separately authenticates the checked-in policy.
+        if not path.is_file() or relative != "coverage.json" and sha(path.read_bytes()) != entry["sha256"]:
+            raise ValueError(f"artifact digest mismatch: {relative}")
+    actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()} - {"manifest.json"}
+    if actual != seen:
+        raise ValueError(f"manifest artifact set differs: missing={sorted(seen-actual)}, extra={sorted(actual-seen)}")
+    if manifest.get("seed") not in seen:
+        raise ValueError("manifest seed descriptor is missing")
+    distractor = json.loads((root / manifest["seed"]).read_bytes()).get("distractor", {})
+    if not all(isinstance(distractor.get(key), str) and distractor[key] for key in ("name", "createdAt")) or not isinstance(distractor.get("owner", {}).get("id"), str):
+        raise ValueError("seed distractor is incomplete")
+    compressed = (root / "upstream/schema.graphql.gz").read_bytes()
+    if compressed[4:8] != b"\0\0\0\0" or gzip.decompress(compressed) == b"":
+        raise ValueError("compressed schema is empty")
+    coverage = json.loads(coverage_bytes)
+    surface = json.loads((root / "upstream/schema-surface.json").read_bytes())
+    claimed_paths = coverage.get("claimed_paths")
+    if not isinstance(claimed_paths, list) or any(not isinstance(path, str) or not path for path in claimed_paths) or len(set(claimed_paths)) != len(claimed_paths):
+        raise ValueError("claimed_paths must contain unique non-empty strings")
+    if missing_claims := sorted(set(claimed_paths) - set(surface)):
+        raise ValueError("claimed paths absent from captured surface: " + ", ".join(missing_claims))
+    for group in ("schema_signature_differences", "upstream_only", "local_extensions"):
+        matches = set()
+        for entry in coverage.get(group, []):
+            match = entry.get("path", entry.get("scope", ""))
+            if match in matches or "*" in match or entry.get("status") not in ("deferred", "intentional-extension") or not str(entry.get("owner", "")).startswith("#") or not entry.get("docs"):
+                raise ValueError(f"invalid coverage disposition: {entry}")
+            matches.add(match)
+            if group == "schema_signature_differences" and (match not in surface or entry.get("upstream") != surface[match]):
+                raise ValueError(f"signature disposition differs from captured upstream: {match}")
+            if group == "upstream_only" and not any(coverage_scope_matches(match, path) for path in surface):
+                raise ValueError(f"upstream disposition absent from captured surface: {match}")
+            if group == "local_extensions" and match in surface:
+                raise ValueError(f"local extension exists in captured upstream: {match}")
+    known_upstream_types = coverage.get("known_upstream_types", {})
+    for name, entry in known_upstream_types.items():
+        if not str(entry.get("owner", "")).startswith("#") or not entry.get("docs") or f"type:{name}" not in surface:
+            raise ValueError(f"upstream type census lacks owner or docs: {name}")
+    unknown_upstream_types = sorted(path.removeprefix("type:") for path in surface if path.startswith("type:") and path.removeprefix("type:") not in known_upstream_types)
+    if unknown_upstream_types:
+        raise ValueError("unknown upstream types: " + ", ".join(unknown_upstream_types))
+    case_ids = set()
+    for case in manifest.get("cases", []):
+        case_id = case.get("id")
+        paths = [case.get(name) for name in ("query", "variables", "response")]
+        if not case_id or case_id in case_ids or case.get("kind") not in ("entity", "filter") or not all(path in seen for path in paths):
+            raise ValueError(f"invalid or duplicate manifest case: {case_id}")
+        case_ids.add(case_id)
+        if json.loads((root / case["variables"]).read_bytes()).get("block", {}).get("number") != provenance["block_number"]:
+            raise ValueError(f"case block differs from provenance: {case_id}")
+    required_cases = {"domain.entity-by-id": ("Domain", "entity", "entities/domain/entity-by-id/query.graphql", "entities/domain/entity-by-id/variables.json", "entities/domain/entity-by-id/upstream-response.json"), "domain.filter.name-eq": ("Domain", "filter", "entities/domain/filters/name-eq/query.graphql", "entities/domain/filters/name-eq/variables.json", "entities/domain/filters/name-eq/upstream-response.json")}
+    cases_by_id = {case["id"]: case for case in manifest.get("cases", [])}
+    for case_id, expected in required_cases.items():
+        case = cases_by_id.get(case_id, {})
+        if tuple(case.get(key) for key in ("entity", "kind", "query", "variables", "response")) != expected:
+            raise ValueError(f"required manifest case has unexpected content: {case_id}")
+    return manifest
+
+
+def compare(args):
+    root = Path(args.fixtures)
+    manifest = verify(root)
+    verify_claimed_schema(root, args.bigname_endpoint)
+    block = json.loads((root / manifest["cases"][0]["variables"]).read_text())["block"]
+    head = request(args.bigname_endpoint, META, {"block": block}, "OracleMeta")
+    observed_meta(head, block["number"])
+    failures = 0
+    for case in manifest["cases"]:
+        operation = "OracleDomain" if case["kind"] == "entity" else "OracleDomainName"
+        actual = request(args.bigname_endpoint, (root / case["query"]).read_text(), json.loads((root / case["variables"]).read_text()), operation)
+        expected = json.loads((root / case["response"]).read_text())
+        if canonical(actual) != canonical(expected):
+            failures += 1
+            print(f"FAIL {case['id']}: expected {canonical(expected).decode().strip()} actual {canonical(actual).decode().strip()}")
+        else:
+            print(f"PASS {case['id']}")
+    print(f"{len(manifest['cases']) - failures} passed, {failures} failed")
+    if failures:
+        raise ValueError("response comparison failed")
+
+
+def main():
+    parser = argparse.ArgumentParser(); commands = parser.add_subparsers(dest="command", required=True)
+    cap = commands.add_parser("capture")
+    for name, options in (("--upstream-endpoint-template", {}), ("--block-number", {"type": int}), ("--domain-id", {}), ("--output", {})):
+        cap.add_argument(name, required=True, **options)
+    cap.add_argument("--pinned-schema-verified-by")
+    cap.add_argument("--pinned-schema-verification-date")
+    offline = commands.add_parser("verify-fixtures")
+    for name, options in (("--offline", {"action": "store_true", "required": True}), ("--fixtures", {"default": str(DEFAULT_FIXTURES)})): offline.add_argument(name, **options)
+    comp = commands.add_parser("compare")
+    for name, options in (("--fixtures", {"default": str(DEFAULT_FIXTURES)}), ("--bigname-endpoint", {"required": True})): comp.add_argument(name, **options)
+    args = parser.parse_args()
+    try:
+        if args.command == "capture":
+            capture(args)
+        elif args.command == "verify-fixtures":
+            manifest = verify(Path(args.fixtures))
+            print(f"fixture v{manifest['fixture_format_version']}: {len(manifest['cases'])} cases, captured artifact digests valid; manual coverage valid (offline)")
+        else:
+            compare(args)
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        print(f"graphql-compat-oracle: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

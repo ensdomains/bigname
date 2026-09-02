@@ -94,20 +94,29 @@ pub(super) async fn build(
             -- (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)
             SELECT pointer.resource_id AS attributed_resource_id, event.*
             FROM pointers pointer
-            JOIN project_events event
-              ON event.chain_id = $1
-             AND event.logical_name_id IS NULL
-             AND event.source_family = 'ens_v1_resolver_l1'
-             AND lower(event.after_state ->> 'node') = pointer.namehash
-             AND lower(COALESCE(
+             JOIN project_events event
+               ON event.chain_id = $1
+              AND event.logical_name_id IS NULL
+              AND lower(event.after_state ->> 'node') = pointer.namehash
+              AND lower(COALESCE(
                     NULLIF(event.after_state ->> 'resolver', ''),
                     NULLIF(event.raw_fact_ref ->> 'emitting_address', '')
                  )) = pointer.resolver_address
             WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
-              AND pointer.pointer_source_family IN (
-                  'ens_v1_registry_l1',
-                  'ens_v1_registrar_l1',
-                  'ens_v1_wrapper_l1'
+              AND (
+                  (
+                      event.source_family = 'ens_v1_resolver_l1'
+                      AND pointer.pointer_source_family IN (
+                          'ens_v1_registry_l1',
+                          'ens_v1_registrar_l1',
+                          'ens_v1_wrapper_l1'
+                      )
+                  )
+                  OR (
+                      event.source_family = 'basenames_base_resolver'
+                      AND pointer.pointer_source_family =
+                          'basenames_base_registry'
+                  )
               )
             UNION ALL
             -- The guarded ENSv2-origin exception uses the exact declaration already selected by
@@ -379,12 +388,26 @@ pub(super) async fn build(
             canonicality_summary, manifest_version
         )
         SELECT pointer.resource_id,
-               concat_ws(':',
-                   pointer.logical_name_id,
-                   pointer.resource_id::text,
-                   COALESCE(version.normalized_event_id, 0)::text,
-                   boundary.block_number::text,
-                   boundary.block_hash
+               concat(
+                   octet_length(pointer.logical_name_id), ':',
+                   pointer.logical_name_id, ';',
+                   octet_length(pointer.resource_id::text), ':',
+                   pointer.resource_id::text, ';',
+                   octet_length(COALESCE(version.normalized_event_id::text, '')), ':',
+                   COALESCE(version.normalized_event_id::text, ''), ';',
+                   octet_length(CASE
+                       WHEN version.normalized_event_id IS NOT NULL
+                           THEN 'RecordVersionChanged'
+                       ELSE ''
+                   END), ':',
+                   CASE WHEN version.normalized_event_id IS NOT NULL
+                       THEN 'RecordVersionChanged' ELSE '' END, ';',
+                   octet_length($1::text), ':', $1::text, ';',
+                   octet_length(boundary.block_number::text), ':',
+                   boundary.block_number::text, ';',
+                   octet_length(boundary.block_hash), ':', boundary.block_hash, ';',
+                   octet_length(to_jsonb(boundary.block_timestamp) #>> '{}'), ':',
+                   to_jsonb(boundary.block_timestamp) #>> '{}', ';'
                ),
                jsonb_build_object(
                    'logical_name_id', pointer.logical_name_id,

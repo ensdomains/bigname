@@ -366,6 +366,77 @@ CREATE INDEX IF NOT EXISTS normalized_events_resource_history_idx
     WHERE resource_id IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_after_node_scope_idx
+    ON normalized_events (
+        chain_id,
+        (namespace || ':' || lower(after_state ->> 'node')),
+        block_number
+    )
+WHERE event_kind = 'SubregistryChanged'
+  AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized')
+  AND after_state ->> 'node' IS NOT NULL
+  AND btrim(after_state ->> 'node') <> ''
+  AND after_state ->> 'child_node' IS NOT NULL
+  AND btrim(after_state ->> 'child_node') <> '';
+
+CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_after_child_scope_idx
+    ON normalized_events (
+        chain_id,
+        (namespace || ':' || lower(after_state ->> 'child_node')),
+        block_number
+    )
+WHERE event_kind = 'SubregistryChanged'
+  AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized')
+  AND after_state ->> 'node' IS NOT NULL
+  AND btrim(after_state ->> 'node') <> ''
+  AND after_state ->> 'child_node' IS NOT NULL
+  AND btrim(after_state ->> 'child_node') <> '';
+
+CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_before_node_scope_idx
+    ON normalized_events (
+        chain_id,
+        (namespace || ':' || lower(before_state ->> 'node')),
+        block_number
+    )
+WHERE event_kind = 'SubregistryChanged'
+  AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized')
+  AND before_state ->> 'node' IS NOT NULL
+  AND btrim(before_state ->> 'node') <> ''
+  AND before_state ->> 'child_node' IS NOT NULL
+  AND btrim(before_state ->> 'child_node') <> '';
+
+CREATE INDEX IF NOT EXISTS normalized_events_v2_subregistry_pointer_scope_idx
+    ON normalized_events USING gin ((ARRAY[
+        lower(after_state ->> 'subregistry'),
+        lower(before_state ->> 'subregistry')
+    ]))
+    WHERE event_kind = 'SubregistryChanged'
+      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND logical_name_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_before_child_scope_idx
+    ON normalized_events (
+        chain_id,
+        (namespace || ':' || lower(before_state ->> 'child_node')),
+        block_number
+    )
+WHERE event_kind = 'SubregistryChanged'
+  AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized')
+  AND before_state ->> 'node' IS NOT NULL
+  AND btrim(before_state ->> 'node') <> ''
+  AND before_state ->> 'child_node' IS NOT NULL
+  AND btrim(before_state ->> 'child_node') <> '';
+
 CREATE INDEX IF NOT EXISTS normalized_events_interpreter_state_history_idx
     ON normalized_events (
         chain_id,
@@ -431,6 +502,25 @@ CREATE INDEX IF NOT EXISTS normalized_events_ens_v1_record_node_resolver_idx
     )
     WHERE logical_name_id IS NULL
       AND source_family = 'ens_v1_resolver_l1'
+      AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX IF NOT EXISTS normalized_events_basenames_record_node_resolver_idx
+    ON normalized_events (
+        chain_id,
+        lower(after_state ->> 'node'),
+        lower(COALESCE(
+            NULLIF(after_state ->> 'resolver', ''),
+            NULLIF(raw_fact_ref ->> 'emitting_address', '')
+        )),
+        block_number,
+        transaction_index,
+        log_index,
+        normalized_event_id
+    )
+    WHERE logical_name_id IS NULL
+      AND source_family = 'basenames_base_resolver'
       AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');

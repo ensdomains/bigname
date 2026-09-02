@@ -332,6 +332,17 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v2_expiry_scope_idx
       )
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
       AND jsonb_typeof(after_state -> 'expiry') = 'number';
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_basenames_record_node_resolver_idx
+    ON bigname_phase.normalized_events
+       (chain_id, lower(after_state ->> 'node'),
+        lower(COALESCE(NULLIF(after_state ->> 'resolver', ''),
+                       NULLIF(raw_fact_ref ->> 'emitting_address', ''))),
+        block_number, transaction_index, log_index, normalized_event_id)
+    WHERE logical_name_id IS NULL
+      AND source_family = 'basenames_base_resolver'
+      AND event_kind IN ('RecordChanged', 'RecordVersionChanged')
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_chain_block_number_idx
     ON bigname_phase.name_surfaces (chain_id, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS surface_bindings_chain_block_number_idx
@@ -394,9 +405,10 @@ indexes are additive; rollback may leave them in place.
    rollout section](../deployment.md#owner-ratified-sepolia-source-role-rollout)
    at step 9;
 3. for the release containing Issue #400, Issue #591, or
-   `20260831150000_normalized_events_v2_expiry_scope_idx.sql`, apply and
-   validate the applicable concurrent baseline indexes above; otherwise skip
-   this step;
+   `20260831150000_normalized_events_v2_expiry_scope_idx.sql`, or
+   `20260902120000_normalized_events_basenames_record_node_resolver_idx.sql`,
+   apply and validate the applicable concurrent baseline indexes above;
+   otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
    cannot take the required `NOT NULL` column without the forbidden historical

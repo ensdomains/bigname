@@ -191,7 +191,22 @@ pub(crate) fn build_subname(
 ) -> Subname {
     let registration = name_registration_fields(name_row, &row.namespace);
     let (owner, registrant) = if name_row.is_some() {
-        (registration.owner, registration.registrant)
+        (
+            registration.owner.or_else(|| {
+                name_row
+                    .filter(|name| {
+                        name.resource_id.is_none()
+                            && name.serving_resource_id.is_some()
+                            && name
+                                .declared_summary
+                                .pointer("/coverage/enumeration_basis")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("event_linked_registry_resolver")
+                    })
+                    .and_then(|_| row.owner.clone())
+            }),
+            registration.registrant,
+        )
     } else {
         (row.owner.clone(), row.registrant.clone())
     };

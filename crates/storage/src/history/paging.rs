@@ -6,6 +6,7 @@ use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryPage, HistorySummaryMode,
     InvalidHistoryCursor,
     decoders::decode_history_event,
+    registration_identity::{push_product_event_kind_predicate, push_product_registration_id},
     selectors::HistorySelector,
     source::{push_history_canonicality_filter, push_history_source_with_visibility},
     summary::load_history_summary,
@@ -122,6 +123,9 @@ pub(super) async fn load_history_page(
     }
     push_history_select(&mut builder, cursor.is_some(), include_candidates);
     push_history_filters(&mut builder, &filter, canonical_only);
+    if !include_candidates {
+        push_product_history_duplicate_filter(&mut builder);
+    }
 
     if cursor.is_some() {
         builder.push(" AND ");
@@ -172,6 +176,7 @@ async fn load_history_internal(
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_history_select(&mut builder, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
+    push_product_history_duplicate_filter(&mut builder);
     push_history_order(&mut builder);
 
     if head_only {
@@ -200,6 +205,11 @@ fn push_history_select(
             ne.namespace,
             ne.logical_name_id,
             ne.resource_id,
+        "#,
+    );
+    push_product_registration_id(builder);
+    builder.push(
+        r#" AS registration_id,
             ne.event_kind,
             ne.source_family,
             ne.manifest_version,
@@ -295,6 +305,16 @@ pub(super) fn push_history_filters<'a>(
         builder.push_bind(namespace);
     }
 
+    if let Some(registration_id) = filter.registration_id.as_ref() {
+        builder.push(" AND ((ne.resource_id IS NULL AND ");
+        push_product_event_kind_predicate(builder);
+        builder.push(") OR (");
+        push_product_registration_id(builder);
+        builder.push(" = ");
+        builder.push_bind(registration_id);
+        builder.push("))");
+    }
+
     if !filter.event_kinds.is_empty() {
         builder.push(" AND ");
         push_string_filter(builder, "ne.event_kind", &filter.event_kinds);
@@ -311,6 +331,12 @@ pub(super) fn push_history_filters<'a>(
     }
 
     push_history_canonicality_filter(builder, canonical_only);
+}
+
+pub(super) fn push_product_history_duplicate_filter(builder: &mut QueryBuilder<'_, Postgres>) {
+    // One registry resolver log can carry both its registry read resource and a distinct control
+    // resource. Product history shows the log once; raw diagnostic history retains both rows.
+    builder.push(" AND strpos(ne.event_identity, ':ResolverChanged:registry-read:') = 0");
 }
 
 fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>) {
@@ -346,6 +372,9 @@ async fn ensure_history_cursor_exists(
     );
     push_history_source_with_visibility(&mut builder, false, include_candidates);
     push_history_filters(&mut builder, filter, canonical_only);
+    if !include_candidates {
+        push_product_history_duplicate_filter(&mut builder);
+    }
     builder.push(" AND ne.event_identity = ");
     builder.push_bind(&cursor.event_identity);
     builder.push(" LIMIT 1)");

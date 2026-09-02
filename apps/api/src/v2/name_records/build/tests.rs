@@ -216,6 +216,7 @@ fn current_name_row(timestamp: OffsetDateTime) -> NameCurrentRow {
                 .parse()
                 .expect("test resource id"),
         ),
+        serving_resource_id: None,
         token_lineage_id: None,
         binding_kind: Some(SurfaceBindingKind::DeclaredRegistryPath),
         declared_summary: json!({

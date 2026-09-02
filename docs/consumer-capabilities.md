@@ -192,6 +192,19 @@ Sepolia distinction above is unchanged.
 
 ## ENSv1→ENSv2 delivery slices
 
+Registry-only ENSv1 and Basenames names with [getter-visible owner](glossary.md#getter-visible-owner) zero form one
+cohesive read capability. Exact-name detail is supported and unregistered;
+indexed records are supported when the retained [serving resource](glossary.md#serving-resource) has inventory;
+verified and auto records follow the ordinary lookup capability; direct
+subnames include a read-only row only while a current nonzero event-linked
+resolver exists; and resolver `bound_names` remains subject to the resolver
+family's existing binding-enumeration capability. Registration/control fields,
+address-name relations, and owner-derived permissions stay absent. A resolver
+selection observed only before the name surface and never repeated remains out
+of scope under the documented #613 caveat. The GraphQL compatibility surface
+uses the same serving resource for its resolver record fields; it does not infer
+registration or control from that read path.
+
 Each slice includes its behavior tests and fixture provenance. Counts are
 estimated hand-written production files; test fixtures, test-only harness
 files, and docs are not included. Rows before “Final activation” describe the
@@ -399,6 +412,23 @@ current projections. The existing `domain`, `domains`,
 `Domain.normalizedName`, `Domain.tokenId`, and both connection count operations
 are bigname additions to the subgraph-shaped surface. `domain(id:)` accepts an
 `ID!` containing the same ENS name or namehash strings accepted previously.
+The reviewed [GraphQL compatibility oracle](graphql-compatibility-oracle.md)
+currently claims one `Domain` point case and one `name` equality-filter case.
+Its captured SDL and semantic index form a [GraphQL upstream
+census](glossary.md#graphql-upstream-census), not a claim of complete entity
+coverage. Directive repeatability is excluded at the documented [schema-comparison
+boundary](graphql-compatibility-oracle.md#schema-comparison).
+The captured upstream signature declares `domains(first: Int = 100, skip: Int = 0)`, matching Graph Node's generated
+collection arguments (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737), while
+bigname's introspection currently declares both arguments without schema defaults; its resolver nevertheless uses page
+size `100` and offset `0` when they are omitted. Task `#670/T2` owns aligning the published argument signature.
+`Domain_orderBy.registrationDate` is an intentional bigname extension retained from bigname's earlier GraphQL schema:
+upstream
+has no direct `Domain.registrationDate` field and instead exposes the nested
+`registration__registrationDate` order value through `Domain.registration`; the date itself belongs to
+`Registration.registrationDate` (upstream: .refs/ens_subgraph/schema.graphql:L1-L46 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/schema.graphql:L184-L190 @ ens_subgraph@723f1b6), and Graph Node generates child order
+values as `<parent>__<child>` (upstream: .refs/graph_node/graph/src/schema/api.rs:L531-L603 @ graph_node@aefe1737).
 
 The schema includes graph-node-compatible `BigInt` and `Bytes` scalars,
 `Block_height`, `_SubgraphErrorPolicy_`, and `_meta`/`_Meta_`/`_Block_` shapes.
@@ -426,11 +456,15 @@ future capability work may add database-backed historical execution, but no
 serving path filters current rows in memory. The endpoint accepts the `subgraphError`
 argument and emits the graph-node default without changing the existing
 Manager response path. The served-head eligibility gate remains authoritative;
-per-entity `allow`/`deny` behavior belongs to future entity capabilities that can
+the [GraphQL claimed compatibility surface](glossary.md#graphql-claimed-compatibility-surface) includes both
+`_SubgraphErrorPolicy_` values, and explicit `deny` behaves the same as omitting the argument. Per-entity `allow`/`deny`
+behavior belongs to future entity capabilities that can
 define it without inventing in-process filtering.
 
 `_meta(block:)` reports the served head used by entity reads, including its
-number, hash, timestamp, and parent hash. All root fields within one HTTP
+number, timestamp, and parent hash. Its hash is present for an unconstrained or
+hash-constrained selection and is `null` for a number-constrained selection;
+the initial oracle pin asserts only the block number in that case. All root fields within one HTTP
 GraphQL request share one request-scoped served-head selection. `deployment` is the interpreter
 [content hash](glossary.md#interpreter-content-hash) for the serving binary.
 When a head is eligible to serve, `hasIndexingErrors` derives from durable

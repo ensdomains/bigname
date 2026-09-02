@@ -1698,6 +1698,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tower",
@@ -1841,9 +1842,11 @@ dependencies = [
 name = "bigname-project"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "bigname-domain",
  "bigname-lookup",
+ "bigname-storage",
  "bigname-test-support",
  "serde_json",
  "sqlx",
