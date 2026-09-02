@@ -3,7 +3,7 @@ use super::{
     registrar_namehash,
 };
 use crate::{
-    evm_abi::{address_hex, decode_event_log, u256_word_hex},
+    evm_abi::{address_hex, decode_event_log, saturating_u256_i64, u256_word_hex},
     schema_v2::{catalog::Selected, model::RawLogInput},
 };
 use alloy_primitives::B256;
@@ -43,7 +43,7 @@ fn name_registered(
     let prior_registrar = state.v1_registrar(&selected.source.namespace, &namehash);
     let (token_lineage_id, resource_id, authority_key) =
         new_registrar_identity(selected, raw, &labelhash_hex);
-    let expiry = crate::evm_abi::u256_i64(event.expires, "registrar expiry")?;
+    let expiry = saturating_u256_i64(event.expires);
     let owner = address_hex(event.owner);
     let surface_known = state.v1_active_surface_materialized(&selected.source.namespace, &namehash);
     state.observe_v1_registrar(
@@ -144,7 +144,7 @@ fn name_renewed(
             )
         })
         .unwrap_or_else(|| new_registrar_identity(selected, raw, &labelhash_hex));
-    let expiry = crate::evm_abi::u256_i64(event.expires, "registrar expiry")?;
+    let expiry = saturating_u256_i64(event.expires);
     let surface_known = existing.as_ref().is_some_and(|state| state.surface_known)
         || state.v1_active_surface_materialized(&selected.source.namespace, &namehash);
     let owner = existing

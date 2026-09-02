@@ -232,6 +232,32 @@ mod v1_registrar {
     }
 
     #[test]
+    fn base_registrar_uint256_expiry_saturates_to_far_future_sentinel() -> anyhow::Result<()> {
+        let labelhash = keccak256(b"far-future-expiry");
+        let output = interpret(vec![raw_at(
+            with_topic0(
+                BaseNameRegistered {
+                    id: U256::from_be_slice(labelhash.as_slice()),
+                    owner: CONTRACT.parse()?,
+                    expires: U256::from(1_u8) << 255,
+                }
+                .encode_log_data(),
+                keccak256(b"NameRegistered(uint256,address,uint256)"),
+            ),
+            1,
+            0,
+            CONTRACT,
+        )])?;
+        let grant = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RegistrationGranted")
+            .expect("valid uint256 expiry must produce registrar lifecycle");
+        assert_eq!(grant.after_state["expiry"], i64::MAX);
+        Ok(())
+    }
+
+    #[test]
     fn controller_event_without_base_registrar_is_preimage_only() -> anyhow::Result<()> {
         let output = interpret(vec![controller_registration("only", 99, 0)])?;
         assert!(

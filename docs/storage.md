@@ -172,6 +172,10 @@ An ENSv1 BaseRegistrar lifecycle event observed before its plaintext label has a
 `logical_name_id` and a non-null registrar `resource_id`. Interpret emits no `NameSurface` for that event. A
 later `PreimageObserved` creates the surface and binds it to the registrar resource; the earlier
 lifecycle rows remain resource-keyed and immutable while Project can then attribute them to the name.
+BaseRegistrar encodes expiry as `uint256`; values above the signed timestamp range are retained as
+the far-future `i64::MAX` sentinel rather than failing interpretation. Settlement treats that
+sentinel as permanently live because adding the ENSv1 grace period overflows the signed range.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
 
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
