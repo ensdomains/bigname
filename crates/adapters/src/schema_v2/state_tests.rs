@@ -30,6 +30,30 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
 }
 
 #[test]
+fn controller_preimage_restore_rebinds_existing_registrar_identity() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    observe_registrar(&mut state, "restored", Some(100));
+    let resource = state.v1_registrars["test:restored"].resource_id;
+    state
+        .v1_registrars
+        .get_mut("test:restored")
+        .unwrap()
+        .surface_known = false;
+    state
+        .v1_names
+        .get_mut("test:restored")
+        .unwrap()
+        .surface_known = false;
+    state.active_resources.remove("test:restored");
+
+    state.observe_v1_active_surface(NAMESPACE, "restored");
+
+    assert!(state.v1_registrars["test:restored"].surface_known);
+    assert!(state.v1_names["test:restored"].surface_known);
+    assert_eq!(state.active_resources.get("test:restored"), Some(&resource));
+}
+
+#[test]
 fn zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfer() {
     const NODE: &str = "node";
     const OWNER: &str = "0x0000000000000000000000000000000000000001";

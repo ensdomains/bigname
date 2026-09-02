@@ -16,19 +16,13 @@ use crate::schema_v2::{
     model::RawLogInput,
     state::{State, V1NameState},
 };
-
 mod identity;
 use identity::{new_registrar_identity, registrar_namehash};
-
 mod base;
 mod decode;
+mod enrichment;
 mod wrapper_renewal;
-
-mod transfer {
-    use super::*;
-    sol! { event Transfer(address indexed from, address indexed to, uint256 indexed tokenId); }
-}
-
+#[rustfmt::skip] mod transfer { use super::*; sol! { event Transfer(address indexed from, address indexed to, uint256 indexed tokenId); } }
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 pub(super) fn interpret(
     selected: &Selected,
@@ -81,6 +75,36 @@ pub(super) fn interpret(
         _ => {}
     }
     match selected.event.name.as_str() {
+        "NameRegistered"
+            if selected.source.source_family == "ens_v1_registrar_l1"
+                && selected.emitter_role.as_deref() != Some("registrar") =>
+        {
+            if selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|event| event == "RegistrationGranted")
+            {
+                name_event(selected, raw, state, true)
+            } else {
+                enrichment::name_registered(selected, raw, state)
+            }
+        }
+        "NameRenewed"
+            if selected.source.source_family == "ens_v1_registrar_l1"
+                && selected.emitter_role.as_deref() != Some("registrar") =>
+        {
+            if selected
+                .event
+                .normalized_events
+                .iter()
+                .any(|event| event == "RegistrationGranted")
+            {
+                name_event(selected, raw, state, false)
+            } else {
+                enrichment::name_renewed(selected, raw, state)
+            }
+        }
         "NameRegistered" => name_event(selected, raw, state, true),
         "NameRenewed" => name_event(selected, raw, state, false),
         "Transfer" => transfer(selected, raw, state),

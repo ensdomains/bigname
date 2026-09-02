@@ -1835,7 +1835,8 @@ fn unexpired_rewrap_restores_retained_parent_fuses_and_expiry() -> anyhow::Resul
 }
 
 #[test]
-fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::Result<()> {
+fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry_from_registrar_state()
+-> anyhow::Result<()> {
     const WRAPPER: &str = "0x0000000000000000000000000000000000000043";
     const CONTROLLER: &str = "0x0000000000000000000000000000000000000044";
 
@@ -1873,22 +1874,35 @@ fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::R
             ),
         ],
     );
-    let registrar_manifest = manifest(
+    let registrar_manifest = manifest_with_events(
         67,
+        "ens",
         "ens_v1_registrar_l1",
-        "NameRenewed",
-        "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)",
-        &["wrapped_registrar_controller"],
         &[
-            "RegistrationGranted",
-            "RegistrationRenewed",
-            "ExpiryChanged",
+            (
+                "NameRenewed",
+                "event NameRenewed(uint256 indexed id, uint256 expires)",
+                &["registrar"],
+                &[
+                    "RegistrationGranted",
+                    "RegistrationRenewed",
+                    "ExpiryChanged",
+                ],
+            ),
+            (
+                "NameRenewed",
+                "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)",
+                &["wrapped_registrar_controller"],
+                &["ExpiryChanged", "PreimageObserved"],
+            ),
         ],
     );
     let mut wrapper_admission = admission(66, "name_wrapper");
     wrapper_admission.address = WRAPPER.to_owned();
     let mut controller_admission = admission(67, "wrapped_registrar_controller");
     controller_admission.address = CONTROLLER.to_owned();
+    controller_admission.contract_instance_id = Uuid::from_u128(68);
+    let registrar_admission = admission(67, "registrar");
     let block = |number| RawBlockInput {
         chain_id: CHAIN.to_owned(),
         block_hash: format!("block-{number}"),
@@ -1901,7 +1915,11 @@ fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::R
             chain_id: CHAIN.to_owned(),
             manifests: vec![wrapper_manifest.clone(), registrar_manifest.clone()],
             discovery_rules: Vec::new(),
-            admissions: vec![wrapper_admission.clone(), controller_admission.clone()],
+            admissions: vec![
+                wrapper_admission.clone(),
+                controller_admission.clone(),
+                registrar_admission.clone(),
+            ],
             prior_events: Vec::new(),
             blocks: Vec::new(),
             raw_logs: vec![raw_at(
@@ -1931,21 +1949,40 @@ fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::R
             chain_id: CHAIN.to_owned(),
             manifests: vec![wrapper_manifest.clone(), registrar_manifest.clone()],
             discovery_rules: Vec::new(),
-            admissions: vec![wrapper_admission.clone(), controller_admission.clone()],
+            admissions: vec![
+                wrapper_admission.clone(),
+                controller_admission.clone(),
+                registrar_admission.clone(),
+            ],
             prior_events: Vec::new(),
             blocks: Vec::new(),
-            raw_logs: vec![raw_at(
-                wrapped_controller::NameRenewed {
-                    name: "renewed".to_owned(),
-                    label,
-                    cost: U256::from(1),
-                    expires: U256::from(200),
-                }
-                .encode_log_data(),
-                2,
-                0,
-                CONTROLLER,
-            )],
+            raw_logs: vec![
+                raw_at(
+                    with_topic0(
+                        v1_registrar::BaseNameRenewed {
+                            id: U256::from_be_slice(label.as_slice()),
+                            expires: U256::from(200),
+                        }
+                        .encode_log_data(),
+                        keccak256(b"NameRenewed(uint256,uint256)"),
+                    ),
+                    2,
+                    0,
+                    CONTRACT,
+                ),
+                raw_at(
+                    wrapped_controller::NameRenewed {
+                        name: "renewed".to_owned(),
+                        label,
+                        cost: U256::from(1),
+                        expires: U256::from(999),
+                    }
+                    .encode_log_data(),
+                    2,
+                    1,
+                    CONTROLLER,
+                ),
+            ],
         },
         Some(session),
     )?;
@@ -1970,7 +2007,7 @@ fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::R
         chain_id: CHAIN.to_owned(),
         manifests: vec![wrapper_manifest, registrar_manifest],
         discovery_rules: Vec::new(),
-        admissions: vec![wrapper_admission, controller_admission],
+        admissions: vec![wrapper_admission, controller_admission, registrar_admission],
         prior_events: Vec::new(),
         blocks: Vec::new(),
         raw_logs: vec![
