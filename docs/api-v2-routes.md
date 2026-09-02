@@ -882,7 +882,8 @@ Field ownership:
   validity claim. True as-of address-name enumeration is deferred to the
   revision-bound storage follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
-  Malformed addresses return `400 invalid_input`. `include=role_summary`
+  Malformed addresses return `400 invalid_input`. Unsupported public namespaces
+  return `404 not_found`. `include=role_summary`
   does not claim a request-wide immutable projection generation, and current-state
   generation changes do not produce `409 stale`. The expansion batch-loads
   projection-owned permission summaries for every
@@ -1124,7 +1125,8 @@ Field ownership:
   validity claim. True as-of/finality row-bounding is deferred to the
   revision-bound storage follow-up.
 - Status semantics: no matching activity returns `200` with empty `data`.
-  Malformed addresses return `400 invalid_input`.
+  Malformed addresses return `400 invalid_input`. Unsupported public namespaces
+  return `404 not_found`.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
 ### `GET /v2/search`

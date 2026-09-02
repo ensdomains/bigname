@@ -22,15 +22,6 @@ pub struct ApiLookupDdlObject {
     pub identity: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
-pub struct ApiProjectGenerationMismatch {
-    pub chain_id: String,
-    pub phase_status: String,
-    pub current_block_number: i64,
-    pub current_block_hash: String,
-    pub input_content_hash: Option<String>,
-}
-
 pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupDdlObject>> {
     let rows = sqlx::query(
         r#"
@@ -87,29 +78,4 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
             })
         })
         .collect()
-}
-
-pub async fn load_incompatible_published_project_generations(
-    pool: &PgPool,
-    expected_interpreter_hash: &str,
-) -> Result<Vec<ApiProjectGenerationMismatch>> {
-    sqlx::query_as::<_, ApiProjectGenerationMismatch>(
-        r#"
-        SELECT
-            chain_id,
-            phase_status,
-            current_block_number,
-            current_block_hash,
-            input_content_hash
-        FROM bigname_phase.chain_phase_state
-        WHERE phase_name = 'project'
-          AND current_block_number IS NOT NULL
-          AND input_content_hash IS DISTINCT FROM $1
-        ORDER BY chain_id
-        "#,
-    )
-    .bind(expected_interpreter_hash)
-    .fetch_all(pool)
-    .await
-    .context("failed to inspect published Project generations")
 }
