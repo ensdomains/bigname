@@ -421,6 +421,7 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:registration-filter-history.eth";
     let resource_id = Uuid::from_u128(0x7140);
+    let later_resource_id = Uuid::from_u128(0x7141);
     seed_identity_name(
         &database,
         logical_name_id,
@@ -435,7 +436,17 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         80,
     )
     .await?;
-    seed_v2_history_blocks(&database, 121..=122).await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            later_resource_id,
+            None,
+            "0xregistration-filter-later-resource",
+            81,
+        )],
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=123).await?;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
@@ -452,6 +463,13 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
                 None,
                 "RecordChanged",
                 122,
+            ),
+            v2_history_event(
+                "registration-filter-later-grant",
+                Some(logical_name_id),
+                Some(later_resource_id),
+                "RegistrationGranted",
+                123,
             ),
         ],
     )
