@@ -174,6 +174,13 @@ def capture(args):
     template = args.upstream_endpoint_template
     if template != "stub://local-mock" and not is_live_endpoint_template(template):
         raise ValueError("live endpoint must use the operator refresh template in docs/development.md")
+    if template != "stub://local-mock":
+        if not args.pinned_schema_verified_by or not args.pinned_schema_verification_date:
+            raise ValueError("live capture requires pinned-schema verifier and verification date")
+        try:
+            dt.date.fromisoformat(args.pinned_schema_verification_date)
+        except ValueError as error:
+            raise ValueError("pinned-schema verification date must use YYYY-MM-DD") from error
     token = os.environ.get("THE_GRAPH_API_KEY")
     if "${THE_GRAPH_API_KEY}" in template and not token:
         raise ValueError("THE_GRAPH_API_KEY is required by the endpoint template")
@@ -229,7 +236,7 @@ def capture(args):
             "entities/domain/filters/name-eq/upstream-response.json": canonical(filtered),
         }
         stamp = dt.datetime.fromtimestamp(int(os.environ.get("SOURCE_DATE_EPOCH", dt.datetime.now(dt.UTC).timestamp())), dt.UTC).isoformat().replace("+00:00", "Z")
-        provenance = {"block_number": args.block_number, "endpoint_template": template, "ens_subgraph_commit": pins["ens_subgraph"], "graph_node_commit": pins["graph_node"], "observed_meta_block_hash": meta["block"].get("hash"), "observed_meta_block_number": meta["block"]["number"], "observed_meta_deployment": meta.get("deployment"), "pin_kind": "number", "provisional_stub": template == "stub://local-mock", "retrieved_at": stamp, "upstream_identifier": meta.get("deployment")}
+        provenance = {"block_number": args.block_number, "endpoint_template": template, "ens_subgraph_commit": pins["ens_subgraph"], "graph_node_commit": pins["graph_node"], "observed_meta_block_hash": meta["block"].get("hash"), "observed_meta_block_number": meta["block"]["number"], "observed_meta_deployment": meta.get("deployment"), "pin_kind": "number", "pinned_schema_verification_date": args.pinned_schema_verification_date, "pinned_schema_verified_by": args.pinned_schema_verified_by, "provisional_stub": template == "stub://local-mock", "retrieved_at": stamp, "upstream_identifier": meta.get("deployment")}
         files["upstream/provenance.json"] = canonical(provenance)
         for relative, data in files.items():
             path = staged / relative
@@ -254,7 +261,7 @@ def verify(root):
     if manifest.get("fixture_format_version") != FORMAT:
         raise ValueError(f"fixture format {manifest.get('fixture_format_version')} is unsupported; upgrade graphql-compat-oracle")
     provenance = json.loads((root / "upstream/provenance.json").read_bytes())
-    required = ("endpoint_template", "upstream_identifier", "retrieved_at", "pin_kind", "block_number", "observed_meta_block_number", "observed_meta_block_hash", "ens_subgraph_commit", "graph_node_commit", "provisional_stub")
+    required = ("endpoint_template", "upstream_identifier", "retrieved_at", "pin_kind", "block_number", "observed_meta_block_number", "observed_meta_block_hash", "ens_subgraph_commit", "graph_node_commit", "pinned_schema_verified_by", "pinned_schema_verification_date", "provisional_stub")
     missing = [key for key in required if key not in provenance]
     if missing:
         raise ValueError(f"provenance missing fields: {', '.join(missing)}")
@@ -268,6 +275,13 @@ def verify(root):
         raise ValueError("provisional GraphQL fixture rejected; run the operator refresh procedure in docs/development.md")
     if not provenance["provisional_stub"] and not is_live_endpoint_template(provenance["endpoint_template"]):
         raise ValueError("non-upstream GraphQL fixture rejected; run the operator refresh procedure in docs/development.md")
+    if not provenance["provisional_stub"]:
+        if not all(isinstance(provenance.get(key), str) and provenance[key] for key in ("pinned_schema_verified_by", "pinned_schema_verification_date")):
+            raise ValueError("live fixture lacks pinned-schema verification provenance")
+        try:
+            dt.date.fromisoformat(provenance["pinned_schema_verification_date"])
+        except ValueError as error:
+            raise ValueError("pinned-schema verification date must use YYYY-MM-DD") from error
     observed_pins = {"ens_subgraph": provenance["ens_subgraph_commit"], "graph_node": provenance["graph_node_commit"]}
     if observed_pins != pins or manifest.get("upstream_checkouts") != pins:
         raise ValueError("fixture reference pins differ from .refs/MANIFEST.toml; recapture the fixture")
@@ -333,7 +347,7 @@ def compare(args):
         operation = "OracleDomain" if case["kind"] == "entity" else "OracleDomainName"
         actual = request(args.bigname_endpoint, (root / case["query"]).read_text(), json.loads((root / case["variables"]).read_text()), operation)
         expected = json.loads((root / case["response"]).read_text())
-        if actual != expected:
+        if canonical(actual) != canonical(expected):
             failures += 1
             print(f"FAIL {case['id']}: expected {canonical(expected).decode().strip()} actual {canonical(actual).decode().strip()}")
         else:
@@ -348,6 +362,8 @@ def main():
     cap = commands.add_parser("capture")
     for name, options in (("--upstream-endpoint-template", {}), ("--block-number", {"type": int}), ("--domain-id", {}), ("--output", {})):
         cap.add_argument(name, required=True, **options)
+    cap.add_argument("--pinned-schema-verified-by")
+    cap.add_argument("--pinned-schema-verification-date")
     offline = commands.add_parser("verify-fixtures")
     for name, options in (("--offline", {"action": "store_true", "required": True}), ("--fixtures", {"default": str(DEFAULT_FIXTURES)})): offline.add_argument(name, **options)
     comp = commands.add_parser("compare")

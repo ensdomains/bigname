@@ -12,7 +12,7 @@ The fixture separates three concepts:
 2. The **[claimed compatibility surface](glossary.md#graphql-claimed-compatibility-surface)** is the exact paths and cases in `coverage.json`; missing or changed claims break compatibility.
 3. The **[dispositioned remainder](glossary.md#graphql-dispositioned-remainder)** keeps upstream-only work and extensions visible without requiring whole-schema equality.
 
-Each difference has an exact path or bounded scope, status, issue-shaped owner, and documentation anchor. Notes do
+Each difference has an exact path or bounded scope, status, GitHub issue/task identifier, and documentation anchor. Notes do
 not affect matching; wildcards, conflicts, unknown paths, and stale entries invalidate the fixture.
 
 Broader entity/event fixtures, filter matrix, historical reads, errors, and reports are deferred; only the Domain point and name-equality responses are claimed.

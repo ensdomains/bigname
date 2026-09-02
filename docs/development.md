@@ -78,18 +78,20 @@ the checkouts in `.refs/MANIFEST.toml`.
 
 Choose an indexed block and one `Domain` with `id`, `name`, `createdAt`, `owner.id`, a selected nullable field, and
 a name unique for the equality filter. Verify `_meta.block.number`; its hash may be `null` for a numeric pin.
+Before capture, confirm that the deployment ID belongs to an ENS subgraph release at or after the pinned
+`ens_subgraph` commit in `.refs/MANIFEST.toml`; the command records the logged-in operator and UTC date as that
+manual verification.
 
 ```sh
 THE_GRAPH_API_KEY='set-explicitly-for-this-command' \
 scripts/graphql-compat-oracle capture \
   --upstream-endpoint-template \
-  'https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/DEPLOYMENT' \
-  --block-number N --domain-id DOMAIN_ID \
+  'https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/id/5XqPmWe6gjyrJtFn9cLy237i4cWw2j9HcUJEXsP5qGtH' \
+  --block-number 23000000 \
+  --domain-id 0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f046a0bcc88a93fc4ae0 \
+  --pinned-schema-verified-by "$(gh api user --jq .login)" \
+  --pinned-schema-verification-date "$(date -u +%F)" \
   --output apps/api/src/tests/fixtures/graphql-oracle/v1
-
-scripts/graphql-compat-oracle compare \
-  --fixtures apps/api/src/tests/fixtures/graphql-oracle/v1 \
-  --bigname-endpoint http://127.0.0.1:8000/graphql
 
 scripts/test-db -- cargo nextest run -p bigname-api -E 'test(/graphql_oracle/)'
 
@@ -100,6 +102,10 @@ The verifier and Rust oracle tests reject local-stub provenance by default. For 
 may opt into a provisional fixture for one command with
 `BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE=1`; CI must never set this variable. The checked-in gate remains red until
 an operator completes the live refresh above.
+
+The Rust command creates and seeds its own API database at the captured block. `compare` is an optional check for a
+separately prepared API whose served head equals that block; the API's default local address is
+`http://127.0.0.1:3000/graphql`.
 
 Supply credentials only through `THE_GRAPH_API_KEY`; the live template must contain its placeholder. The tool never
 reads `.env`, shell configuration/history, or user files. Never retain or paste resolved credentials.
