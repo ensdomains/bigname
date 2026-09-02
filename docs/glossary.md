@@ -693,6 +693,13 @@ copies the stored expiry when a claim passes zero, and emits every renewal's
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2_sepolia_20260629@ccaeb58)
 
+**Expiry root** — a still-live ENSv2 registration or reservation that Project
+selects during a bounded redo because its expiry crossed the displaced branch's
+timestamps or its lifecycle changed between the affected range's start and the
+Project target. Project follows that name's current canonical subregistry edges
+to recover descendant projection scope; being an expiry root does not itself
+change serving status or authority.
+
 **Migration controller** — an ENSv2 contract that accepts a transferred ENSv1
 token and performs that name's migration. There are two, split by whether the
 name can still be unwrapped: "locked" means the `CANNOT_UNWRAP` fuse is burned

@@ -86,9 +86,9 @@ deleted that row. In the standard pipeline, Interpret deletes those release
 events before Project runs, so Project instead marks a still-live ENSv2
 lifecycle whose prior expiry crossed the displaced branch's timestamps,
 including a lifecycle renewed by the replacement branch, and follows only
-activated canonical ENSv2 subregistry edges from that expiry root to its
-descendants. The orphaned release is not served, and unrelated topology
-components are not admitted.
+activated canonical ENSv2 subregistry edges from that
+[expiry root](glossary.md#expiry-root) to its descendants. The orphaned release
+is not served, and unrelated topology components are not admitted.
 `project_events` remains the single filter for data that builders may serve.
 
 Rows outside an incremental tick's affected scope keep the target block number,

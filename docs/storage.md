@@ -857,7 +857,9 @@ row for a [released v2 authority](glossary.md#released-v2-authority) whose
 the tombstone's summary nulls resolver state, so inventory attributed to that
 resource stays out of current serving. A state-derived ENSv2 expiry release
 removes the `name_current` row when ENSv2 is the selected authority, or when no
-authority is selected and the row reports `current_authority_not_projected`.
+authority is selected and the row reports `current_authority_not_projected`;
+for a resource-backed binding, the release's `resource_id` must also match the
+binding's resource.
 A surviving row whose ENSv1 and ENSv2 evidence cannot select one authority
 instead remains explicitly unsupported. For a removed row, retained inventory
 is reachable only through history. ENSv2 stores resolver records by node and
