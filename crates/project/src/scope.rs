@@ -6,6 +6,7 @@ use crate::{
 
 mod authority;
 mod classification;
+mod expiry;
 mod inventory;
 mod primary;
 mod resolver;
