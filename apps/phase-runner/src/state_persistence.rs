@@ -95,8 +95,10 @@ pub(crate) async fn update_progress_in_transaction(
     let query = format!(
         "
         UPDATE chain_phase_state
-        SET current_block_number = $3,
-            current_block_hash = $4,
+        SET current_block_number =
+                CASE WHEN $3::bigint IS NULL THEN current_block_number ELSE $3 END,
+            current_block_hash =
+                CASE WHEN $3::bigint IS NULL THEN current_block_hash ELSE $4 END,
             target_block_number = $5,
             target_block_hash = $6,
             live_handoff_block_number = $7,
