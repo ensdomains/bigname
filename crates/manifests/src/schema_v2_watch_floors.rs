@@ -26,6 +26,7 @@ pub(super) async fn load(
          JOIN contract_instance_addresses address
            ON address.contract_instance_id = declaration.contract_instance_id
           AND address.chain_id = declaration.chain_id
+          AND lower(address.address) = lower(declaration.declared_address)
          WHERE manifest.rollout_status = 'active'
            AND compiled.entry -> 'emitter' ->> 'kind' = 'address'
            AND (address.deactivated_at IS NULL
