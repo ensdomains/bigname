@@ -141,10 +141,12 @@ async fn v2_get_permissions_empties_a_released_name_but_keeps_its_resource_audit
     Ok(())
 }
 
-// A reservation can retain resource-scoped grants, but it is not a current registration. Name
-// filtering therefore stays empty while the explicit resource audit remains available.
+// This deliberately retains resource-keyed audit evidence while changing the name summary to the
+// reservation shape. A reservation is not a current registration, so that retained evidence must
+// remain audit-only and cannot become `current_for_name`.
 #[tokio::test]
-async fn v2_get_permissions_empties_a_reserved_name_but_keeps_its_resource_audit() -> Result<()> {
+async fn v2_get_permissions_keeps_retained_resource_audit_out_of_reserved_name_scope() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
     let reserved_resource_id = v2_permissions_current_resource_id();

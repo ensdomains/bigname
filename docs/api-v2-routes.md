@@ -800,10 +800,14 @@ Field ownership:
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
-  retained historical ENSv1 registration for audit. A reserved ENSv2 name does
-  not select permission rows by `name` because its resource is not a current
-  registration; an explicit `registration_id` read of that resource remains
-  available for audit. Every
+  retained historical ENSv1 registration for audit. An ENSv2 reservation does
+  not select permission rows by `name`: it has no current registration, and
+  upstream rejects a nonzero role bitmap for an owner-zero reservation while
+  granting roles only in the registered branch.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L435-L472 @ ens_v2@a971bd64)
+  If bigname retains resource-keyed permission evidence for audit, an explicit
+  `registration_id` read remains available with `resource_audit`; that marker
+  does not claim the evidence is live for the reserved name. Every
   permission row carries the required `authority_context` field.
   `current_for_name` means a `name` filter selected the row's current
   registration for that requested name. A row admitted without a `name` filter,
