@@ -493,8 +493,8 @@ Field ownership:
   has no indexed comparison: success and
   live `not_found` write and clear no divergence rows, while CCIP-required
   answers remain `unsupported` with `offchain_lookup_required` and likewise
-  write nothing. ENS continues not to follow CCIP-Read. Basenames and other
-  chains and namespaces do not enter this route. Outside this
+  write nothing. ENS verified record resolution continues not to follow CCIP-Read.
+  Basenames and other chains and namespaces do not enter this route. Outside this
   null-exact-resolver class, exact indexed `ok` answers and authoritative
   ENSIP-19 derived answers satisfy auto without a provider request. Within this
   class, all requested keys execute through verified lookup because retained
@@ -803,6 +803,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   pairing `name` with a `registration_id` that is not that name's selected
   current registration is not one of them. It is a supported query that selects
   nothing, so it returns `200` with empty `data`.
+  A supplied `name` that is missing or unrecognized, whose current name is
+  marked unsupported, or that resolves to a current name not bound to a
+  registration resource cannot select a supported current registration. Its
+  request-relative empty result returns `meta.completeness=partial` with
+  `unsupported_reason=permission_support_unknown`; it does not prove that the
+  name has no permission rows. By contrast, a resolved current name paired with
+  an explicitly different `registration_id` is a supported, proven-empty
+  selection, so its empty page has no `completeness` or `unsupported_reason`.
   The route reads current permission rows and summaries without claiming a
   request-wide immutable projection generation; current-state generation changes
   do not produce `409 stale`. When `name` or `registration_id` binds the read to a
