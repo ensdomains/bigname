@@ -630,7 +630,7 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
 }
 
 #[tokio::test]
-async fn v2_lookup_withholds_retained_identity_and_inventory_for_reservation() -> Result<()> {
+async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(
         &database,
@@ -666,6 +666,28 @@ async fn v2_lookup_withholds_retained_identity_and_inventory_for_reservation() -
     )
     .execute(&database.lookup_pool)
     .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES
+             ('ethereum-mainnet', '0xorphaned-audit-inventory', 39,
+              '2026-04-17T00:00:39Z', 'canonical')",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE record_inventory_current inventory
+         SET chain_positions = jsonb_set(
+             jsonb_set(inventory.chain_positions, '{block_hash}',
+                       '\"0xorphaned-audit-inventory\"'),
+             '{target_block_hash}', '\"0xorphaned-audit-inventory\"')
+         FROM name_current name
+         WHERE name.resource_id = inventory.resource_id
+           AND name.raw_name = 'reserved.eth'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
 
     let payload = v2_lookup_json(
         &database,
