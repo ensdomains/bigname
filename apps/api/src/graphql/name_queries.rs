@@ -94,6 +94,7 @@ async fn load_one(
     row.map(decode_row).transpose()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn load_phase_graphql_name_list_page_offset(
     pool: &PgPool,
     filter: &NameCurrentListFilter,
