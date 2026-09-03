@@ -5,25 +5,130 @@ use crate::{Marker, ProjectError, Result};
 /// Builds the parent-child relations each authority arm currently states, then publishes the one
 /// the child's own authority selects.
 ///
-/// Publication is per child, not per subtree: an unmigrated ENSv1 child stays ENSv1 below a
-/// migrated parent, and a child that reaches ENSv2 — through an activated migration boundary or a
-/// positive ENSv2 registration — publishes its ENSv2 relation while the retained ENSv1 relation
-/// becomes residue. A released ENSv2 child publishes nothing and never falls back to ENSv1, and a
-/// pair whose arms cannot be told apart is omitted as unsupported rather than ranked.
+/// Parent migration reachability filters the ENSv1 arm before the child's authority selects an
+/// arm. A released ENSv2 child publishes nothing and never falls back to ENSv1, and a pair whose
+/// arms cannot be told apart is omitted as unsupported rather than ranked.
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
-    candidates(transaction, target).await?;
+    candidates(transaction, chain_id, target).await?;
     publish(transaction, chain_id, target).await
 }
 
-async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker) -> Result<()> {
+async fn candidates(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target: &Marker,
+) -> Result<()> {
     sqlx::query(
         r#"
         CREATE TEMP TABLE project_child_candidates ON COMMIT DROP AS
-        WITH ranked_v1 AS (
+        WITH target_time AS (
+            SELECT extract(epoch FROM block_timestamp) AS epoch_seconds,
+                   block_timestamp + interval '1 second' AS binding_cutoff
+            FROM chain_lineage
+            WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3
+        ), parent_migrations AS (
+            SELECT DISTINCT ON (event.logical_name_id)
+                   event.logical_name_id,
+                   event.after_state ->> 'migration_path' AS migration_path,
+                   event.after_state ->> 'successor_registry_contract_instance_id'
+                       AS successor_registry_contract_instance_id,
+                   event.event_identity, event.raw_fact_ref
+            FROM project_events event
+            WHERE event.source_family = 'ens_v2_migration_l1'
+              AND event.event_kind = 'MigrationApplied'
+              AND event.logical_name_id IS NOT NULL
+            ORDER BY event.logical_name_id,
+                     event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.event_identity DESC
+        ), current_v1_resources AS (
+            SELECT DISTINCT ON (binding.logical_name_id)
+                   binding.logical_name_id, binding.resource_id
+            FROM project_binding_candidates binding
+            CROSS JOIN target_time
+            WHERE binding.authority_arm = 'ens_v1'
+              AND binding.resource_id IS NOT NULL
+              AND binding.active_from < target_time.binding_cutoff
+              AND (binding.active_to IS NULL
+                   OR binding.active_to >= target_time.binding_cutoff)
+            ORDER BY binding.logical_name_id, binding.block_number DESC,
+                     COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1) DESC,
+                     COALESCE((binding.provenance ->> 'log_index')::bigint, -1) DESC,
+                     binding.surface_binding_id DESC
+        ), wrapper_modifiers AS (
+            SELECT DISTINCT ON (event.logical_name_id, event.resource_id)
+                   event.logical_name_id, event.resource_id,
+                   CASE event.after_state ->> 'wrapper_state'
+                       WHEN 'wrapped' THEN 'wrapped'
+                       WHEN 'emancipated' THEN 'emancipated'
+                       WHEN 'locked' THEN 'locked'
+                   END AS wrapper_state,
+                   CASE WHEN jsonb_typeof(event.after_state -> 'fuses') = 'number'
+                         AND (event.after_state ->> 'fuses')::numeric BETWEEN 0 AND 4294967295
+                       THEN (event.after_state ->> 'fuses')::bigint END AS fuses,
+                   event.event_identity, event.raw_fact_ref
+            FROM project_events event
+            WHERE event.source_family = 'ens_v1_wrapper_l1'
+              AND event.event_kind = 'PermissionScopeChanged'
+              AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
+            ORDER BY event.logical_name_id, event.resource_id,
+                     event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ), wrapper_expiries AS (
+            SELECT DISTINCT ON (event.logical_name_id, event.resource_id)
+                   event.logical_name_id, event.resource_id,
+                   CASE WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
+                         AND (event.after_state ->> 'expiry')::numeric BETWEEN
+                             0 AND 18446744073709551615
+                       THEN (event.after_state ->> 'expiry')::numeric END AS expiry_seconds,
+                   event.event_identity, event.raw_fact_ref
+            FROM project_events event
+            WHERE event.event_kind = 'ExpiryChanged'
+              AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
+              AND (event.source_family = 'ens_v1_wrapper_l1' OR (
+                   event.source_family = 'ens_v1_registrar_l1'
+                   AND event.after_state ->> 'source_event' = 'NameRenewed'
+                   AND event.after_state ->> 'authority_kind' = 'wrapper'))
+            ORDER BY event.logical_name_id, event.resource_id,
+                     event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ), effective_wrapper_state AS (
+            SELECT resource.logical_name_id,
+                   CASE WHEN modifier.wrapper_state IS NULL OR modifier.fuses IS NULL
+                         OR expiry.expiry_seconds IS NULL OR target_time.epoch_seconds IS NULL
+                         OR expiry.expiry_seconds < target_time.epoch_seconds THEN 0
+                       ELSE modifier.fuses END AS fuses,
+                   modifier.event_identity AS modifier_event_identity,
+                   modifier.raw_fact_ref AS modifier_raw_fact_ref,
+                   expiry.event_identity AS expiry_event_identity,
+                   expiry.raw_fact_ref AS expiry_raw_fact_ref
+            FROM current_v1_resources resource
+            CROSS JOIN target_time
+            LEFT JOIN wrapper_modifiers modifier
+              ON modifier.logical_name_id = resource.logical_name_id
+             AND modifier.resource_id = resource.resource_id
+            LEFT JOIN wrapper_expiries expiry
+              ON expiry.logical_name_id = resource.logical_name_id
+             AND expiry.resource_id = resource.resource_id
+        ), v2_registration_history AS (
+            SELECT DISTINCT event.logical_name_id,
+                   event.after_state ->> 'registry_contract_instance_id'
+                       AS registry_contract_instance_id
+            FROM project_events event
+            WHERE event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+              AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed')
+              AND event.logical_name_id IS NOT NULL
+              AND event.after_state ->> 'registry_contract_instance_id' IS NOT NULL
+        ), ranked_v1 AS (
             SELECT event.*,
                    row_number() OVER (
                        PARTITION BY event.namespace,
@@ -89,7 +194,18 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                    event.canonicality_state::text AS canonicality_state,
                    CASE WHEN event.source_family = 'basenames_base_registry'
                        THEN 'basenames' ELSE 'ens_v1'
-                   END AS authority_arm
+                   END AS authority_arm,
+                   migration.event_identity AS parent_migration_event_identity,
+                   migration.raw_fact_ref AS parent_migration_raw_fact_ref,
+                   wrapper.modifier_event_identity, wrapper.modifier_raw_fact_ref,
+                   wrapper.expiry_event_identity, wrapper.expiry_raw_fact_ref,
+                   CASE WHEN migration.migration_path = 'locked_wrapped'
+                       THEN jsonb_build_object(
+                           'derivation_kind', 'locked_parent_migratable_child',
+                           'successor_registry_contract_instance_id',
+                           migration.successor_registry_contract_instance_id
+                       )
+                   END AS parent_reachability
             FROM ranked_v1 event
             JOIN project_surfaces parent
               ON lower(parent.namehash) = lower(event.after_state ->> 'node')
@@ -101,6 +217,11 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                  lower(event.after_state ->> 'labelhash')
             LEFT JOIN project_latest_registry_owner ownership
               ON ownership.logical_name_id = event.namespace || ':' ||
+                 lower(event.after_state ->> 'child_node')
+            LEFT JOIN parent_migrations migration
+              ON migration.logical_name_id = parent.logical_name_id
+            LEFT JOIN effective_wrapper_state wrapper
+              ON wrapper.logical_name_id = event.namespace || ':' ||
                  lower(event.after_state ->> 'child_node')
             WHERE event.current_rank = 1
               AND (
@@ -117,6 +238,29 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                             lower(event.after_state ->> 'child_node')
                   )
               )
+              -- Unlocked migration has no child subregistry, and the Graveyard clears the
+              -- unreachable ENSv1 path. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64)
+              -- (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L201 @ ens_v2@a971bd64)
+              -- The locked registry retains exactly the contract's migratable children.
+              -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+              -- The fuse mask and its bit values come from the pinned ENS contracts.
+              -- (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64)
+              -- (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f)
+              AND (event.source_family <> 'ens_v1_registry_l1'
+                   OR migration.logical_name_id IS NULL
+                   OR (migration.migration_path = 'locked_wrapped'
+                       AND (wrapper.fuses & 196608) = 65536
+                       AND lower(COALESCE(
+                           ownership.owner_getter, event.after_state ->> 'owner_getter',
+                           event.after_state ->> 'owner', ''
+                       )) NOT IN ('', '0x0000000000000000000000000000000000000000')
+                       AND NOT EXISTS (
+                           SELECT 1 FROM v2_registration_history history
+                           WHERE history.logical_name_id = event.namespace || ':' ||
+                                 lower(event.after_state ->> 'child_node')
+                             AND history.registry_contract_instance_id =
+                                 migration.successor_registry_contract_instance_id
+                       )))
         ),
         ranked_v2_subregistries AS (
             SELECT event.*,
@@ -207,7 +351,14 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
                        'registration', registration.raw_fact_ref
                    ) AS raw_fact_ref,
                    registration.canonicality_state::text AS canonicality_state,
-                   'ens_v2' AS authority_arm
+                   'ens_v2' AS authority_arm,
+                   NULL::text AS parent_migration_event_identity,
+                   NULL::jsonb AS parent_migration_raw_fact_ref,
+                   NULL::text AS modifier_event_identity,
+                   NULL::jsonb AS modifier_raw_fact_ref,
+                   NULL::text AS expiry_event_identity,
+                   NULL::jsonb AS expiry_raw_fact_ref,
+                   NULL::jsonb AS parent_reachability
             FROM current_v2_subregistries subregistry
             JOIN project_surfaces parent
               ON parent.logical_name_id = subregistry.logical_name_id
@@ -216,9 +367,9 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
               ON address.chain_id = subregistry.chain_id
              AND lower(address.address) = subregistry.subregistry_address
              AND (address.active_from_block_number IS NULL
-                  OR address.active_from_block_number <= $1)
+                  OR address.active_from_block_number <= $2)
              AND (address.active_to_block_number IS NULL
-                  OR address.active_to_block_number > $1)
+                  OR address.active_to_block_number > $2)
              AND address.deactivated_at IS NULL
             JOIN ranked_v2_registrations registration
               ON registration.current_rank = 1
@@ -241,7 +392,9 @@ async fn candidates(transaction: &mut Transaction<'_, Postgres>, target: &Marker
         SELECT * FROM v2_rows
         "#,
     )
+    .bind(chain_id)
     .bind(target.number)
+    .bind(&target.hash)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to stage child candidates", error))?;
@@ -315,10 +468,18 @@ async fn publish(
                child.owner,
                child.registrant,
                jsonb_build_object(
-                   'normalized_event_ids', jsonb_build_array(
-                       child.normalized_event_id
-                   ),
-                   'raw_fact_refs', jsonb_build_array(child.raw_fact_ref),
+                   'normalized_event_ids', jsonb_build_array(child.normalized_event_id),
+                   'event_identities', to_jsonb(array_remove(ARRAY[
+                       child.event_identity, child.parent_migration_event_identity,
+                       child.modifier_event_identity, child.expiry_event_identity
+                   ]::text[], NULL)),
+                   'raw_fact_refs', jsonb_build_array(child.raw_fact_ref)
+                       || CASE WHEN child.parent_migration_raw_fact_ref IS NULL THEN '[]'::jsonb
+                           ELSE jsonb_build_array(child.parent_migration_raw_fact_ref) END
+                       || CASE WHEN child.modifier_raw_fact_ref IS NULL THEN '[]'::jsonb
+                           ELSE jsonb_build_array(child.modifier_raw_fact_ref) END
+                       || CASE WHEN child.expiry_raw_fact_ref IS NULL THEN '[]'::jsonb
+                           ELSE jsonb_build_array(child.expiry_raw_fact_ref) END,
                    'manifest_versions', jsonb_build_array(jsonb_build_object(
                        'source_manifest_id', child.source_manifest_id,
                        'source_family', child.source_family,
@@ -330,7 +491,8 @@ async fn publish(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'
                    )
-               ),
+               ) || CASE WHEN child.parent_reachability IS NULL THEN '{}'::jsonb
+                   ELSE jsonb_build_object('parent_reachability', child.parent_reachability) END,
                jsonb_build_object(
                    'block_number', child.block_number,
                    'block_hash', child.block_hash,

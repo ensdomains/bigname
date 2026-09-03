@@ -17,10 +17,83 @@ pub(super) async fn seed(
         target_block,
     )
     .await?;
+    seed_parent_migration_children(transaction, chain_id, target_block).await?;
     seed_children(transaction, chain_id).await?;
     seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_resolvers(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_primary(transaction, chain_id).await?;
+    Ok(())
+}
+
+async fn seed_parent_migration_children(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        WITH retracted_parents AS (
+            SELECT row.logical_name_id, row.namespace FROM name_current row
+            WHERE row.provenance ->> 'chain_id' = $1
+              AND row.provenance #>> '{authority_selection,proof_kind}' = 'migration_authority_transition'
+              AND row.provenance #>> '{authority_selection,proof_event_id}'
+                  NOT IN ('', 'null')
+              AND NOT EXISTS (
+                  SELECT 1 FROM normalized_events event
+                  LEFT JOIN chain_lineage lineage
+                    ON lineage.chain_id = event.chain_id
+                   AND lineage.block_hash = event.block_hash
+                   AND lineage.block_number = event.block_number
+                  WHERE event.normalized_event_id =
+                        (row.provenance #>>
+                            '{authority_selection,proof_event_id}')::bigint
+                    AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    AND ((event.block_number IS NULL AND event.block_hash IS NULL)
+                         OR lineage.canonicality_state IN (
+                             'canonical', 'safe', 'finalized'
+                         ))
+              )
+        ), candidates AS (
+            SELECT parent.logical_name_id FROM retracted_parents parent
+            UNION
+            SELECT child.child_logical_name_id FROM retracted_parents parent
+            JOIN children_current child
+              ON child.parent_logical_name_id = parent.logical_name_id
+             AND child.provenance ->> 'chain_id' = $1
+            UNION
+            SELECT event.namespace || ':' || lower(event.after_state ->> 'child_node') FROM retracted_parents parent
+            JOIN normalized_events event
+              ON event.chain_id = $1
+             AND event.namespace = parent.namespace
+             AND event.namespace || ':' || lower(event.after_state ->> 'node') =
+                 parent.logical_name_id
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = event.chain_id
+             AND lineage.block_hash = event.block_hash
+             AND lineage.block_number = event.block_number
+            WHERE event.source_family = 'ens_v1_registry_l1'
+              AND event.event_kind = 'SubregistryChanged'
+              AND event.consumer_visibility = 'activated'
+              AND event.block_number <= $2
+              AND event.after_state ->> 'child_node' IS NOT NULL AND btrim(event.after_state ->> 'child_node') <> ''
+              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        )
+        INSERT INTO project_scope_children
+        SELECT logical_name_id FROM candidates
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to retain retracted parent migration children",
+            error,
+        )
+    })?;
     Ok(())
 }
 
