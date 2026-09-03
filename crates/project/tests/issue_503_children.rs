@@ -8,6 +8,7 @@ const CHAIN: &str = "ethereum-sepolia";
 const PARENT: &str = "ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CHILD: &str = "ens:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const V1_RESOURCE: &str = "11111111-1111-1111-1111-111111111111";
+const V1_WRAPPER_RESOURCE: &str = "77777777-7777-7777-7777-777777777777";
 const V1_BINDING: &str = "22222222-2222-2222-2222-222222222222";
 const V2_RESOURCE: &str = "33333333-3333-3333-3333-333333333333";
 const V2_BINDING: &str = "44444444-4444-4444-4444-444444444444";
@@ -110,6 +111,8 @@ async fn seed_identity(pool: &PgPool, child_arms: &[&str]) -> Result<()> {
         sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $4, to_timestamp(1700000000), $5, $6, 10, '{\"transaction_index\":0,\"log_index\":0}', 'canonical')")
             .bind(binding).bind(CHILD).bind(resource).bind(arm).bind(CHAIN).bind(hash(10)).execute(pool).await?;
     }
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(V1_WRAPPER_RESOURCE).bind(CHAIN).bind(hash(10)).execute(pool).await?;
     Ok(())
 }
 
@@ -123,7 +126,7 @@ async fn seed_wrapper(pool: &PgPool, fuses: i64, expiry: i64) -> Result<()> {
         pool,
         "wrapper-fuses",
         CHILD,
-        Some(V1_RESOURCE),
+        Some(V1_WRAPPER_RESOURCE),
         "ens_v1_wrapper_l1",
         "PermissionScopeChanged",
         10,
@@ -135,7 +138,7 @@ async fn seed_wrapper(pool: &PgPool, fuses: i64, expiry: i64) -> Result<()> {
         pool,
         "wrapper-expiry",
         CHILD,
-        Some(V1_RESOURCE),
+        Some(V1_WRAPPER_RESOURCE),
         "ens_v1_wrapper_l1",
         "ExpiryChanged",
         10,
@@ -281,6 +284,54 @@ async fn project_case(prefix: &str, case: Case<'_>) -> Result<bool> {
     visible(&pool).await
 }
 
+async fn same_position_wrapper_case(prefix: &str, reverse: bool) -> Result<bool> {
+    let (_db, pool) = database(prefix).await?;
+    seed_identity(&pool, &["ens_v1"]).await?;
+    seed_v1_relation(&pool, OWNER, 10).await?;
+    let mut evidence = vec![
+        (
+            "wrapper-fuses-a",
+            "PermissionScopeChanged",
+            json!({"fuses":0,"wrapper_state":"emancipated"}),
+        ),
+        (
+            "wrapper-fuses-z",
+            "PermissionScopeChanged",
+            json!({"fuses":65_536,"wrapper_state":"emancipated"}),
+        ),
+        ("wrapper-expiry-a", "ExpiryChanged", json!({"expiry":1})),
+        (
+            "wrapper-expiry-z",
+            "ExpiryChanged",
+            json!({"expiry":2_000_000_000_i64}),
+        ),
+    ];
+    if reverse {
+        evidence.reverse();
+    }
+    for (identity, kind, after) in evidence {
+        event(
+            &pool,
+            identity,
+            CHILD,
+            Some(V1_WRAPPER_RESOURCE),
+            "ens_v1_wrapper_l1",
+            kind,
+            10,
+            if kind == "PermissionScopeChanged" {
+                4
+            } else {
+                5
+            },
+            after,
+        )
+        .await?;
+    }
+    seed_migration(&pool, "locked_wrapped", 10, "parent-migration").await?;
+    run(&pool, 10, None, RunMode::Normal).await?;
+    visible(&pool).await
+}
+
 macro_rules! visibility_test {
     ($name:ident, $prefix:literal, $case:expr, $expected:expr) => {
         #[tokio::test]
@@ -333,20 +384,31 @@ visibility_test!(
     },
     false
 );
-visibility_test!(
-    locked_parent_publishes_migratable_v1_child,
-    "issue503_locked_ok",
-    Case {
-        path: Some("locked_wrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
-    },
-    true
-);
+#[tokio::test]
+async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
+    assert!(same_position_wrapper_case("issue503_wrapper_tie_forward", false).await?);
+    assert!(same_position_wrapper_case("issue503_wrapper_tie_reverse", true).await?);
+
+    let (_incremental_db, incremental) = database("issue503_wrapper_expiry_incremental").await?;
+    seed_identity(&incremental, &["ens_v1"]).await?;
+    seed_v1_relation(&incremental, OWNER, 10).await?;
+    seed_wrapper(&incremental, 65_536, 1_800_000_010).await?;
+    seed_migration(&incremental, "locked_wrapped", 10, "parent-migration").await?;
+    run(&incremental, 10, None, RunMode::Normal).await?;
+    assert!(visible(&incremental).await?);
+    run(&incremental, 11, Some(10), RunMode::Normal).await?;
+
+    let (_fresh_db, fresh) = database("issue503_wrapper_expiry_fresh").await?;
+    seed_identity(&fresh, &["ens_v1"]).await?;
+    seed_v1_relation(&fresh, OWNER, 10).await?;
+    seed_wrapper(&fresh, 65_536, 1_800_000_010).await?;
+    seed_migration(&fresh, "locked_wrapped", 10, "parent-migration").await?;
+    run(&fresh, 11, None, RunMode::Normal).await?;
+
+    assert_eq!(rows(&incremental).await?, rows(&fresh).await?);
+    assert!(!visible(&incremental).await?);
+    Ok(())
+}
 visibility_test!(
     locked_parent_hides_child_without_parent_cannot_control,
     "issue503_no_pcc",

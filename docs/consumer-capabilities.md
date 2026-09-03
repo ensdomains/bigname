@@ -151,10 +151,11 @@ binding transition or change an authority epoch.
 
 Slice 3B selects direct-subname ownership per child, replacing the previous
 child recency tie-break rather than layering authority on top of it: recency now
-orders only the current relation within the one selected arm. A child that has
-not migrated can remain ENSv1-authoritative below a migrated parent and publishes
-its ENSv1 parent-child relation on its own authority, not by inheriting the
-parent's. Once that child migrates or otherwise obtains a current ENSv2
+orders only the current relation within the one selected arm. Parent reachability
+first removes an ENSv1 relation below an unwrapped or unlocked-wrapped migrated
+parent. A locked-wrapped parent retains it only for a
+[migratable child](glossary.md#migratable-child). Once that child migrates or
+otherwise obtains a current ENSv2
 registration, the published relation is the ENSv2 one and the retained ENSv1
 relation is residue. A later release leaves the child unregistered on the ENSv2
 side rather than restoring the retained ENSv1 relation. A Mainnet pair whose two

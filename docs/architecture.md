@@ -292,17 +292,17 @@ replace current `expires_at`; later ENSv1 husk expiry or renewal facts remain
 history. Candidate facts in slice 1 change neither value.
 
 The replacement authority contract selects authority per logical name, but an
-ENSv1 child relation must first remain reachable through its parent's migration
-path. The parent rule is:
+ENSv1 child relation must first remain reachable through its parent's
+ENSv1→ENSv2 migration path. The parent rule is:
 
 | Parent state | ENSv1 child-arm eligibility |
 | --- | --- |
 | No activated `MigrationApplied` | Eligible under the existing live-owner rule. |
 | `migration_path = unwrapped` | Ineligible. |
 | `migration_path = unlocked_wrapped` | Ineligible. |
-| `migration_path = locked_wrapped` | Eligible only for a **migratable child**: the child has never been registered in the parent's successor ENSv2 registry, its current expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set while `IS_DOT_ETH` is clear, and its current ENSv1 registry owner is nonzero. |
+| `migration_path = locked_wrapped` | Eligible only for a [migratable child](glossary.md#migratable-child): the child has never been registered in the parent's successor ENSv2 registry, its current expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set while `IS_DOT_ETH` is clear, and its current ENSv1 registry owner is nonzero. NameWrapper preserves fuse and expiry data when a child unwraps, so Project uses the latest wrapper resource evidence even when the active ENSv1 binding has rotated. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f) |
 
-Unlocked migration registers the parent in ENSv2 without deploying a child
+Unlocked ENSv1→ENSv2 migration registers the parent in ENSv2 without deploying a child
 subregistry, while the Graveyard clears the unreachable ENSv1 descendants.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L153-L166 @ ens_v2@a971bd64)

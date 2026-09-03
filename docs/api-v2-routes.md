@@ -801,10 +801,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   from the relation its own selected authority names. ENSv1 relations that are
   unreachable through the parent's ENSv1→ENSv2 migration path are omitted. An
   unwrapped or unlocked-wrapped migrated parent retains no ENSv1 children. A
-  locked-wrapped migrated parent retains only a migratable child: one never
+  locked-wrapped migrated parent retains only a [migratable child](glossary.md#migratable-child): one never
   registered in that parent's successor ENSv2 registry, whose current
   expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH`
-  clear, and whose current ENSv1 registry owner is nonzero. The child's own
+  clear, and whose current ENSv1 registry owner is nonzero. The wrapper fuse
+  and expiry evidence remains effective across an ENSv1 binding rotation.
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f)
+  The child's own
   authority arm still chooses between the remaining ENSv1 and ENSv2 candidates.
   A child whose arms disagree with no authority proof is omitted entirely, and
   on the Mainnet deployment profile an ENSv1 relation asserted after a proven

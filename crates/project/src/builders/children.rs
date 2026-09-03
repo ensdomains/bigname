@@ -5,9 +5,9 @@ use crate::{Marker, ProjectError, Result};
 /// Builds the parent-child relations each authority arm currently states, then publishes the one
 /// the child's own authority selects.
 ///
-/// Parent migration reachability filters the ENSv1 arm before the child's authority selects an
-/// arm. A released ENSv2 child publishes nothing and never falls back to ENSv1, and a pair whose
-/// arms cannot be told apart is omitted as unsupported rather than ranked.
+/// Parent ENSv1→ENSv2 migration reachability filters the ENSv1 arm before the child's authority
+/// selects an arm. A released ENSv2 child publishes nothing and never falls back to ENSv1, and a
+/// pair whose arms cannot be told apart is omitted as unsupported rather than ranked.
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -46,22 +46,8 @@ async fn candidates(
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
                      event.event_identity DESC
-        ), current_v1_resources AS (
-            SELECT DISTINCT ON (binding.logical_name_id)
-                   binding.logical_name_id, binding.resource_id
-            FROM project_binding_candidates binding
-            CROSS JOIN target_time
-            WHERE binding.authority_arm = 'ens_v1'
-              AND binding.resource_id IS NOT NULL
-              AND binding.active_from < target_time.binding_cutoff
-              AND (binding.active_to IS NULL
-                   OR binding.active_to >= target_time.binding_cutoff)
-            ORDER BY binding.logical_name_id, binding.block_number DESC,
-                     COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1) DESC,
-                     COALESCE((binding.provenance ->> 'log_index')::bigint, -1) DESC,
-                     binding.surface_binding_id DESC
-        ), wrapper_modifiers AS (
-            SELECT DISTINCT ON (event.logical_name_id, event.resource_id)
+        ), latest_wrapper_modifiers AS (
+            SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id, event.resource_id,
                    CASE event.after_state ->> 'wrapper_state'
                        WHEN 'wrapped' THEN 'wrapped'
@@ -76,12 +62,12 @@ async fn candidates(
             WHERE event.source_family = 'ens_v1_wrapper_l1'
               AND event.event_kind = 'PermissionScopeChanged'
               AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
-            ORDER BY event.logical_name_id, event.resource_id,
+            ORDER BY event.logical_name_id,
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
-        ), wrapper_expiries AS (
+                     event.event_identity DESC
+        ), latest_wrapper_expiries AS (
             SELECT DISTINCT ON (event.logical_name_id, event.resource_id)
                    event.logical_name_id, event.resource_id,
                    CASE WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
@@ -100,9 +86,9 @@ async fn candidates(
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+                     event.event_identity DESC
         ), effective_wrapper_state AS (
-            SELECT resource.logical_name_id,
+            SELECT modifier.logical_name_id,
                    CASE WHEN modifier.wrapper_state IS NULL OR modifier.fuses IS NULL
                          OR expiry.expiry_seconds IS NULL OR target_time.epoch_seconds IS NULL
                          OR expiry.expiry_seconds < target_time.epoch_seconds THEN 0
@@ -111,14 +97,11 @@ async fn candidates(
                    modifier.raw_fact_ref AS modifier_raw_fact_ref,
                    expiry.event_identity AS expiry_event_identity,
                    expiry.raw_fact_ref AS expiry_raw_fact_ref
-            FROM current_v1_resources resource
+            FROM latest_wrapper_modifiers modifier
             CROSS JOIN target_time
-            LEFT JOIN wrapper_modifiers modifier
-              ON modifier.logical_name_id = resource.logical_name_id
-             AND modifier.resource_id = resource.resource_id
-            LEFT JOIN wrapper_expiries expiry
-              ON expiry.logical_name_id = resource.logical_name_id
-             AND expiry.resource_id = resource.resource_id
+            LEFT JOIN latest_wrapper_expiries expiry
+              ON expiry.logical_name_id = modifier.logical_name_id
+             AND expiry.resource_id = modifier.resource_id
         ), v2_registration_history AS (
             SELECT DISTINCT event.logical_name_id,
                    event.after_state ->> 'registry_contract_instance_id'
@@ -238,10 +221,11 @@ async fn candidates(
                             lower(event.after_state ->> 'child_node')
                   )
               )
-              -- Unlocked migration has no child subregistry, and the Graveyard clears the
-              -- unreachable ENSv1 path. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64)
+              -- Unlocked ENSv1→ENSv2 migration has no child subregistry, and the Graveyard
+              -- clears the unreachable ENSv1 path. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64)
               -- (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L201 @ ens_v2@a971bd64)
-              -- The locked registry retains exactly the contract's migratable children.
+              -- The locked registry retains exactly the contract's migratable children
+              -- (docs/glossary.md#migratable-child).
               -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
               -- The fuse mask and its bit values come from the pinned ENS contracts.
               -- (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64)
