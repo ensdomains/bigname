@@ -79,6 +79,7 @@ async fn database(prefix: &str) -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn event(
     pool: &PgPool,
     identity: &str,
