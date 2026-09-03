@@ -336,15 +336,15 @@ which sets a new registry owner rather than clearing the entry
 A migrated or positively registered child therefore ordinarily retains its
 ENSv1 relation. The slice 3B child assertion — ordered after the slice 2E
 exact-name assertion and keyed on the parent-child pair — fails the
-[projection generation](glossary.md#projection-generation) only when, on the
-Mainnet deployment profile, a child whose authority proof kind is
+[projection generation](glossary.md#projection-generation) only when, on a
+connected Mainnet or Sepolia deployment profile, a child whose authority proof
+kind is
 `migration_authority_transition` or `positive_v2_child_registration` has an
 ENSv1 parent-child relation asserted at a position after that child's authority
 epoch start. Such a relation contradicts the selection instead of trailing it,
 so the generation aborts with failure kind `dual_current_child_authority`
 through the same post-rollback audit path described below rather than dropping
-the contradiction silently. Sepolia selects by the same rule but never blocks
-publication on this assertion.
+the contradiction silently.
 
 The exact-name ownership rule consumes the activated proof. A
 name with an activated transition authority proof, or a current ENSv2 child
@@ -382,7 +382,7 @@ audit run alongside the corresponding child
 assertion. Those assertions run after transaction-level and then block-level
 reconciliation, so a transient state while one ENSv1→ENSv2 migration transaction
 cleans up the predecessor and establishes the successor does not fail a
-generation. A Mainnet name whose bindings remain
+generation. A connected Mainnet or Sepolia name whose bindings remain
 current after the applicable proven activated boundary causes Project to abort
 before `publish::swap`,
 publishes no partial generation, and fails readiness for that target
@@ -396,24 +396,22 @@ generation never advances the resume cursor, so the window holding the conflict
 is re-derived until it is repaired. An operator redo over a range that excludes
 the conflicted name still publishes. Reorgs retain the row and make its stored
 block hashes explicitly orphaned through lineage; a later successful generation
-does not erase the failure. Neither slice chooses by recency. A mixed
-Mainnet corpus with no provable boundary is explicit `unsupported` with
-`conflicting_current_ens_authority`. A proven Sepolia migration boundary
-follows the same per-name authority rule. Sepolia is not otherwise subject to
-the Mainnet anomaly assertion: its ENSv1 and ENSv2 test deployments are
-independent even though they share the `ens` namespace. The Sepolia profile
-admits ENSv1 sources of its own — the registry and NameWrapper families — so a
-name carrying both ENSv1 and ENSv2 evidence is a shape that profile can
-actually produce, not a hypothetical. That changes nothing about the rule: a
-proven migration boundary is still the only thing that bridges the two
-deployments for a name, and admitting ENSv1 sources alongside ENSv2 ones is not
-itself evidence of a bridge. An overlapping Sepolia
-corpus without a migration boundary is explicit `unsupported` with
-`independent_ens_deployments_overlap`; it is not evidence of a missed
-ENSv1→ENSv2 migration. Before the exact-name slice, a corpus containing both
-families retained the historical `mixed_exact_name_corpus` product reason. The
-current per-name rule and its two reasons are the contracted replacement for that
-blanket refusal, not behavior claimed by ENSv1→ENSv2 migration-family intake alone.
+does not erase the failure. Neither slice chooses by recency. A mixed Mainnet
+corpus with no provable boundary is explicit `unsupported` with
+`conflicting_current_ens_authority`; the equivalent Sepolia corpus remains
+explicit `unsupported` with `independent_ens_deployments_overlap`. Coverage
+floors are not authority evidence and do not weaken either refusal. The ENS
+root, `eth`, `reverse`, and `addr.reverse` are exact shared-infrastructure
+exceptions: when both arms exist without a proof, they select ENSv2 without
+fabricating a proof or authority epoch. Descendants, including
+`alice.addr.reverse`, are not exceptions. Existing migration proof, qualifying
+release, and released-ENSv2-regime branches retain precedence. An ordinary
+no-proof overlap is refused rather than fatal; a dual-current contradiction
+after a proven activated boundary aborts projection generation for both
+connected Mainnet and Sepolia deployment profiles. Before the exact-name slice,
+a corpus containing both families retained the historical
+`mixed_exact_name_corpus` product reason. The current per-name rule and its two
+reasons are the contracted replacement for that blanket refusal.
 
 Resolver-bearing ENSv2 reservations, their expiry maintenance, and their
 release are retained facts, but they do not establish ENSv2 authority.

@@ -100,6 +100,12 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
+> **ENS no-proof overlap refusal versus chain-side era precedence** — For an ordinary logical name with current ENSv1 and ENSv2 candidates but no activated migration, release, or other admitted authority proof, bigname refuses the name instead of inferring ENSv2. A chain-facing resolution path may nevertheless answer from one era according to its own era precedence. The ENS root, `eth`, `reverse`, and `addr.reverse` are exact ENSv2-selection exceptions because the pinned deployments create or preserve those shared infrastructure nodes in both eras. This is an exact-name exception, not a `.reverse` suffix rule. Coverage floors that omit proof events do not establish authority and do not weaken the refusal.
+> **Upstream**: the ENSv1 `.eth` resolver is updated to the ENSv2 resolver, which traverses the ENSv2 registry and retains an explicit ENSv1 override for `eth` `(upstream: .refs/ens_v2/contracts/deploy/00_ENSV2Resolver.ts:L62-L80 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L13-L23 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/resolver/ENSV2Resolver.sol:L49-L55 @ ens_v2@a971bd64)`. The ENSv2 deployment creates its root registry, registers `eth`, and registers or preserves `reverse` `(upstream: .refs/ens_v2/contracts/deploy/00_RootRegistry.ts:L15-L29 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L23-L48 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L13-L34 @ ens_v2@a971bd64)`. The ENSv1 deployment preserves `reverse` and assigns `addr.reverse` to its reverse registrar `(upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/architecture.md` § “ENSv1→ENSv2 current authority” and `crates/project/src/builders/name_authority.rs`.
+> **Why**: selecting an era for an ordinary overlap would invent an authority boundary. Shared infrastructure is admitted only where the pinned deployment itself establishes the exception.
+> **Since**: `2026-08-26`
+
 > **Ownerless ENSv2 reservation resolver serving narrowing** — bigname retains
 > reservation resolver facts for diagnostics, but product name, record, batch
 > lookup, and resolver-listing routes classify an ownerless reservation as no
