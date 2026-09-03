@@ -378,6 +378,7 @@ fn authority_boundary_state(authority: Option<&state::V1NameState>) -> serde_jso
         "source_event":"RegistrationReleased",
         "authority_kind":authority.map(|value| v1_authority_kind(&value.authority_source_family)),
         "authority_key":authority.and_then(|value| value.authority_key.clone()),
+        "owner":authority.and_then(|value| value.owner.clone()),
     })
 }
 

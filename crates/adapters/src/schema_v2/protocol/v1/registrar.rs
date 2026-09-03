@@ -391,7 +391,7 @@ fn name_event(
         );
     }
     let surface_materialization = if surface_known && ens_v1_registrar {
-        Some(state.materialize_v1_active_surface(
+        Some(state.materialize_or_sync_v1_active_surface(
             &selected.source.namespace,
             &raw_namehash,
             &logical_name_id,

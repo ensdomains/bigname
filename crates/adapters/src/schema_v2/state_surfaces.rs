@@ -241,6 +241,27 @@ impl State {
         Ok(V1SurfaceMaterialization::AlreadyMaterialized)
     }
 
+    pub(in crate::schema_v2) fn materialize_or_sync_v1_active_surface(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        logical_name_id: &str,
+        labelhash: &str,
+    ) -> anyhow::Result<V1SurfaceMaterialization> {
+        let materialization =
+            self.materialize_v1_active_surface(namespace, namehash, logical_name_id, labelhash)?;
+        if materialization == V1SurfaceMaterialization::AlreadyMaterialized {
+            self.sync_registry_surface_from_registrar(
+                namespace,
+                namehash,
+                logical_name_id,
+                true,
+                Some(labelhash),
+            );
+        }
+        Ok(materialization)
+    }
+
     pub(in crate::schema_v2) fn v1_explicit_ownerless_registry_evidence(
         &self,
         namespace: &str,

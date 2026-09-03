@@ -2,6 +2,23 @@ use uuid::Uuid;
 
 use crate::schema_v2::{model::PriorEventInput, state::State};
 
+fn materialize_or_sync_retained_registry(
+    state: &mut State,
+    event: &PriorEventInput,
+    namehash: &str,
+    logical_name_id: &str,
+    labelhash: &str,
+) {
+    if let Err(error) = state.materialize_or_sync_v1_active_surface(
+        &event.namespace,
+        namehash,
+        logical_name_id,
+        labelhash,
+    ) {
+        state.record_restore_error(error);
+    }
+}
+
 pub(super) fn restore_preimage(state: &mut State, event: &PriorEventInput) {
     if event.event_kind != "PreimageObserved" || event.logical_name_id.is_none() {
         return;
@@ -135,14 +152,13 @@ pub(super) fn restore_registrar(
                 );
             }
             if surface_known && event.source_family.starts_with("ens_v1_") {
-                if let Err(error) = state.materialize_v1_active_surface(
-                    &event.namespace,
+                materialize_or_sync_retained_registry(
+                    state,
+                    event,
                     namehash,
                     logical_name_id,
                     &labelhash,
-                ) {
-                    state.record_restore_error(error);
-                }
+                );
             }
             true
         }
@@ -228,14 +244,13 @@ pub(super) fn restore_registrar(
                 );
             }
             if surface_known && event.source_family.starts_with("ens_v1_") {
-                if let Err(error) = state.materialize_v1_active_surface(
-                    &event.namespace,
+                materialize_or_sync_retained_registry(
+                    state,
+                    event,
                     namehash,
                     logical_name_id,
                     &labelhash,
-                ) {
-                    state.record_restore_error(error);
-                }
+                );
             }
             true
         }

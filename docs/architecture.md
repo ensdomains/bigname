@@ -971,6 +971,12 @@ Fresh, restored, resumed, and redo interpretation over the same retained input
 must emit identical state-derived output. Within one raw position, Interpret
 orders the selected source's ordinary events first, then state-derived sourced
 events, the block-boundary output, and finally identity and preimage output.
+When a registrar registration becomes current at the first active ENSv1 name
+surface, Interpret also copies that surface identity onto any retained
+registry-only authority and registry read anchor. This does not make the
+registry resource current while the registration is live; it preserves the
+known direct-registry fallback so a later registrar release can bind that
+existing registry resource in fresh, restored, resumed, and redo execution.
 
 The retained ENSv1 resolver pointer records whether its selecting `NewResolver`
 came from the old or current registry. A current-registry `NewOwner` ends an

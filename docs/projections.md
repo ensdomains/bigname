@@ -461,7 +461,11 @@ an older nonzero selection. The original raw-derived normalized row remains
 immutable; the linked pointer is an additive
 [state-derived normalized event](glossary.md#state-derived-normalized-event) at
 the surface-materializing renewal. Record attribution remains node-keyed and
-provider-free.
+provider-free. If a registrar registration makes the registrar resource current
+before the retained registry-only authority can be materialized, the same
+observation still marks that retained authority's surface known. A later
+registrar release can therefore restore the existing registry resource and its
+direct-registry owner instead of losing the known name.
 A resource-less record event cannot create a binding, and name and record reads
 expose the inventory only when the name's current readable control resource or
 `serving_resource_id` selects it. Resolver-local events are accepted only under the manifest and

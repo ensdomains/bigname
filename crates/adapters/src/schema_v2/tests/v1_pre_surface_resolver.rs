@@ -35,17 +35,28 @@ fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
             ),
         ],
     );
-    let registrar_manifest = manifest(
+    let registrar_manifest = manifest_with_events(
         REGISTRAR_MANIFEST_ID,
+        "ens",
         "ens_v1_registrar_l1",
-        "NameRenewed",
-        "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
-        &["registrar"],
         &[
-            "RegistrationGranted",
-            "RegistrationRenewed",
-            "ExpiryChanged",
-            "PreimageObserved",
+            (
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                &["registrar"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "NameRenewed",
+                "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
+                &["registrar"],
+                &[
+                    "RegistrationGranted",
+                    "RegistrationRenewed",
+                    "ExpiryChanged",
+                    "PreimageObserved",
+                ],
+            ),
         ],
     );
     let mut registry = admission(REGISTRY_MANIFEST_ID, "registry");
@@ -117,6 +128,21 @@ fn renewal_with_expiry(block: i64, expiry: u64) -> RawLogInput {
         0,
         REGISTRAR,
     )
+}
+
+fn registration(block: i64, expiry: u64) -> anyhow::Result<RawLogInput> {
+    Ok(raw_at(
+        NameRegistered {
+            name: "pointer".to_owned(),
+            label: keccak256(b"pointer"),
+            owner: OWNER_2.parse()?,
+            expires: U256::from(expiry),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        REGISTRAR,
+    ))
 }
 
 fn current_new_owner(owner: &str, block: i64) -> anyhow::Result<RawLogInput> {
@@ -372,6 +398,90 @@ fn current_registry_reassignment_preserves_resolver_across_every_replay_shape() 
     assert_current_registry_reassignment_replays(OWNER_2, false)?;
     assert_current_registry_reassignment_replays(OWNER, false)?;
     assert_current_registry_reassignment_replays(OWNER_2, true)
+}
+
+#[test]
+fn registered_pre_surface_registry_authority_reactivates_after_expiry_in_every_replay_shape()
+-> anyhow::Result<()> {
+    const EXPIRY: u64 = 100;
+    const RELEASE_BLOCK: i64 = 7_776_101;
+    let (manifests, admissions, node) = fixture();
+    let prefix = vec![current_new_owner(OWNER, 1)?, registration(2, EXPIRY)?];
+    let release_trigger = current_transfer(B256::ZERO, OWNER_2, RELEASE_BLOCK)?;
+    let mut history = prefix.clone();
+    history.push(release_trigger.clone());
+
+    let single = run_batches(&manifests, &admissions, vec![history.clone()])?;
+    let per_block = run_batches(
+        &manifests,
+        &admissions,
+        history.iter().cloned().map(|event| vec![event]).collect(),
+    )?;
+    let split = run_batches(
+        &manifests,
+        &admissions,
+        vec![prefix.clone(), vec![release_trigger.clone()]],
+    )?;
+    assert_eq!(single, per_block, "per-block replay drift");
+    assert_eq!(single, split, "incremental replay drift");
+
+    let (prefix_output, session) = interpret_test_batch_incremental(
+        input(manifests.clone(), admissions.clone(), Vec::new(), prefix),
+        None,
+    )?;
+    let registry_resource = prefix_output
+        .normalized_events
+        .iter()
+        .find(|event| event.block_number == Some(1) && event.event_kind == "AuthorityTransferred")
+        .and_then(|event| event.resource_id)
+        .expect("retained registry authority resource");
+    let (live, live_session) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            vec![release_trigger.clone()],
+        ),
+        Some(session),
+    )?;
+    for prior in [
+        prefix_output
+            .normalized_events
+            .iter()
+            .map(prior_event)
+            .collect(),
+        compact_prior(&prefix_output.normalized_events),
+    ] {
+        let (restored, restored_session) = interpret_test_batch_incremental(
+            input(
+                manifests.clone(),
+                admissions.clone(),
+                prior,
+                vec![release_trigger.clone()],
+            ),
+            None,
+        )?;
+        assert_eq!(live, restored, "cold restore output drift");
+        assert_eq!(live_session, restored_session, "cold restore state drift");
+    }
+    let rebound = live
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.block_number == Some(RELEASE_BLOCK)
+                && event.event_kind == "SurfaceBound"
+                && event.resource_id == Some(registry_resource)
+        })
+        .expect("expiry must reactivate the retained registry surface");
+    assert_eq!(rebound.after_state["authority_kind"], "registry_only");
+    assert_eq!(
+        live_session
+            .v1_name("ens", &format!("{node:#x}"))
+            .and_then(|authority| authority.owner),
+        Some(OWNER.to_owned()),
+        "known name must retain its direct-registry owner after registrar expiry"
+    );
+    Ok(())
 }
 
 fn assert_original_unchanged(prefix: &BatchOutput, complete: &BatchOutput) {

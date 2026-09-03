@@ -102,6 +102,20 @@ mod raw_string_events {
     }
 }
 
+mod legacy_registrar_controller_events {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event NameRegistered(
+            string name,
+            bytes32 indexed label,
+            address indexed owner,
+            uint256 cost,
+            uint256 expires
+        );
+    }
+}
+
 mod v2_registry_events {
     use alloy_sol_types::sol;
 
@@ -1533,6 +1547,74 @@ async fn pre_surface_resolver_materialization_matches_fresh_resume_and_redo() ->
     assert_eq!(raw_before, raw_log_digest(redone.pool()).await?);
     assert_eq!(fresh_snapshot["pointer_count"], 1);
     assert_eq!(fresh_snapshot["binding_count"], 1);
+    fresh.cleanup().await?;
+    resumed.cleanup().await?;
+    redone.cleanup().await
+}
+
+#[tokio::test]
+async fn pre_surface_registry_fallback_after_registrar_expiry_matches_fresh_resume_and_redo()
+-> Result<()> {
+    let (fresh, fresh_snapshot) = live_pre_surface_registry_fallback("fresh", false).await?;
+    let (resumed, resumed_snapshot) = live_pre_surface_registry_fallback("resume", true).await?;
+
+    let redone = ScratchDatabase::create("pre_surface_registry_fallback_redo").await?;
+    seed_pre_surface_registry_fallback(redone.pool()).await?;
+    run_engine(
+        redone.pool(),
+        "ethereum-mainnet",
+        0,
+        2,
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    complete_interpret_state(&redone, 2).await?;
+    let raw_before = raw_log_digest(redone.pool()).await?;
+    let phases = PhaseSet::with_ingest_and_interpret(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(redone.pool().clone())),
+    )?;
+    PhaseRunner::new(
+        redone.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "pre-surface-registry-fallback-redo",
+        test_timing(),
+    )?
+    .redo(
+        &chain_config("ethereum-mainnet")?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(1, 2)?,
+        CancellationToken::new(),
+    )
+    .await?;
+    let redo_snapshot = materialization_snapshot(redone.pool()).await?;
+    assert_eq!(fresh_snapshot, resumed_snapshot);
+    assert_eq!(fresh_snapshot, redo_snapshot);
+    assert_eq!(raw_before, raw_log_digest(redone.pool()).await?);
+
+    run_project(redone.pool(), "ethereum-mainnet", 2, 0, 2).await?;
+    let projected: (Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT declared_summary -> 'control' ->> 'registry_owner', resource_id
+         FROM name_current
+         WHERE raw_name = 'pointer.eth'",
+    )
+    .fetch_one(redone.pool())
+    .await
+    .context("load projected pointer.eth registry fallback")?;
+    assert_eq!(projected.0.as_deref(), Some(PRIOR_REGISTRY_OWNER));
+    let rebound_resource: Option<Uuid> = sqlx::query_scalar(
+        "SELECT resource_id
+         FROM normalized_events
+         WHERE chain_id = 'ethereum-mainnet'
+           AND block_number = 2
+           AND event_kind = 'SurfaceBound'
+           AND after_state ->> 'source_event' = 'RegistrationReleased'",
+    )
+    .fetch_one(redone.pool())
+    .await
+    .context("load release SurfaceBound resource")?;
+    assert_eq!(projected.1, rebound_resource);
     fresh.cleanup().await?;
     resumed.cleanup().await?;
     redone.cleanup().await
@@ -6200,6 +6282,137 @@ async fn seed_pre_surface_pointer(pool: &PgPool) -> Result<()> {
         .await?;
     }
     Ok(())
+}
+
+async fn seed_pre_surface_registry_fallback(pool: &PgPool) -> Result<()> {
+    const CHAIN: &str = "ethereum-mainnet";
+    const REGISTRY_ADDRESS: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    const LEGACY_CONTROLLER: &str = "0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5";
+    let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/mainnet");
+    sync_schema_v2_repository(pool, &load_repository(profile)?).await?;
+    sqlx::query(
+        "WITH declarations AS (
+           UPDATE manifest_contract_instances SET start_block_number = 0
+           WHERE chain_id = $1 AND lower(declared_address) IN (lower($2), lower($3))
+           RETURNING contract_instance_id
+         )
+         UPDATE contract_instance_addresses SET active_from_block_number = 0
+         WHERE contract_instance_id IN (SELECT contract_instance_id FROM declarations)",
+    )
+    .bind(CHAIN)
+    .bind(REGISTRY_ADDRESS)
+    .bind(LEGACY_CONTROLLER)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "WITH blocks(block_number, block_timestamp, emitter) AS (
+           VALUES (0::bigint, 0::bigint, $2), (1, 1, $3), (2, 7776101, $2)
+         ), lineage AS (
+           INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number, block_timestamp,
+             canonicality_state
+           )
+           SELECT $1, $1 || '-block-' || block_number,
+                  CASE WHEN block_number > 0
+                    THEN $1 || '-block-' || (block_number - 1)
+                  END,
+                  block_number, to_timestamp(block_timestamp),
+                  'canonical'::canonicality_state
+           FROM blocks RETURNING block_number
+         )
+         INSERT INTO raw_transactions (
+           chain_id, block_hash, block_number, transaction_hash,
+           transaction_index, from_address, to_address
+         )
+         SELECT $1, $1 || '-block-' || blocks.block_number,
+                blocks.block_number,
+                $1 || '-fallback-transaction-' || blocks.block_number,
+                0, $4, emitter
+         FROM blocks JOIN lineage USING (block_number)",
+    )
+    .bind(CHAIN)
+    .bind(REGISTRY_ADDRESS)
+    .bind(LEGACY_CONTROLLER)
+    .bind(SENDER)
+    .execute(pool)
+    .await?;
+    let facts = [
+        (
+            REGISTRY_ADDRESS,
+            NewOwner {
+                node: raw_namehash(&[b"eth"]),
+                label: keccak256(b"pointer"),
+                owner: PRIOR_REGISTRY_OWNER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            LEGACY_CONTROLLER,
+            legacy_registrar_controller_events::NameRegistered {
+                name: "pointer".into(),
+                label: keccak256(b"pointer"),
+                owner: REGISTRANT.parse()?,
+                cost: U256::from(1),
+                expires: U256::from(100),
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRY_ADDRESS,
+            Transfer {
+                node: B256::ZERO,
+                owner: REGISTRANT.parse()?,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (block, (emitter, fact)) in facts.into_iter().enumerate() {
+        let block = i64::try_from(block)?;
+        insert_log_at(
+            pool,
+            CHAIN,
+            block,
+            &format!("{CHAIN}-fallback-transaction-{block}"),
+            0,
+            emitter,
+            fact.topics(),
+            fact.data.as_ref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn live_pre_surface_registry_fallback(
+    label: &str,
+    split: bool,
+) -> Result<(ScratchDatabase, Value)> {
+    let scratch =
+        ScratchDatabase::create(&format!("pre_surface_registry_fallback_{label}")).await?;
+    seed_pre_surface_registry_fallback(scratch.pool()).await?;
+    run_engine(
+        scratch.pool(),
+        "ethereum-mainnet",
+        0,
+        if split { 1 } else { 2 },
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    if split {
+        run_engine(
+            scratch.pool(),
+            "ethereum-mainnet",
+            2,
+            2,
+            InterpretRunMode::Normal,
+        )
+        .await?;
+    }
+    complete_interpret_state(&scratch, 2).await?;
+    let snapshot = materialization_snapshot(scratch.pool()).await?;
+    Ok((scratch, snapshot))
 }
 
 async fn live_materialization(label: &str, split: bool) -> Result<(ScratchDatabase, Value)> {
