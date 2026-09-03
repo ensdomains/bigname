@@ -26,10 +26,10 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `83 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shard 1 requires `42 passed; 0 failed; 2
+The default gate requires the exact library-test summary `84 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shard 1 requires `43 passed; 0 failed; 2
 ignored; 42 filtered out`, and shard 2 requires `41 passed; 0 failed; 1
-ignored; 44 filtered out`. The gate checks both Cargo's exit status and every
+ignored; 45 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
 
@@ -127,7 +127,7 @@ Sort durations descending, seed shard 1 with
 `scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
 and shard 2 with the second-longest scenario by measured duration, then assign each remaining name
 to the lower predicted load subject to the required final capacities. The
-post-#612 runnable split is 42 on shard 1 and 41 on shard 2. Break equal-duration
+post-#816 runnable split is 43 on shard 1 and 41 on shard 2. Break equal-duration
 or equal-load ties by full test name, keep at most five of the measured top ten
 on either shard, and keep two ignored tests on shard 1 and one on shard 2.
 Update the lists, expected ignored-name set, counts, and predicted totals
@@ -136,33 +136,34 @@ and shard 2 modes. The explicit root-workspace build above removes a one-time
 canonical `phase-runner` compile from the first measured scenario while leaving
 scenario-specific generated builds in the timing sample.
 
-PR #612 adds four runnable scenarios, changing the inventory from 79/3 to
-83/3. Whichever PR merges second must perform this refresh; the set-equality
-gate deliberately fails closed if the inventory changes first.
+PR #612 added four runnable scenarios, and PR #816 adds one, changing the
+inventory from 79/3 to 84/3. The set-equality gate deliberately fails closed
+when the inventory changes without a matching assignment refresh.
 
 ## Coverage ledger
 
-The semantic inventory contains 62 scenario tests:
+The semantic inventory contains 63 scenario tests:
 
-- 59 retargeted and runnable;
+- 60 retargeted and runnable;
 - 3 explicitly retired with one-line reasons.
 
-The 59 runnable scenarios include the #154 known-defect reproduction described
+The 60 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 86 total tests when 24 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is -2: obsolete
+The crate contains 87 total tests when 24 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is -1: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
-parity-completeness regression tests were added. The pure in-memory
+parity-completeness regressions and the separate-transaction wrapper activation
+scenario were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
 semantic scenario. The final worker-coordination stub, verified-resolution
 scenario, and stale observed-code-hash admission scenario were removed
 explicitly with issue #314.
 
-### Retargeted and runnable (59)
+### Retargeted and runnable (60)
 
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
@@ -225,6 +226,7 @@ explicitly with issue #314.
   `reverse_primary_claims::forward_mismatch_keeps_generic_name_record_unadmitted`;
   `reverse_primary_claims::unadmitted_reverse_resolver_keeps_candidate_absent`.
 - Authority and wrapping:
+  `unadmitted_controller::later_wrap_exposes_unadmitted_controller_registrar_owner_and_expiry`;
   `unadmitted_controller::unadmitted_controller_registration_retains_resource_keyed_registrar_lease`;
   `wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity`;
   `wrapper_registration::born_wrapped_registration_retains_wrapper_authority`;
@@ -243,15 +245,15 @@ explicitly with issue #314.
 
 | Measure | Historical baseline | Retargeted suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 86 | -2 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 62 | -1 reclassified, -3 deleted, +4 added |
-| Runnable passed-count gate | 65 in the historical Anvil gate | 83 | +18 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 62 | -3 |
-| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 59 | -6 |
+| Total crate tests | 88 | 87 | -1 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 63 | -1 reclassified, -3 deleted, +5 added |
+| Runnable passed-count gate | 65 in the historical Anvil gate | 84 | +19 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 63 | -2 |
+| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 60 | -5 |
 
 The two 65 comparisons are reported because that is the historical gate
-reference, but the current passed-count denominator is explicit: 59 runnable
-Anvil scenarios and 24 harness/support checks produce 83 passes. Three semantic
+reference, but the current passed-count denominator is explicit: 60 runnable
+Anvil scenarios and 24 harness/support checks produce 84 passes. Three semantic
 scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics

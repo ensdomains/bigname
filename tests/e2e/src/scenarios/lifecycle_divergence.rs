@@ -91,7 +91,8 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
-    .await?;
+    .await
+    .context("registrar resource missing for divergent.eth")?;
     let (current_resource, current_lineage): (Uuid, Option<Uuid>) =
         sqlx::query_as(
             "SELECT binding.resource_id, resource.token_lineage_id \
@@ -104,7 +105,8 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
              ORDER BY binding.active_from DESC LIMIT 1",
         )
         .fetch_one(&run.db.pool)
-        .await?;
+        .await
+        .context("active registry-only binding missing for divergent.eth")?;
     assert_ne!(
         current_resource, registrar_resource,
         "the divergent state must bind to a distinct registry-only resource"

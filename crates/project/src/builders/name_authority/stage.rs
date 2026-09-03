@@ -123,7 +123,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                     OR (event.source_family = 'ens_v1_registrar_l1'
                         AND event.event_kind IN (
                             'RegistrationGranted', 'RegistrationRenewed',
-                            'ExpiryChanged'
+                            'ExpiryChanged', 'TokenControlTransferred'
                         )
                         AND EXISTS (
                             SELECT 1 FROM project_events selected_wrapper
@@ -134,8 +134,14 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                               AND selected_wrapper.source_family =
                                   'ens_v1_wrapper_l1'
                               AND selected_wrapper.event_kind = 'SurfaceBound'
-                              AND selected_wrapper.transaction_hash =
-                                  event.transaction_hash
+                              AND (
+                                  event.event_kind <> 'TokenControlTransferred'
+                                  OR event.transaction_hash IS DISTINCT FROM
+                                     selected_wrapper.transaction_hash
+                              )
+                              AND selected_wrapper.after_state ->>
+                                  'wrapped_registrar_resource_id' =
+                                  event.resource_id::text
                               AND lower(selected_wrapper.after_state ->> 'node') =
                                   lower(event.after_state ->> 'namehash')
                         ))))
@@ -156,7 +162,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                            authority.selected_authority_arm = 'ens_v1'
                            AND event.event_kind IN (
                                'RegistrationGranted', 'RegistrationRenewed',
-                               'ExpiryChanged'
+                               'ExpiryChanged', 'TokenControlTransferred'
                            )
                            AND event.source_family = 'ens_v1_registrar_l1'
                            AND COALESCE(
@@ -213,12 +219,18 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                                    SELECT 1
                                    FROM project_events selected_wrapper
                                    JOIN project_events registration
-                                     ON registration.transaction_hash =
-                                        selected_wrapper.transaction_hash
-                                    AND registration.resource_id = event.resource_id
+                                     ON registration.resource_id = event.resource_id
                                     AND registration.source_family =
                                         'ens_v1_registrar_l1'
                                     AND registration.event_kind = 'RegistrationGranted'
+                                    AND selected_wrapper.after_state ->>
+                                        'wrapped_registrar_resource_id' =
+                                        registration.resource_id::text
+                                    AND (
+                                        event.event_kind <> 'TokenControlTransferred'
+                                        OR event.transaction_hash IS DISTINCT FROM
+                                           selected_wrapper.transaction_hash
+                                    )
                                     AND (registration.logical_name_id =
                                          selected_wrapper.logical_name_id
                                          OR (registration.logical_name_id IS NULL
@@ -357,6 +369,32 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                        (authority.authority_epoch_start_position ->> 'log_index')::bigint, -1
                    )
                )
+               OR (
+                   event.logical_name_id IS NULL
+                   AND event.source_family = 'ens_v1_registrar_l1'
+                   AND event.event_kind IN (
+                       'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged',
+                       'TokenControlTransferred'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM project_events selected_wrapper
+                       WHERE selected_wrapper.logical_name_id =
+                             authority.logical_name_id
+                         AND selected_wrapper.resource_id =
+                             authority.selected_resource_id
+                         AND selected_wrapper.source_family = 'ens_v1_wrapper_l1'
+                         AND selected_wrapper.event_kind = 'SurfaceBound'
+                         AND (
+                             event.event_kind <> 'TokenControlTransferred'
+                             OR event.transaction_hash IS DISTINCT FROM
+                                selected_wrapper.transaction_hash
+                         )
+                         AND selected_wrapper.after_state ->>
+                             'wrapped_registrar_resource_id' = event.resource_id::text
+                         AND lower(selected_wrapper.after_state ->> 'node') =
+                             lower(event.after_state ->> 'namehash')
+                   )
+               )
            )
          ORDER BY event.normalized_event_id",
         "UPDATE project_authority_events
@@ -365,6 +403,54 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
         "ALTER TABLE project_authority_events DROP COLUMN selected_logical_name_id",
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
+        "CREATE TEMP TABLE project_registration_events ON COMMIT DROP AS
+         SELECT event.*
+         FROM project_authority_events event
+         WHERE event.event_kind IN (
+             'RegistrationGranted', 'RegistrationReleased', 'TokenControlTransferred'
+         )
+           AND NOT (
+               (
+                   event.event_kind = 'TokenControlTransferred'
+                   AND event.source_family = 'ens_v1_wrapper_l1'
+                   AND COALESCE(event.after_state ->> 'source_event', '') = 'NameWrapped'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM project_authority_events wrapper_binding
+                       JOIN project_authority_events registrar_grant
+                         ON registrar_grant.resource_id::text =
+                            wrapper_binding.after_state ->> 'wrapped_registrar_resource_id'
+                        AND registrar_grant.source_family = 'ens_v1_registrar_l1'
+                        AND registrar_grant.event_kind = 'RegistrationGranted'
+                        AND registrar_grant.transaction_hash IS DISTINCT FROM
+                            wrapper_binding.transaction_hash
+                       WHERE wrapper_binding.logical_name_id = event.logical_name_id
+                         AND wrapper_binding.resource_id = event.resource_id
+                         AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
+                         AND wrapper_binding.event_kind = 'SurfaceBound'
+                   )
+               ) OR (
+                   event.event_kind = 'TokenControlTransferred'
+                   AND event.source_family = 'ens_v1_registrar_l1'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM project_authority_events wrapper_binding
+                       JOIN project_authority_events registrar_grant
+                         ON registrar_grant.resource_id = event.resource_id
+                        AND registrar_grant.source_family = 'ens_v1_registrar_l1'
+                        AND registrar_grant.event_kind = 'RegistrationGranted'
+                        AND registrar_grant.transaction_hash IS DISTINCT FROM
+                            wrapper_binding.transaction_hash
+                       WHERE wrapper_binding.logical_name_id = event.logical_name_id
+                         AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
+                         AND wrapper_binding.event_kind = 'SurfaceBound'
+                         AND wrapper_binding.transaction_hash = event.transaction_hash
+                         AND wrapper_binding.after_state ->>
+                             'wrapped_registrar_resource_id' = event.resource_id::text
+                   )
+               )
+           )",
+        "CREATE INDEX ON project_registration_events (logical_name_id, normalized_event_id)",
         "CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS
          SELECT authority.logical_name_id,
                 pointer.resource_id AS serving_resource_id,

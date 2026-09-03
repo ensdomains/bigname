@@ -247,7 +247,7 @@ async fn wrapper_reverse_route_snapshots(
         wrapped
             .pointer("/declared_state/control/registrant")
             .and_then(Value::as_str)
-            == Some(format!("{:#x}", chain.record_target).as_str())
+            == Some(format!("{:#x}", chain.owner).as_str())
             && wrapped
                 .pointer("/declared_state/registration/authority_kind")
                 .and_then(Value::as_str)

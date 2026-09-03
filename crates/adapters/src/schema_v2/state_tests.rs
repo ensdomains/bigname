@@ -46,11 +46,90 @@ fn controller_preimage_restore_rebinds_existing_registrar_identity() {
         .surface_known = false;
     state.active_resources.remove("test:restored");
 
-    state.observe_v1_active_surface(NAMESPACE, "restored");
+    state.bind_v1_active_surface(NAMESPACE, "restored");
 
     assert!(state.v1_registrars["test:restored"].surface_known);
     assert!(state.v1_names["test:restored"].surface_known);
     assert_eq!(state.active_resources.get("test:restored"), Some(&resource));
+}
+
+#[test]
+fn activating_a_retained_authority_uses_an_already_known_surface() {
+    const NODE: &str = "node";
+    const OWNER: &str = "0x0000000000000000000000000000000000000001";
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.observe_v1_registry(
+        NAMESPACE,
+        NODE,
+        format!("{NAMESPACE}:{NODE}"),
+        false,
+        Uuid::from_u128(3),
+        "ens_v1_registry_l1".to_owned(),
+        Some(OWNER.to_owned()),
+        Some(format!("registry-only:{NODE}")),
+    );
+    let retained = state.v1_name(NAMESPACE, NODE).expect("registry authority");
+    state.activate_v1_authority(NAMESPACE, NODE, None);
+    state.observe_v1_active_surface(NAMESPACE, NODE);
+
+    state.activate_v1_authority(NAMESPACE, NODE, Some(retained));
+    let activated = state
+        .v1_name(NAMESPACE, NODE)
+        .expect("reactivated authority");
+
+    assert!(activated.surface_known);
+}
+
+#[test]
+fn release_returns_the_promoted_retained_registry_authority() {
+    const NODE: &str = "node";
+    const OWNER: &str = "0x0000000000000000000000000000000000000001";
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.observe_v1_registry(
+        NAMESPACE,
+        NODE,
+        format!("{NAMESPACE}:{NODE}"),
+        false,
+        Uuid::from_u128(3),
+        "ens_v1_registry_l1".to_owned(),
+        Some(OWNER.to_owned()),
+        Some(format!("registry-only:{NODE}")),
+    );
+    state.set_v1_registry_owner_views(
+        NAMESPACE,
+        NODE,
+        OWNER.to_owned(),
+        OWNER.to_owned(),
+        Some("retained registry owner".to_owned()),
+    );
+    state.observe_v1_registrar(
+        NAMESPACE,
+        NODE,
+        format!("{NAMESPACE}:{NODE}"),
+        false,
+        Uuid::from_u128(1),
+        Uuid::from_u128(2),
+        "ens_v1_registrar_l1".to_owned(),
+        Some(1),
+        None,
+        Some(1),
+        Some(OWNER.to_owned()),
+        Some(format!("registrar:{NODE}")),
+        false,
+        true,
+    );
+    state.observe_v1_active_surface(NAMESPACE, NODE);
+
+    let releases = state.settle_v1_releases(1 + super::ENS_GRACE_PERIOD_SECS + 1);
+    let next = releases
+        .first()
+        .and_then(|release| release.next_authority.as_ref())
+        .expect("retained registry authority");
+
+    assert!(
+        next.surface_known,
+        "the release output must carry the surface promotion performed during activation"
+    );
 }
 
 #[test]

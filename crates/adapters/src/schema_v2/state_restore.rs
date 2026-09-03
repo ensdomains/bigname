@@ -215,11 +215,14 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
             .after_state
             .get("visibility_state")
             .and_then(Value::as_str)
-            == Some("shadow")
+            != Some("shadow")
         {
-            state.observe_v1_surface(&event.namespace, namehash);
-        } else {
             state.observe_v1_active_surface(&event.namespace, namehash);
+            if event.after_state.get("surface_known").and_then(Value::as_bool) == Some(true) {
+                state.bind_v1_active_surface(&event.namespace, namehash);
+            }
+        } else {
+            state.observe_v1_surface(&event.namespace, namehash);
         }
     }
     if matches!(source_event, Some("NewOwner" | "Transfer"))
@@ -467,7 +470,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     .after_state
                     .get("surface_known")
                     .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                    == Some(true),
                 resource_id,
                 lineage,
                 event.source_family.clone(),
@@ -507,8 +510,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     .after_state
                     .get("surface_known")
                     .and_then(Value::as_bool)
-                    .or_else(|| retained.as_ref().map(|state| state.surface_known))
-                    .unwrap_or(true),
+                    == Some(true),
                 resource_id,
                 lineage,
                 event.source_family.clone(),
@@ -552,7 +554,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     .after_state
                     .get("surface_known")
                     .and_then(Value::as_bool)
-                    .unwrap_or(true),
+                    == Some(true),
                 resource_id,
                 lineage,
                 event.source_family.clone(),

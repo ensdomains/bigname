@@ -29,7 +29,7 @@ pub(super) fn event(
     let registrar_expiry = u64::try_from(registrar_expiry)?;
     let wrapper_expiry = registrar_expiry
         .checked_add(ENS_GRACE_PERIOD_SECS)
-        .ok_or_else(|| anyhow::anyhow!("wrapped renewal expiry exceeds uint64"))?;
+        .map_or(i64::MAX as u64, |expiry| expiry.min(i64::MAX as u64));
     let Some((previous_expiry, wrapper)) =
         state.update_v1_wrapper_expiry(&selected.source.namespace, namehash, wrapper_expiry)
     else {

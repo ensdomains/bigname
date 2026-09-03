@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::support;
+use crate::harness::responses::{exact_name, pointer};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
@@ -9,9 +10,9 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 /// An owner-added controller registers directly on the registrar
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L79 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f).
-/// The admitted registrar event retains a resource-keyed lease even though the
-/// unadmitted controller contributes no plaintext surface. Without that
-/// surface, exact-name and address-name routes remain empty.
+/// The admitted registrar event retains a lease identified by its registrar
+/// resource ID even though the unadmitted controller contributes no plaintext
+/// name. Exact-name and address-name routes therefore remain empty.
 #[tokio::test]
 async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lease() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -63,7 +64,8 @@ async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lea
     );
 
     // Schema-v2 retains both the registry observation and the authoritative
-    // BaseRegistrar lifecycle, but the registrar rows remain resource-keyed.
+    // BaseRegistrar lifecycle. Those rows have a registrar resource ID but no
+    // logical name ID.
     let derived_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT event_kind, source_family FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
@@ -80,10 +82,6 @@ async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lea
             ),
             (
                 "AuthorityTransferred".to_owned(),
-                "ens_v1_registry_l1".to_owned(),
-            ),
-            (
-                "AuthorityEpochChanged".to_owned(),
                 "ens_v1_registry_l1".to_owned(),
             ),
             (
@@ -176,6 +174,55 @@ async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lea
         "a lease without a surface must not appear in a name collection: {entries:?}"
     );
 
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn later_wrap_exposes_unadmitted_controller_registrar_owner_and_expiry() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let accounts = rpc.accounts().await?;
+    let (controller, registrant, wrapped_owner) = (accounts[3], accounts[4], accounts[5]);
+
+    ens_v1::add_registrar_controller(&rpc, &deployment, controller).await?;
+    ens_v1::register_via_registrar(&rpc, &deployment, controller, "laterwrap", registrant, YEAR)
+        .await?;
+    let registrar_expiry = ens_v1::eth_name_expiry(&rpc, &deployment, "laterwrap").await?;
+    ens_v1::wrap_eth_2ld(
+        &rpc,
+        &deployment,
+        registrant,
+        "laterwrap",
+        wrapped_owner,
+        0,
+        deployment.public_resolver.address,
+    )
+    .await?;
+
+    let logical_name_id = support::schema_v2_logical_name_id("ens:laterwrap.eth");
+    let ready_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events \
+         WHERE logical_name_id = '{logical_name_id}' \
+           AND event_kind = 'SurfaceBound' \
+           AND source_family = 'ens_v1_wrapper_l1' \
+           AND canonicality_state = 'canonical')"
+    );
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
+    let body = exact_name(&run.api, "ens", "laterwrap.eth").await?;
+    assert_eq!(
+        pointer(&body, "/declared_state/registration/registrant"),
+        format!("{registrant:#x}")
+    );
+    assert_eq!(
+        pointer(&body, "/declared_state/registration/expiry"),
+        registrar_expiry
+    );
+    assert_eq!(
+        pointer(&body, "/declared_state/registration/authority_kind"),
+        "wrapper"
+    );
     run.db.cleanup().await?;
     Ok(())
 }

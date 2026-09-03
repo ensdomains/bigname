@@ -51,7 +51,6 @@ pub(super) struct EventFields {
     pub(super) resource_scope: bool,
     pub(super) grant: bool,
     pub(super) revocation: bool,
-    pub(super) named: bool,
     pub(super) current_registry_new_owner: bool,
 }
 
@@ -104,7 +103,6 @@ impl EventFields {
             revocation: state
                 .get("revocation_source")
                 .is_some_and(|source| !source.is_null()),
-            named: event.logical_name_id.is_some(),
             current_registry_new_owner: source_event == SourceEvent::NewOwner
                 && state.get("emitter_role").and_then(Value::as_str) == Some("registry"),
         }

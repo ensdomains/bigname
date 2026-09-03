@@ -199,19 +199,17 @@ fn name_renewed(
         draft.explicit_before =
             Some(json!({"expiry":existing.as_ref().and_then(|state| state.expiry)}));
     }
-    if synthetic_grant {
-        let active = state.v1_name(&selected.source.namespace, &namehash);
-        super::super::registry::append_authority_transition(
-            &mut output,
-            super::super::authority_arm(&selected.source.namespace),
-            previous_active.as_ref(),
-            active.as_ref(),
-            raw,
-            &after,
-            state.v1_resolver(&selected.source.namespace, &namehash),
-            None,
-        );
-    }
+    let active = state.v1_name(&selected.source.namespace, &namehash);
+    super::super::registry::append_authority_transition(
+        &mut output,
+        super::super::authority_arm(&selected.source.namespace),
+        previous_active.as_ref(),
+        active.as_ref(),
+        raw,
+        &after,
+        state.v1_resolver(&selected.source.namespace, &namehash),
+        None,
+    );
     if !surface_known {
         output
             .events

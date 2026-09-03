@@ -110,15 +110,7 @@ fn reconcile_registration(
     let eligible = |fields: &EventFields| {
         fields.position.is_some_and(|position| {
             if registration.window == RegistrationWindow::WholeTransaction {
-                let named_pre_anchor_setup = fields.named
-                    && fields.family == SourceFamily::Registry
-                    && matches!(
-                        fields.source_event,
-                        SourceEvent::NewOwner | SourceEvent::Transfer
-                    )
-                    && position < registration.position;
-                (!fields.named || named_pre_anchor_setup)
-                    && divergence_start.is_none_or(|start| position < start)
+                divergence_start.is_none_or(|start| position < start)
             } else {
                 position.2 < registration.log_index
             }
@@ -236,6 +228,17 @@ fn reconcile_registration(
         refresh_interpreter_state_key(event);
     }
 
+    let redundant_successor_positions = target_candidates
+        .iter()
+        .filter_map(|index| {
+            let fields = &events.fields[*index];
+            (fields.resource_id == Some(registration.resource_id)
+                && fields
+                    .position
+                    .is_some_and(|position| position > registration.position && eligible(fields)))
+            .then_some(fields.position?)
+        })
+        .collect::<BTreeSet<_>>();
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
     for index in retarget_candidates {
         if concerns_predecessor_epoch(
@@ -271,6 +274,19 @@ fn reconcile_registration(
         if !(targets_registry || targets_resolver || references_pending_resource) {
             continue;
         }
+        if fields.family == SourceFamily::Registry
+            && matches!(
+                fields.source_event,
+                SourceEvent::NewOwner | SourceEvent::Transfer
+            )
+            && matches!(
+                output.normalized_events[index].event_kind.as_str(),
+                "SurfaceBound" | "SurfaceUnbound" | "AuthorityEpochChanged" | "ResolverChanged"
+            )
+        {
+            events.active[index] = false;
+            continue;
+        }
         let event = &mut output.normalized_events[index];
         event.logical_name_id = registration
             .surface_known
@@ -292,7 +308,15 @@ fn reconcile_registration(
         events.update_resource(index, registration.resource_id);
     }
     bindings.remove(&stale_resources, &pending_positions);
+    bindings.remove(
+        &BTreeSet::from([registration.resource_id]),
+        &redundant_successor_positions,
+    );
     closures.remove(&registration.logical_name_id, &pending_positions);
+    closures.remove(
+        &registration.logical_name_id,
+        &redundant_successor_positions,
+    );
 }
 
 fn remove_transient_events(

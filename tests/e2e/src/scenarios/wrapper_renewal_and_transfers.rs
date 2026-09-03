@@ -157,8 +157,8 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/registrant"),
-        format!("{bob:#x}"),
-        "wrapped holder remains the projected registrant; body: {body}"
+        format!("{alice:#x}"),
+        "a later wrap retains the pre-wrap registrar holder until a later wrapper transfer; body: {body}"
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),

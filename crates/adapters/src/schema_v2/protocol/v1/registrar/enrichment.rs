@@ -59,25 +59,23 @@ fn event(
         });
         return Ok(output);
     };
-    let resource_id = registrar.as_ref().map(|state| state.resource_id);
-    let token_lineage_id = registrar.as_ref().and_then(|state| state.token_lineage_id);
-    let bind = registrar.as_ref().is_some_and(|state| !state.surface_known);
+    let binding_target = previous_active.as_ref().or(registrar.as_ref());
+    let resource_id = binding_target.map(|state| state.resource_id);
+    let token_lineage_id = binding_target.and_then(|state| state.token_lineage_id);
+    let bind = binding_target.is_some_and(|state| !state.surface_known);
     output.names.push(NameDraft {
         labels: vec![label, "eth".to_owned()],
         namehash,
         resource_id,
         token_lineage_id,
-        surface_binding_id: bind
-            .then_some(registrar.as_ref())
-            .flatten()
-            .and_then(|state| {
-                state.authority_key.as_ref().map(|authority_key| {
-                    stable_uuid(&format!(
-                        "binding:{authority_key}:{}",
-                        raw.block_timestamp.unix_timestamp()
-                    ))
-                })
-            }),
+        surface_binding_id: bind.then_some(binding_target).flatten().and_then(|state| {
+            state.authority_key.as_ref().map(|authority_key| {
+                stable_uuid(&format!(
+                    "binding:{authority_key}:{}",
+                    raw.block_timestamp.unix_timestamp()
+                ))
+            })
+        }),
         bind,
         binding_kind: "declared_registry_path".to_owned(),
         authority_arm: super::super::authority_arm(&selected.source.namespace).to_owned(),

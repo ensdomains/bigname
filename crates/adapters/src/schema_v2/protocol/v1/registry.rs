@@ -3,7 +3,7 @@ use anyhow::bail;
 use serde_json::{Value, json};
 
 use super::super::{
-    BindingClosureDraft, BindingDraft, EventDraft, Interpreted, ResourceDraft, ensure_declared,
+    BindingClosureDraft, EventDraft, Interpreted, ResourceDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
 use super::{support::events, unmasked_word};
@@ -13,7 +13,7 @@ use crate::evm_abi::{
 };
 use crate::schema_v2::{
     catalog::Selected,
-    common::{event_time, stable_uuid},
+    common::stable_uuid,
     model::RawLogInput,
     state::{State, V1NameState, V1RegistryReadAnchor},
 };
@@ -23,6 +23,7 @@ const ROOT_NODE: &str = "0x00000000000000000000000000000000000000000000000000000
 const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
 mod node;
 mod owner;
+mod surface;
 use node::child_node;
 use owner::{RegistryOwnerView, classify as classify_registry_owner};
 mod transfer {
@@ -525,22 +526,17 @@ pub(super) fn append_authority_transition(
     if previous.map(|authority| authority.resource_id)
         == linked.map(|authority| authority.resource_id)
     {
+        if let (Some(previous), Some(linked)) = (previous, linked)
+            && !previous.surface_known
+            && linked.surface_known
+        {
+            surface::append_binding(output, linked, authority_arm, raw, binding_active_from);
+            surface::append_bound_event(output, linked, raw, observation_state);
+        }
         return;
     }
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
-        output.bindings.push(BindingDraft {
-            logical_name_id: linked.logical_name_id.clone(),
-            resource_id: linked.resource_id,
-            binding_kind: "declared_registry_path".to_owned(),
-            authority_arm: authority_arm.to_owned(),
-            surface_binding_id: linked.authority_key.as_ref().map(|authority_key| {
-                stable_uuid(&format!(
-                    "binding:{authority_key}:{}",
-                    event_time(raw).unix_timestamp_nanos()
-                ))
-            }),
-            active_from: binding_active_from,
-        });
+        surface::append_binding(output, linked, authority_arm, raw, binding_active_from);
     } else if let Some(previous) = previous.filter(|authority| authority.surface_known) {
         output.binding_closures.push(BindingClosureDraft {
             logical_name_id: previous.logical_name_id.clone(),
@@ -556,11 +552,10 @@ pub(super) fn append_authority_transition(
                 .map(|authority| authority.logical_name_id.clone())
         });
     let Some(identity_name_id) = linked
-        .or(previous)
-        .filter(|authority| {
-            authority_arm == "ens_v1"
-                || authority.surface_known
-                || authority.token_lineage_id.is_some()
+        .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
+        .or_else(|| {
+            previous
+                .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
         })
         .map(|authority| authority.logical_name_id.clone())
     else {
@@ -593,24 +588,7 @@ pub(super) fn append_authority_transition(
         });
     }
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
-        output.events.push(EventDraft {
-            event_kind: "SurfaceBound".to_owned(),
-            logical_name_id: Some(linked.logical_name_id.clone()),
-            resource_id: Some(linked.resource_id),
-            identity_suffix: format!("SurfaceBound:{source_event}:{}", linked.resource_id),
-            explicit_before: Some(json!({})),
-            after_state: merge_observation(
-                observation_state,
-                json!({
-                    "source_event":source_event,
-                    "authority_kind":authority_kind(linked),
-                    "authority_key":linked.authority_key,
-                    "active_from":raw.block_timestamp.unix_timestamp(),
-                    "binding_kind":"declared_registry_path",
-                }),
-            ),
-            state_scope: String::new(),
-        });
+        surface::append_bound_event(output, linked, raw, observation_state);
     }
     output.events.push(EventDraft {
         event_kind: "AuthorityEpochChanged".to_owned(),

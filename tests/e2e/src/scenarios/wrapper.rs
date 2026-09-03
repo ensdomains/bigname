@@ -171,13 +171,13 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     );
     assert_eq!(
         pointer(&locked_body, "/declared_state/registration/registrant"),
-        format!("{bob:#x}"),
-        "current token-control subject should be the wrapped holder; body: {locked_body}"
+        format!("{alice:#x}"),
+        "a later wrap retains the pre-wrap registrar holder until a later wrapper transfer; body: {locked_body}"
     );
     assert_eq!(
         pointer(&locked_body, "/declared_state/control/registrant"),
-        format!("{bob:#x}"),
-        "wrapped-flow reconciliation should route control to the holder; body: {locked_body}"
+        format!("{alice:#x}"),
+        "wrapped-flow reconciliation should retain the pre-wrap registrar holder; body: {locked_body}"
     );
     let authority_key = pointer(&locked_body, "/declared_state/registration/authority_key");
     assert!(

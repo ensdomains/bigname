@@ -304,6 +304,13 @@ fn name_wrapped(
     let token_lineage_id = stable_uuid(&format!("token-lineage:{authority_key}"));
     let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let previous = state.v1_name(&selected.source.namespace, &raw_namehash);
+    let wrapped_registrar_resource_id = previous
+        .as_ref()
+        .filter(|authority| {
+            authority.authority_source_family == "ens_v1_registrar_l1"
+                && authority.token_lineage_id.is_some()
+        })
+        .map(|authority| authority.resource_id);
     let wrapper_data = state.wrap_v1_name(
         &selected.source.namespace,
         &raw_namehash,
@@ -329,7 +336,7 @@ fn name_wrapped(
         "PermissionScopeChanged",
     ];
     ensure_declared(selected, &["TokenControlTransferred"])?;
-    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":wrapper_data.fuses,"wrapper_state":wrapper_state(wrapper_data.fuses),"expiry":wrapper_data.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
+    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":wrapper_data.fuses,"wrapper_state":wrapper_state(wrapper_data.fuses),"expiry":wrapper_data.expiry,"token_lineage_id":token_lineage_id.to_string(),"wrapped_registrar_resource_id":wrapped_registrar_resource_id,"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
     let mut output = events_linked(kinds, logical_name_id, resource_id, after.clone());
     if let Some(transfer) = output
         .events

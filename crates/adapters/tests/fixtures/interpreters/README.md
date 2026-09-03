@@ -121,19 +121,24 @@ The four PR #301 reconciliation additions exercise a Basenames registration
 over a preceding registry owner, an ENS registration born wrapped, a reverse
 claim followed by a resolver name record without a materialized forward
 [name surface](../../../../../docs/glossary.md), and the legacy mainnet
-controller's `registerWithConfig` ordering. The `.eth` cases place the numeric
-BaseRegistrar registration before later registry, resolver, transfer, and
-controller logs. The last case commits the ordinary lifecycle from that
-BaseRegistrar event, retains the controller event only as plaintext enrichment,
-and reconciles the mid-flow record and final registry owner to the same
-registration resource. Temporary-controller ownership events are absent
+controller's `registerWithConfig` ordering. The `.eth` cases place each
+numeric BaseRegistrar registration at its actual position among the registry,
+resolver, registrar-transfer, and controller logs. The last case follows the
+legacy controller's configured-registration flow: registry ownership first goes
+to the controller, the BaseRegistrar then emits the numeric registration for
+that controller, resolver setup follows, and the registry and registrar token
+finally move to the requested owner before the controller emits its plaintext
+event. Reconciliation attributes those setup observations to one registration
+resource, so no separate temporary-controller
+[authority epoch](../../../../../docs/glossary.md#authority-epoch) remains.
 (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6)
-(upstream: .refs/ens_v1/deployments/mainnet/solcInputs/40ce5451dce8f428cafdaca8fb82d91d.json:L158 @ ens_v1@91c966f).
+(upstream: .refs/ens_v1/deployments/mainnet/solcInputs/40ce5451dce8f428cafdaca8fb82d91d.json:L158 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L152 @ ens_v1@91c966f).
 
 The fixture metadata carries the full pinned upstream citations. The harness
-also asserts the required event kinds, the renewal's non-empty before-state,
-the orphaned and restored reorg outputs, and the ordered wrapper transitions
-before it permits golden output to be refreshed.
+matches each committed event, surface, resource, lineage, and active binding to
+the interpreted output. Dedicated reorg, renewal, binding-closure, and wrapper
+tests cover the state transitions that are not represented by every golden case.
 
 The registrar-authority cases additionally cover a labelhash-only registration
 and renewal without controller observations, numeric-plus-controller binding,

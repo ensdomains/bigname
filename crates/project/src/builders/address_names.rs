@@ -364,7 +364,7 @@ pub(super) async fn build(
                            ELSE event.after_state ->> 'registrant'
                        END) AS registrant,
                        event.*
-                FROM project_authority_events event
+                FROM project_registration_events event
                 WHERE event.logical_name_id = name.logical_name_id
                   AND event.event_kind IN (
                       'RegistrationGranted', 'TokenControlTransferred'

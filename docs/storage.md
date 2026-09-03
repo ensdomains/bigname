@@ -169,12 +169,24 @@ mandatory full Interpret and Project redos.
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
 An ENSv1 BaseRegistrar lifecycle event observed before its plaintext label has a null
-`logical_name_id` and a non-null registrar `resource_id`. Interpret emits no `NameSurface` for that event. A
-later `PreimageObserved` creates the surface and binds it to the registrar resource; the earlier
-lifecycle rows remain resource-keyed and immutable while Project can then attribute them to the name.
+`logical_name_id` and a non-null registrar `resource_id`. Interpret emits no `NameSurface` for that event.
+A later controller `NameRegistered` or `NameRenewed` observation verifies the label, creates the
+surface, and binds it to the current retained ENSv1 authority. That is normally the registrar
+resource; a later registry-owner divergence remains current and receives the surface instead of
+reactivating the dormant registrar. A `NameWrapped` observation instead binds
+the surface to the wrapper resource; its `SurfaceBound.after_state.wrapped_registrar_resource_id`
+records the exact registrar resource whose token was wrapped, so Project can join that lineage even
+when registration and wrapping occurred in different transactions. Another same-namespace preimage
+can create the surface without binding the registrar until the next numeric BaseRegistrar event,
+provided the registrar remains the current authority. The numeric event then emits the durable
+binding without rewriting the earlier lifecycle rows. The earlier lifecycle rows
+remain resource-keyed and immutable while Project can then attribute the matching registrar lineage
+to the name. Incremental Project publication reaches resolver changes and records after the controller
+enrichment binding without requiring a synthetic `SurfaceBound` normalized event.
 BaseRegistrar encodes expiry as `uint256`; values above the signed timestamp range are retained as
 the far-future `i64::MAX` sentinel rather than failing interpretation. Settlement treats that
-sentinel as permanently live because adding the ENSv1 grace period overflows the signed range.
+sentinel as permanently live because adding the ENSv1 grace period overflows the signed range, and
+the API renders the sentinel as `null` because it is not a representable public timestamp.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L168 @ ens_v1@91c966f)
 
 Adapters provide interpretation behavior. They do not write projections. API

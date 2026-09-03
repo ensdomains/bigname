@@ -405,8 +405,8 @@ impl State {
         {
             self.active_resources.remove(&previous.logical_name_id);
         }
-        if let Some(authority) = authority {
-            if authority.surface_known {
+        if let Some(mut authority) = authority {
+            if self.promote_known_v1_authority(&key, &mut authority) {
                 self.remember_known_surface(authority.logical_name_id.clone());
                 self.active_resources
                     .insert(authority.logical_name_id.clone(), authority.resource_id);
@@ -474,8 +474,8 @@ impl State {
         } else {
             self.v1_registry_authority_if_authentic(&v1_key(namespace, namehash))
         };
-        self.activate_v1_authority(namespace, namehash, next.clone());
-        next
+        self.activate_v1_authority(namespace, namehash, next);
+        self.v1_name(namespace, namehash)
     }
 
     pub(super) fn transfer_v1_wrapper_owner(
@@ -649,8 +649,8 @@ impl State {
             };
             let next_authority = if release_is_active {
                 let next = self.v1_registry_authority_if_authentic(&key);
-                self.activate_v1_authority(namespace, namehash, next.clone());
-                next
+                self.activate_v1_authority(namespace, namehash, next);
+                self.v1_name(namespace, namehash)
             } else {
                 previous_authority.clone()
             };

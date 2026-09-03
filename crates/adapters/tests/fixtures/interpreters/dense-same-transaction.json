@@ -7,8 +7,8 @@
   "unrelated_logs_per_transaction": 48,
   "expected_raw_log_count": 1472,
   "expected_registration_count": 320,
-  "expected_normalized_event_count": 3872,
-  "expected_output_keccak": "0x9b3f46b4dfc6c70aa40dad6fe24c2f623622fae2e5306f69a55ca2bf45742fd2",
+  "expected_normalized_event_count": 3712,
+  "expected_output_keccak": "0xb5c9a6da754d331674c456c8e50ba362dca5a8653e231169a01163b718f32a1c",
   "manifests": [
     {
       "namespace": "ens",

@@ -262,7 +262,7 @@
             "block_number": 10,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000010dd",
-            "interpreter_state_key": "ens:ens_v1_registrar_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:registration:0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:registration:0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "kind": "raw_log",
             "log_index": 0,
             "state_scope": "0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
@@ -309,7 +309,7 @@
             "block_number": 10,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000010dd",
-            "interpreter_state_key": "ens:ens_v1_registrar_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:expiry:0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:expiry:0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "kind": "raw_log",
             "log_index": 0,
             "state_scope": "0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
@@ -368,7 +368,7 @@
             "block_number": 10,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000010dd",
-            "interpreter_state_key": "ens:ens_v1_registrar_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:permission:0x00000000000000000000000000000000000010dd:-:-:0x0000000000000000000000000000000000001011:PermissionChanged",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:permission:0x00000000000000000000000000000000000010dd:-:-:0x0000000000000000000000000000000000001011:PermissionChanged",
             "kind": "raw_log",
             "log_index": 0,
             "state_scope": "0x00000000000000000000000000000000000010dd:-:-:0x0000000000000000000000000000000000001011:PermissionChanged",
@@ -416,7 +416,7 @@
             "block_number": 10,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000010dd",
-            "interpreter_state_key": "ens:ens_v1_registrar_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:AuthorityEpochChanged:0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:AuthorityEpochChanged:0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "kind": "raw_log",
             "log_index": 0,
             "state_scope": "0x00000000000000000000000000000000000010dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
@@ -445,7 +445,7 @@
           "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:2:ResolverChanged:0",
           "event_kind": "ResolverChanged",
           "log_index": 2,
-          "logical_name_id": "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+          "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
@@ -453,7 +453,7 @@
             "block_number": 10,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000010bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:resolver:0x00000000000000000000000000000000000010bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewResolver",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:resolver:0x00000000000000000000000000000000000010bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewResolver",
             "kind": "raw_log",
             "log_index": 2,
             "state_scope": "0x00000000000000000000000000000000000010bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewResolver",
@@ -482,7 +482,7 @@
           "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:2:ResolverChanged:registry-read:0x00000000000000000000000000000000000010cc:1",
           "event_kind": "ResolverChanged",
           "log_index": 2,
-          "logical_name_id": "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+          "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
@@ -490,14 +490,14 @@
             "block_number": 10,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000010bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:resolver:0x00000000000000000000000000000000000010bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewResolver",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:9a09a032-5ad4-59c1-b6c7-d94b942c2eb1:resolver:0x00000000000000000000000000000000000010bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewResolver",
             "kind": "raw_log",
             "log_index": 2,
             "state_scope": "0x00000000000000000000000000000000000010bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewResolver",
             "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
             "transaction_index": 0
           },
-          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
+          "resource_id": "9a09a032-5ad4-59c1-b6c7-d94b942c2eb1",
           "source_family": "ens_v1_registry_l1",
           "source_manifest_id": 2,
           "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
@@ -2293,22 +2293,23 @@
       "normalized_events": [
         {
           "after_state": {
-            "active_edge": true,
+            "authority_key": "registry-only:ethereum-mainnet:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+            "authority_kind": "registry_only",
             "child_node": "0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
-            "emitting_address": "0x0000000000000000000000000000000000002aaa",
+            "emitter_role": "registry",
             "labelhash": "0xef5b8fe8789ed448b54018e6e47371bfa696902c135a273e35ad0d4cf6df057e",
+            "node": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "owner": "0x0000000000000000000000000000000000002a22",
-            "parent_node": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "source_event": "NewOwner",
-            "tombstone": false
+            "owner_getter": "0x0000000000000000000000000000000000002a22",
+            "source_event": "NewOwner"
           },
           "before_state": {},
           "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
           "block_number": 180,
-          "canonicality_state": "Canonical",
+          "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_subregistry_changed",
-          "event_identity": "ens_v1_subregistry_changed:1:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:0x0000000000000000000000000000000000002aaa",
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:SubregistryChanged:0",
           "event_kind": "SubregistryChanged",
           "log_index": 0,
           "logical_name_id": null,
@@ -2319,22 +2320,30 @@
             "block_number": 180,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x0000000000000000000000000000000000002aaa",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:35df7b28-6768-57de-bdc9-d104d336f4ec:subregistry:0x0000000000000000000000000000000000002aaa:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f:-:-:NewOwner",
             "kind": "raw_log",
             "log_index": 0,
+            "state_scope": "0x0000000000000000000000000000000000002aaa:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f:-:-:NewOwner",
             "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
             "transaction_index": 0
           },
-          "resource_id": null,
+          "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
           "source_family": "ens_v1_registry_l1",
           "source_manifest_id": 1,
-          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8"
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "transaction_index": 0
         },
         {
           "after_state": {
             "authority_key": "registry-only:ethereum-mainnet:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
             "authority_kind": "registry_only",
+            "child_node": "0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+            "emitter_role": "registry",
+            "labelhash": "0xef5b8fe8789ed448b54018e6e47371bfa696902c135a273e35ad0d4cf6df057e",
+            "node": "0x0000000000000000000000000000000000000000000000000000000000000000",
             "owner": "0x0000000000000000000000000000000000002a22",
-            "owner_getter": "0x0000000000000000000000000000000000002a22"
+            "owner_getter": "0x0000000000000000000000000000000000002a22",
+            "source_event": "NewOwner"
           },
           "before_state": {
             "owner": null,
@@ -2342,7 +2351,7 @@
           },
           "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
           "block_number": 180,
-          "canonicality_state": "Canonical",
+          "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
           "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:AuthorityTransferred:1",
@@ -2355,15 +2364,19 @@
             "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
             "block_number": 180,
             "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002aaa",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:35df7b28-6768-57de-bdc9-d104d336f4ec:authority:0x0000000000000000000000000000000000002aaa:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f:-:-:NewOwner",
             "kind": "raw_log",
             "log_index": 0,
+            "state_scope": "0x0000000000000000000000000000000000002aaa:0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f:-:-:NewOwner",
             "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
             "transaction_index": 0
           },
           "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
           "source_family": "ens_v1_registry_l1",
           "source_manifest_id": 1,
-          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8"
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "transaction_index": 0
         },
         {
           "after_state": {
@@ -2397,7 +2410,7 @@
           },
           "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
           "block_number": 180,
-          "canonicality_state": "Canonical",
+          "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
           "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:PermissionChanged:resource-grant:0x0000000000000000000000000000000000002a22:2",
@@ -2410,40 +2423,19 @@
             "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
             "block_number": 180,
             "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002aaa",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:35df7b28-6768-57de-bdc9-d104d336f4ec:permission:0x0000000000000000000000000000000000002aaa:-:-:0x0000000000000000000000000000000000002a22:PermissionChanged",
             "kind": "raw_log",
             "log_index": 0,
+            "state_scope": "0x0000000000000000000000000000000000002aaa:-:-:0x0000000000000000000000000000000000002a22:PermissionChanged",
             "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
             "transaction_index": 0
           },
           "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
           "source_family": "ens_v1_registry_l1",
           "source_manifest_id": 1,
-          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8"
-        },
-        {
-          "after_state": {
-            "authority_kind": "registry_only",
-            "source_event": "NewOwner"
-          },
-          "before_state": {},
-          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
-          "block_number": 180,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_kind": "AuthorityEpochChanged",
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
-            "block_number": 180,
-            "chain_id": "ethereum-mainnet"
-          },
-          "resource_id": "35df7b28-6768-57de-bdc9-d104d336f4ec",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 1,
-          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8"
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "transaction_index": 0
         }
       ],
       "resources": [],
@@ -3395,31 +3387,6 @@
         },
         {
           "after_state": {
-            "authority_kind": "registry_only",
-            "source_event": "NewOwner"
-          },
-          "before_state": {},
-          "block_hash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
-          "block_number": 181,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_kind": "AuthorityEpochChanged",
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
-            "block_number": 181,
-            "chain_id": "ethereum-mainnet"
-          },
-          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 1,
-          "transaction_hash": "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
-        },
-        {
-          "after_state": {
             "effective_powers": [
               "resource_control"
             ],
@@ -4049,54 +4016,14 @@
       "normalized_events": [
         {
           "after_state": {
-            "child_node": "0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
-            "source_event": "NewOwner"
-          },
-          "before_state": {},
-          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
-          "block_number": 190,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_kind": "SubregistryChanged",
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
-            "block_number": 190,
-            "chain_id": "ethereum-mainnet"
-          },
-          "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 1
-        },
-        {
-          "after_state": {
-            "source_event": "NewOwner"
-          },
-          "before_state": {},
-          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
-          "block_number": 190,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_kind": "AuthorityTransferred",
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
-            "block_number": 190,
-            "chain_id": "ethereum-mainnet"
-          },
-          "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 1
-        },
-        {
-          "after_state": {
+            "authority_key": "registry-only:ethereum-mainnet:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
             "authority_kind": "registry_only",
+            "child_node": "0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
+            "emitter_role": "registry",
+            "labelhash": "0x2d6ca42d0b5f46b311277710cd2dcf95bd59948e0957e7e167ebbf11ac592fc3",
+            "node": "0x91d1777781884d03a6757a803996e38de2a42967fb37eeaca72729271025a9e2",
+            "owner": "0x0000000000000000000000000000000000002aaa",
+            "owner_getter": "0x0000000000000000000000000000000000002aaa",
             "source_event": "NewOwner"
           },
           "before_state": {},
@@ -4105,44 +4032,149 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_kind": "AuthorityEpochChanged",
+          "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3:0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4:0:SubregistryChanged:0",
+          "event_kind": "SubregistryChanged",
+          "log_index": 0,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
             "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
             "block_number": 190,
-            "chain_id": "ethereum-mainnet"
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002bbb",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:597b967c-7952-59c5-a64a-e89d150498a6:subregistry:0x0000000000000000000000000000000000002bbb:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d:-:-:NewOwner",
+            "kind": "raw_log",
+            "log_index": 0,
+            "state_scope": "0x0000000000000000000000000000000000002bbb:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d:-:-:NewOwner",
+            "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+            "transaction_index": 0
           },
           "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
           "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 1
+          "source_manifest_id": 1,
+          "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "transaction_index": 0
         },
         {
           "after_state": {
-            "subject": "0x0000000000000000000000000000000000002aaa"
+            "authority_key": "registry-only:ethereum-mainnet:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
+            "authority_kind": "registry_only",
+            "child_node": "0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
+            "emitter_role": "registry",
+            "labelhash": "0x2d6ca42d0b5f46b311277710cd2dcf95bd59948e0957e7e167ebbf11ac592fc3",
+            "node": "0x91d1777781884d03a6757a803996e38de2a42967fb37eeaca72729271025a9e2",
+            "owner": "0x0000000000000000000000000000000000002aaa",
+            "owner_getter": "0x0000000000000000000000000000000000002aaa",
+            "source_event": "NewOwner"
           },
-          "before_state": {},
+          "before_state": {
+            "owner": null,
+            "owner_getter": null
+          },
           "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
           "block_number": 190,
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_kind": "PermissionChanged",
+          "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3:0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4:0:AuthorityTransferred:1",
+          "event_kind": "AuthorityTransferred",
+          "log_index": 0,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
             "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
             "block_number": 190,
-            "chain_id": "ethereum-mainnet"
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002bbb",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:597b967c-7952-59c5-a64a-e89d150498a6:authority:0x0000000000000000000000000000000000002bbb:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d:-:-:NewOwner",
+            "kind": "raw_log",
+            "log_index": 0,
+            "state_scope": "0x0000000000000000000000000000000000002bbb:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d:-:-:NewOwner",
+            "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+            "transaction_index": 0
           },
           "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
           "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 1
+          "source_manifest_id": 1,
+          "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "transaction_index": 0
         },
         {
           "after_state": {
+            "effective_powers": [
+              "resource_control"
+            ],
+            "grant_source": {
+              "authority_key": "registry-only:ethereum-mainnet:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
+              "authority_kind": "registry_only",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "AuthorityTransferred"
+            },
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000002aaa",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "before_state": {
+            "effective_powers": [],
+            "grant_source": null,
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000002aaa",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "block_number": 190,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_identity": "ens_v1_unwrapped_authority:1:ethereum-mainnet:0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3:0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4:0:PermissionChanged:resource-grant:0x0000000000000000000000000000000000002aaa:2",
+          "event_kind": "PermissionChanged",
+          "log_index": 0,
+          "logical_name_id": null,
+          "manifest_version": 1,
+          "namespace": "ens",
+          "raw_fact_ref": {
+            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+            "block_number": 190,
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002bbb",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:597b967c-7952-59c5-a64a-e89d150498a6:permission:0x0000000000000000000000000000000000002bbb:-:-:0x0000000000000000000000000000000000002aaa:PermissionChanged",
+            "kind": "raw_log",
+            "log_index": 0,
+            "state_scope": "0x0000000000000000000000000000000000002bbb:-:-:0x0000000000000000000000000000000000002aaa:PermissionChanged",
+            "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+            "transaction_index": 0
+          },
+          "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
+          "source_family": "ens_v1_registry_l1",
+          "source_manifest_id": 1,
+          "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "transaction_index": 0
+        },
+        {
+          "after_state": {
+            "address": "0x1111111111111111111111111111111111111111",
+            "claim_provenance": {
+              "contract_instance_id": "00000000-0000-0000-0000-000000000002",
+              "contract_role": "reverse_registrar",
+              "emitting_address": "0x0000000000000000000000000000000000002aaa",
+              "source_family": "ens_v1_reverse_l1"
+            },
+            "coin_type": "60",
+            "namespace": "ens",
+            "reverse_label": "1111111111111111111111111111111111111111",
+            "reverse_name": "1111111111111111111111111111111111111111.addr.reverse",
+            "reverse_namespace": "ens",
+            "reverse_node": "0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
             "source_event": "ReverseClaimed"
           },
           "before_state": {},
@@ -4151,24 +4183,41 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_reverse_claim",
+          "event_identity": "ens_v1_reverse_claim:2:ethereum-mainnet:0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3:0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4:1:ReverseChanged:0",
           "event_kind": "ReverseChanged",
+          "log_index": 1,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
             "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
             "block_number": 190,
-            "chain_id": "ethereum-mainnet"
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002aaa",
+            "interpreter_state_key": "ens:ens_v1_reverse_l1:-:-:ReverseChanged:0x0000000000000000000000000000000000002aaa:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d:-:-:ReverseClaimed",
+            "kind": "raw_log",
+            "log_index": 1,
+            "state_scope": "0x0000000000000000000000000000000000002aaa:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d:-:-:ReverseClaimed",
+            "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+            "transaction_index": 0
           },
           "resource_id": null,
           "source_family": "ens_v1_reverse_l1",
-          "source_manifest_id": 2
+          "source_manifest_id": 2,
+          "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "transaction_index": 0
         },
         {
           "after_state": {
             "node": "0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
             "raw_name": "alice.eth",
-            "source_event": "NameChanged"
+            "record_family": "name",
+            "record_key": "name",
+            "resolver": "0x0000000000000000000000000000000000002ccc",
+            "resolver_contract_instance_id": "00000000-0000-0000-0000-000000000003",
+            "selector_key": null,
+            "source_event": "NameChanged",
+            "value_retained": false
           },
           "before_state": {},
           "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
@@ -4176,22 +4225,36 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_identity": "ens_v1_unwrapped_authority:3:ethereum-mainnet:0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3:0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4:2:RecordChanged:0",
           "event_kind": "RecordChanged",
+          "log_index": 2,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
             "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
             "block_number": 190,
-            "chain_id": "ethereum-mainnet"
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002ccc",
+            "interpreter_state_key": "ens:ens_v1_resolver_l1:-:-:records:0x0000000000000000000000000000000000002ccc:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d:-:-:name",
+            "kind": "raw_log",
+            "log_index": 2,
+            "state_scope": "0x0000000000000000000000000000000000002ccc:0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d:-:-:name",
+            "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+            "transaction_index": 0
           },
           "resource_id": null,
           "source_family": "ens_v1_resolver_l1",
-          "source_manifest_id": 3
+          "source_manifest_id": 3,
+          "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "transaction_index": 0
         },
         {
           "after_state": {
-            "decoded_label": "alice"
+            "decoded_label": "alice",
+            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "raw_label_hex": "616c696365",
+            "source_event": "NameChanged"
           },
           "before_state": {},
           "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
@@ -4199,22 +4262,36 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "raw_log_preimage_observation",
+          "event_identity": "raw_log_preimage_observation:3:ethereum-mainnet:0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3:0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4:2:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
           "event_kind": "PreimageObserved",
+          "log_index": 2,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
             "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
             "block_number": 190,
-            "chain_id": "ethereum-mainnet"
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002ccc",
+            "interpreter_state_key": "ens:ens_v1_resolver_l1:-:-:PreimageObserved:0x0000000000000000000000000000000000002ccc:preimage:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "kind": "raw_log",
+            "log_index": 2,
+            "state_scope": "0x0000000000000000000000000000000000002ccc:preimage:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+            "transaction_index": 0
           },
           "resource_id": null,
           "source_family": "ens_v1_resolver_l1",
-          "source_manifest_id": 3
+          "source_manifest_id": 3,
+          "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "transaction_index": 0
         },
         {
           "after_state": {
-            "decoded_label": "eth"
+            "decoded_label": "eth",
+            "labelhash": "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0",
+            "raw_label_hex": "657468",
+            "source_event": "NameChanged"
           },
           "before_state": {},
           "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
@@ -4222,18 +4299,29 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "raw_log_preimage_observation",
+          "event_identity": "raw_log_preimage_observation:3:ethereum-mainnet:0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3:0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4:2:0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0",
           "event_kind": "PreimageObserved",
+          "log_index": 2,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
             "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
             "block_number": 190,
-            "chain_id": "ethereum-mainnet"
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002ccc",
+            "interpreter_state_key": "ens:ens_v1_resolver_l1:-:-:PreimageObserved:0x0000000000000000000000000000000000002ccc:preimage:0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0",
+            "kind": "raw_log",
+            "log_index": 2,
+            "state_scope": "0x0000000000000000000000000000000000002ccc:preimage:0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0",
+            "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+            "transaction_index": 0
           },
           "resource_id": null,
           "source_family": "ens_v1_resolver_l1",
-          "source_manifest_id": 3
+          "source_manifest_id": 3,
+          "transaction_hash": "0xe4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+          "transaction_index": 0
         }
       ],
       "resources": [
@@ -4273,21 +4361,22 @@
       "normalized_events": [
         {
           "after_state": {
-            "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0",
+            "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
             "authority_kind": "registrar",
-            "authority_owner": "0x0000000000000000000000000000000000005011",
+            "authority_owner": "0x00000000000000000000000000000000000050aa",
             "expiry": 1800000000,
             "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
             "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "registrant": "0x0000000000000000000000000000000000005011",
+            "registrant": "0x00000000000000000000000000000000000050aa",
             "registration_window": "whole_transaction",
+            "registry_migrated": true,
             "source_event": "NameRegistered",
             "surface_known": false,
             "token_id": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
-            "token_lineage_id": "3a5ef405-47ef-50c9-bd8c-c44b01f1288e"
+            "token_lineage_id": "5204f7e1-18cb-5505-9f9f-e171798f77b6"
           },
           "before_state": {
-            "authority_kind": null,
+            "authority_kind": "registry_only",
             "registrant": null
           },
           "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
@@ -4295,9 +4384,9 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:0:RegistrationGranted:0",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:RegistrationGranted:0",
           "event_kind": "RegistrationGranted",
-          "log_index": 0,
+          "log_index": 1,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
@@ -4306,14 +4395,14 @@
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000050dd",
-            "interpreter_state_key": "ens:ens_v1_registrar_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:registration:0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:registration:0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "kind": "raw_log",
-            "log_index": 0,
+            "log_index": 1,
             "state_scope": "0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
           "source_family": "ens_v1_registrar_l1",
           "source_manifest_id": 4,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
@@ -4321,18 +4410,18 @@
         },
         {
           "after_state": {
-            "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0",
+            "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
             "authority_kind": "registrar",
-            "authority_owner": "0x0000000000000000000000000000000000005011",
+            "authority_owner": "0x00000000000000000000000000000000000050aa",
             "expiry": 1800000000,
             "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
             "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "registrant": "0x0000000000000000000000000000000000005011",
+            "registrant": "0x00000000000000000000000000000000000050aa",
             "registration_window": "whole_transaction",
             "source_event": "NameRegistered",
             "surface_known": false,
             "token_id": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
-            "token_lineage_id": "3a5ef405-47ef-50c9-bd8c-c44b01f1288e"
+            "token_lineage_id": "5204f7e1-18cb-5505-9f9f-e171798f77b6"
           },
           "before_state": {
             "expiry": null
@@ -4342,9 +4431,9 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:0:ExpiryChanged:1",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:ExpiryChanged:1",
           "event_kind": "ExpiryChanged",
-          "log_index": 0,
+          "log_index": 1,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
@@ -4353,14 +4442,14 @@
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000050dd",
-            "interpreter_state_key": "ens:ens_v1_registrar_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:expiry:0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:expiry:0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "kind": "raw_log",
-            "log_index": 0,
+            "log_index": 1,
             "state_scope": "0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
           "source_family": "ens_v1_registrar_l1",
           "source_manifest_id": 4,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
@@ -4372,7 +4461,7 @@
               "resource_control"
             ],
             "grant_source": {
-              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0",
+              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
               "authority_kind": "registrar",
               "kind": "ens_v1_authority",
               "source_event_kind": "RegistrationGranted"
@@ -4382,7 +4471,7 @@
             "scope": {
               "kind": "resource"
             },
-            "subject": "0x0000000000000000000000000000000000005011",
+            "subject": "0x00000000000000000000000000000000000050aa",
             "transfer_behavior": "replace_on_authority_change"
           },
           "before_state": {
@@ -4393,7 +4482,7 @@
             "scope": {
               "kind": "resource"
             },
-            "subject": "0x0000000000000000000000000000000000005011",
+            "subject": "0x00000000000000000000000000000000000050aa",
             "transfer_behavior": "replace_on_authority_change"
           },
           "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
@@ -4401,9 +4490,9 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:0:PermissionChanged:2",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:PermissionChanged:2",
           "event_kind": "PermissionChanged",
-          "log_index": 0,
+          "log_index": 1,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
@@ -4412,14 +4501,14 @@
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000050dd",
-            "interpreter_state_key": "ens:ens_v1_registrar_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:permission:0x00000000000000000000000000000000000050dd:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:permission:0x00000000000000000000000000000000000050dd:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
             "kind": "raw_log",
-            "log_index": 0,
-            "state_scope": "0x00000000000000000000000000000000000050dd:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
+            "log_index": 1,
+            "state_scope": "0x00000000000000000000000000000000000050dd:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
           "source_family": "ens_v1_registrar_l1",
           "source_manifest_id": 4,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
@@ -4427,31 +4516,31 @@
         },
         {
           "after_state": {
-            "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0",
+            "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
             "authority_kind": "registrar",
-            "authority_owner": "0x0000000000000000000000000000000000005011",
+            "authority_owner": "0x00000000000000000000000000000000000050aa",
             "expiry": 1800000000,
             "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
             "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "registrant": "0x0000000000000000000000000000000000005011",
+            "registrant": "0x00000000000000000000000000000000000050aa",
             "registration_window": "whole_transaction",
             "source_event": "NameRegistered",
             "surface_known": false,
             "token_id": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
-            "token_lineage_id": "3a5ef405-47ef-50c9-bd8c-c44b01f1288e"
+            "token_lineage_id": "5204f7e1-18cb-5505-9f9f-e171798f77b6"
           },
           "before_state": {
-            "authority_key": null,
-            "authority_kind": null
+            "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+            "authority_kind": "registry_only"
           },
           "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
           "block_number": 200,
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:0:AuthorityEpochChanged:NameRegistered:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:3",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:AuthorityEpochChanged:NameRegistered:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:3",
           "event_kind": "AuthorityEpochChanged",
-          "log_index": 0,
+          "log_index": 1,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
@@ -4460,271 +4549,16 @@
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000050dd",
-            "interpreter_state_key": "ens:ens_v1_registrar_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:AuthorityEpochChanged:0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:AuthorityEpochChanged:0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "kind": "raw_log",
-            "log_index": 0,
+            "log_index": 1,
             "state_scope": "0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:NameRegistered",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
           "source_family": "ens_v1_registrar_l1",
           "source_manifest_id": 4,
-          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-          "transaction_index": 0
-        },
-        {
-          "after_state": {
-            "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "authority_kind": "registry_only",
-            "child_node": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "emitter_role": "registry",
-            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
-            "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
-            "owner": "0x00000000000000000000000000000000000050aa",
-            "owner_getter": "0x00000000000000000000000000000000000050aa",
-            "source_event": "NewOwner"
-          },
-          "before_state": {},
-          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-          "block_number": 200,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:SubregistryChanged:0",
-          "event_kind": "SubregistryChanged",
-          "log_index": 1,
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-            "block_number": 200,
-            "chain_id": "ethereum-mainnet",
-            "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:dad7d3be-1453-5013-b56b-3f05c0a1e2fc:subregistry:0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
-            "kind": "raw_log",
-            "log_index": 1,
-            "state_scope": "0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
-            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-            "transaction_index": 0
-          },
-          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 2,
-          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-          "transaction_index": 0
-        },
-        {
-          "after_state": {
-            "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "authority_kind": "registry_only",
-            "child_node": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "emitter_role": "registry",
-            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
-            "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
-            "owner": "0x00000000000000000000000000000000000050aa",
-            "owner_getter": "0x00000000000000000000000000000000000050aa",
-            "source_event": "NewOwner"
-          },
-          "before_state": {
-            "owner": null,
-            "owner_getter": null
-          },
-          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-          "block_number": 200,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:AuthorityTransferred:1",
-          "event_kind": "AuthorityTransferred",
-          "log_index": 1,
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-            "block_number": 200,
-            "chain_id": "ethereum-mainnet",
-            "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:dad7d3be-1453-5013-b56b-3f05c0a1e2fc:authority:0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
-            "kind": "raw_log",
-            "log_index": 1,
-            "state_scope": "0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
-            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-            "transaction_index": 0
-          },
-          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 2,
-          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-          "transaction_index": 0
-        },
-        {
-          "after_state": {
-            "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "authority_kind": "registry_only",
-            "child_node": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "emitter_role": "registry",
-            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
-            "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
-            "owner": "0x00000000000000000000000000000000000050aa",
-            "owner_getter": "0x00000000000000000000000000000000000050aa",
-            "source_event": "NewOwner"
-          },
-          "before_state": {
-            "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0",
-            "authority_kind": "registrar"
-          },
-          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-          "block_number": 200,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:AuthorityEpochChanged:NewOwner:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:2",
-          "event_kind": "AuthorityEpochChanged",
-          "log_index": 1,
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-            "block_number": 200,
-            "chain_id": "ethereum-mainnet",
-            "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:dad7d3be-1453-5013-b56b-3f05c0a1e2fc:AuthorityEpochChanged:0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
-            "kind": "raw_log",
-            "log_index": 1,
-            "state_scope": "0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
-            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-            "transaction_index": 0
-          },
-          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 2,
-          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-          "transaction_index": 0
-        },
-        {
-          "after_state": {
-            "effective_powers": [],
-            "grant_source": null,
-            "inheritance_path": [],
-            "revocation_source": {
-              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0",
-              "authority_kind": "registrar",
-              "kind": "ens_v1_authority",
-              "source_event_kind": "AuthorityTransferred"
-            },
-            "scope": {
-              "kind": "resource"
-            },
-            "subject": "0x0000000000000000000000000000000000005011",
-            "transfer_behavior": "replace_on_authority_change"
-          },
-          "before_state": {
-            "effective_powers": [
-              "resource_control"
-            ],
-            "grant_source": {
-              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0",
-              "authority_kind": "registrar",
-              "kind": "ens_v1_authority",
-              "source_event_kind": "AuthorityTransferred"
-            },
-            "inheritance_path": [],
-            "revocation_source": null,
-            "scope": {
-              "kind": "resource"
-            },
-            "subject": "0x0000000000000000000000000000000000005011",
-            "transfer_behavior": "replace_on_authority_change"
-          },
-          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-          "block_number": 200,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:PermissionChanged:resource-revoke:0x0000000000000000000000000000000000005011:3",
-          "event_kind": "PermissionChanged",
-          "log_index": 1,
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-            "block_number": 200,
-            "chain_id": "ethereum-mainnet",
-            "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:-:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:permission:0x00000000000000000000000000000000000050bb:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
-            "kind": "raw_log",
-            "log_index": 1,
-            "state_scope": "0x00000000000000000000000000000000000050bb:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
-            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-            "transaction_index": 0
-          },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 2,
-          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-          "transaction_index": 0
-        },
-        {
-          "after_state": {
-            "effective_powers": [
-              "resource_control"
-            ],
-            "grant_source": {
-              "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-              "authority_kind": "registry_only",
-              "kind": "ens_v1_authority",
-              "source_event_kind": "AuthorityTransferred"
-            },
-            "inheritance_path": [],
-            "revocation_source": null,
-            "scope": {
-              "kind": "resource"
-            },
-            "subject": "0x00000000000000000000000000000000000050aa",
-            "transfer_behavior": "replace_on_authority_change"
-          },
-          "before_state": {
-            "effective_powers": [],
-            "grant_source": null,
-            "inheritance_path": [],
-            "revocation_source": null,
-            "scope": {
-              "kind": "resource"
-            },
-            "subject": "0x00000000000000000000000000000000000050aa",
-            "transfer_behavior": "replace_on_authority_change"
-          },
-          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-          "block_number": 200,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:1:PermissionChanged:resource-grant:0x00000000000000000000000000000000000050aa:4",
-          "event_kind": "PermissionChanged",
-          "log_index": 1,
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-            "block_number": 200,
-            "chain_id": "ethereum-mainnet",
-            "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:dad7d3be-1453-5013-b56b-3f05c0a1e2fc:permission:0x00000000000000000000000000000000000050bb:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
-            "kind": "raw_log",
-            "log_index": 1,
-            "state_scope": "0x00000000000000000000000000000000000050bb:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
-            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-            "transaction_index": 0
-          },
-          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 2,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
           "transaction_index": 0
         },
@@ -4757,14 +4591,14 @@
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000050cc",
-            "interpreter_state_key": "ens:ens_v1_resolver_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:records:0x00000000000000000000000000000000000050cc:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:addr:60",
+            "interpreter_state_key": "ens:ens_v1_resolver_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:records:0x00000000000000000000000000000000000050cc:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:addr:60",
             "kind": "raw_log",
             "log_index": 2,
             "state_scope": "0x00000000000000000000000000000000000050cc:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:addr:60",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
           "source_family": "ens_v1_resolver_l1",
           "source_manifest_id": 3,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
@@ -4797,14 +4631,14 @@
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:subregistry:0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:subregistry:0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
             "kind": "raw_log",
             "log_index": 3,
             "state_scope": "0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
           "source_family": "ens_v1_registry_l1",
           "source_manifest_id": 2,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
@@ -4837,54 +4671,14 @@
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:authority:0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:authority:0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
             "kind": "raw_log",
             "log_index": 3,
             "state_scope": "0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 2,
-          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-          "transaction_index": 0
-        },
-        {
-          "after_state": {
-            "child_node": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-            "emitter_role": "registry",
-            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
-            "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
-            "owner": "0x0000000000000000000000000000000000005011",
-            "owner_getter": "0x0000000000000000000000000000000000005011",
-            "source_event": "NewOwner"
-          },
-          "before_state": {},
-          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-          "block_number": 200,
-          "canonicality_state": "canonical",
-          "chain_id": "ethereum-mainnet",
-          "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:3:AuthorityEpochChanged:NewOwner:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:2",
-          "event_kind": "AuthorityEpochChanged",
-          "log_index": 3,
-          "logical_name_id": null,
-          "manifest_version": 1,
-          "namespace": "ens",
-          "raw_fact_ref": {
-            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
-            "block_number": 200,
-            "chain_id": "ethereum-mainnet",
-            "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:AuthorityEpochChanged:0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
-            "kind": "raw_log",
-            "log_index": 3,
-            "state_scope": "0x00000000000000000000000000000000000050bb:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:-:-:NewOwner",
-            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
-            "transaction_index": 0
-          },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
           "source_family": "ens_v1_registry_l1",
           "source_manifest_id": 2,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
@@ -4896,8 +4690,8 @@
             "grant_source": null,
             "inheritance_path": [],
             "revocation_source": {
-              "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-              "authority_kind": "registry_only",
+              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
+              "authority_kind": "registrar",
               "kind": "ens_v1_authority",
               "source_event_kind": "AuthorityTransferred"
             },
@@ -4912,8 +4706,8 @@
               "resource_control"
             ],
             "grant_source": {
-              "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-              "authority_kind": "registry_only",
+              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
+              "authority_kind": "registrar",
               "kind": "ens_v1_authority",
               "source_event_kind": "AuthorityTransferred"
             },
@@ -4930,7 +4724,7 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:3:PermissionChanged:resource-revoke:0x00000000000000000000000000000000000050aa:3",
+          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:3:PermissionChanged:resource-revoke:0x00000000000000000000000000000000000050aa:2",
           "event_kind": "PermissionChanged",
           "log_index": 3,
           "logical_name_id": null,
@@ -4941,14 +4735,14 @@
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
             "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:dad7d3be-1453-5013-b56b-3f05c0a1e2fc:permission:0x00000000000000000000000000000000000050bb:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:permission:0x00000000000000000000000000000000000050bb:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
             "kind": "raw_log",
             "log_index": 3,
             "state_scope": "0x00000000000000000000000000000000000050bb:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
           "source_family": "ens_v1_registry_l1",
           "source_manifest_id": 2,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
@@ -4960,7 +4754,7 @@
               "resource_control"
             ],
             "grant_source": {
-              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0",
+              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
               "authority_kind": "registrar",
               "kind": "ens_v1_authority",
               "source_event_kind": "AuthorityTransferred"
@@ -4973,6 +4767,159 @@
             "subject": "0x0000000000000000000000000000000000005011",
             "transfer_behavior": "replace_on_authority_change"
           },
+          "before_state": {},
+          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+          "block_number": 200,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:3:PermissionChanged:resource-grant:0x0000000000000000000000000000000000005011:3",
+          "event_kind": "PermissionChanged",
+          "log_index": 3,
+          "logical_name_id": null,
+          "manifest_version": 1,
+          "namespace": "ens",
+          "raw_fact_ref": {
+            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+            "block_number": 200,
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x00000000000000000000000000000000000050bb",
+            "interpreter_state_key": "ens:ens_v1_registry_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:permission:0x00000000000000000000000000000000000050bb:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
+            "kind": "raw_log",
+            "log_index": 3,
+            "state_scope": "0x00000000000000000000000000000000000050bb:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
+            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+            "transaction_index": 0
+          },
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
+          "source_family": "ens_v1_registry_l1",
+          "source_manifest_id": 2,
+          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+          "transaction_index": 0
+        },
+        {
+          "after_state": {
+            "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+            "source_event": "Transfer",
+            "to": "0x0000000000000000000000000000000000005011",
+            "token_id": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "token_lineage_id": "5204f7e1-18cb-5505-9f9f-e171798f77b6"
+          },
+          "before_state": {
+            "from": "0x00000000000000000000000000000000000050aa"
+          },
+          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+          "block_number": 200,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:4:TokenControlTransferred:0",
+          "event_kind": "TokenControlTransferred",
+          "log_index": 4,
+          "logical_name_id": null,
+          "manifest_version": 1,
+          "namespace": "ens",
+          "raw_fact_ref": {
+            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+            "block_number": 200,
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x00000000000000000000000000000000000050dd",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:TokenControlTransferred:0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:Transfer",
+            "kind": "raw_log",
+            "log_index": 4,
+            "state_scope": "0x00000000000000000000000000000000000050dd:-:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:-:Transfer",
+            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+            "transaction_index": 0
+          },
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
+          "source_family": "ens_v1_registrar_l1",
+          "source_manifest_id": 4,
+          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+          "transaction_index": 0
+        },
+        {
+          "after_state": {
+            "effective_powers": [],
+            "grant_source": null,
+            "inheritance_path": [],
+            "revocation_source": {
+              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
+              "authority_kind": "registrar",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "TokenControlTransferred"
+            },
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x00000000000000000000000000000000000050aa",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "before_state": {
+            "effective_powers": [
+              "resource_control"
+            ],
+            "grant_source": {
+              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
+              "authority_kind": "registrar",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "TokenControlTransferred"
+            },
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x00000000000000000000000000000000000050aa",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+          "block_number": 200,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:4:PermissionChanged:transfer:0:revoke:0x00000000000000000000000000000000000050aa:1",
+          "event_kind": "PermissionChanged",
+          "log_index": 4,
+          "logical_name_id": null,
+          "manifest_version": 1,
+          "namespace": "ens",
+          "raw_fact_ref": {
+            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+            "block_number": 200,
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x00000000000000000000000000000000000050dd",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:permission:0x00000000000000000000000000000000000050dd:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
+            "kind": "raw_log",
+            "log_index": 4,
+            "state_scope": "0x00000000000000000000000000000000000050dd:-:-:0x00000000000000000000000000000000000050aa:PermissionChanged",
+            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+            "transaction_index": 0
+          },
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
+          "source_family": "ens_v1_registrar_l1",
+          "source_manifest_id": 4,
+          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+          "transaction_index": 0
+        },
+        {
+          "after_state": {
+            "effective_powers": [
+              "resource_control"
+            ],
+            "grant_source": {
+              "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
+              "authority_kind": "registrar",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "TokenControlTransferred"
+            },
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000005011",
+            "transfer_behavior": "replace_on_authority_change"
+          },
           "before_state": {
             "effective_powers": [],
             "grant_source": null,
@@ -4989,9 +4936,9 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "derivation_kind": "ens_v1_unwrapped_authority",
-          "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:3:PermissionChanged:resource-grant:0x0000000000000000000000000000000000005011:4",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:4:PermissionChanged:transfer:0:grant:0x0000000000000000000000000000000000005011:2",
           "event_kind": "PermissionChanged",
-          "log_index": 3,
+          "log_index": 4,
           "logical_name_id": null,
           "manifest_version": 1,
           "namespace": "ens",
@@ -4999,17 +4946,56 @@
             "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
             "block_number": 200,
             "chain_id": "ethereum-mainnet",
-            "emitting_address": "0x00000000000000000000000000000000000050bb",
-            "interpreter_state_key": "ens:ens_v1_registry_l1:-:bb4b6c18-712a-5c36-b92a-3bee8367a1bd:permission:0x00000000000000000000000000000000000050bb:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
+            "emitting_address": "0x00000000000000000000000000000000000050dd",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:permission:0x00000000000000000000000000000000000050dd:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
             "kind": "raw_log",
-            "log_index": 3,
-            "state_scope": "0x00000000000000000000000000000000000050bb:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
+            "log_index": 4,
+            "state_scope": "0x00000000000000000000000000000000000050dd:-:-:0x0000000000000000000000000000000000005011:PermissionChanged",
             "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
             "transaction_index": 0
           },
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
-          "source_family": "ens_v1_registry_l1",
-          "source_manifest_id": 2,
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
+          "source_family": "ens_v1_registrar_l1",
+          "source_manifest_id": 4,
+          "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+          "transaction_index": 0
+        },
+        {
+          "after_state": {
+            "authority_key": "registrar:ethereum-mainnet:4:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:1",
+            "authority_kind": "registrar",
+            "source_event": "Transfer"
+          },
+          "before_state": {
+            "authority_key": "registry-only:ethereum-mainnet:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+            "authority_kind": "registry_only"
+          },
+          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+          "block_number": 200,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "event_identity": "ens_v1_unwrapped_authority:4:ethereum-mainnet:0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4:0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5:4:AuthorityEpochChanged:Transfer:ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec:3",
+          "event_kind": "AuthorityEpochChanged",
+          "log_index": 4,
+          "logical_name_id": null,
+          "manifest_version": 1,
+          "namespace": "ens",
+          "raw_fact_ref": {
+            "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+            "block_number": 200,
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x00000000000000000000000000000000000050dd",
+            "interpreter_state_key": "ens:ens_v1_registrar_l1:-:748b87fe-25b3-5370-99d7-5b282322faa7:AuthorityEpochChanged:0x00000000000000000000000000000000000050dd:-:-:-:Transfer",
+            "kind": "raw_log",
+            "log_index": 4,
+            "state_scope": "0x00000000000000000000000000000000000050dd:-:-:-:Transfer",
+            "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+            "transaction_index": 0
+          },
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
+          "source_family": "ens_v1_registrar_l1",
+          "source_manifest_id": 4,
           "transaction_hash": "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
           "transaction_index": 0
         }
@@ -5020,21 +5006,21 @@
           "block_number": 200,
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
-          "token_lineage_id": "3a5ef405-47ef-50c9-bd8c-c44b01f1288e"
+          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
+          "token_lineage_id": null
         },
         {
           "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
           "block_number": 200,
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
-          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
-          "token_lineage_id": null
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
+          "token_lineage_id": "5204f7e1-18cb-5505-9f9f-e171798f77b6"
         }
       ],
       "surface_bindings": [
         {
-          "active_from": "2023-11-14T22:16:40.000004+00:00",
+          "active_from": "2023-11-14T22:16:40.000005+00:00",
           "active_to": null,
           "authority_arm": "ens_v1",
           "binding_kind": "declared_registry_path",
@@ -5043,8 +5029,8 @@
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
           "logical_name_id": "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
-          "resource_id": "bb4b6c18-712a-5c36-b92a-3bee8367a1bd",
-          "surface_binding_id": "11879092-3e3e-5c32-871d-746ec17df251"
+          "resource_id": "748b87fe-25b3-5370-99d7-5b282322faa7",
+          "surface_binding_id": "d9095f7f-021a-517e-90d9-4edb545d913d"
         }
       ],
       "token_lineages": [
@@ -5053,7 +5039,7 @@
           "block_number": 200,
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
-          "token_lineage_id": "3a5ef405-47ef-50c9-bd8c-c44b01f1288e"
+          "token_lineage_id": "5204f7e1-18cb-5505-9f9f-e171798f77b6"
         }
       ]
     }

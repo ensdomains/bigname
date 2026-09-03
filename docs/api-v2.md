@@ -112,6 +112,15 @@ plaintext name exists. After plaintext enrichment binds the name to the same reg
 detail and name-scoped history expose the registrar-derived owner and expiry; the earlier events
 remain registration-scoped and are not rewritten.
 
+For a registration that becomes wrapped before it is name-addressable, the later wrapper
+[surface binding](glossary.md#surface-binding) makes the registrar-derived registrant and expiry
+visible while the active registration summary reports `authority_kind = "wrapper"`. The wrapper is
+the currently selected name authority; it does not replace the registrar's
+[token lineage](glossary.md#token-lineage) or make wrapper expiry authoritative for the lease.
+Immediately after that later wrap, the served registrant is still the registrar holder from before
+the wrap. A subsequent ERC-1155 wrapper transfer changes the served registrant, token holder, and
+address-to-name relations to the new wrapper holder while retaining the registrar-derived expiry.
+
 `GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
 read current permission rows and per-resource permission summaries. Canonical
 identity checks exclude rows from an orphaned chain lineage. These routes do

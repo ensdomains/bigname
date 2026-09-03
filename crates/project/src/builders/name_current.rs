@@ -277,7 +277,7 @@ pub(super) async fn build(
                        WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant
-            FROM project_authority_events event
+            FROM project_registration_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationReleased', 'TokenControlTransferred'
