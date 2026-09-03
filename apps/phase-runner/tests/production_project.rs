@@ -3611,7 +3611,7 @@ async fn a_basenames_child_publishes_under_its_own_authority_arm() -> Result<()>
     scratch.cleanup().await
 }
 
-// Connected Sepolia applies the same proof-gated contradiction assertion as Mainnet.
+// Sepolia applies the same proof-gated contradiction assertion as Mainnet.
 #[tokio::test]
 async fn a_sepolia_child_overlap_blocks_publication() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_child_sepolia").await?;

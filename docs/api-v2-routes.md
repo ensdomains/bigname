@@ -806,8 +806,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   from the relation its own selected authority names. An unmigrated protected
   child can remain ENSv1-backed; a migrated or otherwise currently registered
   ENSv2 child is ENSv2-backed. A child whose arms disagree with no authority
-  proof is omitted entirely, and on connected Mainnet and Sepolia deployment
-  profiles an ENSv1 relation asserted after a proven ENSv2 child authority
+  proof is omitted entirely, and on every ENS deployment profile (Mainnet and
+  Sepolia) an ENSv1 relation asserted after a proven ENSv2 child authority
   began blocks Project publication for that generation,
   so this route never chooses one by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.

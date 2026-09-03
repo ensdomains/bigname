@@ -588,8 +588,10 @@ Route from the first confirmed symptom:
   [follow the reorg and verification incident play](#reorg-and-verification-incidents).
 - rollback requires an older binary, deleted schema, or restored data ->
   [follow the rollback boundary](#rollback).
-- `project` refuses a Mainnet name with `dual_current_exact_name_authority` ->
-  [follow the dual-current generation-failure runbook](dual-current-generation-failure.md).
+- `project` refuses a Mainnet or Sepolia projection with
+  `dual_current_exact_name_authority` or `dual_current_child_authority` ->
+  [follow the dual-current generation-failure runbook](dual-current-generation-failure.md),
+  including its evidence-preserving child-failure escalation path.
 
 Use the exact Compose file set deployed on the host for every recovery command,
 retaining every active overlay. Replace `<compose-files>` below with that exact

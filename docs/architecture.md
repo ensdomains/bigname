@@ -336,9 +336,9 @@ which sets a new registry owner rather than clearing the entry
 A migrated or positively registered child therefore ordinarily retains its
 ENSv1 relation. The slice 3B child assertion — ordered after the slice 2E
 exact-name assertion and keyed on the parent-child pair — fails the
-[projection generation](glossary.md#projection-generation) only when, on a
-connected Mainnet or Sepolia deployment profile, a child whose authority proof
-kind is
+[projection generation](glossary.md#projection-generation) only when, on
+either ENS deployment profile (Mainnet or Sepolia), a child whose authority
+proof kind is
 `migration_authority_transition` or `positive_v2_child_registration` has an
 ENSv1 parent-child relation asserted at a position after that child's authority
 epoch start. Such a relation contradicts the selection instead of trailing it,
@@ -383,8 +383,8 @@ integrity assertion and durable failure audit run alongside the corresponding ch
 assertion. Those assertions run after transaction-level and then block-level
 reconciliation, so a transient state while one ENSv1→ENSv2 migration transaction
 cleans up the predecessor and establishes the successor does not fail a
-generation. A connected Mainnet or Sepolia name whose bindings remain
-current after the applicable proven activated boundary causes Project to abort
+generation. On either ENS deployment profile (Mainnet or Sepolia), a name whose
+bindings remain current after the applicable proven activated boundary causes Project to abort
 before `publish::swap`,
 publishes no partial generation, and fails readiness for that target
 generation. After the Project transaction rolls back, the phase runner writes a

@@ -673,7 +673,7 @@ profiles and generated watch plans do not change, so no historical fetch or
 manifest-authority attestation is introduced. Deploy the new phase runner,
 complete the retained-range Interpret redo under the new interpreter content
 hash, run the stamped Project range, and evaluate the proof-scoped integrity
-assertions for configured Mainnet and Sepolia ENS deployment profiles before
+assertions for every ENS deployment profile (Mainnet and Sepolia) before
 `publish::swap`. Only after that Project generation publishes may the matching
 API be deployed. Independent unproven Sepolia ENSv1/ENSv2 overlap remains
 non-blocking.
