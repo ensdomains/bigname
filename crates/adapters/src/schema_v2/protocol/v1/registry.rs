@@ -464,6 +464,7 @@ pub(super) fn interpret(
                 resolver_anchor
                     .as_ref()
                     .and_then(|(_, logical_name_id)| logical_name_id.clone()),
+                emitter_role.map(str::to_owned),
             )
             .as_ref()
             .map(|link| link.resolver_address.clone());

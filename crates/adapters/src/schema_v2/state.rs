@@ -49,6 +49,7 @@ pub(super) struct V1ResolverLink {
     pub resolver_address: String,
     pub resource_id: Option<Uuid>,
     pub logical_name_id: Option<String>,
+    pub source_role: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -490,6 +491,7 @@ impl State {
         resolver: Option<String>,
         resource_id: Option<Uuid>,
         logical_name_id: Option<String>,
+        source_role: Option<String>,
     ) -> Option<V1ResolverLink> {
         let key = v1_key(namespace, namehash);
         let previous = self.v1_resolver_links.remove(&key);
@@ -503,6 +505,7 @@ impl State {
                     resolver_address,
                     resource_id,
                     logical_name_id,
+                    source_role,
                 },
             );
         }

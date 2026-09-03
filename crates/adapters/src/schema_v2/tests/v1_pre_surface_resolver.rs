@@ -4,6 +4,7 @@ const REGISTRY: &str = "0x00000000000000000000000000000000000000a1";
 const OLD_REGISTRY: &str = "0x00000000000000000000000000000000000000a0";
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000a2";
 const OWNER: &str = "0x00000000000000000000000000000000000000a3";
+const OWNER_2: &str = "0x00000000000000000000000000000000000000a5";
 const RESOLVER_A: &str = "0x00000000000000000000000000000000000000a4";
 const REGISTRY_MANIFEST_ID: i64 = 6131;
 const REGISTRAR_MANIFEST_ID: i64 = 6132;
@@ -109,6 +110,33 @@ fn renewal(block: i64) -> RawLogInput {
     )
 }
 
+fn current_new_owner(owner: &str, block: i64) -> anyhow::Result<RawLogInput> {
+    Ok(raw_at(
+        v1_registry::NewOwner {
+            node: super::common::namehash(&["eth".to_owned()]).parse()?,
+            label: keccak256(b"pointer"),
+            owner: owner.parse()?,
+        }
+        .encode_log_data(),
+        block,
+        0,
+        REGISTRY,
+    ))
+}
+
+fn current_transfer(node: B256, owner: &str, block: i64) -> anyhow::Result<RawLogInput> {
+    Ok(raw_at(
+        v1_registry::Transfer {
+            node,
+            owner: owner.parse()?,
+        }
+        .encode_log_data(),
+        block,
+        0,
+        REGISTRY,
+    ))
+}
+
 fn input(
     manifests: Vec<ManifestInput>,
     admissions: Vec<AddressAdmissionInput>,
@@ -177,6 +205,135 @@ fn state_derived_pointer(output: &BatchOutput) -> Option<&NormalizedEvent> {
             && event.after_state["state_derived"] == true
             && event.after_state["surface_materialization"] == true
     })
+}
+
+fn compact_prior(events: &[NormalizedEvent]) -> Vec<PriorEventInput> {
+    let prior = events.iter().map(prior_event).collect::<Vec<_>>();
+    let mut last_index = std::collections::HashMap::new();
+    for (index, event) in prior.iter().enumerate() {
+        last_index.insert(event.retained_state_key.clone(), index);
+    }
+    prior
+        .into_iter()
+        .enumerate()
+        .filter(|(index, event)| last_index[&event.retained_state_key] == *index)
+        .map(|(_, event)| event)
+        .collect()
+}
+
+fn run_batches(
+    manifests: &[ManifestInput],
+    admissions: &[AddressAdmissionInput],
+    batches: Vec<Vec<RawLogInput>>,
+) -> anyhow::Result<Vec<NormalizedEvent>> {
+    let mut session = None;
+    let mut events = Vec::new();
+    for raw_logs in batches {
+        let (output, next) = interpret_test_batch_incremental(
+            input(
+                manifests.to_vec(),
+                admissions.to_vec(),
+                Vec::new(),
+                raw_logs,
+            ),
+            session,
+        )?;
+        events.extend(output.normalized_events);
+        session = Some(next);
+    }
+    Ok(events)
+}
+
+fn assert_current_registry_reassignment_replays(
+    reassigned_owner: &str,
+    transfer_suffix: bool,
+) -> anyhow::Result<()> {
+    let (manifests, admissions, node) = fixture();
+    let prefix = vec![
+        current_new_owner(OWNER, 1)?,
+        raw_at(
+            v1_registry::NewResolver {
+                node,
+                resolver: RESOLVER_A.parse()?,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            REGISTRY,
+        ),
+        current_new_owner(reassigned_owner, 3)?,
+    ];
+    let suffix = if transfer_suffix {
+        current_transfer(node, OWNER_2, 4)?
+    } else {
+        renewal(4)
+    };
+    let mut history = prefix.clone();
+    history.push(suffix.clone());
+
+    let single = run_batches(&manifests, &admissions, vec![history.clone()])?;
+    let per_block = run_batches(
+        &manifests,
+        &admissions,
+        history.iter().cloned().map(|event| vec![event]).collect(),
+    )?;
+    let split_three_one = run_batches(
+        &manifests,
+        &admissions,
+        vec![history[..3].to_vec(), history[3..].to_vec()],
+    )?;
+    let split_two_two = run_batches(
+        &manifests,
+        &admissions,
+        vec![history[..2].to_vec(), history[2..].to_vec()],
+    )?;
+    assert_eq!(single, per_block, "per-block replay drift");
+    assert_eq!(single, split_three_one, "3|1 replay drift");
+    assert_eq!(single, split_two_two, "2|2 replay drift");
+
+    let (prefix_output, session) = interpret_test_batch_incremental(
+        input(manifests.clone(), admissions.clone(), Vec::new(), prefix),
+        None,
+    )?;
+    let (live, _) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            vec![suffix.clone()],
+        ),
+        Some(session),
+    )?;
+    let full_prior = prefix_output
+        .normalized_events
+        .iter()
+        .map(prior_event)
+        .collect();
+    let compacted_prior = compact_prior(&prefix_output.normalized_events);
+    let (restored_full, _) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            full_prior,
+            vec![suffix.clone()],
+        ),
+        None,
+    )?;
+    let (restored_compacted, _) = interpret_test_batch_incremental(
+        input(manifests, admissions, compacted_prior, vec![suffix]),
+        None,
+    )?;
+    assert_eq!(live, restored_full, "full restore drift");
+    assert_eq!(live, restored_compacted, "compacted restore drift");
+    Ok(())
+}
+
+#[test]
+fn current_registry_reassignment_preserves_resolver_across_every_replay_shape() -> anyhow::Result<()>
+{
+    assert_current_registry_reassignment_replays(OWNER_2, false)?;
+    assert_current_registry_reassignment_replays(OWNER, false)?;
+    assert_current_registry_reassignment_replays(OWNER_2, true)
 }
 
 fn assert_original_unchanged(prefix: &BatchOutput, complete: &BatchOutput) {

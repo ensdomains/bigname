@@ -19,7 +19,12 @@ pub(in crate::schema_v2) enum V1SurfaceMaterialization {
 impl State {
     pub(in crate::schema_v2) fn mark_v1_migrated(&mut self, namespace: &str, namehash: &str) {
         let key = v1_key(namespace, namehash);
-        if self.v1_migrated_nodes.insert(key.clone()).is_none() {
+        self.v1_migrated_nodes.insert(key.clone());
+        if self
+            .v1_resolver_links
+            .get(&key)
+            .is_some_and(|link| link.source_role.as_deref() == Some("registry_old"))
+        {
             self.v1_resolver_links.remove(&key);
             self.v1_resolvers.remove(&key);
         }

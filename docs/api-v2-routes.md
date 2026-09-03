@@ -587,12 +587,11 @@ Field ownership:
   and the resolver's version-, node-, and key-scoped text storage
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f).
   Once that inventory exists, a key's absence is therefore absence from the
-  retained attributable history rather than an unfinished build. The known
-  case documented in [`projections.md`](projections.md#resolver-and-records),
-  where resolver selection predates the
-  [name surface](glossary.md#surface-name-surface) and is never repeated,
-  produces no inventory instead of treating an interpretation-time linking gap
-  as authoritative absence. The row's
+  retained attributable history rather than an unfinished build. When an
+  ENSv1 registry resolver selection predates the
+  [name surface](glossary.md#surface-name-surface), first-surface
+  materialization supplies the linked pointer without requiring a repeated
+  selection; a latest zero-address selection remains a clear. The row's
   `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
   which is a weaker statement than `full` and does not weaken this admission.
   Node-keyed `ens_v1_resolver_l1` records written before the name surface

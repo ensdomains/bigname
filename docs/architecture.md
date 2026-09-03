@@ -972,6 +972,22 @@ must emit identical state-derived output. Within one raw position, Interpret
 orders the selected source's ordinary events first, then state-derived sourced
 events, the block-boundary output, and finally identity and preimage output.
 
+The retained ENSv1 resolver pointer records whether its selecting `NewResolver`
+came from the old or current registry. A current-registry `NewOwner` ends an
+old-registry pointer because the fallback getter delegates only while the
+current registry has no record, but later current-registry owner assignments
+preserve a current-registry pointer: `setSubnodeOwner` updates ownership without
+changing the node's resolver slot. This provenance rule, rather than replay
+insertion order, applies identically after normalized-event compaction.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L95 @ ens_v1@91c966f)
+
+For the explicitly ownerless first-surface case, a label-bearing registrar
+renewal does not create registrar control when the getter-visible registry owner
+is zero and no registrar state was previously known. A registrar authority
+already current before the owner becomes zero remains current and is refreshed
+by later renewals; only the synthetic first-surface control grant is suppressed.
+
 Normalized events are schema-v2 interpreter transitions. Interpretation loads
 canonical raw facts in chain order. Persisted normalized events are the working
 store for per-key before/after state; the process carries protocol state and a

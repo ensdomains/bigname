@@ -284,6 +284,11 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             resolver,
             event.resource_id,
             event.logical_name_id.clone(),
+            event
+                .after_state
+                .get("emitter_role")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         );
     }
     if event.source_family == "ens_v1_wrapper_l1"
