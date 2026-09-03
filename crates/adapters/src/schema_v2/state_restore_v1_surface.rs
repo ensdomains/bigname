@@ -46,7 +46,7 @@ pub(super) fn restore_registrar(
     state: &mut State,
     event: &PriorEventInput,
     source_event: Option<&str>,
-    logical_name_id: &String,
+    logical_name_id: &str,
     resource_id: Uuid,
     lineage: Option<Uuid>,
     expiry: Option<i64>,
@@ -106,7 +106,7 @@ pub(super) fn restore_registrar(
             state.observe_v1_registrar(
                 &event.namespace,
                 namehash,
-                logical_name_id.clone(),
+                logical_name_id.to_owned(),
                 surface_known,
                 resource_id,
                 lineage,
@@ -175,7 +175,7 @@ pub(super) fn restore_registrar(
             state.observe_v1_registrar(
                 &event.namespace,
                 namehash,
-                logical_name_id.clone(),
+                logical_name_id.to_owned(),
                 surface_known,
                 resource_id,
                 lineage,

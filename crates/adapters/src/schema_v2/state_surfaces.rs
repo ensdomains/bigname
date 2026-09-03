@@ -3,8 +3,8 @@ use super::{State, V1NameState, V1RegistryReadAnchor, v1_key};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::schema_v2) enum V1SurfaceMaterialization {
     RegistryAuthority {
-        previous: V1NameState,
-        promoted: V1NameState,
+        previous: Box<V1NameState>,
+        promoted: Box<V1NameState>,
         resolver: Option<String>,
         source_manifest_id: i64,
     },
@@ -107,8 +107,8 @@ impl State {
                 link.logical_name_id = Some(logical_name_id.to_owned());
             }
             return Ok(V1SurfaceMaterialization::RegistryAuthority {
-                previous,
-                promoted,
+                previous: Box::new(previous),
+                promoted: Box::new(promoted),
                 resolver,
                 source_manifest_id,
             });
