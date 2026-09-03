@@ -1,8 +1,8 @@
-# Mainnet dual-current projection-generation halt
+# Connected ENS exact-name dual-current projection-generation halt
 
 This runbook is for the on-call operator responding when the
 [Project phase](../glossary.md#projection-generation)
-refuses to publish a Mainnet name because both its ENSv1 and ENSv2
+refuses to publish a Mainnet or Sepolia name because both its ENSv1 and ENSv2
 [authority arms](../glossary.md#authority-epoch) still have a
 current [surface binding](../glossary.md#surface-name-surface) after a proven,
 activated [ENSv1→ENSv2 migration boundary](../glossary.md#migration-boundary)
@@ -81,7 +81,8 @@ long-running supervisor. The audit signature is the same in all three cases.
    ([`apps/phase-runner/src/project_phase.rs:143-163`](../../apps/phase-runner/src/project_phase.rs#L143-L163),
    [`apps/phase-runner/src/error.rs:60-69`](../../apps/phase-runner/src/error.rs#L60-L69)).
 
-4. `GET /v2/status` reports the Mainnet chain (`data.chains["1"]`) as
+4. `GET /v2/status` reports the affected chain (`data.chains["1"]` for Mainnet
+   or `data.chains["11155111"]` for Sepolia) as
    `status: "stale"` and keeps `indexed_block` at the most recent successful
    Project publication. A failed Project phase maps directly to `stale`
    ([`apps/api/src/v2/status.rs:175-226`](../../apps/api/src/v2/status.rs#L175-L226)).
@@ -936,15 +937,17 @@ production recovery rules also prohibit hand-editing identity and normalized
 event rows
 ([production interpreter-mismatch procedure](production-docker.md#stop-and-escalate-an-interpreter-mismatch)).
 
-## Sepolia carve-out
+## Sepolia distinction
 
-This exact-name assertion is Mainnet-scoped by the staged
-[deployment profile](../glossary.md#deployment-profile):
-it requires `deployment_profile = 'mainnet'` and an activated
-`migration_authority_transition` proof
-([`crates/project/src/integrity.rs:127-135`](../../crates/project/src/integrity.rs#L127-L135)).
-That scope is deliberate. Ethereum Sepolia carries distinct ENSv1 and ENSv2
-test deployments on the same chain: the pinned ENSv1 registry is
+Both exact-name and child assertions apply to configured Mainnet and Sepolia ENS
+[deployment profiles](../glossary.md#deployment-profile). They remain gated by
+an admitted proof: exact-name failures require an activated
+`migration_authority_transition`, and child failures require the selected
+ENSv2 authority and its admitted proof
+([`crates/project/src/integrity.rs:127-135`](../../crates/project/src/integrity.rs#L127-L135),
+[`crates/project/src/integrity.rs:309-320`](../../crates/project/src/integrity.rs#L309-L320)).
+Ethereum Sepolia carries distinct ENSv1 and ENSv2 test deployments on the same
+chain: the pinned ENSv1 registry is
 `0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e`
 (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L2 @ ens_v1@91c966f),
 while the pinned ENSv2 RootRegistry and ETHRegistry are
@@ -954,12 +957,15 @@ while the pinned ENSv2 RootRegistry and ETHRegistry are
 (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2 @ ens_v2@a971bd64).
 
 Genuine Sepolia overlap therefore means that the same logical name has readable
-ENSv1 and ENSv2 evidence from those independent deployments **without** an
+ENSv1 and ENSv2 evidence from the independently deployed eras **without** an
 activated `MigrationApplied` boundary connecting that name. Project leaves that
 shape unsupported with `independent_ens_deployments_overlap`; it does not raise
-this halt
-([`crates/project/src/builders/name_authority.rs:495-503`](../../crates/project/src/builders/name_authority.rs#L495-L503),
-[`crates/project/src/builders/name_authority.rs:617-628`](../../crates/project/src/builders/name_authority.rs#L617-L628)).
+this halt. The exact
+[shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names—root,
+`eth`, `reverse`, and `addr.reverse`—instead select ENSv2 without fabricating a
+proof, so they also do not raise this halt
+([`crates/project/src/builders/name_authority.rs:459-480`](../../crates/project/src/builders/name_authority.rs#L459-L480),
+[`crates/project/src/builders/name_authority.rs:619-630`](../../crates/project/src/builders/name_authority.rs#L619-L630)).
 Do not interpret mere cross-era Sepolia evidence as a missed ENSv1→ENSv2
 migration.
 
@@ -972,10 +978,11 @@ The unlocked-wrapped path instead clears the wrapper resolver, unwraps the name
 to the Graveyard, and then performs the same ENSv2 injection
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L160 @ ens_v2@a971bd64).
 Only a proven per-name boundary derived from such admitted evidence connects the
-two arms. If Sepolia has that proof and an open predecessor, capture and file it
-as an indexing or authority-selection defect; do not label it the Mainnet
-`dual_current_exact_name_authority` emergency, because the assertion cannot
-produce that failure under the Sepolia deployment profile.
+two arms. If Sepolia has that proof and an open predecessor, treat the resulting
+`dual_current_exact_name_authority` failure as this runbook's emergency and
+follow the same evidence-capture and repair procedure. The command examples above use Mainnet; substitute
+`ethereum-sepolia` and the affected Sepolia source descriptors without changing
+the required proof, lineage, or publication checks.
 
 ## Closure and escalation record
 

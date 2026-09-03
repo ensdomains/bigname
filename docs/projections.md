@@ -253,12 +253,15 @@ outcomes, or durable traces.
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
 
 `surface_bindings` remains identity history rather than a `_current`
-projection. Exact-name reads first select the logical name's
+projection. Exact-name reads ordinarily first select the logical name's
 [`authority epoch`](glossary.md#authority-epoch), then select fields only from
 that epoch's binding and resources at the requested position. An activated
 ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
 that [released v2 authority](glossary.md#released-v2-authority) does not fall
-back to an active retained ENSv1 binding.
+back to an active retained ENSv1 binding. The exact
+[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
+exception selects the ENSv2 arm without establishing an authority epoch, so
+its epoch start and proof fields remain null.
 
 ## Exact-name projection
 

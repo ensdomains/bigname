@@ -3611,26 +3611,20 @@ async fn a_basenames_child_publishes_under_its_own_authority_arm() -> Result<()>
     scratch.cleanup().await
 }
 
-// Sepolia runs the same selection but never blocks publication on the pair.
+// Connected Sepolia applies the same proof-gated contradiction assertion as Mainnet.
 #[tokio::test]
-async fn a_sepolia_child_overlap_selects_without_blocking_publication() -> Result<()> {
+async fn a_sepolia_child_overlap_blocks_publication() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_child_sepolia").await?;
     seed_project_fixture(scratch.pool()).await?;
     seed_child_authority_fixture(scratch.pool(), 5, 3).await?;
     declare_sepolia_post_audit_profile(scratch.pool(), CHAIN).await?;
 
-    run_project_phase(scratch.pool(), CHAIN, 5).await?;
-    assert_eq!(
-        child_relation(scratch.pool()).await?,
-        Some((None, Some(OWNER.to_owned()))),
-        "sepolia still selects the proven ENSv2 relation"
-    );
-    assert!(
-        generation_failure_rows(scratch.pool(), CHAIN)
-            .await?
-            .is_empty(),
-        "sepolia records no publication-blocking failure"
-    );
+    run_project_phase(scratch.pool(), CHAIN, 5)
+        .await
+        .expect_err("the proven Sepolia child contradiction must not publish");
+    let rows = generation_failure_rows(scratch.pool(), CHAIN).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].3, DUAL_CURRENT_CHILD_AUTHORITY);
     scratch.cleanup().await
 }
 
@@ -9441,6 +9435,15 @@ async fn authority_selector_dual_open_cross_arm_fixture() -> Result<()> {
         );
         assert!(open_bindings[0].2 < open_bindings[1].2);
 
+        sqlx::query(
+            "UPDATE surface_bindings SET active_to = to_timestamp(5)
+             WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+        )
+        .bind(chain)
+        .bind(&logical_name_id)
+        .execute(scratch.pool())
+        .await?;
+
         let (v2_binding, v2_resource, proof_identity) =
             insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped")
                 .await?;
@@ -9493,6 +9496,14 @@ async fn authority_selector_follows_post_migration_v2_binding_churn() -> Result<
          WHERE surface_binding_id = $1",
     )
     .bind(successor_binding)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(5)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
     .execute(scratch.pool())
     .await?;
     sqlx::query(
@@ -10316,7 +10327,6 @@ async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -
     let scratch = ScratchDatabase::create("project_authority_candidate_parity").await?;
     let chain = "authority-candidate-parity";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 1).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
             chain_id: chain.into(),
@@ -10360,6 +10370,14 @@ async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -
          WHERE event_identity = $1",
     )
     .bind(&proof_identity)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(5)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
     .execute(scratch.pool())
     .await?;
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
@@ -11219,6 +11237,14 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
     let (proof_binding, proof_resource, _) =
         insert_activated_authority_proof(scratch.pool(), chain, &proof_name, "unwrapped").await?;
     assert_eq!(proof_bindings.v2, Some((proof_binding, proof_resource)));
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(5)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&proof_name)
+    .execute(scratch.pool())
+    .await?;
 
     let released_name = format!(
         "ens:{:#x}",
@@ -19453,7 +19479,7 @@ async fn a_closed_predecessor_publishes_on_mainnet_without_an_audit_row() -> Res
 }
 
 #[tokio::test]
-async fn sepolia_profile_publishes_the_same_dual_current_corpus() -> Result<()> {
+async fn sepolia_profile_blocks_the_same_proven_dual_current_corpus() -> Result<()> {
     let scratch = ScratchDatabase::create("project_dual_current_sepolia").await?;
     let chain = "project-dual-current-sepolia";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
@@ -19469,20 +19495,12 @@ async fn sepolia_profile_publishes_the_same_dual_current_corpus() -> Result<()> 
         .await?;
     insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped").await?;
 
-    run_project_phase(scratch.pool(), chain, 5).await?;
-
-    let published: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(&logical_name_id)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(published, 1, "sepolia keeps selecting past the boundary");
-    assert!(
-        generation_failure_rows(scratch.pool(), chain)
-            .await?
-            .is_empty(),
-        "the assertion is Mainnet-scoped"
-    );
+    run_project_phase(scratch.pool(), chain, 5)
+        .await
+        .expect_err("the proven Sepolia exact-name contradiction must not publish");
+    let rows = generation_failure_rows(scratch.pool(), chain).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].3, DUAL_CURRENT_EXACT_NAME_AUTHORITY);
 
     scratch.cleanup().await
 }
@@ -23205,7 +23223,7 @@ async fn seed_raw_reservation_release_then_registration_before_v1(
     )
     .await?;
 
-    let label = "eth";
+    let label = "ordinary";
     let mut token_bytes = *keccak256(label.as_bytes());
     token_bytes[28..].copy_from_slice(&0_u32.to_be_bytes());
     let token_id = U256::from_be_bytes(token_bytes);
@@ -23282,8 +23300,8 @@ async fn seed_raw_reservation_release_then_registration_before_v1(
     )
     .await?;
     let wrapped = NameWrapped {
-        node: raw_namehash(&[b"eth"]),
-        name: b"\x03eth\0".to_vec().into(),
+        node: raw_namehash(&[b"ordinary"]),
+        name: b"\x08ordinary\0".to_vec().into(),
         owner: OWNER.parse()?,
         fuses: 0,
         expiry: 4_000_000_000,
@@ -23301,7 +23319,7 @@ async fn seed_raw_reservation_release_then_registration_before_v1(
     )
     .await?;
 
-    Ok(format!("ens:{:#x}", raw_namehash(&[b"eth"])))
+    Ok(format!("ens:{:#x}", raw_namehash(&[b"ordinary"])))
 }
 
 async fn assert_reservation_selects_v1(
@@ -23472,11 +23490,11 @@ async fn seed_dual_open_cross_arm_fixture(
 }
 
 // An inert manifest whose deployment epoch makes the projection classify the
-// chain under the sepolia deployment profile. Selection coverage that leaves
-// both authority arms open past an activated boundary declares it: the same
-// corpus on Mainnet is unpublishable under the dual-current assertion. It must
-// be declared before the first projection so a profile-sensitive field cannot
-// change mid-test.
+// chain under the sepolia deployment profile. A proven boundary with both
+// authority arms still open is unpublishable on connected ENS deployment
+// profiles, so selector-only fixtures either close the predecessor arm or use
+// a synthetic deployment profile. Declare this before the first projection so
+// a deployment-profile-sensitive field cannot change mid-test.
 async fn declare_sepolia_post_audit_profile(pool: &PgPool, chain: &str) -> Result<()> {
     insert_namespaced_manifest(
         pool,
@@ -23715,7 +23733,6 @@ async fn seed_authority_lifecycle_fixture(
     migration_path: &str,
 ) -> Result<(String, String)> {
     let logical_name_id = seed_dual_open_cross_arm_fixture(pool, chain, 4).await?;
-    declare_sepolia_post_audit_profile(pool, chain).await?;
     InterpretEngine::new(pool.clone())
         .run_batch(InterpretRequest {
             chain_id: chain.into(),
@@ -23730,6 +23747,14 @@ async fn seed_authority_lifecycle_fixture(
     }
     let (_, v2_resource, proof_identity) =
         insert_activated_authority_proof(pool, chain, &logical_name_id, migration_path).await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(4)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(pool)
+    .await?;
     let v1_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM surface_bindings
          WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'

@@ -375,10 +375,11 @@ binding for subsequent current-state selection; releasing it leaves the child
 with released v2 authority and does not reactivate the ENSv1 residue.
 
 Project trusts the validated activated transition proof and does not
-treat retained binding intervals as a second authority vote. This is why its
-dual-open regression fixture selects the proven successor instead of ranking
-either arm. The exact-name dual-current integrity assertion and durable failure
-audit run alongside the corresponding child
+rank retained binding intervals against the proven arm. Its binding-order
+regression fixture first verifies that Interpret retains both arms, then closes
+the predecessor before Project so it can prove successor selection without
+triggering the intentional dual-current fatal. The exact-name dual-current
+integrity assertion and durable failure audit run alongside the corresponding child
 assertion. Those assertions run after transaction-level and then block-level
 reconciliation, so a transient state while one ENSv1→ENSv2 migration transaction
 cleans up the predecessor and establishes the successor does not fail a
@@ -399,17 +400,30 @@ block hashes explicitly orphaned through lineage; a later successful generation
 does not erase the failure. Neither slice chooses by recency. A mixed Mainnet
 corpus with no provable boundary is explicit `unsupported` with
 `conflicting_current_ens_authority`; the equivalent Sepolia corpus remains
-explicit `unsupported` with `independent_ens_deployments_overlap`. Coverage
-floors are not authority evidence and do not weaken either refusal. The ENS
-root, `eth`, `reverse`, and `addr.reverse` are exact shared-infrastructure
-exceptions: when both arms exist without a proof, they select ENSv2 without
-fabricating a proof or authority epoch. Descendants, including
-`alice.addr.reverse`, are not exceptions. Existing migration proof, qualifying
-release, and released-ENSv2-regime branches retain precedence. An ordinary
+explicit `unsupported` with `independent_ens_deployments_overlap`. Configured
+ingest start blocks that omit proof events are not authority evidence and do
+not weaken either refusal. The ENS
+root, `eth`, `reverse`, and `addr.reverse` are the four exact
+[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names: when
+both arms exist without a proof, they select ENSv2 without
+fabricating a proof or authority epoch. The pinned ENSv2 deployment establishes
+root, `eth`, and `reverse`. The pinned ENSv1 contract defines `addr.reverse` as
+its reverse registrar node, and its deployment assigns that node directly on
+testnets; bigname intentionally preserves this exact four-name classification
+across configured ENS deployment profiles.
+(upstream: .refs/ens_v2/contracts/deploy/00_RootRegistry.ts:L15-L29 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L23-L64 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L13-L34 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15-L37 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)
+Descendants, including
+`alice.addr.reverse`, are not exceptions. Existing ENSv1→ENSv2 migration proof, qualifying
+release, and deployment-wide ENSv2 release-threshold branches retain precedence.
+An ordinary
 no-proof overlap is refused rather than fatal; a dual-current contradiction
 after a proven activated boundary aborts projection generation for both
-connected Mainnet and Sepolia deployment profiles. Before the exact-name slice,
-a corpus containing both families retained the historical
+configured Mainnet and Sepolia ENS deployment profiles. Before the exact-name
+slice, a corpus containing both families retained the historical
 `mixed_exact_name_corpus` product reason. The current per-name rule and its two
 reasons are the contracted replacement for that blanket refusal.
 

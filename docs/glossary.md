@@ -72,10 +72,21 @@ on each binding. It makes ordinary interval conflicts arm-specific and is
 supplied by adapters, never inferred in SQL. Project stages the selected arm,
 binding, resource, start position, lifecycle state, and proof together; field
 selection cannot rank events from different arms or combine them in one
-`name_current` row. The related `AuthorityEpochChanged`
+`name_current` row. The exact [shared ENS
+infrastructure](#shared-ens-infrastructure) no-proof exception is not an
+authority epoch: it selects the ENSv2 arm for current fields while its
+epoch start and proof fields remain null. The related `AuthorityEpochChanged`
 normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
+
+<a id="shared-ens-infrastructure"></a>
+## Shared ENS infrastructure
+
+the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
+surface has current ENSv1 and ENSv2 arms but no higher-precedence authority
+evidence, Project selects the ENSv2 arm for these four names without creating
+an authority proof or epoch. Descendants are not included in the exception.
 
 ## Authority proof
 

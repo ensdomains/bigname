@@ -1,3 +1,4 @@
+use alloy_primitives::keccak256;
 use anyhow::{Context, Result};
 use bigname_project::{
     BatchRequest, DUAL_CURRENT_CHILD_AUTHORITY, DUAL_CURRENT_EXACT_NAME_AUTHORITY, Engine, RunMode,
@@ -69,23 +70,27 @@ fn uuid(kind: u8, index: u16) -> String {
     format!("{kind:08x}-0000-0000-0000-{index:012x}")
 }
 
-fn namehash(index: u16) -> String {
-    format!("0x{index:064x}")
+fn labelhash(label: &str) -> String {
+    format!("{:#x}", keccak256(label.as_bytes()))
 }
 
 async fn surface(pool: &PgPool, index: u16, raw_name: &str, arms: &[&str]) -> Result<String> {
-    let hash = namehash(index);
-    let logical = format!("ens:{hash}");
     let labels: Vec<_> = if raw_name.is_empty() {
         vec![]
     } else {
         raw_name.split('.').collect()
     };
-    let labelhashes: Vec<_> = labels
-        .iter()
-        .enumerate()
-        .map(|(n, _)| namehash(index + n as u16 + 1000))
-        .collect();
+    let hash = format!(
+        "{:#x}",
+        bigname_storage::ens_namehash_label_bytes(
+            &labels
+                .iter()
+                .map(|label| label.as_bytes())
+                .collect::<Vec<_>>()
+        )
+    );
+    let logical = format!("ens:{hash}");
+    let labelhashes: Vec<_> = labels.iter().map(|label| labelhash(label)).collect();
     sqlx::query("INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state, chain_id, block_hash, block_number, canonicality_state) VALUES ($1, 'ens', $2, $3, '\\x00', $4, $5, 'ensip15', 'active', $6, $7, 10, 'canonical')")
         .bind(&logical).bind(raw_name).bind(labels).bind(&hash).bind(labelhashes).bind(CHAIN).bind(HASH).execute(pool).await?;
     for (offset, arm) in arms.iter().enumerate() {
@@ -99,18 +104,32 @@ async fn surface(pool: &PgPool, index: u16, raw_name: &str, arms: &[&str]) -> Re
     Ok(logical)
 }
 
+struct Event<'a> {
+    family: &'a str,
+    kind: &'a str,
+    log: i64,
+    after: Value,
+}
+
+#[derive(sqlx::FromRow)]
+struct CapturedAuthority {
+    selected_authority_arm: Option<String>,
+    authority_epoch_start_position: Option<Value>,
+    authority_proof_kind: Option<String>,
+    authority_proof_event_id: Option<i64>,
+    authority_proof_event_identity: Option<String>,
+    authority_transition_id: Option<String>,
+}
+
 async fn event(
     pool: &PgPool,
     identity: &str,
     logical: &str,
     resource: Option<&str>,
-    family: &str,
-    kind: &str,
-    log: i64,
-    after: Value,
+    event: Event<'_>,
 ) -> Result<i64> {
     Ok(sqlx::query_scalar("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state, migration_correlation_ids) VALUES ($1, 'ens', $2, $3::uuid, $4, $5, 1, $6, 10, $7, '0x503', 0, $8, CASE WHEN $4 = 'MigrationApplied' THEN 'ens_v2_migration' ELSE 'ens_v2_registry_resource_surface' END, 'canonical', $9, CASE WHEN $4 = 'MigrationApplied' THEN ARRAY['issue-503'] ELSE ARRAY[]::text[] END) RETURNING normalized_event_id")
-        .bind(identity).bind(logical).bind(resource).bind(kind).bind(family).bind(CHAIN).bind(HASH).bind(log).bind(after).fetch_one(pool).await?)
+        .bind(identity).bind(logical).bind(resource).bind(event.kind).bind(event.family).bind(CHAIN).bind(HASH).bind(event.log).bind(event.after).fetch_one(pool).await?)
 }
 
 async fn run(pool: &PgPool) -> bigname_project::Result<()> {
@@ -155,6 +174,32 @@ async fn optional_authority(
         .bind(logical).fetch_optional(pool).await?)
 }
 
+async fn authority_evidence(
+    pool: &PgPool,
+    logical: &str,
+) -> Result<(
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<serde_json::Value>,
+)> {
+    Ok(sqlx::query_as("SELECT provenance #>> '{authority_selection,proof_kind}', provenance #>> '{authority_selection,proof_event_id}', provenance #>> '{authority_selection,proof_event_identity}', provenance #> '{authority_selection,epoch_start_position}' FROM name_current WHERE logical_name_id = $1")
+        .bind(logical).fetch_one(pool).await?)
+}
+
+async fn capture_staged_authority(pool: &PgPool) -> Result<()> {
+    sqlx::query("CREATE TABLE issue503_authority_capture (logical_name_id text, selected_authority_arm text, authority_epoch_start_position jsonb, authority_proof_kind text, authority_proof_event_id bigint, authority_proof_event_identity text, authority_transition_id text)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE FUNCTION capture_issue503_authority() RETURNS trigger LANGUAGE plpgsql AS $capture$ BEGIN INSERT INTO issue503_authority_capture SELECT logical_name_id, selected_authority_arm, authority_epoch_start_position, authority_proof_kind, authority_proof_event_id, authority_proof_event_identity, authority_transition_id FROM project_name_authority; RETURN NULL; END $capture$")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE TRIGGER capture_issue503_authority AFTER INSERT ON name_current FOR EACH STATEMENT EXECUTE FUNCTION capture_issue503_authority()")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn sepolia_no_proof_overlap_remains_refused_not_fatal() -> Result<()> {
     let (_db, pool) = database("issue503_no_proof").await?;
@@ -182,12 +227,32 @@ async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Res
     {
         logicals.push(surface(&pool, index as u16 + 10, name, &["ens_v1", "ens_v2"]).await?);
     }
+    capture_staged_authority(&pool).await?;
     run(&pool).await?;
+    let root_authority: CapturedAuthority = sqlx::query_as("SELECT selected_authority_arm, authority_epoch_start_position, authority_proof_kind, authority_proof_event_id, authority_proof_event_identity, authority_transition_id FROM issue503_authority_capture WHERE logical_name_id = $1")
+        .bind(&logicals[0])
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        root_authority.selected_authority_arm.as_deref(),
+        Some("ens_v2")
+    );
+    assert_eq!(root_authority.authority_epoch_start_position, None);
+    assert_eq!(root_authority.authority_proof_kind, None);
+    assert_eq!(root_authority.authority_proof_event_id, None);
+    assert_eq!(root_authority.authority_proof_event_identity, None);
+    assert_eq!(root_authority.authority_transition_id, None);
+    // The exact root participates in authority selection, while the current
+    // name projection intentionally omits its empty surface.
     assert_eq!(optional_authority(&pool, &logicals[0]).await?, None);
     for logical in &logicals[1..] {
         assert_eq!(
             authority(&pool, logical).await?,
             (Some("ens_v2".into()), None, None, None)
+        );
+        assert_eq!(
+            authority_evidence(&pool, logical).await?,
+            (None, None, None, None)
         );
     }
     Ok(())
@@ -214,7 +279,19 @@ async fn proven_sepolia_dual_current_exact_name_is_fatal() -> Result<()> {
     let logical = surface(&pool, 30, "proven.eth", &["ens_v1", "ens_v2"]).await?;
     let successor_binding = uuid(4, 30);
     let successor_resource = uuid(2, 30);
-    event(&pool, "issue503-exact-proof", &logical, None, "ens_v2_migration_l1", "MigrationApplied", 1, json!({"migration_path":"unwrapped","successor_binding":{"binding_id":successor_binding,"resource_id":successor_resource}})).await?;
+    event(
+        &pool,
+        "issue503-exact-proof",
+        &logical,
+        None,
+        Event {
+            family: "ens_v2_migration_l1",
+            kind: "MigrationApplied",
+            log: 1,
+            after: json!({"migration_path":"unwrapped","successor_binding":{"binding_id":successor_binding,"resource_id":successor_resource}}),
+        },
+    )
+    .await?;
     let error = run(&pool)
         .await
         .expect_err("proven Sepolia conflict must fail");
@@ -247,15 +324,53 @@ async fn proven_sepolia_dual_current_child_is_fatal() -> Result<()> {
         "issue503-parent-registry",
         &parent,
         None,
-        "ens_v2_registry_l1",
-        "SubregistryChanged",
-        1,
-        json!({"subregistry":"0x0000000000000000000000000000000000000503"}),
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "SubregistryChanged",
+            log: 1,
+            after: json!({"subregistry":"0x0000000000000000000000000000000000000503"}),
+        },
     )
     .await?;
-    event(&pool, "issue503-v2-child", &child, Some(&uuid(1, 41)), "ens_v2_registry_l1", "RegistrationGranted", 2, json!({"registry_contract_instance_id":registry,"status":"registered","registrant":"0x0000000000000000000000000000000000000001"})).await?;
-    event(&pool, "issue503-child-proof", &child, None, "ens_v2_migration_l1", "MigrationApplied", 3, json!({"migration_path":"locked_wrapped","successor_binding":{"binding_id":uuid(3, 41),"resource_id":uuid(1, 41)}})).await?;
-    event(&pool, "issue503-v1-child", &child, None, "ens_v1_registry_l1", "SubregistryChanged", 4, json!({"node":parent.trim_start_matches("ens:"),"child_node":child.trim_start_matches("ens:"),"labelhash":namehash(1041),"owner":"0x0000000000000000000000000000000000000002"})).await?;
+    event(
+        &pool,
+        "issue503-v2-child",
+        &child,
+        Some(&uuid(1, 41)),
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationGranted",
+            log: 2,
+            after: json!({"registry_contract_instance_id":registry,"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        },
+    )
+    .await?;
+    event(
+        &pool,
+        "issue503-child-proof",
+        &child,
+        None,
+        Event {
+            family: "ens_v2_migration_l1",
+            kind: "MigrationApplied",
+            log: 3,
+            after: json!({"migration_path":"locked_wrapped","successor_binding":{"binding_id":uuid(3, 41),"resource_id":uuid(1, 41)}}),
+        },
+    )
+    .await?;
+    event(
+        &pool,
+        "issue503-v1-child",
+        &child,
+        None,
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "SubregistryChanged",
+            log: 4,
+            after: json!({"node":parent.trim_start_matches("ens:"),"child_node":child.trim_start_matches("ens:"),"labelhash":labelhash("child"),"owner":"0x0000000000000000000000000000000000000002"}),
+        },
+    )
+    .await?;
     let error = run(&pool)
         .await
         .expect_err("proven Sepolia child conflict must fail");

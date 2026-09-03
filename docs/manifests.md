@@ -368,12 +368,19 @@ No ENSv1 registrar-controller contract is admitted on this deployment profile. T
 The pins also carry a tracked Sepolia v1-reference address for `WrappedETHRegistrarController`, `0xFED6a969AaA60E4961FCD3EBF1A2e8913ac65B72`, and the ENSv2 `ETHRenewerV1` constructor data names the same controller. That reference artifact contains only the address and ABI, however: it has no deployment transaction, receipt, or historical start block. The ENS subgraph and ENSNode cross-check references both pair the address with block `3790244`, but those references do not supply authoritative deployment provenance. Unlike the explicit BaseRegistrar exception above, bigname does not elevate that cross-check metadata into a controller watch-plan floor, so the controller remains unadmitted and its admission remains deferred.[^v1-sepolia-wrapped-controller-gap]
 Registrar-controller coverage remains a known asymmetry against the mainnet deployment profile; resolver-log coverage for the approved four-address set is no longer one.
 
-A name that carries both ENSv1 and ENSv2 evidence on this profile is
+An ordinary active name that carries both current ENSv1 and ENSv2 arms on this
+deployment profile, without an admitted authority proof, qualifying release, or
+deployment-wide ENSv2 release-threshold decision, is
 [`independent_ens_deployments_overlap`](architecture.md) rather than a chosen
-authority, because the two Sepolia deployments are independent except where a
-proven migration boundary joins a single name. Admitting ENSv1 sources here
-makes that shape reachable in production for the first time; it does not make
-it a migration.
+authority. The runtime projects both independently deployed eras, but only an
+admitted ENSv1→ENSv2 migration boundary connects them for a particular name.
+The exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure)
+names—root, `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when both
+current arms are present and none of those
+higher-precedence decisions applies; descendants do not inherit that exception.
+Admitting ENSv1 sources here
+makes ordinary overlap reachable in production for the first time; it does not
+establish an ENSv1→ENSv2 migration boundary.
 
 `exact_name_profile` [capability promotion](glossary.md) is deployment-profile-scoped: only `exact_name_profile = "supported"` on the active `ens_v2_registrar_l1` version in the `sepolia` root promotes `.eth` exact-name declared reads to supported, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The admitted ENSv1 registrar remains `shadow` because registrar-controller label coverage is absent, so the product namespace route aggregates the two declarations as `name_profile.completeness = "partial"`; this does not demote the ENSv2 family-level support. The capability promotion does not apply to mainnet, another deployment profile, or any runtime that has not selected `manifests/sepolia`. Active rollout, raw preimage observations, resolver admission, or backfill completion promote no other capability.
 
@@ -823,10 +830,10 @@ source authority: fixed contracts, `manifests/mainnet/`, `manifests/sepolia/`,
 and the generated watch plans remain byte-for-byte unchanged. The new
 [interpreter content hash](glossary.md#interpreter-content-hash) therefore
 requires one complete retained-range Interpret re-walk followed by Project,
-with publication blocked until the completed generation is coherent. Mainnet
-integrity assertions apply to activated proofs in that completed generation;
-Sepolia selects a proven arm but independent unproven ENSv1/ENSv2 overlap never
-blocks its publication. There is no production interval serving candidate-only
+with publication blocked until the completed generation is coherent. Integrity
+assertions on configured Mainnet and Sepolia ENS deployment profiles apply to
+activated proofs in that completed generation; ordinary unproven Sepolia
+ENSv1/ENSv2 overlap never blocks publication. There is no production interval serving candidate-only
 data. The ordinary announcement edge above remains a watch-plan input and this
 activation creates no ingest gap.
 
