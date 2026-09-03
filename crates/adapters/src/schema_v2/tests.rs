@@ -12961,6 +12961,46 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         .and_then(|event| event.resource_id)
         .expect("registrar authority");
     assert_ne!(registry_resource, registrar_resource);
+    let transferred = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            63,
+            "ens_v1_registrar_l1",
+            "Transfer",
+            "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+            &["registrar"],
+            &["TokenControlTransferred"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(63, "registrar")],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v1_registrar::Transfer {
+                from: CONTRACT.parse()?,
+                to: "0x0000000000000000000000000000000000000068".parse()?,
+                tokenId: U256::from_be_bytes(*labelhash),
+            }
+            .encode_log_data(),
+            2,
+            0,
+            CONTRACT,
+        )],
+    })?;
+    let transition = |kind, resource| {
+        transferred
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == kind && event.resource_id == Some(resource))
+    };
+    let unbound = transition("SurfaceUnbound", registrar_resource)
+        .expect("registrar authority detached after the token transfer");
+    let rebound = transition("SurfaceBound", registry_resource)
+        .expect("registry authority restored after the token transfer");
+    assert_eq!(unbound.source_family, "ens_v1_registrar_l1");
+    assert_eq!(rebound.source_family, "ens_v1_registrar_l1");
+    assert_eq!(rebound.after_state["owner_getter"], CONTRACT);
+    assert_eq!(rebound.after_state["registry_contract"], REGISTRY);
     let released = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest, registrar_manifest],

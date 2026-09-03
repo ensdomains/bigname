@@ -544,7 +544,6 @@ pub(super) fn interpret(
     }
     Ok(output)
 }
-
 pub(super) fn append_authority_transition(
     output: &mut Interpreted,
     authority_arm: &str,
@@ -624,6 +623,11 @@ pub(super) fn append_authority_transition(
         });
     }
     if let Some(linked) = linked.filter(|authority| authority.surface_known) {
+        let mut linked_observation = observation_state.clone();
+        if linked.registry_contract.is_some() {
+            linked_observation["owner_getter"] = json!(linked.owner);
+            linked_observation["registry_contract"] = json!(linked.registry_contract);
+        }
         output.events.push(EventDraft {
             event_kind: "SurfaceBound".to_owned(),
             logical_name_id: Some(logical_name_id.clone()),
@@ -631,7 +635,7 @@ pub(super) fn append_authority_transition(
             identity_suffix: format!("SurfaceBound:{source_event}:{}", linked.resource_id),
             explicit_before: Some(json!({})),
             after_state: merge_observation(
-                observation_state,
+                &linked_observation,
                 json!({
                     "source_event":source_event,
                     "authority_kind":authority_kind(linked),
@@ -682,7 +686,6 @@ pub(super) fn append_authority_transition(
         });
     }
 }
-
 fn merge_observation(observation: &Value, fields: Value) -> Value {
     let mut merged = observation.clone();
     merged
@@ -703,7 +706,6 @@ pub(super) fn authority_kind(authority: &V1NameState) -> &'static str {
         _ => "registry_only",
     }
 }
-
 #[allow(clippy::too_many_arguments)]
 fn push_permission_change(
     output: &mut Interpreted,
@@ -749,7 +751,6 @@ fn push_permission_change(
         state_scope: String::new(),
     });
 }
-
 fn append_authority_permissions(
     output: &mut Interpreted,
     previous: Option<&V1NameState>,
@@ -810,7 +811,6 @@ fn append_authority_permissions(
         }
     }
 }
-
 fn child_node(parent: B256, labelhash: B256) -> String {
     let mut input = [0u8; 64];
     input[..32].copy_from_slice(parent.as_slice());

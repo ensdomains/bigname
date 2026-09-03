@@ -141,7 +141,6 @@ impl State {
             .insert(token_lineage_id)
             .is_none()
     }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_v1_name(
         &mut self,
@@ -214,6 +213,11 @@ impl State {
             self.active_resources
                 .insert(logical_name_id.clone(), resource_id);
         }
+        let key = v1_key(namespace, namehash);
+        let registry_contract = self
+            .v1_registry_authorities
+            .get(&key)
+            .and_then(|state| state.registry_contract.clone());
         let value = V1NameState {
             logical_name_id,
             surface_known,
@@ -224,11 +228,10 @@ impl State {
             labelhash,
             expiry,
             owner,
-            registry_contract: None,
+            registry_contract,
             authority_key,
             wrapper_fallback,
         };
-        let key = v1_key(namespace, namehash);
         let previous_expiry = self
             .v1_registrars
             .insert(key.clone(), value.clone())
@@ -247,11 +250,9 @@ impl State {
             self.v1_names.insert(key, value);
         }
     }
-
     pub(super) fn v1_name(&self, namespace: &str, namehash: &str) -> Option<V1NameState> {
         self.v1_names.get(&v1_key(namespace, namehash)).cloned()
     }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_v1_registry(
         &mut self,
@@ -283,7 +284,6 @@ impl State {
         self.v1_registry_authorities.insert(key, authority.clone());
         self.activate_v1_authority(namespace, namehash, Some(authority));
     }
-
     pub(super) fn remember_v1_registry_authority(
         &mut self,
         namespace: &str,

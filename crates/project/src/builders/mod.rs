@@ -22,9 +22,9 @@ pub(crate) async fn build_all(
 ) -> Result<()> {
     name_authority::build(transaction, chain_id, target).await?;
     permissions::build(transaction, chain_id, target).await?;
-    permission_resources::build_registry_binding(transaction).await?;
     account_permissions::build(transaction, chain_id, target).await?;
     name_current::build(transaction, chain_id, target).await?;
+    permission_resources::build_registry_binding(transaction).await?;
     resolver::build(transaction, chain_id, target, full_rebuild).await?;
     record_inventory::build(transaction, chain_id, target).await?;
     name_topology::build(transaction, chain_id, target).await?;

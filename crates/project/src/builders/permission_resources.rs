@@ -8,13 +8,17 @@ pub(super) async fn build_registry_binding(
     sqlx::query(
         r#"
         WITH latest_registry_observation AS (
-            SELECT DISTINCT ON (event.resource_id)
-                   event.resource_id,
+            SELECT DISTINCT ON (COALESCE(current_name.resource_id, event.resource_id))
+                   COALESCE(current_name.resource_id, event.resource_id) AS resource_id,
                    event.normalized_event_id,
                    CASE WHEN event.event_kind = 'SurfaceUnbound' THEN NULL
                         ELSE lower(event.after_state ->> 'owner_getter') END AS registry_owner,
-                   lower(COALESCE(event.raw_fact_ref ->> 'emitting_address',
-                                  event.after_state ->> 'registry_contract')) AS registry_contract,
+                   lower(CASE WHEN event.source_family IN (
+                                      'ens_v1_registrar_l1', 'basenames_base_registrar'
+                                  ) THEN event.after_state ->> 'registry_contract'
+                              ELSE COALESCE(event.raw_fact_ref ->> 'emitting_address',
+                                            event.after_state ->> 'registry_contract') END)
+                       AS registry_contract,
                    jsonb_build_object(
                        'normalized_event_ids', jsonb_build_array(event.normalized_event_id),
                        'raw_fact_ref', event.raw_fact_ref,
@@ -29,12 +33,20 @@ pub(super) async fn build_registry_binding(
                    ) AS chain_positions,
                    event.manifest_version
             FROM project_events event
+            LEFT JOIN project_stage_name_current current_name
+              ON event.event_kind IN ('AuthorityTransferred', 'SubregistryChanged')
+             AND current_name.logical_name_id = event.logical_name_id
             WHERE event.event_kind IN (
                       'AuthorityTransferred', 'SubregistryChanged', 'SurfaceBound', 'SurfaceUnbound'
                   )
-              AND event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+              AND (event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+                   OR (event.event_kind IN ('SurfaceBound', 'SurfaceUnbound')
+                       AND event.source_family IN (
+                           'ens_v1_registrar_l1', 'basenames_base_registrar'
+                       )))
               AND event.resource_id IS NOT NULL
-            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
+            ORDER BY COALESCE(current_name.resource_id, event.resource_id),
+                     event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
         ), classified AS (

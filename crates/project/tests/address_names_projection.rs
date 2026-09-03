@@ -448,18 +448,12 @@ async fn registry_operator_state_and_binding_converge_after_revocation() -> Resu
             .bind(RESOURCE)
             .fetch_one(&pool)
             .await?;
-            assert_eq!(
-                active,
-                (
-                    true,
-                    OWNER.to_owned(),
-                    REGISTRY.to_owned(),
-                    "operator_approval_surfaces_not_ingested".to_owned()
-                )
-            );
+            assert!(active.0);
+            assert_eq!(active.1, OWNER);
+            assert_eq!(active.2, REGISTRY);
+            assert_eq!(active.3, "operator_approval_surfaces_not_ingested");
         }
     }
-
     run_project(&pool, 10, 10, Some(9)).await?;
     let approved: bool = sqlx::query_scalar(
         "SELECT approved FROM account_permission_state_current WHERE subject = $1",
@@ -468,39 +462,20 @@ async fn registry_operator_state_and_binding_converge_after_revocation() -> Resu
     .fetch_one(&pool)
     .await?;
     assert!(!approved, "the latest revocation must remain projected");
-    let incremental: (serde_json::Value, Option<String>, Option<String>, String) = sqlx::query_as(
-        "SELECT to_jsonb(account) - 'last_recomputed_at' - 'inserted_at',
-                summary.registry_owner, summary.registry_contract,
-                summary.unsupported_reason
-         FROM account_permission_state_current account
-         JOIN permissions_current_resource_summary summary
-           ON summary.resource_id = $1::uuid
-         WHERE account.subject = $2",
-    )
-    .bind(RESOURCE)
-    .bind(OPERATOR)
-    .fetch_one(&pool)
-    .await?;
+    const CURRENT_STATE: &str = "SELECT jsonb_build_object('account', to_jsonb(account) - 'last_recomputed_at' - 'inserted_at', 'registry_owner', summary.registry_owner, 'registry_contract', summary.registry_contract, 'unsupported_reason', summary.unsupported_reason) FROM account_permission_state_current account JOIN permissions_current_resource_summary summary ON summary.resource_id = $1::uuid";
+    let incremental: serde_json::Value = sqlx::query_scalar(CURRENT_STATE)
+        .bind(RESOURCE)
+        .fetch_one(&pool)
+        .await?;
     run_project(&pool, 10, 8, None).await?;
-    let rebuilt = sqlx::query_as(
-        "SELECT to_jsonb(account) - 'last_recomputed_at' - 'inserted_at',
-                summary.registry_owner, summary.registry_contract,
-                summary.unsupported_reason
-         FROM account_permission_state_current account
-         JOIN permissions_current_resource_summary summary
-           ON summary.resource_id = $1::uuid
-         WHERE account.subject = $2",
-    )
-    .bind(RESOURCE)
-    .bind(OPERATOR)
-    .fetch_one(&pool)
-    .await?;
+    let rebuilt: serde_json::Value = sqlx::query_scalar(CURRENT_STATE)
+        .bind(RESOURCE)
+        .fetch_one(&pool)
+        .await?;
     assert_eq!(incremental, rebuilt);
-
     database.cleanup().await?;
     Ok(())
 }
-
 #[tokio::test]
 async fn registry_operator_reorg_restores_losing_grant_and_revoke() -> Result<()> {
     const OWNER: &str = "0x0000000000000000000000000000000000000a51";
@@ -558,7 +533,6 @@ async fn registry_operator_reorg_restores_losing_grant_and_revoke() -> Result<()
             (REVOKE_LOSER.to_owned(), false)
         ]
     );
-
     sqlx::query(
         "UPDATE normalized_events SET canonicality_state = 'orphaned'
          WHERE event_identity IN ('fixture:losing-grant', 'fixture:losing-revoke')",
@@ -588,7 +562,6 @@ async fn registry_operator_reorg_restores_losing_grant_and_revoke() -> Result<()
     database.cleanup().await?;
     Ok(())
 }
-
 #[tokio::test]
 async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() -> Result<()> {
     const RESOURCE: &str = "00000000-0000-0000-0000-000000000615";
@@ -649,14 +622,8 @@ async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() ->
     .bind(RESOURCE)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(
-        binding,
-        (
-            Some(CURRENT_REGISTRY.to_owned()),
-            Some("registrar".to_owned())
-        )
-    );
-
+    assert_eq!(binding.0.as_deref(), Some(CURRENT_REGISTRY));
+    assert_eq!(binding.1.as_deref(), Some("registrar"));
     seed_normalized_event(
         &pool,
         "fixture:current-registry-clear",
@@ -678,7 +645,6 @@ async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() ->
     .fetch_one(&pool)
     .await?;
     assert_eq!(cleared, (None, None));
-
     sqlx::query(
         "DELETE FROM normalized_events
          WHERE event_identity = 'fixture:current-registry-clear'",
@@ -706,21 +672,46 @@ async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() ->
     );
 
     const RESTORED_REGISTRY: &str = "0x0000000000000000000000000000000000000c34";
-    for (identity, resource, kind, after, raw_fact) in [
+    const LATER_REGISTRY: &str = "0x0000000000000000000000000000000000000c35";
+    seed_normalized_event(
+        &pool,
+        "fixture:same-block-log",
+        None,
+        Some(RESTORED_RESOURCE),
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        11,
+        2,
+        json!({"source_event":"NewOwner", "owner_getter":OWNER}),
+        json!({"kind":"raw_log", "emitting_address":LATER_REGISTRY}),
+    )
+    .await?;
+    for (identity, resource, kind, family, after, raw_fact) in [
         (
             "fixture:detached-registry",
             RESOURCE,
             "SurfaceUnbound",
-            json!({"source_event":"NewOwner", "owner_getter":OWNER}),
-            json!({"kind":"raw_log", "emitting_address":CURRENT_REGISTRY}),
+            "ens_v1_registrar_l1",
+            json!({"source_event":"NameRegistered"}),
+            json!({"kind":"raw_log", "emitting_address":"0x0000000000000000000000000000000000000c33"}),
+        ),
+        (
+            "fixture:same-block-boundary",
+            RESTORED_RESOURCE,
+            "SurfaceBound",
+            "ens_v1_registry_l1",
+            json!({"source_event":"RegistrationReleased", "owner_getter":OWNER,
+                "registry_contract":RESTORED_REGISTRY}),
+            json!({"kind":"raw_block"}),
         ),
         (
             "fixture:expiry-restored-registry",
             RESTORED_RESOURCE,
             "SurfaceBound",
-            json!({"source_event":"RegistrationReleased", "authority_kind":"registry_only",
+            "ens_v1_registrar_l1",
+            json!({"source_event":"Transfer", "authority_kind":"registry_only",
                 "owner_getter":OWNER, "registry_contract":RESTORED_REGISTRY}),
-            json!({"kind":"raw_block"}),
+            json!({"kind":"raw_log", "emitting_address":"0x0000000000000000000000000000000000000c33"}),
         ),
     ] {
         seed_normalized_event(
@@ -729,7 +720,7 @@ async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() ->
             None,
             Some(resource),
             kind,
-            "ens_v1_registry_l1",
+            family,
             11,
             1,
             after,
@@ -737,6 +728,13 @@ async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() ->
         )
         .await?;
     }
+    sqlx::query(
+        "UPDATE normalized_events SET transaction_hash = NULL,
+                 transaction_index = NULL, log_index = NULL
+                 WHERE event_identity = 'fixture:same-block-boundary'",
+    )
+    .execute(&pool)
+    .await?;
     run_project_redo(&pool, 11, 11).await?;
     let incremental = serving_projection_snapshot(&pool).await?;
     let rotated: (Option<String>, Option<String>) = sqlx::query_as(
@@ -749,13 +747,12 @@ async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() ->
     .bind(RESTORED_RESOURCE)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(rotated, (None, Some(RESTORED_REGISTRY.to_owned())));
+    assert_eq!(rotated, (None, Some(LATER_REGISTRY.to_owned())));
     run_project(&pool, 11, 8, None).await?;
     assert_eq!(incremental, serving_projection_snapshot(&pool).await?);
     database.cleanup().await?;
     Ok(())
 }
-
 #[tokio::test]
 async fn registry_binding_reorg_restores_surviving_observation() -> Result<()> {
     const NAMEHASH: &str = "0x6050000000000000000000000000000000000000000000000000000000000021";
@@ -832,7 +829,6 @@ async fn registry_binding_reorg_restores_surviving_observation() -> Result<()> {
     database.cleanup().await?;
     Ok(())
 }
-
 async fn ownerless_serving_projection_snapshot(
     pool: &PgPool,
     logical_name_id: &str,

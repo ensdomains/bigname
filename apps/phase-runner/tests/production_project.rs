@@ -13397,6 +13397,76 @@ async fn registrar_transfer_authority_flip_matches_full_rebuild() -> Result<()> 
     assert_registrar_transfer_matches_full_rebuild("project-resolver-transfer-flip", true).await
 }
 
+#[tokio::test]
+async fn registrar_reregistration_moves_registry_binding_per_block() -> Result<()> {
+    let scratch = ScratchDatabase::create("project-registrar-reregistration-binding").await?;
+    let chain = "project-registrar-reregistration-binding";
+    seed_raw_registrar_transfer_fixture(scratch.pool(), chain, true).await?;
+    for table in ["raw_logs", "raw_transactions"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE chain_id = $1"))
+            .bind(chain)
+            .execute(scratch.pool())
+            .await?;
+    }
+    let blocks = [1, 2, 3, 4, 5, 6, 7, 8];
+    for block in [6, 7, 8] {
+        insert_lineage_block(scratch.pool(), chain, block).await?;
+    }
+    sqlx::raw_sql(
+        "ALTER TABLE chain_lineage DISABLE TRIGGER chain_lineage_protect_identity;
+        UPDATE chain_lineage SET block_timestamp = to_timestamp(CASE block_number
+        WHEN 2 THEN 8000000 WHEN 3 THEN 8000001 WHEN 4 THEN 8000002
+        WHEN 5 THEN 16000004 WHEN 6 THEN 16000005 WHEN 7 THEN 16000006
+        WHEN 8 THEN 16000007 ELSE block_number END);
+        ALTER TABLE chain_lineage ENABLE TRIGGER chain_lineage_protect_identity;",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "fixtures/registry-binding-reregistration.json"
+    ))?;
+    for fact in fixture["facts"].as_array().unwrap() {
+        let topics = serde_json::from_value::<Vec<String>>(fact["topics"].clone())?
+            .iter()
+            .map(|topic| topic.parse())
+            .collect::<Result<Vec<B256>, _>>()?;
+        let data =
+            alloy_primitives::hex::decode(fact["data"].as_str().unwrap().trim_start_matches("0x"))?;
+        insert_raw_event_at(
+            scratch.pool(),
+            chain,
+            fact["block"].as_i64().unwrap(),
+            0,
+            fact["log"].as_i64().unwrap(),
+            fact["emitter"].as_str().unwrap(),
+            &topics,
+            &data,
+        )
+        .await?;
+    }
+    let expected: Vec<Vec<String>> = serde_json::from_value(fixture["expected"].clone())?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: *blocks.last().unwrap(),
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    for (index, block) in blocks.into_iter().enumerate() {
+        run_project(scratch.pool(), chain, None, RunMode::Normal, 0, block).await?;
+        let owners: Vec<String> = sqlx::query_scalar(
+            "SELECT registry_owner FROM permissions_current_resource_summary
+             WHERE registry_owner IS NOT NULL ORDER BY registry_owner",
+        )
+        .fetch_all(scratch.pool())
+        .await?;
+        assert_eq!(owners, expected[index]);
+    }
+    scratch.cleanup().await
+}
+
 async fn assert_registrar_transfer_matches_full_rebuild(
     chain: &str,
     include_registry_owner: bool,
@@ -22482,6 +22552,12 @@ async fn seed_raw_registrar_transfer_fixture(
                 "event NewResolver(bytes32 indexed node, address resolver)",
                 &["registry"],
                 &["ResolverChanged", "PermissionChanged"],
+            ),
+            (
+                "Transfer",
+                "event Transfer(bytes32 indexed node, address owner)",
+                &["registry"],
+                &["AuthorityTransferred", "PermissionChanged"],
             ),
         ],
     )
