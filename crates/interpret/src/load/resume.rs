@@ -198,6 +198,7 @@ mod tests {
             source_family: "ens_v2_registry_l1".to_owned(),
             manifest_version: 1,
             source_manifest_id: Some(1),
+            emitting_address: None,
             state_scope: Some(format!(
                 "{emitter}:-:{}:-:{event_kind}",
                 token_id.unwrap_or("-")

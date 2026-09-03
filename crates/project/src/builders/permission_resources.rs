@@ -11,8 +11,10 @@ pub(super) async fn build_registry_binding(
             SELECT DISTINCT ON (event.resource_id)
                    event.resource_id,
                    event.normalized_event_id,
-                   lower(event.after_state ->> 'owner_getter') AS registry_owner,
-                   lower(event.raw_fact_ref ->> 'emitting_address') AS registry_contract,
+                   CASE WHEN event.event_kind = 'SurfaceUnbound' THEN NULL
+                        ELSE lower(event.after_state ->> 'owner_getter') END AS registry_owner,
+                   lower(COALESCE(event.raw_fact_ref ->> 'emitting_address',
+                                  event.after_state ->> 'registry_contract')) AS registry_contract,
                    jsonb_build_object(
                        'normalized_event_ids', jsonb_build_array(event.normalized_event_id),
                        'raw_fact_ref', event.raw_fact_ref,
@@ -27,7 +29,9 @@ pub(super) async fn build_registry_binding(
                    ) AS chain_positions,
                    event.manifest_version
             FROM project_events event
-            WHERE event.event_kind IN ('AuthorityTransferred', 'SubregistryChanged')
+            WHERE event.event_kind IN (
+                      'AuthorityTransferred', 'SubregistryChanged', 'SurfaceBound', 'SurfaceUnbound'
+                  )
               AND event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
               AND event.resource_id IS NOT NULL
             ORDER BY event.resource_id, event.block_number DESC NULLS LAST,

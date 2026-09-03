@@ -31,10 +31,10 @@ pub(super) struct V1NameState {
     pub labelhash: Option<String>,
     pub expiry: Option<i64>,
     pub owner: Option<String>,
+    pub registry_contract: Option<String>,
     pub authority_key: Option<String>,
     pub wrapper_fallback: bool,
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1RegistryReadAnchor {
     pub logical_name_id: String,
@@ -43,20 +43,17 @@ pub(super) struct V1RegistryReadAnchor {
     pub source_family: String,
     pub source_manifest_id: Option<i64>,
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1ResolverLink {
     pub resolver_address: String,
     pub resource_id: Option<Uuid>,
     pub logical_name_id: Option<String>,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct V1WrapperData {
     pub fuses: u32,
     pub expiry: u64,
 }
-
 #[path = "state_v2.rs"]
 mod v2;
 
@@ -185,6 +182,7 @@ impl State {
                 labelhash: None,
                 expiry,
                 owner,
+                registry_contract: None,
                 authority_key,
                 wrapper_fallback: false,
             },
@@ -226,6 +224,7 @@ impl State {
             labelhash,
             expiry,
             owner,
+            registry_contract: None,
             authority_key,
             wrapper_fallback,
         };
@@ -263,6 +262,7 @@ impl State {
         resource_id: Uuid,
         authority_source_family: String,
         owner: Option<String>,
+        registry_contract: Option<String>,
         authority_key: Option<String>,
     ) {
         let key = v1_key(namespace, namehash);
@@ -276,6 +276,7 @@ impl State {
             labelhash: None,
             expiry: None,
             owner,
+            registry_contract,
             authority_key,
             wrapper_fallback: false,
         };
@@ -320,13 +321,12 @@ impl State {
     }
 
     fn v1_registry_authority_if_authentic(&self, key: &str) -> Option<V1NameState> {
-        self.v1_registry_owners
-            .get(key)
-            .filter(|owner| {
-                !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-            })
-            .and_then(|_| self.v1_registry_authorities.get(key))
-            .cloned()
+        let owner = self.v1_registry_owners.get(key).filter(|owner| {
+            !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
+        })?;
+        let mut authority = self.v1_registry_authorities.get(key)?.clone();
+        authority.owner = Some(owner.clone());
+        Some(authority)
     }
 
     pub(super) fn set_v1_registry_owner_views(

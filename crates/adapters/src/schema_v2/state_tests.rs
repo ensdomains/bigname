@@ -66,6 +66,7 @@ fn zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfe
         Uuid::from_u128(3),
         "ens_v1_registry_l1".to_owned(),
         Some(OWNER.to_owned()),
+        None,
         Some(format!("registry-only:{NODE}")),
     );
     assert!(

@@ -279,6 +279,7 @@ pub(super) fn interpret(
                         .map(str::to_owned),
                     expiry: None,
                     owner: Some(owner.to_owned()),
+                    registry_contract: Some(raw.emitting_address.to_lowercase()),
                     authority_key: Some(format!("registry-only:{}:{affected_node}", raw.chain_id)),
                     wrapper_fallback: false,
                 };
@@ -695,7 +696,6 @@ fn merge_observation(observation: &Value, fields: Value) -> Value {
         );
     merged
 }
-
 pub(super) fn authority_kind(authority: &V1NameState) -> &'static str {
     match authority.authority_source_family.as_str() {
         "ens_v1_wrapper_l1" => "wrapper",

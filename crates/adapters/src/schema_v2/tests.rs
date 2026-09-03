@@ -2041,6 +2041,7 @@ fn incremental_v2_delta_refreshes_only_the_affected_topology_component() {
             source_family: "ens_v2_registry_l1".to_owned(),
             manifest_version: 1,
             source_manifest_id: Some(58),
+            emitting_address: None,
             state_scope: Some(format!("{registry}:-:{token_id}:-:LabelRegistered")),
             block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(timestamp)),
             after_state: json!({
@@ -2572,6 +2573,7 @@ fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow:
         source_family: "ens_v1_registry_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: None,
+        emitting_address: None,
         state_scope: Some(format!("registry:{namehash}")),
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1)),
         after_state: json!({
@@ -2649,6 +2651,7 @@ fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow:
         source_family: selected.source.source_family.clone(),
         manifest_version: selected.source.manifest_version,
         source_manifest_id: Some(selected.source.manifest_id),
+        emitting_address: None,
         state_scope: Some(grant.state_scope),
         block_timestamp: Some(raw.block_timestamp),
         after_state: grant.after_state,
@@ -7757,6 +7760,7 @@ fn surface_before_first_owner_links_a_later_ownerless_resolver() -> anyhow::Resu
         source_family: "ens_v1_registrar_l1".to_owned(),
         manifest_version: 1,
         source_manifest_id: Some(94),
+        emitting_address: None,
         state_scope: Some(format!("surface:{node:#x}")),
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH),
         after_state: json!({"source_event":"NameRegistered", "namehash":format!("{node:#x}")}),
@@ -9078,6 +9082,11 @@ fn ens_v2_resource_and_lineage_survive_prior_state_and_token_regeneration() -> a
             source_family: event.source_family.clone(),
             manifest_version: event.manifest_version,
             source_manifest_id: event.source_manifest_id,
+            emitting_address: event
+                .raw_fact_ref
+                .get("emitting_address")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
             state_scope: event
                 .raw_fact_ref
                 .get("state_scope")
@@ -12952,7 +12961,6 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         .and_then(|event| event.resource_id)
         .expect("registrar authority");
     assert_ne!(registry_resource, registrar_resource);
-
     let released = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest, registrar_manifest],
@@ -12969,9 +12977,15 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         }],
         raw_logs: Vec::new(),
     })?;
-    assert!(released.normalized_events.iter().any(|event| {
-        event.event_kind == "SurfaceBound" && event.resource_id == Some(registry_resource)
-    }));
+    let restored = released
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound" && event.resource_id == Some(registry_resource)
+        })
+        .expect("restored registry authority");
+    assert_eq!(restored.after_state["owner_getter"], CONTRACT);
+    assert_eq!(restored.after_state["registry_contract"], REGISTRY);
     let persisted_resources = first
         .resources
         .iter()
@@ -17857,6 +17871,11 @@ fn prior_event(event: &NormalizedEvent) -> PriorEventInput {
         source_family: event.source_family.clone(),
         manifest_version: event.manifest_version,
         source_manifest_id: event.source_manifest_id,
+        emitting_address: event
+            .raw_fact_ref
+            .get("emitting_address")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         state_scope: event
             .raw_fact_ref
             .get("state_scope")

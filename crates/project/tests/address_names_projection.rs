@@ -590,8 +590,9 @@ async fn registry_operator_reorg_restores_losing_grant_and_revoke() -> Result<()
 }
 
 #[tokio::test]
-async fn registry_binding_tracks_generation_replacement_and_zero_clear() -> Result<()> {
+async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() -> Result<()> {
     const RESOURCE: &str = "00000000-0000-0000-0000-000000000615";
+    const RESTORED_RESOURCE: &str = "00000000-0000-0000-0000-000000000616";
     const OWNER: &str = "0x0000000000000000000000000000000000000a11";
     const ZERO: &str = "0x0000000000000000000000000000000000000000";
     const OLD_REGISTRY: &str = "0x0000000000000000000000000000000000000c31";
@@ -602,9 +603,11 @@ async fn registry_binding_tracks_generation_replacement_and_zero_clear() -> Resu
     sqlx::query(
         "INSERT INTO resources (
              resource_id, chain_id, block_hash, block_number, canonicality_state
-         ) VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+         ) VALUES ($1::uuid, $3, $4, 8, 'canonical'),
+                  ($2::uuid, $3, $4, 8, 'canonical')",
     )
     .bind(RESOURCE)
+    .bind(RESTORED_RESOURCE)
     .bind(CHAIN)
     .bind(block_hash(8))
     .execute(&pool)
@@ -701,6 +704,54 @@ async fn registry_binding_tracks_generation_replacement_and_zero_clear() -> Resu
         restored,
         (Some(OWNER.to_owned()), Some(CURRENT_REGISTRY.to_owned()))
     );
+
+    const RESTORED_REGISTRY: &str = "0x0000000000000000000000000000000000000c34";
+    for (identity, resource, kind, after, raw_fact) in [
+        (
+            "fixture:detached-registry",
+            RESOURCE,
+            "SurfaceUnbound",
+            json!({"source_event":"NewOwner", "owner_getter":OWNER}),
+            json!({"kind":"raw_log", "emitting_address":CURRENT_REGISTRY}),
+        ),
+        (
+            "fixture:expiry-restored-registry",
+            RESTORED_RESOURCE,
+            "SurfaceBound",
+            json!({"source_event":"RegistrationReleased", "authority_kind":"registry_only",
+                "owner_getter":OWNER, "registry_contract":RESTORED_REGISTRY}),
+            json!({"kind":"raw_block"}),
+        ),
+    ] {
+        seed_normalized_event(
+            &pool,
+            identity,
+            None,
+            Some(resource),
+            kind,
+            "ens_v1_registry_l1",
+            11,
+            1,
+            after,
+            raw_fact,
+        )
+        .await?;
+    }
+    run_project_redo(&pool, 11, 11).await?;
+    let incremental = serving_projection_snapshot(&pool).await?;
+    let rotated: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT detached.registry_contract, restored.registry_contract
+         FROM permissions_current_resource_summary detached
+         CROSS JOIN permissions_current_resource_summary restored
+         WHERE detached.resource_id = $1::uuid AND restored.resource_id = $2::uuid",
+    )
+    .bind(RESOURCE)
+    .bind(RESTORED_RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rotated, (None, Some(RESTORED_REGISTRY.to_owned())));
+    run_project(&pool, 11, 8, None).await?;
+    assert_eq!(incremental, serving_projection_snapshot(&pool).await?);
     database.cleanup().await?;
     Ok(())
 }

@@ -157,6 +157,7 @@ fn transfer(
             labelhash: Some(format!("{labelhash:#x}")),
             expiry: None,
             owner: Some(registry_owner),
+            registry_contract: None,
             authority_key: Some(format!("registry-only:{}:{raw_namehash}", raw.chain_id)),
             wrapper_fallback: false,
         };
