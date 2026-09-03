@@ -405,6 +405,7 @@ fn outer_chain_index<'a>(mut node: &'a Value, index_name: &str) -> Result<&'a Va
     }
 }
 
+// NULL relationship IDs make these rows prove the bounded outer scan, not lineage joins or serving-resource EXISTS.
 async fn pad_resolver_planner_statistics(database: &TestDatabase) -> Result<()> {
     let alice_id = format!("ens:{GRAPHQL_ALICE_NAMEHASH}");
     let surfaces = sqlx::query(r#"WITH source AS (
@@ -485,6 +486,18 @@ async fn graphql_generated_resolvers_plan_pages_in_postgres() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     pad_resolver_planner_statistics(&database).await?;
+    let invalid_identity_rows: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+             FROM bigname_phase.name_current
+            WHERE logical_name_id <> namespace || ':' || namehash
+               OR namehash !~ '^0x[0-9a-f]{64}$'"#,
+    )
+    .fetch_one(&database.lookup_pool)
+    .await?;
+    assert_eq!(
+        invalid_identity_rows, 0,
+        "every padded name must use the minted namespace:namehash identity"
+    );
     let chains = vec!["ethereum-mainnet".to_owned()];
     let rows = crate::graphql::load_phase_graphql_resolver_page_offset(
         &database.lookup_pool,
@@ -524,7 +537,11 @@ async fn graphql_generated_resolvers_plan_pages_in_postgres() -> Result<()> {
         if matches!(label, "UNFILTERED" | "ADDRESS") {
             assert_eq!(joins["Node Type"], "Nested Loop");
         }
-        let expected_index = if label == "DOMAIN" { "name_current_lookup_idx" } else { "name_current_resolver_idx" };
+        let expected_index = match label {
+            "DOMAIN" => "name_current_lookup_idx",
+            "ID" => "name_current_pkey",
+            _ => "name_current_resolver_idx",
+        };
         let scan = outer_chain_index(joins, expected_index)?;
         assert_eq!(scan["Node Type"], "Index Scan");
         if matches!(label, "UNFILTERED" | "ADDRESS") {
@@ -534,6 +551,19 @@ async fn graphql_generated_resolvers_plan_pages_in_postgres() -> Result<()> {
                     .context("resolver index actual rows")?
                     <= 105,
                 "ordered resolver index scan must stop within a small constant of the 100-row page: {scan}"
+            );
+        }
+        if label == "ID" {
+            let condition = scan["Index Cond"].as_str().context("Resolver ID index condition")?;
+            assert!(condition.contains("logical_name_id"), "{condition}");
+            let rows_removed = scan["Rows Removed by Filter"].as_u64().unwrap_or(0);
+            assert!(
+                rows_removed <= 1,
+                "Resolver point lookup must not scan the shared-address group: {scan}"
+            );
+            assert!(
+                scan["Shared Hit Blocks"].as_u64().context("point index shared hit blocks")? <= 16,
+                "Resolver point lookup must touch a bounded number of index/heap blocks: {scan}"
             );
         }
         if label == "ADDRESS" {

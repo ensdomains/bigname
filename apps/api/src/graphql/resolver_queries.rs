@@ -260,6 +260,9 @@ fn push_filtered_resolvers<'a>(
             .push(" AND LOWER(nc.declared_summary #>> '{resolver,address}') = ")
             .push_bind(&id.address);
         builder.push(" AND nc.namehash = ").push_bind(&id.namehash);
+        builder
+            .push(" AND nc.logical_name_id = ")
+            .push_bind(format!("{namespace}:{}", id.namehash));
     }
     if let Some(address) = filter.address.as_deref() {
         // Equal inclusive bounds are exact equality while preserving the indexed address
