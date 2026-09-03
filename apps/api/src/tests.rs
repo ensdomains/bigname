@@ -304,10 +304,12 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
 
 include!("tests/graphql.rs");
 include!("tests/graphql_generated_domain_roots.rs");
+include!("tests/graphql_generated_domain_filter_plans.rs");
 include!("tests/graphql_generated_account_resolver_roots.rs");
 include!("tests/graphql_contract.rs");
 include!("tests/graphql_oracle.rs");
 include!("tests/graphql_oracle_input_scopes.rs");
+include!("tests/graphql_oracle_enum_scopes.rs");
 include!("tests/v2_name_record.rs");
 include!("tests/v2_diagnostics_names.rs");
 include!("tests/v2_history.rs");

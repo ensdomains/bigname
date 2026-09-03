@@ -81,7 +81,7 @@ async fn graphql_generated_domain_root_signature_matches_pinned_schema() -> Resu
 }
 
 #[tokio::test]
-async fn graphql_generated_domain_filter_has_only_the_t2_members() -> Result<()> {
+async fn graphql_generated_domain_filter_has_the_slice_one_members() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let payload = post_graphql(
         database.app_state(),
@@ -98,7 +98,16 @@ async fn graphql_generated_domain_filter_has_only_the_t2_members() -> Result<()>
     actual.sort_unstable();
     assert_eq!(
         actual,
-        ["id", "id_in", "name", "name_contains", "owner", "owner_in"]
+        [
+            "id", "id_gt", "id_gte", "id_in", "id_lt", "id_lte", "id_not",
+            "id_not_in", "name", "name_contains", "name_contains_nocase",
+            "name_ends_with", "name_ends_with_nocase", "name_gt", "name_gte",
+            "name_in", "name_lt", "name_lte", "name_not", "name_not_contains",
+            "name_not_contains_nocase", "name_not_ends_with",
+            "name_not_ends_with_nocase", "name_not_in", "name_not_starts_with",
+            "name_not_starts_with_nocase", "name_starts_with",
+            "name_starts_with_nocase", "owner", "owner_in"
+        ]
     );
     database.cleanup().await
 }
@@ -622,6 +631,216 @@ async fn graphql_generated_domain_roots_enforce_current_snapshot_blocks() -> Res
                 assert_eq!(payload["data"], Value::Null);
             }
         }
+    }
+    database.cleanup().await
+}
+
+async fn generated_domain_values(database: &TestDatabase, where_value: Value) -> Result<Vec<Value>> {
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: Domain_filter!) {
+            domains(first: 200, orderBy: id, where: $where) {
+                id name createdAt expiryDate owner { id } resolver { id }
+            }
+        }"#,
+        json!({"where": where_value}),
+    )
+    .await?;
+    payload["data"]["domains"]
+        .as_array()
+        .cloned()
+        .context("generated Domain rows")
+}
+
+fn sql_like(value: &str, pattern: &str, nocase: bool) -> bool {
+    let (value, pattern) = if nocase {
+        (value.to_lowercase(), pattern.to_lowercase())
+    } else {
+        (value.to_owned(), pattern.to_owned())
+    };
+    fn walk(value: &[char], pattern: &[char]) -> bool {
+        match pattern {
+            [] => value.is_empty(),
+            ['%', rest @ ..] => (0..=value.len()).any(|skip| walk(&value[skip..], rest)),
+            ['_', rest @ ..] => !value.is_empty() && walk(&value[1..], rest),
+            ['\\', escaped, rest @ ..] => {
+                value.first() == Some(escaped) && walk(&value[1..], rest)
+            }
+            [literal, rest @ ..] => {
+                value.first() == Some(literal) && walk(&value[1..], rest)
+            }
+        }
+    }
+    walk(&value.chars().collect::<Vec<_>>(), &pattern.chars().collect::<Vec<_>>())
+}
+
+fn operator_matches(row: &Value, member: &str, operand: &Value) -> bool {
+    let field = if member.starts_with("id") { "id" } else { "name" };
+    let Some(value) = row[field].as_str() else { return false };
+    let scalar = operand.as_str().unwrap_or_default();
+    match member {
+        "id" | "name" => value == scalar,
+        "id_not" | "name_not" => value != scalar,
+        "id_gt" | "name_gt" => value > scalar,
+        "id_gte" | "name_gte" => value >= scalar,
+        "id_lt" | "name_lt" => value < scalar,
+        "id_lte" | "name_lte" => value <= scalar,
+        "id_in" | "name_in" => operand.as_array().is_some_and(|items| items.iter().any(|item| item == value)),
+        "id_not_in" | "name_not_in" => operand.as_array().is_some_and(|items| !items.is_empty() && items.iter().all(|item| item != value)),
+        _ => {
+            let negative = member.contains("_not_");
+            let nocase = member.ends_with("_nocase");
+            let pattern = if member.contains("contains") {
+                if scalar.starts_with('%') || scalar.ends_with('%') { scalar.to_owned() } else { format!("%{scalar}%") }
+            } else if member.contains("starts_with") {
+                format!("{scalar}%")
+            } else {
+                format!("%{scalar}")
+            };
+            sql_like(value, &pattern, nocase) != negative
+        }
+    }
+}
+
+#[tokio::test]
+async fn graphql_generated_domain_all_id_and_name_operators_agree_with_served_fields() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let corpus = generated_domain_values(&database, json!({})).await?;
+    let ids = corpus.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();
+    let names = corpus.iter().map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>();
+    let cases = [
+        ("id", json!(ids[0])), ("id_not", json!(ids[0])), ("id_gt", json!(ids[0])),
+        ("id_gte", json!(ids[1])), ("id_lt", json!(ids[1])), ("id_lte", json!(ids[0])),
+        ("id_in", json!([ids[0], ids[0]])), ("id_not_in", json!([ids[0]])),
+        ("name", json!(names[0])), ("name_not", json!(names[0])),
+        ("name_gt", json!(names[0])), ("name_gte", json!(names[1])),
+        ("name_lt", json!(names[1])), ("name_lte", json!(names[0])),
+        ("name_in", json!([names[0], names[0]])), ("name_not_in", json!([names[0]])),
+        ("name_contains", json!("ali")), ("name_contains_nocase", json!("ALI")),
+        ("name_not_contains", json!("ALI")), ("name_not_contains_nocase", json!("ALI")),
+        ("name_starts_with", json!("ali")), ("name_starts_with_nocase", json!("ALI")),
+        ("name_not_starts_with", json!("ALI")), ("name_not_starts_with_nocase", json!("ALI")),
+        ("name_ends_with", json!(".eth")), ("name_ends_with_nocase", json!(".ETH")),
+        ("name_not_ends_with", json!(".ETH")), ("name_not_ends_with_nocase", json!(".ETH")),
+    ];
+    for (member, operand) in cases {
+        let expected = corpus.iter().filter(|row| operator_matches(row, member, &operand))
+            .map(|row| row["id"].clone()).collect::<Vec<_>>();
+        let actual = generated_domain_values(&database, json!({(member): operand})).await?
+            .into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{member} must agree with served fields");
+    }
+    for member in ["id_in", "id_not_in", "name_in", "name_not_in"] {
+        assert!(generated_domain_values(&database, json!({(member): []})).await?.is_empty(), "{member}");
+    }
+    for (member, operand) in [("name_contains", "%"), ("name_contains", "_"), ("name_contains", r"\%"), ("name_contains", "")] {
+        let expected = corpus.iter().filter(|row| operator_matches(row, member, &json!(operand)))
+            .map(|row| row["id"].clone()).collect::<Vec<_>>();
+        let actual = generated_domain_values(&database, json!({(member): operand})).await?
+            .into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+        assert_eq!(actual, expected, "wildcard case {operand:?}");
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_generated_domain_members_conjoin_before_pagination() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let corpus = generated_domain_values(&database, json!({})).await?;
+    let first = corpus[0]["id"].clone();
+    let expected = corpus.iter().filter(|row| operator_matches(row, "id_gte", &first) && operator_matches(row, "name_ends_with", &json!(".eth")))
+        .map(|row| row["id"].clone()).collect::<Vec<_>>();
+    let actual = generated_domain_values(&database, json!({"id_gte": first, "name_ends_with": ".eth"})).await?
+        .into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    let payload = post_graphql(database.app_state(), "query($where: Domain_filter!) { domains(first: 1, skip: 1, orderBy: id, where: $where) { id } }", json!({"where":{"name_ends_with":".eth"}})).await?;
+    assert_eq!(payload["data"]["domains"][0]["id"], expected[1]);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_generated_domain_0x_ids_are_exact_no_matches() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    for id in [GRAPHQL_ALICE_NAMEHASH.replacen("0x", "0X", 1), GRAPHQL_ALICE_NAMEHASH.to_uppercase().replacen("0X", "0x", 1)] {
+        for where_value in [json!({"id": id}), json!({"id_in": [id]})] {
+            assert!(generated_domain_values(&database, where_value).await?.is_empty());
+        }
+    }
+    assert_eq!(generated_domain_values(&database, json!({"id": GRAPHQL_ALICE_NAMEHASH})).await?.len(), 1);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_change_block_remains_exact_upstream_only() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let introspection = post_graphql(database.app_state(), "query { __type(name: \"BlockChangedFilter\") { name } }", json!({})).await?;
+    assert!(introspection["data"]["__type"].is_null());
+    let payload = post_graphql_allow_errors(database.app_state(), "query { domains(where: { _change_block: { number_gte: 1 } }) { id } }", json!({})).await?;
+    let error = payload["errors"][0]["message"].as_str().context("validation error")?;
+    assert!(error.contains("Domain_filter") && error.contains("_change_block"), "{payload}");
+    assert!(payload.get("data").is_none() || payload["data"].is_null());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_generated_domain_order_values_match_served_fields() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let introspection = post_graphql(database.app_state(), "query { __type(name: \"Domain_orderBy\") { enumValues { name } } }", json!({})).await?;
+    let actual_values = introspection["data"]["__type"]["enumValues"].as_array().context("order values")?
+        .iter().map(|value| value["name"].as_str().unwrap()).collect::<Vec<_>>();
+    assert_eq!(actual_values, ["createdAt", "expiryDate", "id", "name", "owner", "owner__id", "registrationDate", "resolver"]);
+
+    let corpus = generated_domain_values(&database, json!({})).await?;
+    for (order_by, pointer) in [
+        ("id", "/id"), ("name", "/name"), ("createdAt", "/createdAt"),
+        ("expiryDate", "/expiryDate"), ("owner", "/owner/id"),
+        ("owner__id", "/owner/id"), ("resolver", "/resolver/id"),
+    ] {
+        for direction in ["asc", "desc"] {
+            let mut expected = corpus.clone();
+            expected.sort_by(|left, right| {
+                let left_key = left.pointer(pointer).and_then(Value::as_str);
+                let right_key = right.pointer(pointer).and_then(Value::as_str);
+                let primary = match (left_key, right_key) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => if direction == "asc" { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less },
+                    (Some(_), None) => if direction == "asc" { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater },
+                    (Some(left), Some(right)) => if direction == "asc" { left.cmp(right) } else { right.cmp(left) },
+                };
+                primary.then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+            });
+            let payload = post_graphql(database.app_state(), &format!("query {{ domains(first: 200, orderBy: {order_by}, orderDirection: {direction}) {{ id }} }}"), json!({})).await?;
+            let actual = payload["data"]["domains"].as_array().context("ordered domains")?
+                .iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+            let expected = expected.into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{order_by} {direction}");
+        }
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_generated_and_legacy_name_filters_remain_separate() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let namehash = bigname_lookup::ens_namehash_hex("mixed.eth")?;
+    seed_identity_name(
+        &database, "ens:mixed.eth", "MiXeD.eth", "mixed.eth", &namehash,
+        Uuid::from_u128(0x670_4001), Uuid::from_u128(0x670_4002),
+        Uuid::from_u128(0x670_4003), GRAPHQL_OWNER,
+        bigname_storage::AddressNameRelation::TokenHolder, 720,
+    ).await?;
+    let generated_raw = generated_domain_values(&database, json!({"name":"MiXeD.eth"})).await?;
+    let generated_normalized = generated_domain_values(&database, json!({"name":"mixed.eth"})).await?;
+    assert_eq!(generated_raw.len(), 1);
+    assert!(generated_normalized.is_empty());
+    for where_value in [json!({"name":"mixed.eth"}), json!({"name_contains":"mix%"})] {
+        let payload = post_graphql(database.app_state(), "query($where: DomainFilter!) { domainConnection(first: 10, where: $where) { domains { name } } }", json!({"where":where_value})).await?;
+        assert_eq!(payload["data"]["domainConnection"]["domains"].as_array().context("legacy domains")?.len(), if where_value.get("name").is_some() { 1 } else { 0 });
     }
     database.cleanup().await
 }

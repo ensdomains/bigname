@@ -347,11 +347,21 @@ mod tests {
 
     #[test]
     fn composite_resolver_id_parser_is_exact_and_canonical() {
-        let address = "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD";
-        let namehash = format!("0x{}", "AB".repeat(32));
+        let address = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let namehash = format!("0x{}", "ab".repeat(32));
         let parsed = parse_resolver_id(&format!("{address}-{namehash}")).unwrap();
-        assert_eq!(parsed.address, address.to_ascii_lowercase());
-        assert_eq!(parsed.namehash, namehash.to_ascii_lowercase());
+        assert_eq!(parsed.address, address);
+        assert_eq!(parsed.namehash, namehash);
+        assert!(
+            parse_resolver_id(&format!(
+                "{}-{namehash}",
+                address.to_uppercase().replacen("0X", "0x", 1)
+            ))
+            .is_none()
+        );
+        assert!(
+            parse_resolver_id(&format!("{}-{namehash}", address.replacen("0x", "0X", 1))).is_none()
+        );
         assert!(parse_resolver_id(&format!("{address}-{namehash}-extra")).is_none());
         assert!(parse_resolver_id("not-an-id").is_none());
     }
