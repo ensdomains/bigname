@@ -2230,6 +2230,18 @@ async fn graphql_ownerless_domain_resolver_uses_serving_resource_inventory() -> 
     .execute(&database.pool)
     .await?;
     assert_eq!(update.rows_affected(), 1, "ownerless fixture must update Alice");
+    let (current_resource_id, serving_resource_id): (Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as(
+            "SELECT resource_id, serving_resource_id
+             FROM bigname_phase.name_current
+             WHERE logical_name_id = 'ens:' || $1",
+        )
+        .bind(GRAPHQL_ALICE_NAMEHASH)
+        .fetch_one(&database.pool)
+        .await?;
+    assert!(current_resource_id.is_none());
+    assert!(serving_resource_id.is_some());
+    assert_ne!(current_resource_id, serving_resource_id);
 
     let payload = post_graphql(
         database.app_state(),

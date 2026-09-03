@@ -470,14 +470,21 @@ resolvers(
 `Account.id: ID!` is the lowercase address. `Account_filter` accepts exactly
 `id: ID` and `id_in: [ID!]`; `Account_orderBy` accepts only `id`. The entity
 source is the distinct set of current registrant, token-holder, and effective-
-controller addresses in `address_names_current`. A former owner or registrant
-with no current relation is absent even though the ENS subgraph retains the
-Account created by an earlier ownership event; `#670/T4` owns that persistence
+controller addresses in `address_names_current`. An address with no current
+membership relation is absent, including a current address-record target that
+is not also a registrant, token holder, or effective controller. `#670/T4` owns
+historical Account persistence and `#670/T5` owns serving resolved-address
+Account membership. A former owner or registrant is therefore absent even
+though the ENS subgraph retains the Account created by an earlier ownership
+event; `#670/T4` owns that persistence
 gap (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L89-L92 @ ens_subgraph@723f1b6)
 (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L146-L151 @ ens_subgraph@723f1b6)
 (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L43-L56 @ ens_subgraph@723f1b6)
 (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L163-L174 @ ens_subgraph@723f1b6).
 Account reverse fields remain deferred to `#670/T4`.
+`Domain.owner.id` can also serve the zero address while `account(id:)` returns
+null because the current address-name projection drops the zero address; this
+is the same zero-owner residual owned by `#670/T5` as the Domain owner filter.
 
 `Resolver.id: ID!` is
 `<lowercase-resolver-address>-<lowercase-domain-namehash>`, and
@@ -485,7 +492,10 @@ Account reverse fields remain deferred to `#670/T4`.
 hexadecimal JSON string. `Resolver_filter` accepts exactly `id: ID`,
 `address: Bytes`, and `domain: String`; `Resolver_orderBy` accepts only `id`.
 One entity comes from each current resolver-address/namehash binding in
-`name_current`, so two names using one resolver address remain distinct.
+`name_current`, so two names using one resolver address remain distinct. For
+rows produced by the normal projection builder, nested `Domain.resolver` and
+the Resolver roots form the same identity. The roots additionally reject zero-
+address and off-snapshot-chain bindings if out-of-builder data contains them.
 Changing a name's resolver removes the prior composite ID from local reads,
 although the ENS subgraph retains the prior Resolver entity; current Resolver
 materialization remains `#670/T6` work and event history remains `#670/T9`
@@ -511,13 +521,14 @@ All Account and Resolver filter members combine with logical AND, and an empty
 `Account_filter.id_in` matches no rows. Filtering, distinctness, ordering, and
 paging execute in PostgreSQL. Omitted ordering is `id` ascending. Account IDs
 use lexical lowercase-address order. Resolver SQL orders by the exact indexed
-lowercase-address expression and then namehash; because admitted addresses and
-namehashes are fixed-width lowercase hexadecimal text and the separator is
-constant, the acceptance test asserts that tuple order is identical to composite
-text under PostgreSQL `COLLATE "C"` without wrapping the indexed expression in a
-different collation. This slice does not claim an alternate database collation
-that reorders the canonical hexadecimal alphabet; an explicit-collation index
-would be schema work outside this API-only change.
+lowercase-address expression and then `logical_name_id`. The interpreter mints
+that key as `namespace:namehash`, so within the filtered namespace this is
+identical to address/namehash composite-ID order. Admitted addresses and
+namehashes are fixed-width lowercase hexadecimal text, whose order is the same
+under the test database's `en_US.utf8` collation and PostgreSQL `COLLATE "C"`.
+The acceptance test proves the served order directly without wrapping the
+indexed expression in another collation. An explicit-collation index would be
+schema work outside this API-only change.
 Pagination uses the Domain bounds: omitted `first`
 is `100`, positive `first` is capped at `200`, non-positive `first` returns an
 empty list after head validation, negative `skip` becomes zero, and positive

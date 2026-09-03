@@ -193,6 +193,56 @@ async fn graphql_generated_resolver_id_is_per_domain() -> Result<()> {
 }
 
 #[tokio::test]
+async fn graphql_generated_resolver_roots_validate_current_resource() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let update = sqlx::query(
+        r#"UPDATE bigname_phase.name_current alice
+           SET serving_resource_id = bob.resource_id
+          FROM bigname_phase.name_current bob
+         WHERE alice.namehash = $1
+           AND bob.namehash = $2"#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .bind(GRAPHQL_BOB_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(update.rows_affected(), 1);
+    let orphaned = sqlx::query(
+        r#"UPDATE bigname_phase.resources resource
+              SET canonicality_state = 'orphaned'
+             FROM bigname_phase.name_current alice
+            WHERE alice.namehash = $1
+              AND resource.resource_id = alice.resource_id"#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(orphaned.rows_affected(), 1);
+
+    let id = format!("{GRAPHQL_RESOLVER}-{GRAPHQL_ALICE_NAMEHASH}");
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query ResolverCanonicality($id: ID!, $domainId: ID!, $domainFilter: String!) {
+            domain(id: $domainId) { id }
+            resolver(id: $id) { id }
+            resolvers(where: { domain: $domainFilter }) { id }
+        }"#,
+        json!({
+            "id": id,
+            "domainId": GRAPHQL_ALICE_NAMEHASH,
+            "domainFilter": GRAPHQL_ALICE_NAMEHASH,
+        }),
+    )
+    .await?;
+    assert!(payload.get("errors").is_none(), "{payload}");
+    assert!(payload["data"]["domain"].is_null());
+    assert!(payload["data"]["resolver"].is_null());
+    assert_eq!(payload["data"]["resolvers"], json!([]));
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn graphql_generated_resolver_id_uses_current_binding_only() -> Result<()> {
     const NEXT: &str = "0x000000000000000000000000000000000000def1";
     let database = TestDatabase::new_migrated().await?;
@@ -211,6 +261,18 @@ async fn graphql_generated_resolver_id_uses_current_binding_only() -> Result<()>
 async fn graphql_generated_resolvers_page_and_order_in_postgres() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
+    let invalid_identity_rows: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+             FROM bigname_phase.name_current
+            WHERE logical_name_id <> namespace || ':' || namehash
+               OR namehash !~ '^0x[0-9a-f]{64}$'"#,
+    )
+    .fetch_one(&database.lookup_pool)
+    .await?;
+    assert_eq!(
+        invalid_identity_rows, 0,
+        "every fixture name must use the minted namespace:namehash identity"
+    );
     for (args, expected) in [("", 2), ("first: 500", 2), ("first: 0", 0), ("first: -1", 0), ("skip: 1000001", 0)] {
         let args = if args.is_empty() { String::new() } else { format!("({args})") };
         let payload = post_graphql(database.app_state(), &format!("query {{ resolvers{args} {{ id }} }}"), json!({})).await?;
@@ -348,7 +410,7 @@ async fn pad_resolver_planner_statistics(database: &TestDatabase) -> Result<()> 
     let surfaces = sqlx::query(r#"WITH source AS (
         SELECT * FROM bigname_phase.name_surfaces WHERE logical_name_id = $1
     ), generated AS (
-        SELECT n, '0x' || LPAD(TO_HEX(n), 64, '0') AS hash FROM GENERATE_SERIES(1000, 1499) n
+        SELECT n, '0x' || LPAD(TO_HEX(n), 64, '0') AS hash FROM GENERATE_SERIES(1000, 5999) n
     ) INSERT INTO bigname_phase.name_surfaces (
         logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
         labelhashes, normalizer_version, visibility_state, normalization_errors,
@@ -361,12 +423,12 @@ async fn pad_resolver_planner_statistics(database: &TestDatabase) -> Result<()> 
         .bind(&alice_id)
         .execute(&database.lookup_pool)
         .await?;
-    assert_eq!(surfaces.rows_affected(), 500);
+    assert_eq!(surfaces.rows_affected(), 5_000);
     let names = sqlx::query(r#"WITH source AS (
         SELECT * FROM bigname_phase.name_current WHERE logical_name_id = $1
     ), generated AS (
         SELECT n, '0x' || LPAD(TO_HEX(n), 64, '0') AS hash
-          FROM GENERATE_SERIES(1000, 1499) n
+          FROM GENERATE_SERIES(1000, 5999) n
     ) INSERT INTO bigname_phase.name_current (
         logical_name_id, namespace, raw_name, namehash, declared_summary,
         support_status, unsupported_reason, provenance, chain_positions,
@@ -380,8 +442,10 @@ async fn pad_resolver_planner_statistics(database: &TestDatabase) -> Result<()> 
         .bind(GRAPHQL_RESOLVER)
         .execute(&database.lookup_pool)
         .await?;
-    assert_eq!(names.rows_affected(), 500);
-    sqlx::query("ANALYZE bigname_phase.name_current").execute(&database.lookup_pool).await?;
+    assert_eq!(names.rows_affected(), 5_000);
+    sqlx::query("ANALYZE bigname_phase.name_current, bigname_phase.name_surfaces")
+        .execute(&database.lookup_pool)
+        .await?;
     Ok(())
 }
 
@@ -422,6 +486,23 @@ async fn graphql_generated_resolvers_plan_pages_in_postgres() -> Result<()> {
     seed_graphql_compat_fixture(&database).await?;
     pad_resolver_planner_statistics(&database).await?;
     let chains = vec!["ethereum-mainnet".to_owned()];
+    let rows = crate::graphql::load_phase_graphql_resolver_page_offset(
+        &database.lookup_pool,
+        "ens",
+        &chains,
+        &crate::graphql::GeneratedResolverFilter::default(),
+        bigname_storage::NameCurrentListOrder::Asc,
+        100,
+        0,
+    )
+    .await?;
+    let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+    let mut composite_id_order = ids.clone();
+    composite_id_order.sort_unstable();
+    assert_eq!(
+        ids, composite_id_order,
+        "minted logical-name order must equal served composite Resolver-ID order"
+    );
     let enabled: String = sqlx::query_scalar("SHOW enable_incremental_sort").fetch_one(&database.lookup_pool).await?;
     assert_eq!(enabled, "on");
     for (label, filter) in [
@@ -439,21 +520,22 @@ async fn graphql_generated_resolvers_plan_pages_in_postgres() -> Result<()> {
         if matches!(label, "UNFILTERED" | "ADDRESS") {
             assert_eq!(plan["Actual Rows"], 100);
         }
-        let ordered = outer_plan(plan)?;
-        let joins = if matches!(label, "UNFILTERED" | "ADDRESS") {
-            assert_eq!(ordered["Node Type"], "Incremental Sort");
-            let presorted = ordered["Presorted Key"].as_array().context("presorted key")?;
-            let sort = ordered["Sort Key"].as_array().context("sort key")?;
-            assert_eq!(presorted.len(), 1);
-            assert!(presorted[0].as_str().context("presorted expression")?.contains("resolver,address"));
-            assert!(sort[1].as_str().context("namehash sort key")?.contains("namehash"));
-            outer_plan(ordered)?
-        } else {
-            ordered
-        };
+        let joins = outer_plan(plan)?;
+        if matches!(label, "UNFILTERED" | "ADDRESS") {
+            assert_eq!(joins["Node Type"], "Nested Loop");
+        }
         let expected_index = if label == "DOMAIN" { "name_current_lookup_idx" } else { "name_current_resolver_idx" };
         let scan = outer_chain_index(joins, expected_index)?;
         assert_eq!(scan["Node Type"], "Index Scan");
+        if matches!(label, "UNFILTERED" | "ADDRESS") {
+            assert!(
+                scan["Actual Rows"]
+                    .as_u64()
+                    .context("resolver index actual rows")?
+                    <= 105,
+                "ordered resolver index scan must stop within a small constant of the 100-row page: {scan}"
+            );
+        }
         if label == "ADDRESS" {
             let condition = scan["Index Cond"].as_str().context("address index condition")?;
             assert!(condition.contains(">="));

@@ -119,15 +119,19 @@ to the applicable entries below.
 
 > **Generated Account reads expose current address relations, not persistent historical entities** — bigname's
 > `account` and `accounts` roots select distinct addresses that currently appear as a registrant, token holder, or
-> effective controller. An address with no current relation is absent even if it appeared in an earlier ownership or
-> resolver-address event. **Upstream**: the ENS subgraph creates and saves an Account for each `NewOwner` and `Transfer` owner before assigning
+> effective controller. An address with no current membership relation is absent, including a current address-record
+> target that is not also a registrant, token holder, or effective controller, as well as an address seen only in past
+> events. `Domain.owner.id` can serve the zero address while `account(id:)` returns null because the current address-name
+> [projection](glossary.md#projection) drops the zero address; this is the same `#670/T5` zero-owner residual as the Domain owner filter.
+> **Upstream**: the ENS subgraph creates and saves an Account for each `NewOwner` and `Transfer` owner before assigning
 > that address to the Domain (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L89-L92 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L146-L157 @ ens_subgraph@723f1b6), and `AddrChanged` creates and
 > saves an Account for the resolved address (upstream: .refs/ens_subgraph/src/resolver.ts:L33-L35 @ ens_subgraph@723f1b6).
 > The registrar creates an Account for registration and transfer recipients before assigning it as the registrant
 > (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L43-L56 @ ens_subgraph@723f1b6)
 > (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L163-L174 @ ens_subgraph@723f1b6).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T4` owns Account persistence beyond current membership.
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T4` owns Account persistence beyond
+> current membership and `#670/T5` owns resolved-address membership and zero-owner agreement.
 > **Why**: the authorized source for this slice is the current address-name projection, not event-history synthesis.
 > **Since**: `2026-09-02`
 

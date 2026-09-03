@@ -29,7 +29,8 @@ pub(crate) use account_queries::{GeneratedAccountFilter, explain_phase_graphql_a
 pub(crate) use name_queries::count_phase_graphql_name_list;
 #[cfg(test)]
 pub(crate) use resolver_queries::{
-    GeneratedResolverFilter, explain_phase_graphql_resolver_page, parse_resolver_id,
+    GeneratedResolverFilter, explain_phase_graphql_resolver_page,
+    load_phase_graphql_resolver_page_offset, parse_resolver_id,
 };
 pub(crate) use schema::graphql_routes;
 #[cfg(test)]

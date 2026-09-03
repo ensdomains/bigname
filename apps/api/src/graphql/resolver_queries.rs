@@ -32,7 +32,7 @@ pub struct PhaseGraphqlResolverRow {
     pub id: String,
     pub address: String,
     pub domain_namehash: String,
-    pub resource_id: Option<Uuid>,
+    pub inventory_resource_id: Option<Uuid>,
     pub record_version_boundary: Option<Value>,
     pub chain_positions: Value,
 }
@@ -78,7 +78,7 @@ pub async fn hydrate_resolver_rows(
     let keys = rows
         .iter()
         .filter_map(|row| {
-            row.resource_id
+            row.inventory_resource_id
                 .map(|id| record_inventory_key(id, row.record_version_boundary.as_ref()))
         })
         .collect::<Vec<_>>();
@@ -98,7 +98,7 @@ pub async fn hydrate_resolver_rows(
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
         let key = row
-            .resource_id
+            .inventory_resource_id
             .map(|id| record_inventory_key(id, row.record_version_boundary.as_ref()));
         let inventory = key.as_ref().and_then(|key| inventories.get(key));
         if let Some(inventory) = inventory {
@@ -209,14 +209,14 @@ fn push_filtered_resolvers<'a>(
     builder.push(
         "WITH resolver_bindings AS (SELECT nc.logical_name_id, \
          nc.namehash, nc.declared_summary, \
-         COALESCE(nc.serving_resource_id, nc.resource_id) AS resource_id, \
+         COALESCE(nc.serving_resource_id, nc.resource_id) AS inventory_resource_id, \
          nc.declared_summary #> \
          '{topology,version_boundaries,record_version_boundary}' AS record_version_boundary, \
          nc.chain_positions FROM bigname_phase.name_current nc \
          JOIN bigname_phase.name_surfaces surface \
            ON surface.logical_name_id = nc.logical_name_id \
          LEFT JOIN bigname_phase.resources resource \
-           ON resource.resource_id = COALESCE(nc.serving_resource_id, nc.resource_id) \
+           ON resource.resource_id = nc.resource_id \
          LEFT JOIN bigname_phase.surface_bindings binding \
            ON binding.surface_binding_id = nc.surface_binding_id \
          LEFT JOIN bigname_phase.token_lineages token_lineage \
@@ -247,7 +247,8 @@ fn push_filtered_resolvers<'a>(
     builder.push_bind(snapshot_chain_ids).push(
         "))) SELECT LOWER(nc.declared_summary #>> '{resolver,address}') || '-' || nc.namehash AS id, \
         LOWER(nc.declared_summary #>> '{resolver,address}') AS address, \
-        nc.namehash AS domain_namehash, nc.resource_id, nc.record_version_boundary, \
+        nc.namehash AS domain_namehash, nc.inventory_resource_id, \
+        nc.record_version_boundary, \
         nc.chain_positions FROM resolver_bindings nc \
         WHERE nc.declared_summary #>> '{resolver,address}' <> '' \
           AND LOWER(nc.declared_summary #>> '{resolver,address}') ~ '^0x[0-9a-f]{40}$' \
@@ -261,8 +262,8 @@ fn push_filtered_resolvers<'a>(
         builder.push(" AND nc.namehash = ").push_bind(&id.namehash);
     }
     if let Some(address) = filter.address.as_deref() {
-        // Equal inclusive bounds are exact equality, while preserving the indexed address
-        // expression as a pathkey for PostgreSQL's incremental sort on the namehash tie column.
+        // Equal inclusive bounds are exact equality while preserving the indexed address
+        // expression and its ordering for the bounded index scan.
         builder
             .push(" AND LOWER(nc.declared_summary #>> '{resolver,address}') >= ")
             .push_bind(address)
@@ -283,9 +284,13 @@ fn push_filtered_resolvers<'a>(
             " ORDER BY nc.namehash {direction}, nc.logical_name_id {direction}"
         ));
     } else {
+        // The interpreter mints each `logical_name_id` as `namespace:namehash` in
+        // `crates/adapters/src/schema_v2/identity.rs::materialize`. Within this namespace,
+        // logical-name order is therefore namehash order and matches composite Resolver-ID order,
+        // while retaining the resolver index's complete `(lower(address), logical_name_id)` key.
         builder.push(format!(
             " ORDER BY LOWER(nc.declared_summary #>> '{{resolver,address}}') {direction}, \
-             nc.namehash {direction}, nc.logical_name_id {direction}"
+             nc.logical_name_id {direction}"
         ));
     }
 }
@@ -295,7 +300,7 @@ fn decode_resolver_row(row: PgRow) -> Result<PhaseGraphqlResolverRow> {
         id: row.try_get("id")?,
         address: row.try_get("address")?,
         domain_namehash: row.try_get("domain_namehash")?,
-        resource_id: row.try_get("resource_id")?,
+        inventory_resource_id: row.try_get("inventory_resource_id")?,
         record_version_boundary: row.try_get("record_version_boundary")?,
         chain_positions: row.try_get("chain_positions")?,
     })
