@@ -21,9 +21,13 @@ Upstream-only fields on a shared type require exact field entries; a type-wide e
 absent locally. The one bounded exception is an upstream-only `Query` entity field: when its return type, after list and
 non-null wrappers are unwrapped, is a censused object with an `id` field, the root field inherits that type's owner unless
 that return type is claimed or already served locally. An
-upstream-only argument inherits its parent field's disposition, never the parent type's, so a new argument on a claimed field still fails. An
-upstream-only enum value inherits the owner of its enum type in `known_upstream_types`; a value whose enum type is absent
-from that census still fails.
+upstream-only argument inherits its parent field's disposition, never the parent type's, so a new argument on a claimed field still fails.
+An exact `enum:<EnumType>.<value>` disposition owns one upstream-only enum
+value. It cannot contain a wildcard, omit either the enum type or value, own a
+sibling value, or remain after that value becomes local. Duplicate and unknown
+exact-enum scopes are invalid. A `type:<EnumType>` disposition can own enum
+values only while the complete enum type is absent locally; it cannot own the
+remainder of an enum that is partially served locally.
 
 An exact `input:<Type>.<name>` disposition owns one currently upstream-only
 input member. It cannot contain a wildcard, own the input type or a sibling,
@@ -57,7 +61,9 @@ members respectively; non-`id` order values continue to inherit the existing
 type-level `#670/T3` owner. Account reverse fields stay with `#670/T4`, Resolver
 serving fields stay with `#670/T6`, and the `Resolver.contentHash` signature
 difference remains with its existing `#670/T2` disposition. The resulting upstream census is 113 types with zero
-unowned upstream-only paths. Any `coverage.json` update must re-sign both the
+unowned upstream-only paths. `Domain_orderBy` therefore claims only its served
+upstream values and assigns each remaining upstream value an exact owner. Any
+`coverage.json` update must re-sign both the
 manifest's top-level `coverage_sha256` and its `coverage.json` artifact entry.
 
 The steward's live introspection observed the Graph Node logging types `LogLevel`, `_LogArgument_`, `_LogMeta_`, and

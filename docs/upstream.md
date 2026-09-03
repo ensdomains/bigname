@@ -202,15 +202,16 @@ to the applicable entries below.
 > namehash IDs authoritative.
 > **Since**: `2026-09-02`
 
-> **Generated Domain exact-name filtering uses ENS namehash equality** — `Domain_filter.name` normalizes the supplied ENS
-> name and matches its namehash rather than comparing the stored human-readable name bytes directly.
+> **Generated Domain filters compare served ID and name text directly** — generated `Domain_filter.id` members bind the
+> supplied ID text without normalization, while generated `Domain_filter.name` members compare the supplied text with the
+> nullable human-readable name instead of converting it to an ENS namehash.
 > **Upstream**: Graph Node maps an equality filter to direct entity-field equality
 > (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe1737), while the ENS subgraph declares
 > the human-readable `Domain.name` separately from the namehash `Domain.id`
 > (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6).
-> **Our rule**: `docs/architecture.md` and `docs/consumer-capabilities.md` § GraphQL compatibility.
-> **Why**: the existing Manager-facing name semantics treat normalization-equivalent spellings as the same ENS name.
-> **Since**: `2026-09-02`
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility. The separate legacy `DomainFilter` retains its ENS
+> name lookup and normalization behavior.
+> **Since**: `2026-09-03`
 
 > **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
 > `owner_in` members use bigname's effective-controller relation. The effective controller agrees with `Domain.owner`
@@ -237,15 +238,37 @@ to the applicable entries below.
 > those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
 > **Since**: `2026-09-02`
 
-> **Generated Domain `name_contains` retains ENS normalization** — bigname normalizes the supplied ENS fragment before
-> applying the stored-name predicate, so case variants that normalize identically can match even though the separate
-> `name_contains_nocase` member remains absent.
-> **Upstream**: Graph Node maps `contains` to SQL `LIKE` and `contains_nocase` to `ILIKE`
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1535 @ graph_node@aefe1737).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T3` owns the remaining filter
-> vocabulary and any later alignment.
-> **Why**: this T2 slice preserves bigname's existing ENS-aware name filtering behavior.
-> **Since**: `2026-09-02`
+> **Generated Domain patterns preserve SQL wildcards** — generated contains patterns are left unchanged when they start or
+> end with `%` and otherwise gain `%` at both ends. Generated pattern input does not perform ENSIP-15 substring
+> normalization and does not escape `%`, `_`, or backslash. The legacy `DomainFilter` retains its existing normalization
+> and escaped-pattern behavior.
+> **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE`
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Since**: `2026-09-03`
+
+> **Generated GraphQL text uses expression-local C collation** — Graph Node rejects a store database whose collation or
+> character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
+> graph_node@aefe173). Bigname applies `COLLATE "C"` to each generated Domain text comparison and order expression but does
+> not add a database-locale startup gate in this API-only slice.
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Divergence**: Graph Node enforces the locale for the database; bigname enforces it only on the generated expressions.
+> **Since**: `2026-09-03`
+
+> **Uppercase `0X` is never canonicalized** — Account and Domain IDs remain valid GraphQL text but compare exactly, a
+> non-lowercase Resolver composite ID is a no-match, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
+> digits after lowercase `0x` remain valid Bytes input and serialize canonically.
+> **Upstream**: Graph Node's Bytes parser strips only lowercase `0x`
+> (upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Since**: `2026-09-03`
+
+> **Generated `_change_block` is absent** — bigname's current Domain projection has no entity last-change block, so
+> `BlockChangedFilter` and the Domain, Account, and Resolver `_change_block` inputs remain exact upstream-only instead of
+> substituting publication provenance or the selected served head.
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility. The existing `block: Block_height` argument only
+> validates an eligible current snapshot.
+> **Since**: `2026-09-03`
 
 > **Direct Domain registration-date ordering is a local GraphQL extension** — bigname retains
 > `Domain_orderBy.registrationDate` from bigname's earlier GraphQL schema. The generated upstream equivalent is the nested

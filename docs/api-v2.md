@@ -33,6 +33,15 @@ not the public-edge rollout state.
 including its generated-style roots, local extensions, and explicit unsupported
 behavior. This document does not define a second GraphQL contract.
 
+The generated `Domain_filter` serves the complete upstream ID and name operator
+families with conjunctive semantics, direct comparison against the served
+`Domain.id` and `Domain.name` values, and separate case-sensitive and nocase
+pattern operators. Generated text comparisons and orders use expression-local
+PostgreSQL `COLLATE "C"`; pattern input retains SQL `%`, `_`, and backslash
+semantics. The generated `Domain_orderBy` exposes only the exact values listed
+in the capability contract. The legacy `DomainFilter` behavior and local
+`registrationDate` ordering remain separate extensions.
+
 ## Naming Dictionary
 
 Normative one-name-per-concept dictionary from ADR 0006, extended with the

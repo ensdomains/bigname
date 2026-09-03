@@ -506,16 +506,15 @@ remain deferred to `#670/T6`. `Resolver.contentHash` remains the existing local
 `String` divergence under its existing `#670/T2` disposition rather than
 changing to upstream `Bytes` in this slice.
 
-Account point/filter IDs, composite Resolver point/filter IDs, and Resolver
-domain-namehash filters accept uppercase hexadecimal input and normalize it to
-the lowercase value served on the wire, a local widening over ordinary Graph
-Node string comparison (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L729 @
-graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L357-L379 @
-graph_node@aefe1737) (upstream: .refs/graph_node/graphql/src/store/query.rs:L332-L334 @
-graph_node@aefe1737). `Resolver_filter.address` uses `Bytes`: uppercase digits
-normalize in both systems, while bigname requires the `0x` prefix that Graph
-Node also permits clients to omit (upstream:
-.refs/graph_node/graph/src/data/store/scalar/bytes.rs:L41-L52 @ graph_node@aefe1737).
+Account and Domain IDs are compared exactly as supplied. Uppercase `0X`, or
+uppercase hexadecimal digits after lowercase `0x`, are valid GraphQL `ID` text
+but do not alias the lowercase served value. A Resolver point ID must use the
+exact lowercase `<address>-<namehash>` composite form; a case-different form is
+a no-match. `Resolver_filter.address` uses `Bytes`: lowercase `0x` followed by
+uppercase or lowercase hexadecimal digits is accepted and byte-canonicalized,
+while uppercase `0X` is a scalar-coercion error. Graph Node's Bytes parser strips
+only lowercase `0x` (upstream:
+.refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).
 
 All Account and Resolver filter members combine with logical AND, and an empty
 `Account_filter.id_in` matches no rows. Filtering, distinctness, ordering, and
@@ -555,10 +554,34 @@ hash-shaped ENS name from shadowing an entity ID; every other input takes the
 direct name lookup path. `Domain_filter.id` and `Domain_filter.id_in` match
 namehashes only.
 
-`Domain_filter` accepts exactly `id: ID`, `id_in: [ID!]`, `owner: String`,
-`owner_in: [String!]`, `name: String`, and `name_contains: String`. Supplied
-members combine with logical AND. A supplied empty `id_in` or `owner_in` list
-matches no rows. `owner` and `owner_in` match the projected effective controller.
+`Domain_filter` retains `owner` and `owner_in` and serves the complete generated
+ID family: `id`, `id_not`, `id_gt`, `id_gte`, `id_lt`, `id_lte`, `id_in`, and
+`id_not_in`. It also serves `name`, `name_not`, `name_gt`, `name_gte`, `name_lt`,
+`name_lte`, `name_in`, `name_not_in`, and the `contains`, `starts_with`, and
+`ends_with` positive and negative forms, each with a distinct `_nocase` sibling.
+These members match the upstream `Domain.id: ID!` and nullable `Domain.name:
+String` fields (upstream: .refs/ens_subgraph/schema.graphql:L1-L7 @
+ens_subgraph@723f1b6). Every supplied member contributes an AND predicate.
+Empty `in` and `not_in` lists both match no rows, as Graph Node emits SQL
+`false` for either empty membership list (upstream:
+.refs/graph_node/store/postgres/src/relational_queries.rs:L1716-L1725 @
+graph_node@aefe173).
+
+Generated ID operators compare the supplied text directly with the served
+namehash text. Generated name equality, range, membership, and pattern operators
+compare the supplied text directly with the nullable served `Domain.name`; they
+do not perform ENSIP-15 normalization or convert equality to namehash lookup.
+All generated ID/name text comparisons use expression-local PostgreSQL
+`COLLATE "C"`. Case-sensitive pattern members use `LIKE`/`NOT LIKE`; nocase
+members use `ILIKE`/`NOT ILIKE`. Contains surrounds a value with `%` unless the
+value already starts or ends with `%`; starts-with appends `%`; ends-with
+prepends `%`. `%`, `_`, and backslash remain SQL pattern characters and are not
+escaped. Graph Node uses that contains construction and does not escape those
+characters (upstream:
+.refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @
+graph_node@aefe173).
+
+`owner` and `owner_in` match the projected effective controller.
 The effective controller agrees with `Domain.owner` when the latest projected
 registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero
 address on a non-wrapper-authority name and no later resource-scoped
@@ -588,22 +611,47 @@ these remaining disagreement classes:
   epoch event is excluded from the effective-controller fold and the release's
   `resource_control` grant keeps the registry owner there.
 
-`name` and `name_contains` preserve the existing ENS-aware name normalization.
-Every other captured upstream member is absent from the SDL, so GraphQL input
-validation rejects it instead of ignoring it at runtime.
 `DomainFilter` remains the separate input for the local `domainConnection`
-operation. In particular, `isMigrated` remains on `DomainFilter` and is not
-accepted by `Domain_filter`; task `#670/T10` remains outside this slice and is
-subject to the Manager constraint below.
+operation. Its `name` continues the existing ENS name lookup, and its
+`name_contains` continues ENSIP-15 normalization plus escaped-pattern behavior.
+In particular, `isMigrated` remains on `DomainFilter` and is not accepted by
+`Domain_filter`; task `#670/T10` remains outside this slice and is subject to the
+Manager constraint below. Owner operators beyond `owner`/`owner_in`, date and
+Resolver-ID filters, relation filters, `and`, `or`, and every other unclaimed
+upstream member remain absent and produce the existing unknown-input-field
+validation error.
 
 When `orderBy` is omitted, `domains()` now orders by namehash ascending using
 PostgreSQL `COLLATE "C"`; this is a behavior change from the previous name
-ordering. `Domain_orderBy.id` uses that same namehash ordering. The existing
-`createdAt`, `expiryDate`, `name`, and `registrationDate` orderings remain.
+ordering. `Domain_orderBy.id` uses that same namehash ordering. The served
+upstream order values are `id`, `name`, `createdAt`, `expiryDate`,
+`owner`, `owner__id`, and `resolver`, corresponding to the upstream Domain
+fields and Account/Resolver relations (upstream:
+.refs/ens_subgraph/schema.graphql:L1-L40 @ ens_subgraph@723f1b6).
+`owner` and `owner__id` order by the exact non-null effective owner served by
+`Domain.owner`; `resolver` orders by the nullable composite Resolver ID served
+by `Domain.resolver`, not by address alone. All textual primary expressions and
+deterministic textual tie-breakers use `COLLATE "C"`. The local
+`registrationDate` extension remains; every other upstream order value is
+exact-owned and absent from the local enum.
 Omitted pagination starts at offset zero and returns the first 100 rows.
 Non-positive `first` returns an empty page, positive `first` is capped at
 `200`, negative `skip` becomes zero, and positive `skip` is capped at
 `1_000_000`.
+
+`BlockChangedFilter` and each `_change_block` input remain exact upstream-only.
+The current projection has no entity last-change block, so the API does not
+substitute a block from `chain_positions`, the selected served head,
+`manifest_version`, `last_recomputed_at`, or a resolver inventory boundary.
+The existing `block: Block_height` argument continues to validate an eligible
+current snapshot and does not execute a historical read.
+
+Generated Domain filtering and ordering execute in PostgreSQL inside the
+filtered CTE before `ORDER BY`, `LIMIT`, and `OFFSET`. Acceptance requires at
+least 5,000 eligible rows spanning at least two effective owners and two
+resolver addresses, with fixed reviewed EXPLAIN bounds for every claimed
+operator family and order value. This API-only slice adds no index or database
+locale startup gate.
 
 The affected Manager operation set therefore requires two declaration edits:
 `$id: String!` becomes `$id: ID!`, and the `Domains.graphql` declaration
