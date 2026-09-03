@@ -3220,7 +3220,11 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
         None,
         "MigrationApplied",
         "ens_v2_migration_l1",
-        json!({"successor_binding":{"authority_epoch":"ens_v2"}}),
+        json!({
+            "successor_binding":{"authority_epoch":"ens_v2"},
+            "migration_path":"unlocked_wrapped",
+            "successor_registry_contract_instance_id":subregistry_instance
+        }),
         json!({}),
     )
     .await?;
@@ -3522,33 +3526,26 @@ async fn same_position_multi_candidate_child_conflict_is_replay_stable_within_ea
 // for a chain/address, and `ranked_v2_registrations` keeps one current row per child and admitted
 // instance, so that proposed second candidate cannot reach `publish` after candidate construction.
 
-// The other ENSv2 child authority proof reaches the same assertion: a positive ENSv2 child
-// registration is an authority epoch too, so an ENSv1 relation asserted after it is the same
-// unreconcilable contradiction as one asserted after a migration boundary.
+// Parent reachability is applied before the child's positive ENSv2 authority proof. An ENSv1
+// relation restated beneath an unlocked migrated parent is unreachable, so it cannot become a
+// dual-current contradiction or suppress the reachable ENSv2 relation.
 #[tokio::test]
-async fn a_post_epoch_ens_v1_relation_blocks_a_positively_registered_child() -> Result<()> {
+async fn an_unlocked_parent_filters_post_epoch_v1_before_positive_v2_child_integrity() -> Result<()>
+{
     let scratch = ScratchDatabase::create("production_project_child_positive_conflict").await?;
     seed_project_fixture(scratch.pool()).await?;
     seed_positive_child_authority_fixture(scratch.pool(), 5).await?;
 
-    let failure = run_project_phase(scratch.pool(), CHAIN, 5)
-        .await
-        .expect_err("a post-epoch ENSv1 child relation must not publish");
-    assert!(
-        failure
-            .to_string()
-            .contains("after the child's ENSv2 authority began"),
-        "unexpected failure: {failure}"
-    );
-    let rows = generation_failure_rows(scratch.pool(), CHAIN).await?;
-    assert_eq!(rows.len(), 1);
-    let (_, _, _, failure_kind, _, name, evidence) = rows[0].clone();
-    assert_eq!(failure_kind, DUAL_CURRENT_CHILD_AUTHORITY);
-    assert_eq!(name, "ens:0xalice");
+    run_project_phase(scratch.pool(), CHAIN, 5).await?;
     assert_eq!(
-        evidence["authority_proof"]["proof_kind"],
-        json!("positive_v2_child_registration"),
-        "the positive registration is the proof this conflict is measured against"
+        child_relation(scratch.pool()).await?,
+        Some((None, Some(OWNER.to_owned()))),
+        "the reachable ENSv2 relation publishes after the ENSv1 arm is filtered"
+    );
+    assert!(
+        generation_failure_rows(scratch.pool(), CHAIN)
+            .await?
+            .is_empty()
     );
     scratch.cleanup().await
 }

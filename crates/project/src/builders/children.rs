@@ -469,10 +469,6 @@ async fn publish(
                child.registrant,
                jsonb_build_object(
                    'normalized_event_ids', jsonb_build_array(child.normalized_event_id),
-                   'event_identities', to_jsonb(array_remove(ARRAY[
-                       child.event_identity, child.parent_migration_event_identity,
-                       child.modifier_event_identity, child.expiry_event_identity
-                   ]::text[], NULL)),
                    'raw_fact_refs', jsonb_build_array(child.raw_fact_ref)
                        || CASE WHEN child.parent_migration_raw_fact_ref IS NULL THEN '[]'::jsonb
                            ELSE jsonb_build_array(child.parent_migration_raw_fact_ref) END
@@ -492,7 +488,13 @@ async fn publish(
                        'exhaustiveness', 'not_asserted'
                    )
                ) || CASE WHEN child.parent_reachability IS NULL THEN '{}'::jsonb
-                   ELSE jsonb_build_object('parent_reachability', child.parent_reachability) END,
+                   ELSE jsonb_build_object(
+                       'event_identities', to_jsonb(array_remove(ARRAY[
+                           child.event_identity, child.parent_migration_event_identity,
+                           child.modifier_event_identity, child.expiry_event_identity
+                       ]::text[], NULL)),
+                       'parent_reachability', child.parent_reachability
+                   ) END,
                jsonb_build_object(
                    'block_number', child.block_number,
                    'block_hash', child.block_hash,
