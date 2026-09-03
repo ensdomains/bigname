@@ -962,8 +962,9 @@ activated `MigrationApplied` boundary connecting that name. Project leaves that
 shape unsupported with `independent_ens_deployments_overlap`; it does not raise
 this halt. The exact
 [shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names—root,
-`eth`, `reverse`, and `addr.reverse`—instead select ENSv2 without fabricating a
-proof, so they also do not raise this halt
+`eth`, `reverse`, and `addr.reverse`—instead select a current ENSv2 arm when
+ENSv1 evidence is current or historical, without fabricating a proof, so they
+also do not raise this halt
 ([`crates/project/src/builders/name_authority.rs:459-480`](../../crates/project/src/builders/name_authority.rs#L459-L480),
 [`crates/project/src/builders/name_authority.rs:619-630`](../../crates/project/src/builders/name_authority.rs#L619-L630)).
 Do not interpret mere cross-era Sepolia evidence as a missed ENSv1→ENSv2

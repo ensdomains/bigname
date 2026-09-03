@@ -260,8 +260,10 @@ ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
 that [released v2 authority](glossary.md#released-v2-authority) does not fall
 back to an active retained ENSv1 binding. The exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
-exception selects the ENSv2 arm without establishing an authority epoch, so
-its epoch start and proof fields remain null.
+exception selects a current ENSv2 arm when ENSv1 evidence is current or
+historical, without establishing an authority epoch, so its epoch start and
+proof fields remain null. Historical ENSv2 evidence without a current ENSv2
+binding does not qualify.
 
 ## Exact-name projection
 

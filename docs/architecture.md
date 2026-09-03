@@ -404,9 +404,11 @@ explicit `unsupported` with `independent_ens_deployments_overlap`. Configured
 ingest start blocks that omit proof events are not authority evidence and do
 not weaken either refusal. The ENS
 root, `eth`, `reverse`, and `addr.reverse` are the four exact
-[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names: when
-both arms exist without a proof, they select ENSv2 without
-fabricating a proof or authority epoch. The pinned ENSv2 deployment establishes
+[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. When
+the ENSv2 arm is current and ENSv1 evidence exists as a current binding or
+historical events, they select ENSv2 without fabricating a proof or authority
+epoch. Historical ENSv2 evidence without a current ENSv2 binding does not
+qualify. The pinned ENSv2 deployment establishes
 root, `eth`, and `reverse`. The pinned ENSv1 contract defines `addr.reverse` as
 its reverse registrar node, and its deployment assigns that node directly on
 testnets; bigname intentionally preserves this exact four-name classification

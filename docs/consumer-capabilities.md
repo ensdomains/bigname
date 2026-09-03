@@ -164,14 +164,15 @@ rather than resolved by event recency; it is neither an ambiguous product row no
 a publication failure. A proven Sepolia boundary, or a current
 child registration in the admitted migration registry below a proven migrated
 parent, follows the same per-name or per-child selection rule. Sepolia overlap
-without either proof is expected because the runtime projects independently
-deployed test eras and remains unsupported under its retained contract reason
-until a caller or
-[deployment profile](glossary.md#deployment-profile) selects one system. The
+without either proof is expected because the runtime admits evidence from both
+protocol eras without establishing per-name authority between them. It remains
+unsupported under its retained contract reason. The
 ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. They
-select ENSv2 when both arms are present, without fabricating a
-proof or extending the exception to descendants. Complete direct-child groups
+select ENSv2 when the ENSv2 arm is current and ENSv1 evidence, current or
+historical, exists, without fabricating a proof or extending the exception to
+descendants. Historical ENSv2 evidence without a current binding does not
+qualify. Complete direct-child groups
 now supply production input
 to the activated-boundary branch; a refused or unmigrated child reaches ENSv2
 authority only through a current positive ENSv2 registration.

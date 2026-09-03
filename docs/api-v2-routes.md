@@ -226,9 +226,10 @@ Field ownership:
   ordinary Sepolia overlap without a proven ENSv1→ENSv2 migration boundary; a proven
   Sepolia boundary follows the same per-name authority rule. The exact
   [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names—root,
-  `eth`, `reverse`, and `addr.reverse`—instead
-  select ENSv2 when both arms are present without proof; `.reverse` descendants
-  do not inherit that exception. These values replace the
+  `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
+  current and ENSv1 evidence, current or historical, exists without proof.
+  Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
+  do not inherit the exception. These values replace the
   blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
   family](glossary.md#source-family) alone does not add them. An address lookup
   returns `409 conflict` when the deployment has no ready public namespace.

@@ -84,9 +84,12 @@ rows — millions on Basenames alone — mark within-era anchor transitions.
 ## Shared ENS infrastructure
 
 the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
-surface has current ENSv1 and ENSv2 arms but no higher-precedence authority
-evidence, Project selects the ENSv2 arm for these four names without creating
-an authority proof or epoch. Descendants are not included in the exception.
+surface has a current ENSv2 arm and ENSv1 evidence from a current binding or
+historical events, but no higher-precedence authority evidence, Project selects
+the ENSv2 arm for these four names without creating an authority proof or epoch.
+Historical ENSv2 evidence without a current ENSv2 binding does not qualify, and
+descendants are not included in the exception. A current ENSv2 binding with no
+ENSv1 evidence remains the ordinary single-arm ENSv2 case.
 
 ## Authority proof
 

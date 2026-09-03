@@ -465,8 +465,8 @@ pub(super) async fn build(
                        WHEN proof.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN released.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN regime.logical_name_id IS NOT NULL THEN 'ens_v2'
-                       WHEN shared.logical_name_id IS NOT NULL AND (COALESCE(summary.has_ens_v1, false) OR COALESCE(event_summary.has_ens_v1, false))
-                        AND (COALESCE(summary.has_ens_v2, false) OR COALESCE(event_summary.has_ens_v2, false)) THEN 'ens_v2'
+                       WHEN shared.logical_name_id IS NOT NULL
+                        AND COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
                        WHEN (
                            COALESCE(summary.has_ens_v1, false)
                            OR COALESCE(event_summary.has_ens_v1, false)
@@ -488,8 +488,8 @@ pub(super) async fn build(
                        OR COALESCE(event_summary.has_ens_v1, false) AS has_ens_v1,
                    COALESCE(summary.has_ens_v2, false)
                        OR COALESCE(event_summary.has_ens_v2, false) AS has_ens_v2,
-                   (shared.logical_name_id IS NOT NULL AND (COALESCE(summary.has_ens_v1, false) OR COALESCE(event_summary.has_ens_v1, false))
-                    AND (COALESCE(summary.has_ens_v2, false) OR COALESCE(event_summary.has_ens_v2, false))
+                   (shared.logical_name_id IS NOT NULL
+                    AND COALESCE(summary.has_ens_v2, false)
                     AND proof.logical_name_id IS NULL AND released.logical_name_id IS NULL AND regime.logical_name_id IS NULL) AS shared_infrastructure_authority,
                    COALESCE(
                        proof.logical_name_id IS NULL
@@ -604,7 +604,7 @@ pub(super) async fn build(
                (ownerless.logical_name_id IS NOT NULL AND selected.selected_binding_id IS NULL
                 AND NOT (selected.has_ens_v1 AND selected.has_ens_v2)) AS known_ownerless_registry,
                ownerless.resource_id AS ownerless_registry_resource_id, ownerless.owner_getter_reason,
-               CASE WHEN selected.shared_infrastructure_authority THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object(
+               CASE WHEN selected.shared_infrastructure_authority AND selected.has_ens_v1 THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object(
                    'block_number', selected.selected_epoch_block_number, 'transaction_index', selected.selected_epoch_transaction_index, 'log_index', selected.selected_epoch_log_index)) END AS authority_epoch_start_position,
                selected.proof_kind AS authority_proof_kind, selected.proof_event_id AS authority_proof_event_id,
                selected.proof_event_identity AS authority_proof_event_identity, selected.transition_id AS authority_transition_id,

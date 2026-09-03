@@ -372,12 +372,16 @@ An ordinary active name that carries both current ENSv1 and ENSv2 arms on this
 deployment profile, without an admitted authority proof, qualifying release, or
 deployment-wide ENSv2 release-threshold decision, is
 [`independent_ens_deployments_overlap`](architecture.md) rather than a chosen
-authority. The runtime projects both independently deployed eras, but only an
-admitted ENSv1→ENSv2 migration boundary connects them for a particular name.
+authority. The runtime admits evidence from both protocol eras, but only an
+admitted ENSv1→ENSv2 migration boundary establishes per-name authority between
+them.
 The exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure)
-names—root, `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when both
-current arms are present and none of those
-higher-precedence decisions applies; descendants do not inherit that exception.
+names—root, `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the
+ENSv2 arm is current, ENSv1 evidence exists as either a current binding or
+historical events, and none of those higher-precedence decisions applies.
+Historical ENSv2 evidence alone does not qualify, and descendants do not
+inherit the exception. A current ENSv2 arm without ENSv1 evidence remains the
+ordinary single-arm ENSv2 case.
 Admitting ENSv1 sources here
 makes ordinary overlap reachable in production for the first time; it does not
 establish an ENSv1→ENSv2 migration boundary.

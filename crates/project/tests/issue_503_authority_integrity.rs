@@ -202,7 +202,7 @@ async fn capture_staged_authority(pool: &PgPool) -> Result<()> {
 
 #[tokio::test]
 async fn sepolia_no_proof_overlap_remains_refused_not_fatal() -> Result<()> {
-    let (_db, pool) = database("issue503_no_proof").await?;
+    let (db, pool) = database("issue503_no_proof").await?;
     let logical = surface(&pool, 1, "ordinary.eth", &["ens_v1", "ens_v2"]).await?;
     run(&pool).await?;
     assert_eq!(
@@ -214,12 +214,13 @@ async fn sepolia_no_proof_overlap_remains_refused_not_fatal() -> Result<()> {
             None
         )
     );
+    db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Result<()> {
-    let (_db, pool) = database("issue503_shared").await?;
+    let (db, pool) = database("issue503_shared").await?;
     let mut logicals = Vec::new();
     for (index, name) in ["", "eth", "reverse", "addr.reverse"]
         .into_iter()
@@ -255,12 +256,100 @@ async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Res
             (None, None, None, None)
         );
     }
+    db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_infrastructure_refuses_historical_only_v2_evidence() -> Result<()> {
+    let (db, pool) = database("issue503_shared_historical_v2").await?;
+    let logical = surface(&pool, 15, "eth", &["ens_v1"]).await?;
+    let v2_resource = uuid(2, 15);
+    let v2_binding = uuid(4, 15);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&v2_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v2', '2026-08-25T00:00:00Z', '2026-08-25T12:00:00Z', $4, $5, 10, '{\"transaction_index\":0,\"log_index\":0}', 'canonical')")
+        .bind(v2_binding).bind(&logical).bind(&v2_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    event(
+        &pool,
+        "issue503-shared-v2-release",
+        &logical,
+        Some(&v2_resource),
+        Event {
+            family: "ens_v2_registrar_l1",
+            kind: "RegistrationReleased",
+            log: 2,
+            after: json!({"status":"unregistered"}),
+        },
+    )
+    .await?;
+
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (
+            None,
+            Some("independent_ens_deployments_overlap".into()),
+            None,
+            None
+        )
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_infrastructure_current_v2_accepts_historical_or_absent_v1_evidence() -> Result<()> {
+    let (db, pool) = database("issue503_shared_current_v2").await?;
+    let historical_v1 = surface(&pool, 16, "eth", &["ens_v2"]).await?;
+    let v2_only = surface(&pool, 17, "reverse", &["ens_v2"]).await?;
+    event(
+        &pool,
+        "issue503-shared-v1-history",
+        &historical_v1,
+        None,
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "AuthorityTransferred",
+            log: 1,
+            after: json!({"owner":"0x0000000000000000000000000000000000000001"}),
+        },
+    )
+    .await?;
+
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &historical_v1).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    assert_eq!(
+        authority_evidence(&pool, &historical_v1).await?,
+        (None, None, None, None)
+    );
+    assert_eq!(
+        authority(&pool, &v2_only).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    assert_eq!(
+        authority_evidence(&pool, &v2_only).await?,
+        (
+            None,
+            None,
+            None,
+            Some(json!({
+                "block_number": 10,
+                "transaction_index": 0,
+                "log_index": 0
+            }))
+        )
+    );
+    db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn reverse_descendants_are_not_shared_infrastructure() -> Result<()> {
-    let (_db, pool) = database("issue503_reverse_descendants").await?;
+    let (db, pool) = database("issue503_reverse_descendants").await?;
     let a = surface(&pool, 20, "alice.addr.reverse", &["ens_v1", "ens_v2"]).await?;
     let b = surface(&pool, 21, "default.reverse", &["ens_v1", "ens_v2"]).await?;
     run(&pool).await?;
@@ -270,12 +359,13 @@ async fn reverse_descendants_are_not_shared_infrastructure() -> Result<()> {
             Some("independent_ens_deployments_overlap")
         );
     }
+    db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn proven_sepolia_dual_current_exact_name_is_fatal() -> Result<()> {
-    let (_db, pool) = database("issue503_exact_fatal").await?;
+    let (db, pool) = database("issue503_exact_fatal").await?;
     let logical = surface(&pool, 30, "proven.eth", &["ens_v1", "ens_v2"]).await?;
     let successor_binding = uuid(4, 30);
     let successor_resource = uuid(2, 30);
@@ -306,12 +396,13 @@ async fn proven_sepolia_dual_current_exact_name_is_fatal() -> Result<()> {
     );
     assert_eq!(evidence.payload["target"]["block_number"], 10);
     assert_eq!(evidence.failure_fingerprint.len(), 64);
+    db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn proven_sepolia_dual_current_child_is_fatal() -> Result<()> {
-    let (_db, pool) = database("issue503_child_fatal").await?;
+    let (db, pool) = database("issue503_child_fatal").await?;
     let parent = surface(&pool, 40, "parent.eth", &["ens_v2"]).await?;
     let child = surface(&pool, 41, "child.parent.eth", &["ens_v2"]).await?;
     let registry = uuid(8, 40);
@@ -379,15 +470,17 @@ async fn proven_sepolia_dual_current_child_is_fatal() -> Result<()> {
         .context("failure evidence")?;
     assert_eq!(evidence.failure_kind, DUAL_CURRENT_CHILD_AUTHORITY);
     assert_eq!(evidence.payload["parent_logical_name_id"], parent);
+    db.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn shared_infrastructure_without_proof_is_not_integrity_fatal() -> Result<()> {
-    let (_db, pool) = database("issue503_shared_nonfatal").await?;
+    let (db, pool) = database("issue503_shared_nonfatal").await?;
     let logical = surface(&pool, 50, "eth", &["ens_v1", "ens_v2"]).await?;
     run(&pool).await?;
     let selected = authority(&pool, &logical).await?;
     assert_eq!(selected, (Some("ens_v2".into()), None, None, None));
+    db.cleanup().await?;
     Ok(())
 }
