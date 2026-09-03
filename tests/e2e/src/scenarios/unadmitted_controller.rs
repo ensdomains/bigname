@@ -68,7 +68,8 @@ async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lea
     // `logical_name_id`.
     let derived_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT event_kind, source_family FROM normalized_events \
-         WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
+         WHERE transaction_hash = $1 AND canonicality_state = 'canonical' \
+         ORDER BY block_number, transaction_index, log_index, normalized_event_id",
     )
     .bind(&register_tx)
     .fetch_all(&run.db.pool)
