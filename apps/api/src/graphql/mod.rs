@@ -1,11 +1,12 @@
 //! Native subgraph-compatible GraphQL surface for the documented compatibility subset.
 //!
-//! Serves the minimal four-operation subset (`domain`, `domains`, `registrationConnection`,
-//! `domainConnection`) over the existing `bigname_storage` reads, preserving the subgraph field
+//! Serves generated Account, Domain, and Resolver entity roots plus the existing connection roots
+//! over the current schema-v2 projections, preserving the subgraph field
 //! shapes exercised by the committed GraphQL schema fixture and API tests.
 //! Resolver record fields (`texts`/`contentHash`/`addresses`) are served from the name's
 //! `record_inventory_current` projection (text selector keys, retained addr/contenthash values).
 
+mod account_queries;
 mod convert;
 mod enums;
 mod error;
@@ -17,12 +18,19 @@ mod name_queries;
 mod objects;
 mod query;
 mod record_inventory_query;
+mod resolver_queries;
 mod scalars;
 mod schema;
 mod snapshot;
 
 #[cfg(test)]
+pub(crate) use account_queries::{GeneratedAccountFilter, explain_phase_graphql_account_page};
+#[cfg(test)]
 pub(crate) use name_queries::count_phase_graphql_name_list;
+#[cfg(test)]
+pub(crate) use resolver_queries::{
+    GeneratedResolverFilter, explain_phase_graphql_resolver_page, parse_resolver_id,
+};
 pub(crate) use schema::graphql_routes;
 #[cfg(test)]
 pub(crate) use schema::subgraph_sdl;
