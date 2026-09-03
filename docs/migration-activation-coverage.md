@@ -19,23 +19,35 @@ The dispositions are:
   effects but emits no migration authority boundary.
 - `refused`: the transaction reverts or the observed evidence fails an existing
   path gate, so no migration boundary is admitted.
+- `blocked`: the catalog transaction is valid, but a known production
+  Interpret defect prevents the activated boundary from being committed and
+  reaching Project.
 
-No row is deferred and no row requires new schema, manifest, event, selector,
-or public vocabulary. Each executed scenario links its exact immutable catalog
-result rather than inferring it from another scenario. The final column separately
-names the exact checked-in test when the repository imports that scenario shape
-or pins the production rule it exercises; `exact catalog result only` states
-plainly that the external artifact is not itself a checked-in test.
+U-01, U-04, and U-07 are deferred by the same blocker named below. No row requires
+new schema, manifest, event, selector, or public vocabulary. Each scenario links its exact
+immutable catalog result rather than inferring it from another scenario. The
+final column separately names the exact checked-in test when the repository
+imports that scenario shape or pins the production rule it exercises; `exact
+catalog result only` states plainly that the external artifact is not itself a
+checked-in test.
+
+U-01 has no passing checked-in end-to-end database path. Its faithful ten-log transaction is retained by the ignored
+`faithful_unwrapped_migration_reaches_predecessor_refusal` test, which reaches
+Interpret's `0 active ENSv1 predecessors` refusal. The reduced
+`checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
+fixture omits the registry reclaim and cleanup logs and therefore tests only
+transition materialization. End-to-end publication for U-01, U-04, and U-07
+remains deferred to `#<interpret-unwrapped-predecessor-issue>`.
 
 | ID | Production disposition | Pinned exact catalog result | Checked-in rule anchor |
 | --- | --- | --- | --- |
-| U-01 | activated — `unwrapped` | [validation/U-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-01.json) | `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary`; production DB path `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor` |
+| U-01 | blocked — valid `unwrapped` path reaches the zero-predecessor refusal | [validation/U-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-01.json) | `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary`; reduced transition-only fixture `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`; ignored faithful-path refusal `faithful_unwrapped_migration_reaches_predecessor_refusal` (`#<interpret-unwrapped-predecessor-issue>`) |
 | U-02 | activated — `unwrapped` | [validation/U-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-02.json) | exact catalog result only; `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` pins production `unwrapped` activation |
 | U-03 | activated — `unwrapped` | [validation/U-03.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-03.json) | exact catalog result only; `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` pins production `unwrapped` activation |
-| U-04 | activated — `unwrapped` | [validation/U-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-04.json) | `resolver_and_ttl_clears_are_optional_boundary_evidence`; `assert_activated_transition` matrix |
+| U-04 | blocked — U-01 forward-name sequence with a resolver override | [validation/U-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-04.json) | adapter-only `resolver_and_ttl_clears_are_optional_boundary_evidence`; no production-writer path (`#<interpret-unwrapped-predecessor-issue>`) |
 | U-05 | activated — `unwrapped` | [validation/U-05.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-05.json) | `assert_activated_transition` matrix; ordinary subregistry output stays independent |
 | U-06 | activated — `unwrapped`; later ENSv1 residue stays historical | [validation/U-06.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-06.json) | `assert_activated_transition` matrix; ordinary post-boundary facts remain byte-for-byte independent |
-| U-07 | activated — `unwrapped`; reverse claim is independent | [validation/U-07.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-07.json) | `assert_activated_transition` matrix; Project authority fanout suite |
+| U-07 | blocked — U-01 forward-name sequence; reverse claim is independent | [validation/U-07.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-07.json) | adapter-only transition matrix; no production-writer path (`#<interpret-unwrapped-predecessor-issue>`) |
 | U-08 | activated — `unwrapped`; emitted [migration expiry jump](glossary.md#migration-expiry-jump) | [validation/U-08.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-08.json) | `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` |
 | U-09 | activated — `unwrapped`; contract owner is retained | [validation/U-09.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-09.json) | `assert_activated_transition` matrix |
 | X-U-01 | refused — reverted transaction | [validation/X-U-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/X-U-01.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
