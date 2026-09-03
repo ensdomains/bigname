@@ -145,10 +145,10 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
             }
         }
         "ResolverChanged" => {
-            if expiry_retirement_is_projection_only(event) {
+            let Some(token) = token else { return };
+            if expiry_retirement_is_projection_only(event) || support::missing_replacement_role(state, emitter, token, event, "resolver") {
                 return;
             }
-            let Some(token) = token else { return };
             let resolver = event
                 .after_state
                 .get("resolver")
@@ -157,10 +157,10 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
             state.set_v2_resolver(emitter, token, resolver);
         }
         "SubregistryChanged" => {
-            if expiry_retirement_is_projection_only(event) {
+            let Some(token) = token else { return };
+            if expiry_retirement_is_projection_only(event) || support::missing_replacement_role(state, emitter, token, event, "subregistry") {
                 return;
             }
-            let Some(token) = token else { return };
             state.restore_v2_subregistry_change(emitter, token, &event.after_state);
         }
         "ExpiryChanged" => {

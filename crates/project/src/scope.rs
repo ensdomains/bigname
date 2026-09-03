@@ -6,6 +6,7 @@ use crate::{
 
 mod authority;
 mod classification;
+mod expiry;
 mod inventory;
 mod labels;
 mod primary;
@@ -53,7 +54,7 @@ pub(crate) async fn initialize(
     .await?;
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
     if window.retain_retracted {
-        retracted::seed(transaction, chain_id, window.from_block, window.to_block).await?;
+        retracted::seed(transaction, chain_id, &window, target.number).await?;
         // Resource citations retain the losing projected pointer while canonical history supplies
         // its replacement; both resolver keys must expand before redo rebuilds either row family.
         resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
@@ -89,6 +90,7 @@ pub(crate) async fn initialize(
 async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
         "CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_expiry_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_permission_effect_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",

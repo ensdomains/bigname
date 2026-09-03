@@ -38,7 +38,10 @@ pub use role_insensitivity::{
     ROLE_INSENSITIVE_EVENTS, RoleInsensitiveEvent, event_allows_empty_emitter_roles,
     role_insensitivity_justification,
 };
-pub use schema_v2::{SchemaV2ManifestSyncSummary, sync_schema_v2_repository};
+pub use schema_v2::{
+    SchemaV2ManifestSyncSummary, sync_schema_v2_repository,
+    sync_schema_v2_repository_in_transaction,
+};
 pub use views::*;
 pub use watch_policy::*;
 

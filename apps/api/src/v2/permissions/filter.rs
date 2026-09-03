@@ -7,19 +7,28 @@ use sqlx::types::Uuid;
 
 use crate::AppState;
 
-use super::super::name_record::string_field;
+use super::super::name_record::{name_registration_fields, string_field};
 use super::super::support::normalize_inferred_route_name;
-use super::super::{QueryParams, V2Result, vocab::AuthorityContext};
+use super::super::{
+    QueryParams, V2Result,
+    vocab::{AuthorityContext, RegistrationStatus},
+};
 use super::{
     ADDRESS_FILTER_KEY, INCLUDE_FILTER_KEY, NAMESPACE_FILTER_KEY, REGISTRATION_ID_FILTER_KEY,
     V2Error, load_current_name_row,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EmptyPermissionsSelection {
+    MissingOrUnsupportedNameAnchor,
+    SupersededNameRegistrationPair,
+}
+
 #[derive(Debug)]
 pub(super) struct ResolvedPermissionsFilter {
     pub(super) subject: Option<String>,
     pub(super) resource_id: Option<Uuid>,
-    pub(super) known_empty: bool,
+    pub(super) empty_selection: Option<EmptyPermissionsSelection>,
     pub(super) authority_context: AuthorityContext,
     pub(super) cursor_filters: BTreeMap<String, String>,
 }
@@ -87,6 +96,14 @@ pub(super) async fn resolve_permissions_filter(
         .as_ref()
         .and_then(|row| row.as_ref())
         .filter(|row| string_field(row.coverage.get("status")).as_deref() != Some("unsupported"))
+        .filter(|row| {
+            matches!(
+                name_registration_fields(Some(row), &row.namespace).registration_status,
+                RegistrationStatus::Active
+                    | RegistrationStatus::Wrapped
+                    | RegistrationStatus::Registered
+            )
+        })
         .and_then(|row| row.resource_id);
 
     // A registration the name filter did not select is a superseded pair: queryable on its own as
@@ -98,8 +115,13 @@ pub(super) async fn resolve_permissions_filter(
 
     let namespace = inputs.namespace.clone();
     let resource_id = inputs.requested_resource_id.or(name_resource_id);
-    let known_empty =
-        superseded_pair || (inputs.name_filter.is_some() && name_resource_id.is_none());
+    let empty_selection = if superseded_pair {
+        Some(EmptyPermissionsSelection::SupersededNameRegistrationPair)
+    } else if inputs.name_filter.is_some() && name_resource_id.is_none() {
+        Some(EmptyPermissionsSelection::MissingOrUnsupportedNameAnchor)
+    } else {
+        None
+    };
     let authority_context = if inputs.name_filter.is_some() {
         AuthorityContext::CurrentForName
     } else {
@@ -125,7 +147,7 @@ pub(super) async fn resolve_permissions_filter(
     Ok(ResolvedPermissionsFilter {
         subject: params.address.clone(),
         resource_id,
-        known_empty,
+        empty_selection,
         authority_context,
         cursor_filters,
     })

@@ -57,7 +57,7 @@ async fn graphql_responses_match_committed_contract() -> Result<()> {
         &all_records,
         vec![GraphqlRequestCase::new(
             "existing_domains_records_for_each_name",
-            r#"query Domains($where: DomainFilter!) {
+            r#"query Domains($where: Domain_filter!) {
                 domains(where: $where, orderBy: name, orderDirection: asc) {
                     name
                     resolver { contentHash addresses { coinType address } }
@@ -77,7 +77,7 @@ async fn graphql_responses_match_committed_contract() -> Result<()> {
         &sepolia,
         vec![GraphqlRequestCase::new(
             "existing_sepolia_record_anchor_fallback",
-            r#"query Domain($id: String!) {
+            r#"query Domain($id: ID!) {
                 domain(id: $id) {
                     resolver { texts addresses { coinType address } contentHash }
                 }
@@ -120,7 +120,7 @@ fn base_graphql_requests() -> Vec<GraphqlRequestCase> {
     vec![
         GraphqlRequestCase::new(
             "existing_domain_shape",
-            r#"query Domain($id: String!) {
+            r#"query Domain($id: ID!) {
                 domain(id: $id) {
                     id name normalizedName tokenId createdAt expiryDate
                     owner { id }
@@ -131,20 +131,20 @@ fn base_graphql_requests() -> Vec<GraphqlRequestCase> {
         ),
         GraphqlRequestCase::new(
             "existing_domain_by_name",
-            r#"query Domain($id: String!) {
+            r#"query Domain($id: ID!) {
                 domain(id: $id) { id name normalizedName owner { id } }
             }"#,
             json!({ "id": "alice.eth" }),
         ),
         GraphqlRequestCase::new(
             "existing_domain_missing",
-            r#"query Domain($id: String!) { domain(id: $id) { id } }"#,
+            r#"query Domain($id: ID!) { domain(id: $id) { id } }"#,
             json!({ "id": "0xdeadbeef" }),
         ),
         GraphqlRequestCase::new(
             "existing_domains_first_page",
             r#"query Domains(
-                $where: DomainFilter!
+                $where: Domain_filter!
                 $first: Int
                 $skip: Int
                 $orderBy: Domain_orderBy
@@ -169,7 +169,7 @@ fn base_graphql_requests() -> Vec<GraphqlRequestCase> {
         GraphqlRequestCase::new(
             "existing_domains_second_page",
             r#"query Domains(
-                $where: DomainFilter!
+                $where: Domain_filter!
                 $first: Int
                 $skip: Int
                 $orderBy: Domain_orderBy
@@ -193,14 +193,14 @@ fn base_graphql_requests() -> Vec<GraphqlRequestCase> {
         ),
         GraphqlRequestCase::new(
             "existing_owner_filter",
-            r#"query Domains($where: DomainFilter!) {
+            r#"query Domains($where: Domain_filter!) {
                 domains(where: $where) { id }
             }"#,
             json!({ "where": { "owner_in": [GRAPHQL_OWNER] } }),
         ),
         GraphqlRequestCase::new(
             "existing_empty_owner_filter",
-            r#"query Domains($where: DomainFilter!) {
+            r#"query Domains($where: Domain_filter!) {
                 domains(where: $where) { id }
             }"#,
             json!({ "where": { "owner_in": [] } }),
@@ -235,14 +235,14 @@ fn base_graphql_requests() -> Vec<GraphqlRequestCase> {
         ),
         GraphqlRequestCase::new(
             "existing_owner_registrant_fallback",
-            r#"query Domain($id: String!) {
+            r#"query Domain($id: ID!) {
                 domain(id: $id) { owner { id } expiryDate }
             }"#,
             json!({ "id": "carol.eth" }),
         ),
         GraphqlRequestCase::new(
             "existing_owner_zero_address_fallback",
-            r#"query Domain($id: String!) {
+            r#"query Domain($id: ID!) {
                 domain(id: $id) { owner { id } expiryDate createdAt }
             }"#,
             json!({ "id": "dave.eth" }),
@@ -261,12 +261,11 @@ fn base_graphql_requests() -> Vec<GraphqlRequestCase> {
         ),
         GraphqlRequestCase::new(
             "existing_name_contains_filter",
-            r#"query Domains($where: DomainFilter!) {
+            r#"query Domains($where: Domain_filter!) {
                 domains(where: $where) { name }
             }"#,
             json!({
                 "where": {
-                    "owner_in": [GRAPHQL_FALLBACK_HOLDER],
                     "name_contains": "aro"
                 }
             }),
@@ -282,7 +281,7 @@ fn ordered_names_request(
     GraphqlRequestCase::new(
         id,
         r#"query Domains(
-            $where: DomainFilter!
+            $where: Domain_filter!
             $orderBy: Domain_orderBy
             $orderDirection: OrderDirection
         ) {
@@ -293,7 +292,7 @@ fn ordered_names_request(
             ) { name }
         }"#,
         json!({
-            "where": { "owner_in": [GRAPHQL_FALLBACK_HOLDER] },
+            "where": { "id_in": [GRAPHQL_CAROL_NAMEHASH, GRAPHQL_DAVE_NAMEHASH] },
             "orderBy": order_by,
             "orderDirection": direction,
         }),
@@ -304,7 +303,7 @@ fn alice_record_graphql_requests() -> Vec<GraphqlRequestCase> {
     vec![
         GraphqlRequestCase::new(
             "existing_domains_record_hit_and_miss",
-            r#"query Domains($where: DomainFilter!) {
+            r#"query Domains($where: Domain_filter!) {
                 domains(where: $where, orderBy: name, orderDirection: asc) {
                     name
                     resolver { address contentHash texts addresses { coinType address } }
@@ -314,7 +313,7 @@ fn alice_record_graphql_requests() -> Vec<GraphqlRequestCase> {
         ),
         GraphqlRequestCase::new(
             "existing_domain_records",
-            r#"query Domain($id: String!) {
+            r#"query Domain($id: ID!) {
                 domain(id: $id) {
                     resolver { id address texts contentHash addresses { coinType address } }
                 }
@@ -323,7 +322,7 @@ fn alice_record_graphql_requests() -> Vec<GraphqlRequestCase> {
         ),
         GraphqlRequestCase::new(
             "existing_domain_without_records",
-            r#"query Domain($id: String!) {
+            r#"query Domain($id: ID!) {
                 domain(id: $id) {
                     resolver { texts contentHash addresses { coinType address } }
                 }
@@ -367,6 +366,7 @@ fn manager_domain_document() -> String {
         include_str!("fixtures/manager-graphql/fragments/Account.graphql"),
     ]
     .join("\n")
+    .replace("$id: String!", "$id: ID!")
 }
 
 fn manager_domains_document() -> String {
@@ -377,4 +377,5 @@ fn manager_domains_document() -> String {
         include_str!("fixtures/manager-graphql/fragments/Account.graphql"),
     ]
     .join("\n")
+    .replace("$where: DomainFilter!", "$where: Domain_filter!")
 }

@@ -493,6 +493,159 @@ fn v2_regeneration_collision_closes_displaced_registration_in_every_replay_shape
 }
 
 #[test]
+fn v2_label_collision_with_topology_does_not_resurrect_displaced_token_after_restore() -> Result<()>
+{
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_label_collision_with_topology_input(&wiring)?;
+    let token_a = versioned_token("alpha", 1);
+    let token_b = versioned_token("alpha", 2);
+    let token_a_hex = format!("{token_a:#066x}");
+    let token_b_hex = format!("{token_b:#066x}");
+    let collision_block = 20_000_304;
+    let expected_role_scope = format!(
+        "{}:-:{token_a_hex}:-:LabelRegistered",
+        wiring
+            .address("ens_v2_registry_l1", "registry")
+            .to_ascii_lowercase()
+    );
+
+    let converged = converge(
+        "directed=v2-label-collision-with-displaced-topology",
+        input,
+        vec![0..1, 1..2, 2..3, 3..4, 4..5, 5..6, 6..7],
+    )?;
+    assert!(
+        converged.artifacts.counts().is_empty(),
+        "the collision retained batch-boundary differences: {}",
+        converged.artifacts
+    );
+    let output = &converged.whole.output;
+    assert!(output.discovery_edge_closures.iter().any(|closure| {
+        closure.active_to_block_number == collision_block && closure.edge_kind == "resolver"
+    }));
+    assert!(output.discovery_edge_closures.iter().any(|closure| {
+        closure.active_to_block_number == collision_block && closure.edge_kind == "subregistry"
+    }));
+    for (event_kind, field) in [
+        ("ResolverChanged", "resolver"),
+        ("SubregistryChanged", "subregistry"),
+    ] {
+        assert!(output.normalized_events.iter().any(|event| {
+            event.block_number == Some(collision_block)
+                && event.event_kind == event_kind
+                && event.after_state["token_id"] == token_a_hex
+                && event.after_state[field].is_null()
+                && event.raw_fact_ref["state_scope"] == expected_role_scope
+        }));
+    }
+    assert!(output.normalized_events.iter().all(|event| {
+        event.block_number != Some(20_000_305) || event.after_state["token_id"] != token_a_hex
+    }));
+    assert!(output.normalized_events.iter().any(|event| {
+        event.block_number == Some(20_000_306)
+            && event.event_kind == "RegistrationRenewed"
+            && event.after_state["token_id"] == token_b_hex
+    }));
+    Ok(())
+}
+
+#[test]
+fn v2_replacement_null_roles_do_not_restore_displaced_token() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_label_collision_with_topology_input(&wiring)?;
+    let prefix_blocks = input.blocks[..5].to_vec();
+    let prefix_hashes = prefix_blocks
+        .iter()
+        .map(|block| block.block_hash.as_str())
+        .collect::<BTreeSet<_>>();
+    let prefix = interpret_schema_v2_batch(BatchInput {
+        blocks: prefix_blocks.clone(),
+        raw_logs: input
+            .raw_logs
+            .iter()
+            .filter(|log| prefix_hashes.contains(log.block_hash.as_str()))
+            .cloned()
+            .collect(),
+        ..input.clone()
+    })?;
+    let prior = seam::fold_prior_events(Vec::new(), &prefix.normalized_events, &prefix_blocks)?;
+    let restored_expiry = interpret_schema_v2_batch(BatchInput {
+        prior_events: prior,
+        blocks: vec![input.blocks[5].clone()],
+        raw_logs: input
+            .raw_logs
+            .iter()
+            .filter(|log| log.block_hash == input.blocks[5].block_hash)
+            .cloned()
+            .collect(),
+        ..input
+    })?;
+    let displaced_token = format!("{:#066x}", versioned_token("alpha", 1));
+
+    assert!(
+        restored_expiry
+            .normalized_events
+            .iter()
+            .all(|event| { event.after_state["token_id"] != displaced_token }),
+        "replacement null roles recreated the displaced token: {:#?}",
+        restored_expiry.normalized_events
+    );
+    Ok(())
+}
+
+#[test]
+fn v2_same_token_claim_clears_reserved_topology_after_restore() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
+    let input = v2_same_token_claim_with_reserved_topology_input(&wiring)?;
+    let claim_block = 20_000_403;
+    let whole = interpret_schema_v2_batch(input.clone())?;
+    let prefix_blocks = input.blocks[..3].to_vec();
+    let prefix_hashes = prefix_blocks
+        .iter()
+        .map(|block| block.block_hash.as_str())
+        .collect::<BTreeSet<_>>();
+    let prefix = interpret_schema_v2_batch(BatchInput {
+        blocks: prefix_blocks.clone(),
+        raw_logs: input
+            .raw_logs
+            .iter()
+            .filter(|log| prefix_hashes.contains(log.block_hash.as_str()))
+            .cloned()
+            .collect(),
+        ..input.clone()
+    })?;
+    let prior = seam::fold_prior_events(Vec::new(), &prefix.normalized_events, &prefix_blocks)?;
+    let restored_claim = interpret_schema_v2_batch(BatchInput {
+        prior_events: prior,
+        blocks: vec![input.blocks[3].clone()],
+        raw_logs: input
+            .raw_logs
+            .iter()
+            .filter(|log| log.block_hash == input.blocks[3].block_hash)
+            .cloned()
+            .collect(),
+        ..input
+    })?;
+
+    for output in [&whole, &restored_claim] {
+        for (event_kind, field) in [
+            ("ResolverChanged", "resolver"),
+            ("SubregistryChanged", "subregistry"),
+        ] {
+            assert!(output.normalized_events.iter().any(|event| {
+                event.block_number == Some(claim_block)
+                    && event.event_kind == event_kind
+                    && event.after_state[field].is_null()
+            }));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn v2_label_registration_preserves_a_shared_subregistry_observation_key() -> Result<()> {
     let checked_in = checked_in_manifests()?;
     let wiring = Wiring::build(&ENS_V2_SEPOLIA, &checked_in)?;
@@ -1727,6 +1880,191 @@ fn v2_released_name_record_input(
 /// and resolver record expose any surviving attribution to the displaced registration.
 fn v2_regeneration_collision_input(wiring: &Wiring, collision: bool) -> Result<BatchInput> {
     v2_regeneration_collision_input_inner(wiring, collision, false, false, false, false)
+}
+
+fn v2_label_collision_with_topology_input(wiring: &Wiring) -> Result<BatchInput> {
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let resolver: Address = "0x00000000000000000000000000000000f0000097".parse()?;
+    let subregistry: Address = "0x00000000000000000000000000000000f0000098".parse()?;
+    let token_a = versioned_token("alpha", 1);
+    let token_b = versioned_token("alpha", 2);
+    let blocks = (0..7_i64)
+        .map(|index| BlockSpec {
+            number: 20_000_300 + index,
+            hash: format!("0x{:064x}", 0x4833_u64 + index as u64),
+            timestamp: 1_700_000_300 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, encoded: LogData| {
+        let emission = scenario::emission(registry, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x4833_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = vec![
+        log(
+            0,
+            0,
+            V2Registry::LabelRegistered {
+                tokenId: token_a,
+                labelHash: labelhash("alpha"),
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            1,
+            V2Registry::ResolverUpdated {
+                tokenId: token_a,
+                resolver,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            2,
+            V2Registry::SubregistryUpdated {
+                tokenId: token_a,
+                subregistry,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            3,
+            3,
+            V2Registry::TokenResource {
+                tokenId: token_a,
+                resource: U256::from(0xa11ce_u64),
+            }
+            .encode_log_data(),
+        ),
+        log(
+            4,
+            4,
+            V2Registry::LabelRegistered {
+                tokenId: token_b,
+                labelHash: labelhash("alpha"),
+                label: "alpha".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            5,
+            5,
+            V2Registry::ExpiryUpdated {
+                tokenId: token_a,
+                newExpiry: 1_850_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            6,
+            6,
+            V2Registry::ExpiryUpdated {
+                tokenId: token_b,
+                newExpiry: 1_850_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
+}
+
+fn v2_same_token_claim_with_reserved_topology_input(wiring: &Wiring) -> Result<BatchInput> {
+    let registry = wiring.address("ens_v2_registry_l1", "registry");
+    let owner: Address = "0x00000000000000000000000000000000f0000001".parse()?;
+    let sender: Address = "0x00000000000000000000000000000000f0000002".parse()?;
+    let resolver: Address = "0x00000000000000000000000000000000f0000097".parse()?;
+    let subregistry: Address = "0x00000000000000000000000000000000f0000098".parse()?;
+    let token = versioned_token("claim", 0);
+    let blocks = (0..4_i64)
+        .map(|index| BlockSpec {
+            number: 20_000_400 + index,
+            hash: format!("0x{:064x}", 0x4844_u64 + index as u64),
+            timestamp: 1_700_000_400 + index,
+        })
+        .collect::<Vec<_>>();
+    let log = |block_index: usize, ordinal: u64, encoded: LogData| {
+        let emission = scenario::emission(registry, encoded);
+        GeneratedLog {
+            block_index,
+            transaction_hash: format!("0x{:064x}", 0x4844_0000_u64 + ordinal),
+            transaction_index: ordinal as i64,
+            log_index: 0,
+            emitter: emission.emitter,
+            topics: emission.topics,
+            data: emission.data,
+            burst: None,
+        }
+    };
+    let logs = vec![
+        log(
+            0,
+            0,
+            V2Registry::LabelReserved {
+                tokenId: token,
+                labelHash: labelhash("claim"),
+                label: "claim".to_owned(),
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            1,
+            1,
+            V2Registry::ResolverUpdated {
+                tokenId: token,
+                resolver,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            2,
+            2,
+            V2Registry::SubregistryUpdated {
+                tokenId: token,
+                subregistry,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+        log(
+            3,
+            3,
+            V2Registry::LabelRegistered {
+                tokenId: token,
+                labelHash: labelhash("claim"),
+                label: "claim".to_owned(),
+                owner,
+                expiry: 1_800_000_000,
+                sender,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    wiring.batch_input(&blocks, &logs)
 }
 
 fn v2_regeneration_collision_input_with_topology(

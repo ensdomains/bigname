@@ -1,25 +1,36 @@
 use sqlx::{Postgres, Transaction};
 
-use crate::{ProjectError, Result};
+use crate::{ProjectError, Result, scope::Window};
 
-/// Interpret redo replaces normalized events in-place. Retain the incremental keys of current
-/// rows whose cited event disappeared so project can retract losing-fork output after interpret
-/// has already deleted that event.
+/// Retain keys whose cited events Interpret deleted during redo so Project can retract losing-fork output.
 pub(super) async fn seed(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-    from_block: i64,
-    to_block: i64,
+    window: &Window<'_>,
+    target_block: i64,
 ) -> Result<()> {
-    seed_names(transaction, chain_id).await?;
+    seed_names(
+        transaction,
+        chain_id,
+        window.from_block,
+        window.to_block,
+        target_block,
+    )
+    .await?;
     seed_children(transaction, chain_id).await?;
-    seed_resources(transaction, chain_id, from_block, to_block).await?;
-    seed_resolvers(transaction, chain_id, from_block, to_block).await?;
+    seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
+    seed_resolvers(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_primary(transaction, chain_id).await?;
     Ok(())
 }
 
-async fn seed_names(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) -> Result<()> {
+async fn seed_names(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+    target_block: i64,
+) -> Result<()> {
     sqlx::query(
         r#"
         WITH citations AS (
@@ -59,6 +70,54 @@ async fn seed_names(transaction: &mut Transaction<'_, Postgres>, chain_id: &str)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to retain retracted name scope", error))?;
+    sqlx::query(
+        r#"
+        INSERT INTO project_scope_expiry_names
+        SELECT DISTINCT event.logical_name_id
+        FROM normalized_events event
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = event.chain_id
+         AND lineage.block_hash = event.block_hash
+         AND lineage.block_number = event.block_number
+        WHERE event.chain_id = $1
+          AND event.block_number BETWEEN $2 AND $3
+          AND event.logical_name_id IS NOT NULL
+          AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+          AND event.event_kind = 'RegistrationReleased'
+          AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+          AND event.after_state ->> 'derived_from' = 'interpreter_state'
+          AND event.after_state ->> 'terminal_reason' =
+              'registry_name_binding_expired'
+          AND (event.canonicality_state = 'orphaned'
+               OR lineage.canonicality_state = 'orphaned')
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to retain orphaned expiry name scope", error)
+    })?;
+    super::expiry::include_retracted_roots(transaction, chain_id, from_block, to_block).await?;
+    super::expiry::include_expiring_names(
+        transaction,
+        chain_id,
+        from_block,
+        to_block,
+        target_block,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO project_scope_names
+         SELECT logical_name_id FROM project_scope_expiry_names
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to install expiry name scope", error))?;
     Ok(())
 }
 
@@ -143,16 +202,36 @@ async fn seed_resources(
             SELECT row.resource_id, citation.event_id, false
             FROM permissions_current_resource_summary row
             CROSS JOIN LATERAL (VALUES
+                (row.provenance ->> 'authority_event_id'),
                 (row.provenance -> 'wrapper_expiry_boundary' ->> 'fuses_event_id'),
-                (row.provenance -> 'wrapper_expiry_boundary' ->> 'expiry_event_id')
+                (row.provenance -> 'wrapper_expiry_boundary' ->> 'expiry_event_id'),
+                (row.provenance ->> 'expiry_retirement_event_id')
             ) citation(event_id)
             WHERE row.provenance ->> 'chain_id' = $1
             UNION ALL
-            SELECT row.resource_id, NULL, true
-            FROM permissions_current_resource_summary row
-            WHERE row.provenance ->> 'chain_id' = $1
-              AND NULLIF(row.chain_positions ->> 'block_number', '')::bigint
-                  BETWEEN $2 AND $3
+            SELECT root.resource_id, NULL::text, true
+            FROM project_redo_expiry_roots root
+            WHERE root.chain_id = $1
+              AND root.block_number BETWEEN $2 AND $3
+              AND root.resource_id IS NOT NULL
+            UNION ALL
+            SELECT event.resource_id, NULL::text, true
+            FROM normalized_events event
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = event.chain_id
+             AND lineage.block_hash = event.block_hash
+             AND lineage.block_number = event.block_number
+            WHERE event.chain_id = $1
+              AND event.block_number BETWEEN $2 AND $3
+              AND event.resource_id IS NOT NULL
+              AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+              AND event.event_kind = 'RegistrationReleased'
+              AND event.after_state ->> 'source_event' = 'RegistryPathExpired'
+              AND event.after_state ->> 'derived_from' = 'interpreter_state'
+              AND event.after_state ->> 'terminal_reason' =
+                  'registry_name_binding_expired'
+              AND (event.canonicality_state = 'orphaned'
+                   OR lineage.canonicality_state = 'orphaned')
         )
         INSERT INTO project_scope_resources
         SELECT DISTINCT citation.resource_id
@@ -383,6 +462,21 @@ pub(super) async fn consume(
     .map_err(|error| {
         ProjectError::database(
             "failed to consume resolver evidence during Project publication",
+            error,
+        )
+    })?;
+    sqlx::query(
+        "DELETE FROM project_redo_expiry_roots
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3",
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to consume path-expiry logical names during Project publication",
             error,
         )
     })?;

@@ -2,13 +2,10 @@ mod expiry;
 mod registrar;
 mod topology;
 mod transfer;
-
-use alloy_primitives::{Address, U256, hex, keccak256};
-use alloy_sol_types::sol;
-use anyhow::{Context, bail};
-use serde_json::{Value, json};
-use uuid::Uuid;
-
+use super::{
+    BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, LabelDraft, NameDraft,
+    ResourceDraft, ShadowNameDraft, ensure_declared,
+};
 use crate::{
     evm_abi::{address_hex, decode_event_log, decode_event_log_data_as, hex_string, u256_word_hex},
     schema_v2::{
@@ -21,23 +18,22 @@ use crate::{
         state::{State, V2NameTransition, V2RawNameState, V2TokenState, v2_expiry_is_live},
     },
 };
-
-use super::{
-    BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, LabelDraft, NameDraft,
-    ResourceDraft, ShadowNameDraft, ensure_declared,
-};
+use alloy_primitives::{Address, U256, hex, keccak256};
+use alloy_sol_types::sol;
+use anyhow::{Context, bail};
+use serde_json::{Value, json};
 pub(in crate::schema_v2) use topology::boundary_reassertion;
 use topology::{
     append_resolver_discovery_closures, append_terminal_boundaries,
     append_token_discovery_closures, append_v2_name_transitions, discovery_observation_key,
 };
+use uuid::Uuid;
 pub(super) fn boundary_expiration(
     transition: V2NameTransition,
     released_at: i64,
 ) -> anyhow::Result<Interpreted> {
     topology::boundary_expiration(transition, released_at)
 }
-
 sol! {
     event RegistryCreated();
     event RawLabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, bytes label, address owner, uint64 expiry, address indexed sender);
@@ -54,7 +50,6 @@ sol! {
     event RawParentUpdated(address indexed parent, bytes label, address indexed sender);
     event Upgraded(address indexed implementation);
 }
-
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
@@ -65,7 +60,6 @@ pub(super) fn interpret(
     }
     registry(selected, raw, state)
 }
-
 fn registry(
     selected: &Selected,
     raw: &RawLogInput,
@@ -133,7 +127,7 @@ fn registry(
                 event_state.clone(),
             );
             ensure_declared(selected, &["ExpiryChanged"])?;
-            if detached_revival.is_some() {
+            if after.registration.is_some() || detached_revival.is_some() {
                 ensure_declared(selected, &["RegistrationRenewed"])?;
             }
             let mut output = single_event(
@@ -267,6 +261,7 @@ fn registry(
             output.labels.push(LabelDraft {
                 raw_label: raw_label.clone(),
                 source_kind: "ParentUpdated_label".to_owned(),
+                explicit_preimage_observed: false,
             });
             if label.is_none()
                 && let Some(parent) = parent.as_deref()
@@ -292,7 +287,6 @@ fn registry(
     initial_output.append(&mut output);
     Ok(initial_output)
 }
-
 fn label_event(
     selected: &Selected,
     raw: &RawLogInput,
@@ -455,6 +449,7 @@ fn label_event(
     output.labels.push(LabelDraft {
         raw_label: label,
         source_kind: format!("{}_label", selected.event.name),
+        explicit_preimage_observed: false,
     });
     if let Some(name) = name.as_ref() {
         output.names.push(NameDraft {
@@ -469,8 +464,6 @@ fn label_event(
             source_kind: format!("{}_label", selected.event.name),
             preimage_metadata: None,
         });
-        // Closures are arm-wide per logical name, so only a registration assert may clear the
-        // name's stale bindings; a reservation would close another holder's live binding.
         if registered {
             output.binding_closures.push(BindingClosureDraft {
                 logical_name_id: name.logical_name_id.clone(),
@@ -479,6 +472,9 @@ fn label_event(
         }
     }
     for (replaced_token, previous) in &replaced {
+        // Preserve the existing null role events and token_id for API readers and rebuilt read
+        // models.
+        // Retained-event replay skips these exact boundaries so it does not recreate the token.
         append_terminal_boundaries(
             &mut output,
             state,
@@ -661,3 +657,7 @@ fn single_event(
     });
     output
 }
+
+// Declaration-guard coverage stays beside this adapter.
+#[cfg(test)]
+mod tests;

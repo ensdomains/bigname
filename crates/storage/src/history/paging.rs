@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
+use super::redo::{InterpretRedoFence, ensure_interpret_redo_fence};
 use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryPage, HistorySummaryMode,
     InvalidHistoryCursor,
@@ -58,6 +59,7 @@ pub(super) async fn load_event_history_rows(
     load_history_internal(pool, filter, canonical_only, false).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn load_history_page(
     pool: &PgPool,
     filter: EventHistoryReadFilter,
@@ -66,6 +68,7 @@ pub(super) async fn load_history_page(
     page_size: u64,
     summary_mode: HistorySummaryMode,
     include_candidates: bool,
+    interpret_redo_fence: Option<&InterpretRedoFence>,
 ) -> Result<HistoryPage> {
     let mut transaction = pool
         .begin()
@@ -75,6 +78,12 @@ pub(super) async fn load_history_page(
         .execute(&mut *transaction)
         .await
         .context("failed to configure normalized-event history page transaction")?;
+
+    if let Some(interpret_redo_fence) = interpret_redo_fence {
+        ensure_interpret_redo_fence(&mut transaction, interpret_redo_fence)
+            .await
+            .context("normalized-event history page refused during Interpret redo")?;
+    }
 
     if let Some(cursor) = cursor {
         ensure_history_cursor_exists(
@@ -103,6 +112,7 @@ pub(super) async fn load_history_page(
             rows: Vec::new(),
             next_cursor: None,
             summary,
+            interpret_redo_fence: interpret_redo_fence.cloned(),
         });
     }
 
@@ -156,6 +166,7 @@ pub(super) async fn load_history_page(
         rows,
         next_cursor,
         summary,
+        interpret_redo_fence: interpret_redo_fence.cloned(),
     })
 }
 
@@ -371,7 +382,11 @@ async fn ensure_history_cursor_exists(
         "#,
     );
     push_history_source_with_visibility(&mut builder, false, include_candidates);
-    push_history_filters(&mut builder, filter, canonical_only);
+    let mut cursor_filter = filter.clone();
+    if !cursor_filter.bind_cursor_anchor_to_event_kinds {
+        cursor_filter.event_kinds.clear();
+    }
+    push_history_filters(&mut builder, &cursor_filter, canonical_only);
     if !include_candidates {
         push_product_history_duplicate_filter(&mut builder);
     }

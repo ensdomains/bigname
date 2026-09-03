@@ -72,6 +72,8 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     )
     .await?;
     assert_eq!(paired["data"], json!([]));
+    assert!(paired["meta"].get("completeness").is_none());
+    assert!(paired["meta"].get("unsupported_reason").is_none());
 
     // Anti-vacuity: the same superseded registration is still readable as a resource audit.
     let audited = v2_permissions_payload_for_database(
@@ -91,6 +93,96 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
             .as_array()
             .unwrap()
             .iter()
+            .all(|row| row["authority_context"] == json!("resource_audit"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+// An explicit ENSv2 release leaves retained permission rows available to a resource audit, but
+// the released name no longer has a current registration and cannot select those rows.
+#[tokio::test]
+async fn v2_get_permissions_empties_a_released_name_but_keeps_its_resource_audit() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let released_resource_id = v2_permissions_current_resource_id();
+
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{registration,status}',
+             '\"released\"'::jsonb
+         )
+         WHERE resource_id = $1",
+    )
+    .bind(released_resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert_eq!(by_name["data"], json!([]));
+
+    let audited = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?registration_id={released_resource_id}"),
+    )
+    .await?;
+    let rows = audited["data"]
+        .as_array()
+        .expect("resource audit must return an array");
+    assert!(!rows.is_empty(), "the released resource lost its audit read");
+    assert!(
+        rows.iter()
+            .all(|row| row["authority_context"] == json!("resource_audit"))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+// This deliberately retains resource-keyed audit evidence while changing the name summary to the
+// reservation shape and removing current-owner evidence. The API therefore classifies the name as
+// unregistered, so the retained evidence remains audit-only and cannot become `current_for_name`.
+#[tokio::test]
+async fn v2_get_permissions_keeps_retained_resource_audit_out_of_reserved_name_scope() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let reserved_resource_id = v2_permissions_current_resource_id();
+
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+                 jsonb_set(
+                     declared_summary #- '{control,owner}' #- '{control,registry_owner}',
+                     '{registration,status}', '\"reserved\"'::jsonb
+                 ),
+                 '{registration,authority_kind}', '\"ens_v2_registry\"'::jsonb
+             )
+         WHERE resource_id = $1",
+    )
+    .bind(reserved_resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let by_name =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert_eq!(by_name["data"], json!([]));
+
+    let audited = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?registration_id={reserved_resource_id}"),
+    )
+    .await?;
+    let rows = audited["data"]
+        .as_array()
+        .expect("resource audit must return an array");
+    assert!(!rows.is_empty(), "the reserved resource lost its audit read");
+    assert!(
+        rows.iter()
             .all(|row| row["authority_context"] == json!("resource_audit"))
     );
 
@@ -162,6 +254,23 @@ async fn v2_get_permissions_empties_a_name_filter_the_projection_does_not_suppor
     let payload =
         v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
     assert_eq!(payload["data"], json!([]));
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
+
+    sqlx::query("UPDATE bigname_phase.name_current SET surface_binding_id = NULL, resource_id = NULL, token_lineage_id = NULL, binding_kind = NULL, support_status = 'supported', unsupported_reason = NULL WHERE raw_name = 'perms.eth'")
+        .execute(&database.pool)
+        .await?;
+    let unbound =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    assert_eq!(unbound["data"], json!([]));
+    assert_eq!(unbound["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        unbound["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -407,6 +516,28 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
 }
 
 #[tokio::test]
+async fn v2_name_and_name_filtered_permissions_select_the_same_live_registration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let expected = v2_permissions_current_resource_id().to_string();
+
+    let name = v2_name_record_payload_for_database(&database, "/v2/names/Perms.eth").await?;
+    assert_eq!(name["data"]["registration_status"], json!("active"));
+    assert_eq!(name["data"]["registration_id"], json!(expected));
+
+    let permissions =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
+    let rows = permissions["data"].as_array().expect("permissions data");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| {
+        row["registration_id"] == name["data"]["registration_id"]
+            && row["authority_context"] == json!("current_for_name")
+    }));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_non_name_filters_do_not_require_snapshot_metadata() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
@@ -566,6 +697,32 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     assert_eq!(by_missing_name["data"], json!([]));
     assert_eq!(by_missing_name["page"]["has_more"], json!(false));
     assert_eq!(by_missing_name["page"]["next_cursor"], Value::Null);
+    assert_eq!(
+        by_missing_name["meta"]["completeness"],
+        json!("partial")
+    );
+    assert_eq!(
+        by_missing_name["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
+
+    let by_missing_name_and_registration = v2_permissions_payload_for_database(
+        &database,
+        &format!(
+            "/v2/permissions?name=missing.eth&registration_id={}",
+            v2_permissions_current_resource_id()
+        ),
+    )
+    .await?;
+    assert_eq!(by_missing_name_and_registration["data"], json!([]));
+    assert_eq!(
+        by_missing_name_and_registration["meta"]["completeness"],
+        json!("partial")
+    );
+    assert_eq!(
+        by_missing_name_and_registration["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
 
     database.cleanup().await?;
     Ok(())

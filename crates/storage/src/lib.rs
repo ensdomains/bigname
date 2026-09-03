@@ -56,14 +56,19 @@ pub use children::{
 pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use history::history_anchor_read_test_hooks;
 pub use history::{
     EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
     HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
-    InvalidHistoryCursor, load_address_history, load_address_history_for_relations,
+    InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
+    capture_interpret_redo_fence, load_address_history, load_address_history_for_relations,
     load_address_history_page, load_address_history_page_for_relations, load_event_history,
-    load_event_history_page, load_name_history, load_name_history_head, load_name_history_page,
-    load_resource_history, load_resource_history_page,
+    load_event_history_page, load_event_history_page_with_redo_policy, load_name_history,
+    load_name_history_head, load_name_history_page, load_resource_history,
+    load_resource_history_page, revalidate_interpret_redo_fence,
 };
+pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 pub use identity::{
     NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
     ens_v2_registry_resource_id, load_name_surface, load_name_surface_including_noncanonical,
@@ -141,7 +146,9 @@ pub use resolution_support::{
     ETHEREUM_MAINNET_CHAIN_ID, SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass,
     VerifiedResolutionRecord, VerifiedResolutionRequestedChainPosition,
     VerifiedResolutionSupportBoundary, canonical_addr_coin_type,
-    classify_supported_resolution_topology, is_resolution_avatar_record,
+    classify_supported_resolution_topology,
+    identity_name_current_has_event_linked_ownerless_registry_serving, is_resolution_avatar_record,
+    name_current_has_event_linked_ownerless_registry_serving,
     parse_supported_verified_resolution_record_key, projected_resolution_boundaries_from_topology,
     projected_resolution_topology, record_version_boundary_has_pointer,
     resolution_record_inventory_lookup_key, resolution_record_inventory_lookup_key_any_chain,

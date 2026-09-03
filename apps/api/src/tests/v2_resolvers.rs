@@ -559,6 +559,45 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
 }
 
 #[tokio::test]
+async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET surface_binding_id = NULL,
+             resource_id = NULL,
+             token_lineage_id = NULL,
+             binding_kind = NULL,
+             declared_summary =
+                 jsonb_set(declared_summary, '{registration,status}', '\"active\"')
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let names = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound names must be an array")
+        .iter()
+        .map(|row| row["name"].as_str().expect("bound name must be text"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["beta.eth"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_resolver_serves_phase_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
@@ -655,7 +694,57 @@ async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported()
              resource_id = NULL, token_lineage_id = NULL, binding_kind = NULL,
              declared_summary = jsonb_set(
                  jsonb_set(declared_summary, '{registration,status}', '"unregistered"'::jsonb),
-                 '{control,status}', '"unregistered"'::jsonb)
+                 '{control,status}', '"unregistered"'::jsonb),
+             provenance = provenance || jsonb_build_object(
+                 'read_reachability', jsonb_build_object(
+                     'basis', 'retained_registry_resolver_pointer'))
+         WHERE raw_name = 'alpha.eth'"#,
+    )
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+    let ownerless_shape: bool = sqlx::query_scalar(
+        r#"SELECT surface_binding_id IS NULL
+               AND resource_id IS NULL
+               AND serving_resource_id IS NOT NULL
+               AND provenance #>> '{read_reachability,basis}' =
+                   'retained_registry_resolver_pointer'
+           FROM bigname_phase.name_current
+           WHERE raw_name = 'alpha.eth'"#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(ownerless_shape, "fixture must model event-linked ownerless serving");
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let names = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound_names data must be an array");
+    assert!(names.iter().all(|row| row["name"] != "alpha.eth"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_resolver_excludes_unclassified_serving_resource_row() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+    let updated = sqlx::query(
+        r#"UPDATE bigname_phase.name_current
+         SET serving_resource_id = resource_id, surface_binding_id = NULL,
+             resource_id = NULL, token_lineage_id = NULL, binding_kind = NULL,
+             declared_summary = jsonb_set(
+                 jsonb_set(declared_summary, '{registration,status}', '"reserved"'::jsonb),
+                 '{registration,authority_kind}', '"ens_v2_registry"'::jsonb)
          WHERE raw_name = 'alpha.eth'"#,
     )
     .execute(&database.pool)
@@ -671,6 +760,59 @@ async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported()
         .as_array()
         .expect("bound_names data must be an array");
     assert!(names.iter().all(|row| row["name"] != "alpha.eth"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_resolver_includes_ownerless_name_when_bindings_are_supported() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+    let updated = sqlx::query(
+        r#"UPDATE bigname_phase.name_current
+         SET serving_resource_id = resource_id, surface_binding_id = NULL,
+             resource_id = NULL, token_lineage_id = NULL, binding_kind = NULL,
+             declared_summary = jsonb_set(
+                 jsonb_set(declared_summary, '{registration,status}', '"unregistered"'::jsonb),
+                 '{control,status}', '"unregistered"'::jsonb),
+             provenance = provenance || jsonb_build_object(
+                 'read_reachability', jsonb_build_object(
+                     'basis', 'retained_registry_resolver_pointer'))
+         WHERE raw_name = 'alpha.eth'"#,
+    )
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+    let ownerless_shape: bool = sqlx::query_scalar(
+        r#"SELECT surface_binding_id IS NULL
+               AND resource_id IS NULL
+               AND serving_resource_id IS NOT NULL
+               AND provenance #>> '{read_reachability,basis}' =
+                   'retained_registry_resolver_pointer'
+           FROM bigname_phase.name_current
+           WHERE raw_name = 'alpha.eth'"#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(ownerless_shape, "fixture must model event-linked ownerless serving");
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let names = payload["data"]["bound_names"]["data"]
+        .as_array()
+        .expect("bound_names data must be an array");
+    assert!(
+        names.iter().any(|row| row["name"] == "alpha.eth"),
+        "supported ownerless row missing: {payload}"
+    );
 
     database.cleanup().await
 }

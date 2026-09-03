@@ -249,6 +249,110 @@ async fn v2_diagnostics_name_records_executes_ephemeral_lookup_without_legacy_pe
 }
 
 #[tokio::test]
+async fn v2_diagnostics_name_records_compares_retained_reservation_audit_state() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    let execution_block_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let indexed_address = "0x0000000000000000000000000000000000000def";
+    let verified_address = "0x0000000000000000000000000000000000000e0e";
+    let lookup_pool = database.lookup_pool().await?;
+    let namehash = seed_schema_v2_ens_record_lookup(
+        &lookup_pool,
+        21_000_003,
+        execution_block_hash,
+        "2026-04-17T00:00:03Z",
+        indexed_address,
+    )
+    .await?;
+    seed_v2_alice_name_record_fixture_migrated(
+        &database,
+        |row| {
+            row.namehash = namehash;
+            row.chain_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+            row.declared_summary["registration"] = json!({
+                "status": "reserved",
+                "expiry": 4_000_000_000_u64,
+                "latest_event_kind": "RegistrationReserved"
+            });
+            row.declared_summary["control"] = json!({"status": "reserved"});
+        },
+        |_, _, inventory| {
+            inventory.selectors = json!([{
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "cacheable": true
+            }]);
+            inventory.entries = json!([{
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": {"coin_type": "60", "value": indexed_address}
+            }]);
+            inventory.record_version_boundary["chain_position"]["block_hash"] =
+                json!(execution_block_hash);
+            inventory.chain_positions = json!({
+                "ethereum-mainnet": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": execution_block_hash,
+                    "timestamp": "2026-04-17T00:00:03Z"
+                }
+            });
+        },
+    )
+    .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        resolution_universal_resolver_addr60_response(verified_address),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(
+        database
+            .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+            .await?,
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/v2/diagnostics/names/Alice.eth/records?keys=addr:60")
+            .body(Body::empty())
+            .expect("request must build"),
+    )
+    .await
+    .context("v2 reservation diagnostic records request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+    assert_eq!(
+        payload["data"]["comparison"]["addr:60"],
+        json!({
+            "indexed": {"status": "ok", "value": indexed_address},
+            "verified": {"status": "ok", "value": verified_address}
+        })
+    );
+    assert_eq!(
+        payload["data"]["record_cache"]["entries"][0]["value"]["value"],
+        json!(indexed_address)
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 1);
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_diagnostics_name_records_at_or_below_cap_has_no_truncation_note() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     seed_v2_alice_name_records_fixture(

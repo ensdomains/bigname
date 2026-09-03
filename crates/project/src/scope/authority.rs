@@ -105,6 +105,170 @@ pub(super) async fn include_topology_dependents(
     .map_err(|error| {
         ProjectError::database("failed to scope authority topology dependents", error)
     })?;
+    loop {
+        let added = sqlx::query(
+            r#"
+            INSERT INTO project_scope_expiry_names
+            SELECT DISTINCT registration.logical_name_id
+            FROM project_scope_expiry_names parent
+            JOIN LATERAL (
+                SELECT topology.after_state ->> 'subregistry' AS address
+                FROM normalized_events topology
+                JOIN chain_lineage topology_lineage
+                  ON topology_lineage.chain_id = topology.chain_id
+                 AND topology_lineage.block_number = topology.block_number
+                 AND topology_lineage.block_hash = topology.block_hash
+                WHERE topology.chain_id = $1
+                  AND topology.logical_name_id = parent.logical_name_id
+                  AND topology.block_number <= $2
+                  AND topology.event_kind = 'SubregistryChanged'
+                  AND topology.source_family IN (
+                      'ens_v2_root_l1', 'ens_v2_registry_l1'
+                  )
+                  AND topology.consumer_visibility = 'activated'
+                  AND topology.canonicality_state IN (
+                      'canonical', 'safe', 'finalized'
+                  )
+                  AND topology_lineage.canonicality_state IN (
+                      'canonical', 'safe', 'finalized'
+                  )
+                ORDER BY topology.block_number DESC NULLS LAST,
+                         topology.transaction_index DESC NULLS LAST,
+                         topology.log_index DESC NULLS LAST,
+                         topology.normalized_event_id DESC
+                LIMIT 1
+            ) pointer ON pointer.address IS NOT NULL
+                     AND btrim(pointer.address) <> ''
+            JOIN contract_instance_addresses address
+              ON address.chain_id = $1
+             AND lower(address.address) = lower(pointer.address)
+             AND (address.active_from_block_number IS NULL
+                  OR address.active_from_block_number <= $2)
+             AND (address.active_to_block_number IS NULL
+                  OR address.active_to_block_number > $2)
+             AND address.deactivated_at IS NULL
+            JOIN LATERAL (
+                SELECT DISTINCT head.logical_name_id
+                FROM (
+                    SELECT DISTINCT ON (
+                               candidate.logical_name_id,
+                               candidate.lifecycle_key
+                           )
+                           candidate.logical_name_id, candidate.event_kind
+                    FROM (
+                        SELECT event.*,
+                               COALESCE(
+                                   event.resource_id::text,
+                                   (
+                                       SELECT linked.resource_id::text
+                                       FROM normalized_events linked
+                                       JOIN chain_lineage linked_lineage
+                                         ON linked_lineage.chain_id = linked.chain_id
+                                        AND linked_lineage.block_number = linked.block_number
+                                        AND linked_lineage.block_hash = linked.block_hash
+                                       WHERE linked.chain_id = event.chain_id
+                                         AND linked.logical_name_id = event.logical_name_id
+                                         AND linked.block_number <= $2
+                                         AND linked.resource_id IS NOT NULL
+                                         AND linked.event_kind IN (
+                                             'RegistrationGranted',
+                                             'RegistrationReserved'
+                                         )
+                                         AND linked.source_family IN (
+                                             'ens_v2_root_l1',
+                                             'ens_v2_registry_l1'
+                                         )
+                                         AND linked.consumer_visibility = 'activated'
+                                         AND linked.canonicality_state IN (
+                                             'canonical', 'safe', 'finalized'
+                                         )
+                                         AND linked_lineage.canonicality_state IN (
+                                             'canonical', 'safe', 'finalized'
+                                         )
+                                         AND COALESCE(
+                                             linked.after_state ->> 'registry_contract_instance_id',
+                                             linked.raw_fact_ref ->> 'emitting_address',
+                                             linked.after_state ->> 'registry'
+                                         ) = COALESCE(
+                                             event.after_state ->> 'registry_contract_instance_id',
+                                             event.raw_fact_ref ->> 'emitting_address',
+                                             event.after_state ->> 'registry'
+                                         )
+                                         AND linked.after_state ->> 'token_id' =
+                                             event.after_state ->> 'token_id'
+                                       ORDER BY linked.block_number DESC NULLS LAST,
+                                                linked.normalized_event_id DESC
+                                       LIMIT 1
+                                   ),
+                                   NULLIF(CONCAT(
+                                       event.after_state ->> 'registry_contract_instance_id',
+                                       ':', event.after_state ->> 'token_id'
+                                   ), ':')
+                               ) AS lifecycle_key
+                        FROM normalized_events event
+                        JOIN chain_lineage lineage
+                          ON lineage.chain_id = event.chain_id
+                         AND lineage.block_number = event.block_number
+                         AND lineage.block_hash = event.block_hash
+                        WHERE event.chain_id = $1
+                          AND event.after_state ->> 'registry_contract_instance_id' =
+                              address.contract_instance_id::text
+                          AND event.block_number <= $2
+                          AND event.event_kind IN (
+                              'RegistrationGranted', 'RegistrationReserved',
+                              'RegistrationRenewed', 'RegistrationReleased'
+                          )
+                          AND event.source_family IN (
+                              'ens_v2_root_l1', 'ens_v2_registry_l1'
+                          )
+                          AND event.consumer_visibility = 'activated'
+                          AND event.canonicality_state IN (
+                              'canonical', 'safe', 'finalized'
+                          )
+                          AND lineage.canonicality_state IN (
+                              'canonical', 'safe', 'finalized'
+                          )
+                          AND event.logical_name_id IS NOT NULL
+                    ) candidate
+                    WHERE candidate.lifecycle_key IS NOT NULL
+                    ORDER BY candidate.logical_name_id,
+                             candidate.lifecycle_key,
+                             candidate.block_number DESC NULLS LAST,
+                             candidate.transaction_index DESC NULLS LAST,
+                             candidate.log_index DESC NULLS LAST,
+                             candidate.normalized_event_id DESC
+                ) head
+                WHERE head.event_kind IN (
+                    'RegistrationGranted', 'RegistrationReserved',
+                    'RegistrationRenewed'
+                )
+            ) registration ON TRUE
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to close expiry topology scope", error))?
+        .rows_affected();
+        if added == 0 {
+            break;
+        }
+    }
+    for table in ["project_scope_names", "project_scope_children"] {
+        let statement = format!(
+            "INSERT INTO {table}
+             SELECT logical_name_id FROM project_scope_expiry_names
+             ON CONFLICT DO NOTHING"
+        );
+        sqlx::query(&statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to publish expiry topology scope", error)
+            })?;
+    }
     Ok(())
 }
 

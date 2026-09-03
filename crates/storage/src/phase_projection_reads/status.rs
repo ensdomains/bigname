@@ -52,6 +52,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
                 ),
                 false
             ) AS project_generation_current,
+            COALESCE(interpret.redo_in_progress, false) AS interpret_redo_in_progress,
             COALESCE(project.redo_in_progress, false) AS project_redo_in_progress,
             heartbeat.age_seconds AS phase_runner_heartbeat_age_seconds
         FROM known_chains
@@ -60,6 +61,9 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
         LEFT JOIN chain_phase_state project
           ON project.chain_id = known_chains.chain_id
          AND project.phase_name = 'project'
+        LEFT JOIN chain_phase_state interpret
+          ON interpret.chain_id = known_chains.chain_id
+         AND interpret.phase_name = 'interpret'
         LEFT JOIN chain_phase_state ingest
           ON ingest.chain_id = known_chains.chain_id
          AND ingest.phase_name = 'ingest'
@@ -136,6 +140,10 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
                 project_generation_current: crate::sql_row::get(
                     &row,
                     "project_generation_current",
+                )?,
+                interpret_redo_in_progress: crate::sql_row::get(
+                    &row,
+                    "interpret_redo_in_progress",
                 )?,
                 project_redo_in_progress: crate::sql_row::get(&row, "project_redo_in_progress")?,
                 phase_runner_heartbeat_age_seconds: crate::sql_row::get(

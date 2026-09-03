@@ -146,6 +146,63 @@ pub(super) fn correlate(
         output,
         &mut boundaries,
     )?;
+    let admitted_bridge_preimages = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.source_family == MIGRATION_FAMILY
+                && event.event_kind == "PreimageObserved"
+                && event.consumer_visibility == CANDIDATE
+        })
+        .filter_map(|event| {
+            Some((
+                event.chain_id.clone(),
+                event.block_hash.clone()?,
+                event.transaction_hash.clone()?,
+                event.log_index?,
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    // A bridge label becomes durable only when the matching renewal logs admit its
+    // [normalized events](../../../../docs/glossary.md#normalized-event). Other chain-observed
+    // labels remain independently admitted.
+    output.label_preimages.retain(|preimage| {
+        if preimage.source_kind != "NameRenewed_label"
+            || preimage
+                .provenance
+                .get("source_manifest_id")
+                .and_then(Value::as_i64)
+                != Some(migration_source.manifest_id)
+        {
+            return true;
+        }
+        let Some(chain_id) = preimage.provenance.get("chain_id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(block_hash) = preimage
+            .provenance
+            .get("block_hash")
+            .and_then(Value::as_str)
+        else {
+            return false;
+        };
+        let Some(transaction_hash) = preimage
+            .provenance
+            .get("transaction_hash")
+            .and_then(Value::as_str)
+        else {
+            return false;
+        };
+        let Some(log_index) = preimage.provenance.get("log_index").and_then(Value::as_i64) else {
+            return false;
+        };
+        admitted_bridge_preimages.contains(&(
+            chain_id.to_owned(),
+            block_hash.to_owned(),
+            transaction_hash.to_owned(),
+            log_index,
+        ))
+    });
     // Logs from the ENSv1→ENSv2 migration source that do not match an admitted shape are omitted;
     // unrelated factory logs stay out.
     output.normalized_events.retain(|event| {

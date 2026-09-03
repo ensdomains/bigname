@@ -100,21 +100,95 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
+> **Ownerless ENSv2 reservation resolver serving narrowing** — bigname retains
+> reservation resolver facts for diagnostics, but product name, record, batch
+> lookup, and resolver-listing routes classify an ownerless reservation as no
+> current registration and do not serve that resolver or its record inventory.
+> **Upstream**: `PermissionedRegistry` stores the supplied resolver before its
+> owner-zero reservation branch and emits `ResolverUpdated` for a nonzero value
+> `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)`;
+> `getResolver` returns the stored value until the entry expires
+> `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)`.
+> **Our rule**: `docs/api-v2.md` § Field Budgets,
+> `docs/api-v2-routes.md` name and resolver routes, and `docs/storage.md` §
+> Projection storage rules.
+> **Why**: product routes use current-registration ownership as their serving
+> boundary. Diagnostics preserve the retained facts for comparison without
+> presenting them as current name data.
+> **Since**: `2026-09-02`
+
 > **Graph Node directive repeatability is declared but not resolved** — deployment `QmcE8RpWtsiN5hkJKdfCXGfTDoTgPEjMbQwnjLPfThT7kZ` at block 23,000,000 resolved `__Directive.isRepeatable` as null for each of its five directives, producing five non-null-field errors and null data. The same introspection without that field returned 113 types and no errors.
 > **Upstream**: the pinned Graph Node introspection schema declares `isRepeatable: Boolean!` (upstream: .refs/graph_node/graph/src/schema/introspection.graphql:L85 @ graph_node@aefe1737), but its directive-object resolver supplies only `name`, `description`, `locations`, and `args` (upstream: .refs/graph_node/graphql/src/introspection/resolver.rs:L252-L263 @ graph_node@aefe1737).
 > **Our rule**: `docs/graphql-compatibility-oracle.md` § Schema comparison omits directive repeatability from capture and comparison.
 > **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
 > **Since**: `2026-09-02`
 
-> **Graph Node collection-argument schema defaults are omitted locally** — Graph Node publishes collection arguments as
-> nullable `Int` values with `first = 100` and `skip = 0`, while bigname currently publishes the same nullable arguments
-> without schema defaults. The bigname resolver still applies page size `100` and offset `0` when callers omit them.
-> **Upstream**: Graph Node's generated collection arguments assign `skip` the default `0` and `first` the default `100`
-> (upstream: .refs/graph_node/graph/src/schema/api.rs:L667-L676 @ graph_node@aefe1737).
-> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility and the exact signature dispositions in the
-> GraphQL oracle `coverage.json`; task `#670/T2` owns publishing the defaults.
-> **Why**: preserving the current runtime page size avoids a behavior change in the capture-preparation change while the
-> entities machinery task aligns the introspected signature.
+> **Generated Domain pagination retains bigname's safety bounds** — Graph Node rejects a non-positive or over-limit
+> `first` and a negative or over-limit `skip`. Bigname's generated-style `domains` root instead returns an empty page for
+> non-positive `first`, caps positive `first` at `200`, treats negative `skip` as zero, and caps
+> positive `skip` at `1_000_000`.
+> **Upstream**: Graph Node accepts `first` only in `1..=max_first` and `skip` only in `0..=max_skip`, returning a range
+> argument error otherwise (upstream: .refs/graph_node/graphql/src/store/query.rs:L62-L84 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the generated root preserves the existing bounded bigname paging behavior while publishing Graph Node's
+> generated argument defaults.
+> **Since**: `2026-09-02`
+
+> **Generated Domain point lookup accepts an ENS name** — `domain(id:)` treats only a canonical `0x` plus 64-hex input
+> as a namehash first, then falls back to the local ENS-name lookup if the entity ID does not match. Every other input
+> takes the direct name lookup path. Namehash precedence prevents a hash-shaped ENS name from shadowing an entity ID.
+> **Upstream**: the ENS subgraph defines `Domain.id` as the namehash
+> (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6), and Graph Node applies the supplied point ID
+> as an equality filter without a name fallback
+> (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the local extension preserves bigname's existing name-string lookup convenience while keeping generated
+> namehash IDs authoritative.
+> **Since**: `2026-09-02`
+
+> **Generated Domain exact-name filtering uses ENS namehash equality** — `Domain_filter.name` normalizes the supplied ENS
+> name and matches its namehash rather than comparing the stored human-readable name bytes directly.
+> **Upstream**: Graph Node maps an equality filter to direct entity-field equality
+> (upstream: .refs/graph_node/graphql/src/store/query.rs:L156-L190 @ graph_node@aefe1737), while the ENS subgraph declares
+> the human-readable `Domain.name` separately from the namehash `Domain.id`
+> (upstream: .refs/ens_subgraph/schema.graphql:L1-L5 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/architecture.md` and `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: the existing Manager-facing name semantics treat normalization-equivalent spellings as the same ENS name.
+> **Since**: `2026-09-02`
+
+> **Generated Domain owner filters depend on projected registry ownership** — the partial `Domain_filter.owner` and
+> `owner_in` members use bigname's effective-controller relation. The effective controller agrees with `Domain.owner`
+> when the latest projected registry-ownership event is an owner-bearing `AuthorityTransferred` to a non-zero address on
+> a non-wrapper-authority name and no later resource-scoped `PermissionChanged` event exists on the selected resource.
+> A zero registry owner is served as the zero address; a masked owner word is served as the registrant fallback, or the
+> zero address when there is none. In both cases the address-name projection drops the row, so the filter selects nothing.
+> Task `#670/T5` owns four remaining disagreement classes: wrapper-authority names; the zero or masked case just described;
+> names without a projected registry-ownership event; and resource-scoped `PermissionChanged` events granting or revoking
+> `resource_control`, or an owner-less `AuthorityEpochChanged` emitted on release. A resource-scoped `PermissionChanged`
+> granting `resource_control` makes its grantee the effective controller, while one revoking the current controller's
+> `resource_control` clears the current controller. The effective controller is then absent when the name has no registrar
+> [token lineage](glossary.md#token-lineage), or falls back to the token holder or registrant otherwise; served control
+> ownership is unchanged by either `PermissionChanged`. A release can also co-emit an owner-less `AuthorityEpochChanged`,
+> which clears the served registry owner so `Domain.owner` falls back to the registrant or zero address, while the epoch
+> event is excluded from the effective-controller fold and the release's `resource_control` grant keeps the registry owner
+> there. `docs/consumer-capabilities.md` § GraphQL compatibility states each class explicitly.
+> **Upstream**: the ENS subgraph defines `Domain.owner` as the account that owns the domain and updates it from registry
+> ownership events (upstream: .refs/ens_subgraph/schema.graphql:L29-L32 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L138 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L151-L158 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T5` owns the four residual classes.
+> **Why**: the effective-controller and served-owner projections intentionally answer different authority questions in
+> those classes, so the partial filter contract names the boundary instead of claiming universal field/filter equality.
+> **Since**: `2026-09-02`
+
+> **Generated Domain `name_contains` retains ENS normalization** — bigname normalizes the supplied ENS fragment before
+> applying the stored-name predicate, so case variants that normalize identically can match even though the separate
+> `name_contains_nocase` member remains absent.
+> **Upstream**: Graph Node maps `contains` to SQL `LIKE` and `contains_nocase` to `ILIKE`
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1535 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T3` owns the remaining filter
+> vocabulary and any later alignment.
+> **Why**: this T2 slice preserves bigname's existing ENS-aware name filtering behavior.
 > **Since**: `2026-09-02`
 
 > **Direct Domain registration-date ordering is a local GraphQL extension** — bigname retains
@@ -146,6 +220,12 @@ to the applicable entries below.
 > **Our rule**: `docs/storage.md` § Projection storage rules.
 > **Why**: `name_current` timestamp projections and the REST/GraphQL list surfaces use representable timestamp semantics. Mapping max or otherwise unrepresentable numeric expiry values to `null` preserves the "no public finite expiry" meaning without inventing a date that route types and ordering helpers cannot represent.
 > **Since**: `2026-06-30`
+
+> **ENSv2 expired-role projection narrowing** — after a state-derived ENSv2 path-expiry release, bigname removes that resource's effective current permission rows until a same-resource renewal or later grant or reservation readmits retained grants. Whether the expiry release named a surface does not affect the resource revival. The partial-coverage resource summary remains available during the expired interval.
+> **Upstream**: `PermissionedRegistry.getResource` resolves an identifier through the resource constructor `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L304-L305 @ ens_v2@a971bd64)`, whose expiry branch bumps the EAC version for an expired entry, so live role reads during the expired interval land on a fresh empty scope while pre-expiry grants stay stored under the prior version `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L642-L644 @ ens_v2@a971bd64)`; `roles` reads EnhancedAccessControl roles through that resource `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L356-L364 @ ens_v2@a971bd64)`. A renewal — including the post-expiry revive path — extends expiry without touching either version counter, making the stored grants live again `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L228 @ ens_v2@a971bd64)`, while unregistering a registered entry burns its token and increments both version counters, so a later registration uses the already-fresh permission scope `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L206 @ ens_v2@a971bd64)` `(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29-L34 @ ens_v2@a971bd64)`.
+> **Our rule**: `docs/storage.md` § Projection storage rules.
+> **Why**: bigname models the expired interval by removing the effective permission rows from current serving rather than by serving upstream's version-bumped empty scope; the partial-coverage summary and event history retain audit context. Readmission mirrors upstream's version semantics: a same-versioned continuation (revival) makes retained grants current again, and a new versioned resource receives grants only from its own permission events.
+> **Since**: `2026-08-31`
 
 > **Graph Node query-execution narrowing on the compatibility GraphQL surface** — bigname exposes Graph Node's `Block_height`, `_meta`, and `_SubgraphErrorPolicy_` shapes, including Graph Node's `hash`-then-`number`-then-`number_gte` selector precedence and rejection of an empty block object, but currently executes entity reads only at a request-scoped [served head](glossary.md#served-head). Historical block numbers and hashes are rejected, and `subgraphError` is accepted without per-entity omission because the current name projections do not attribute indexing errors to individual entities. `_Meta_.deployment` identifies bigname's interpreter content rather than a Graph Node deployment, and `hasIndexingErrors` maps durable serving-readiness signals rather than Graph Node's stored non-fatal-error flag. On chains that require verification, the verification-floor check can transiently report `true` while healthy verification catches up after a batch.
 > **Upstream**: Graph Node represents hash, number, minimum-number, and latest constraints as distinct selectors `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L53-L70 @ graph_node@aefe1737)` and applies that precedence while rejecting an empty block object `(upstream: .refs/graph_node/graphql/src/query/ext.rs:L80-L100 @ graph_node@aefe1737)`. A number-constrained `_meta` result has a null block hash `(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L36-L73 @ graph_node@aefe1737)`. It defaults a missing `subgraphError` to `deny` and combines field policies for execution `(upstream: .refs/graph_node/graphql/src/execution/query.rs:L308-L329 @ graph_node@aefe1737)`. Its metadata resolver returns the deployment identifier and maps `hasIndexingErrors` from the deployment's non-fatal-error state `(upstream: .refs/graph_node/graphql/src/store/resolver.rs:L228-L245 @ graph_node@aefe1737)`.

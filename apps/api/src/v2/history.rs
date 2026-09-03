@@ -74,6 +74,17 @@ pub(crate) async fn get_history(
 
     let logical_name_id =
         bigname_storage::logical_name_id_for_name(&namespace, &normalized.normalized_name);
+    let storage_cursor = params
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            let payload = decode(cursor)?;
+            history_storage_cursor(&payload, &namespace, &logical_name_id, params.scope)
+        })
+        .transpose()?;
+    let interpret_redo_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
+        .await
+        .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
     let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
         .await
         .map_err(|error| {
@@ -82,13 +93,22 @@ pub(crate) async fn get_history(
                 "failed to load history for {}/{}",
                 namespace, normalized.normalized_name
             ))
-        })?
-        .ok_or_else(|| {
-            V2Error::not_found(format!(
+        })?;
+    let parent = match parent {
+        Some(parent) => parent,
+        None => {
+            let current_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
+                .await
+                .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
+            if current_fence != interpret_redo_fence {
+                return Err(history_redo_stale_error());
+            }
+            return Err(V2Error::not_found(format!(
                 "name {} was not found in namespace {namespace}",
                 normalized.normalized_name
-            ))
-        })?;
+            )));
+        }
+    };
 
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
         Vec::new()
@@ -116,14 +136,7 @@ pub(crate) async fn get_history(
         .collect()
     };
     let storage_scope = history_storage_scope(params.scope);
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            history_storage_cursor(&payload, &namespace, &parent.logical_name_id, params.scope)
-        })
-        .transpose()?;
+    let event_kinds = product_history_event_kinds();
 
     let storage_page = bigname_storage::load_name_history_page(
         &state.pool,
@@ -134,22 +147,11 @@ pub(crate) async fn get_history(
         storage_cursor.as_ref(),
         params.page_size,
         HistorySummaryMode::None,
+        &event_kinds,
+        Some(&interpret_redo_fence),
     )
     .await
-    .map_err(|error| {
-        tracing::error!(error = ?error, "failed to load normalized-event history page");
-        if error
-            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
-            .is_some()
-        {
-            invalid_cursor_error()
-        } else {
-            V2Error::internal_error(format!(
-                "failed to load history for {}/{}",
-                namespace, normalized.normalized_name
-            ))
-        }
-    })?;
+    .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
         encode(&history_cursor_payload(
@@ -203,6 +205,42 @@ pub(crate) fn history_event_type(event_kind: &str) -> Option<HistoryEventType> {
         .iter()
         .copied()
         .find(|event_type| event_type.storage_event_kinds().contains(&event_kind))
+}
+
+pub(crate) fn product_history_event_kinds() -> Vec<String> {
+    HistoryEventType::ALL
+        .iter()
+        .flat_map(|event_type| event_type.storage_event_kinds())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+pub(crate) fn map_history_page_error(
+    error: anyhow::Error,
+    internal_message: &'static str,
+) -> V2Error {
+    if error
+        .downcast_ref::<bigname_storage::InterpretRedoInProgress>()
+        .is_some()
+    {
+        tracing::debug!(error = ?error, "history page refused during Interpret redo");
+        history_redo_stale_error()
+    } else if error
+        .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
+        .is_some()
+    {
+        invalid_cursor_error()
+    } else {
+        tracing::error!(error = ?error, message = internal_message, "failed to load history page");
+        V2Error::internal_error(internal_message)
+    }
+}
+
+fn history_redo_stale_error() -> V2Error {
+    V2Error::stale("history is temporarily unavailable while Interpret redo is in progress")
 }
 
 pub(crate) fn history_cursor_payload(

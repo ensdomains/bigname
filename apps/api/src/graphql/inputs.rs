@@ -1,4 +1,4 @@
-use async_graphql::{InputObject, MaybeUndefined};
+use async_graphql::{ID, InputObject, MaybeUndefined};
 
 use super::scalars::Bytes;
 
@@ -29,6 +29,21 @@ pub(crate) struct DomainFilter {
     pub(crate) name_contains: Option<String>,
     #[graphql(name = "isMigrated")]
     pub(crate) is_migrated: Option<bool>,
+}
+
+/// Generated-style partial `Domain_filter` for `Query.domains`.
+#[derive(InputObject, Default)]
+#[graphql(name = "Domain_filter")]
+pub(crate) struct DomainEntityFilter {
+    pub(crate) id: Option<ID>,
+    #[graphql(name = "id_in")]
+    pub(crate) id_in: Option<Vec<ID>>,
+    pub(crate) owner: Option<String>,
+    #[graphql(name = "owner_in")]
+    pub(crate) owner_in: Option<Vec<String>>,
+    pub(crate) name: Option<String>,
+    #[graphql(name = "name_contains")]
+    pub(crate) name_contains: Option<String>,
 }
 
 /// Subgraph `RegistrationFilter`.

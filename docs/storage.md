@@ -161,6 +161,7 @@ mandatory full Interpret and Project redos.
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
+| `project_redo_expiry_roots` | Interpret, then Project consumption | Logical names or permission resources from state-derived ENSv2 path-expiry releases preserved before Interpret deletes a redo range; bounded projection-redo coordination only, never serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
@@ -870,7 +871,7 @@ preimages can share one retained [interpreter state
 key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
 named-resource resolver hint and diverge from a fresh walk
 ([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
-in as an ignored collision probe). Project's resource-keyed record inventory
+in as an ignored collision probe). Project's record inventory attached to a resource
 follows the resource's latest retained linked `ResolverChanged` event whose
 name has a readable canonical surface staged at the target. If a later linked
 event's name lacks such a surface, an earlier linked event with one is the
@@ -898,12 +899,35 @@ of the node owner, and stores text by record version, node, and key.
 When an ended
 resource still has a pointer to the emitting resolver, the newly attributed event can therefore
 change that resource's rebuildable inventory row even though the event remains
-resource-less. This does not restore a current binding. ENSv2 released or expired names have no
-[`serving_resource_id`](glossary.md#serving-resource), so their reads still find no current
-resource. Registry-only ENSv1 and Basenames names are different when a current nonzero resolver
-pointer remains event-linked: `name_current.resource_id` stays null while the serving resource
-joins resolver and inventory reads without creating control. ENSv2 stores resolver records by node
-and version.
+resource-less. This does not restore a current binding. Registry-only ENSv1 and
+Basenames names are different when a current nonzero resolver pointer remains
+event-linked: `name_current.resource_id` stays null while the
+[`serving_resource_id`](glossary.md#serving-resource) joins resolver and
+inventory reads without creating control. An explicitly released ENSv2 name
+instead keeps a row for a [released v2
+authority](glossary.md#released-v2-authority) whose `resource_id` still
+references the released resource, but its `serving_resource_id` is null; the
+tombstone's summary nulls resolver state, so inventory attributed to that
+resource stays out of current serving. A state-derived ENSv2 expiry release
+removes the `name_current` row when ENSv2 is the selected authority, or when no
+authority is selected and the row reports `current_authority_not_projected`;
+for a resource-backed binding, the release's `resource_id` must also match the
+binding's resource.
+If a different ENSv2 reservation survives that expiry, the row's lifecycle
+summary follows the reservation, but `surface_binding_id`, `resource_id`,
+`serving_resource_id`, `token_lineage_id`, and `binding_kind` are all null: a
+reservation does not write a surface binding, and the expired registration's
+identity and record inventory are not current name data. This is an intentional serving narrowing:
+ENSv2 stores a nonzero resolver supplied for an ownerless reservation and
+returns it until expiry. (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @
+ens_v2@a971bd64)
+A surviving row whose ENSv1 and ENSv2 evidence cannot select one authority
+instead remains explicitly unsupported. For a removed row, retained inventory
+is reachable only through history. ENSv2 stores resolver records by node and
+version.
 `setName` passes
 part zero, selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no
@@ -996,10 +1020,17 @@ Project is the only projection writer. It derives the affected scope from
 canonical interpreted input, stages rows in connection-local tables, and
 publishes the affected projection set transactionally. It has no legacy claim
 queue, general-purpose durable replay stage tables, apply cursors, dead-letter
-queue, database session version stamp, or worker heartbeat. The sole replay
-handoff, `project_redo_resolver_evidence`, contains pre-delete resolver
-references rather than staged projection rows and is consumed by the matching
-redo or later normal catch-up publication.
+queue, database session version stamp, or worker heartbeat. The two narrow replay
+handoffs contain pre-delete input rather than staged projection rows:
+`project_redo_resolver_evidence` retains resolver and permission-resource
+references, and `project_redo_expiry_roots` retains the available logical-name
+or permission-resource identifiers whose deleted path-expiry releases must seed
+a bounded rebuild.
+Project consumes a row when a publication covers its recorded block. The normal
+Interpret-to-Project pipeline does so immediately; if an operator runs an
+Interpret redo whose requested Project endpoint is below the already recorded
+Project head, rows above that endpoint remain until a covering Project redo or
+full rebuild.
 
 Consumer slice 2E adds one diagnostic exception to durable staging, not to
 projection ownership. A post-reconciliation dual-current invariant makes the
@@ -1061,6 +1092,20 @@ unchanged; Project
 clears only the rebuildable current summary when the served projection timestamp
 passes wrapper expiry. Permission reads join this current summary by
 `resource_id` rather than persisting a second copy in `permissions_current`.
+For ENSv2, a latest state-derived `RegistryPathExpired` release removes that resource's effective
+permission rows without removing its partial-coverage summary. A later
+`RegistrationRenewed` marked as a revival readmits retained grants when the same
+resource has an earlier path-expiry release, regardless of whether that release
+named a surface. A grant or reservation also readmits the resource. A new
+versioned resource receives grants only from its own permission events. An
+owner-zero reservation is different: registration keeps both version counters,
+including `eacVersionId`, so it reuses the reservation's permission resource ID.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29-L34
+@ ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @
+ens_v2@a971bd64) (upstream:
+.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L632-L645 @
+ens_v2@a971bd64)
 
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
@@ -1075,7 +1120,11 @@ complete the manifest-sync-required Ingest redo for the widened address/topic
 intervals before the shared interpreter content-hash rotation permits the
 planned full-history Interpret and Project walk. A fresh deployment instead
 loads the final manifests before its block-zero historical walk, so the new raw
-facts arrive in that initial pass.
+facts arrive in that initial pass. The ENSv2 expiry Project fold also rotates
+the shared interpreter content hash without changing raw facts or
+normalized-event semantics; the expiry interpretation slice must not be served
+before its paired Project fold is deployed and that coherent replay and rebuild
+has completed.
 
 ## Snapshot serving
 

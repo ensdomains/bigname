@@ -1516,6 +1516,7 @@ impl TestDatabase {
             "UPDATE bigname_phase.chain_phase_state
              SET phase_status = 'running',
                  redo_in_progress = true,
+                 redo_attempt_generation = redo_attempt_generation + 1,
                  redo_mode = $2,
                  redo_previous_phase_status = phase_status,
                  redo_previous_last_error = last_error,
@@ -1536,6 +1537,41 @@ impl TestDatabase {
         anyhow::ensure!(
             result.rows_affected() == 1,
             "missing Interpret phase state for {chain_id}"
+        );
+        Ok(())
+    }
+
+    async fn simulate_interpret_redo_finish(&self, chain_id: &str) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE bigname_phase.chain_phase_state
+             SET phase_status = redo_previous_phase_status,
+                 last_error = redo_previous_last_error,
+                 started_at = redo_previous_started_at,
+                 finished_at = redo_previous_finished_at,
+                 redo_in_progress = false,
+                 redo_mode = NULL,
+                 redo_previous_phase_status = NULL,
+                 redo_previous_last_error = NULL,
+                 redo_previous_started_at = NULL,
+                 redo_previous_finished_at = NULL,
+                 redo_from_block_number = NULL,
+                 redo_to_block_number = NULL,
+                 redo_current_block_number = NULL,
+                 redo_current_block_hash = NULL,
+                 redo_target_block_number = NULL,
+                 redo_target_block_hash = NULL,
+                 redo_source_boundary_markers = NULL,
+                 redo_manifest_authority_fingerprint = NULL,
+                 updated_at = now()
+             WHERE chain_id = $1 AND phase_name = 'interpret' AND redo_in_progress",
+        )
+        .bind(chain_id)
+        .execute(&self.lookup_pool)
+        .await
+        .with_context(|| format!("failed to simulate Interpret redo finish for {chain_id}"))?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "missing active Interpret redo for {chain_id}"
         );
         Ok(())
     }
@@ -2111,7 +2147,13 @@ async fn seed_schema_v2_basenames_record_lookup(
              resource_id, binding_kind, declared_summary, support_status,
              provenance, chain_positions, canonicality_summary, manifest_version)
          VALUES ($1, 'basenames', 'alice.base.eth', $2, $3, $4,
-                 'declared_registry_path', jsonb_build_object('topology', $5::jsonb),
+                 'declared_registry_path', jsonb_build_object(
+                     'topology', $5::jsonb,
+                     'registration', jsonb_build_object(
+                         'status', 'active',
+                         'authority_kind', 'registrar'
+                     )
+                 ),
                  'supported', $6, $7, $8, 2)",
     )
     .bind(&logical_name_id)
@@ -3536,7 +3578,7 @@ fn address_name_current_row(
     let chain_id = chain_id_for_namespace(namespace);
     let chain_slot = chain_slot_for_namespace(namespace);
     bigname_storage::AddressNameCurrentRow {
-        address: address.to_owned(),
+        address: address.to_ascii_lowercase(),
         logical_name_id: logical_name_id.to_owned(),
         relation,
         namespace: namespace.to_owned(),
@@ -3596,6 +3638,7 @@ fn compact_name_declared_summary(
     json!({
         "registration": {
             "status": "active",
+            "authority_kind": "registrar",
             "registrant": registrant,
             "expiry": expiry,
             "registered_at": registered_at,

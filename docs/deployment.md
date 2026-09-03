@@ -294,6 +294,32 @@ error. The check runs before event-derived project publication or hydration
 writes, so previously hydrated values remain intact while the chain is stopped
 for configuration repair.
 
+The retained ENS chain set is the union of chains in ENS [name
+surfaces](glossary.md#surface-name-surface) and active ENS manifests. Later
+`run` and `redo` synchronization allows an empty retained set only when the
+incoming [deployment profile](glossary.md#deployment-profile) has zero or one
+ENS chain. When retained state exists, exactly one retained ENS chain must equal
+the single incoming ENS chain. Every other combination is refused before
+manifest versions, contract instances, discovery rules, or normalized
+`SourceManifestUpdated` events change. Multi-chain ENS deployment profiles need
+an explicit contract change; this guard does not allow them.
+
+Validation and the complete manifest-mutation transaction run on the same
+PostgreSQL session that holds the startup advisory lock, so losing that session
+also aborts the transaction. Concurrent runners wait and validate against the
+manifests installed by the preceding synchronization. Use a separate
+database/schema for the other ENS deployment.
+
+Ordinary redo and `recompute-flags` operations do not authorize an in-place ENS
+chain switch. Only the explicitly reviewed [full phase-schema replacement
+procedure](#replacing-an-initialized-phase-schema) can do so when its documented
+preconditions apply.
+
+An empty retained set means that neither ENS name surfaces nor active ENS
+manifests supply persisted-chain evidence to this guard. Deprecated ENS
+manifests and raw facts without an active ENS manifest or ENS name surface are
+outside this startup predicate.
+
 One-shot finite phase work is available through `phase-runner redo` for
 `ingest`, `interpret`, `project`, `verify`, and `recompute-flags`.
 `--phase all` runs ingest through verify for each selected chain, and

@@ -252,7 +252,7 @@ fn oracle_schema_surface(payload: &Value) -> Result<OracleMap<String, Value>> {
 }
 
 fn scope_matches(scope: &str, path: &str) -> bool {
-    if scope.starts_with("field:") {
+    if scope.starts_with("field:") || scope.starts_with("input:") {
         return path == scope;
     }
     if let Some(name) = scope.strip_prefix("type:") {
@@ -435,6 +435,7 @@ fn apply_oracle_coverage(
             || !scope.starts_with("type:")
                 && !scope.starts_with("root:")
                 && !scope.starts_with("field:")
+                && !scope.starts_with("input:")
         {
             failures.push(format!("overbroad disposition: {scope}"));
             continue;
@@ -731,6 +732,7 @@ fn graphql_oracle_census_owns_wholly_deferred_type_surfaces() {
     assert_oracle_field_ownership_rules();
     assert_oracle_argument_ownership_rules();
     assert_oracle_enum_value_ownership_rules();
+    assert_oracle_exact_input_ownership_rules();
 }
 
 fn assert_oracle_field_ownership_rules() {

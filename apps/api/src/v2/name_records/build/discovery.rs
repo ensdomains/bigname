@@ -6,8 +6,12 @@ use bigname_storage::NameCurrentRow;
 use serde_json::Value;
 
 use super::string_field;
+use crate::v2::name_record::row_has_current_registration;
 
 pub(super) fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
+    if !row_has_current_registration(row) {
+        return true;
+    }
     let Some(resolver) = row
         .declared_summary
         .get("resolver")
@@ -24,7 +28,8 @@ pub(super) fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {
 }
 
 pub(crate) fn ens_universal_resolver_discovery_candidate(row: &NameCurrentRow) -> bool {
-    if row.namespace != "ens"
+    if !row_has_current_registration(row)
+        || row.namespace != "ens"
         || !row
             .declared_summary
             .get("resolver")

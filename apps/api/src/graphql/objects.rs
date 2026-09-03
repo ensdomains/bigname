@@ -1,5 +1,5 @@
 use async_graphql::dataloader::DataLoader;
-use async_graphql::{Context, Object, Result, SimpleObject};
+use async_graphql::{Context, ID, Object, Result, SimpleObject};
 use sqlx::types::Uuid;
 
 use super::convert::resolver_from_store;
@@ -63,7 +63,7 @@ pub(crate) struct RegistrationConnection {
 /// Subgraph `Domain`. A manual `#[Object]` (not `SimpleObject`) so `owner` is non-null `Account!`;
 /// the storage fallback (`owner → registrant → zero-address`) is resolved in `convert.rs`.
 pub(crate) struct Domain {
-    pub(crate) id: String,
+    pub(crate) id: ID,
     pub(crate) name: Option<String>,
     pub(crate) normalized_name: Option<String>,
     pub(crate) token_id: Option<String>,
@@ -78,7 +78,7 @@ pub(crate) struct Domain {
 
 #[Object]
 impl Domain {
-    async fn id(&self) -> &str {
+    async fn id(&self) -> &ID {
         &self.id
     }
 
