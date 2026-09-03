@@ -203,7 +203,7 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
 An [intake-only event](glossary.md#intake-only-event) may be declared for raw
 intake without promising a manifest-owned normalized-event mapping by declaring
 an empty `normalized_events` list. This is not an unrestricted
-adapter-admission bypass. Standard approval declarations must retain the empty
+adapter-admission bypass. [Standard approval](glossary.md#standard-approval-derivation) declarations must retain the empty
 list: their ABI decoding is declaration-backed, while any normalized output is
 an adapter-owned mapping versioned by the
 [interpreter content hash](glossary.md#interpreter-content-hash). The admitted
@@ -213,6 +213,9 @@ remain decoded with no normalized output. Standard approval events are watched
 only at explicitly declared, role-eligible
 contract addresses and their declared historical intervals; they are not added
 to generic resolver [all-emitter watches](glossary.md#watch-plan--watched-tuple).
+The admitted Sepolia legacy registry artifact declares that exact
+`ApprovalForAll(owner, operator, approved)` event.
+(upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L2-L32 @ ens_v1@91c966f)
 Raw capture does not by itself imply permission interpretation or complete
 permission coverage.
 

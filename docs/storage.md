@@ -1077,7 +1077,8 @@ Registry-wide approvals use the same rule: Project owns the replayable
 [registry-owner binding](glossary.md#registry-owner-binding). Revoked account
 rows remain in the current-state table so losing-fork grants and losing-fork
 revocations both rebuild from surviving canonical history. Interpret re-walks
-retained raw facts; Project then rebuilds both state legs without a provider
+retained raw facts through the [`standard_approval`
+derivation](glossary.md#standard-approval-derivation); Project then rebuilds both state legs without a provider
 refetch. App-facing synthesis from those two state legs is deferred to the
 follow-up serving change.
 

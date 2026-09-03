@@ -108,7 +108,7 @@ upstream event. The admitted values are `ens_v1_reverse_claim`,
 `raw_block_preimage_observation`, and `standard_approval`. Their meanings and
 write owners are defined
 by the canonical
-[normalized-event contract](../docs/architecture.md#derivation-kinds).
+[derivation-kind definitions](../docs/glossary.md#derivation-kind).
 
 ## Current projections
 

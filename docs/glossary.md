@@ -302,6 +302,15 @@ rename. "Unwrapped authority" is a historical name kept because it is a stored
 identifier: that pipeline derives ownership and control for ENSv1 and Basenames
 names alike, whether the name is registry-, registrar-, or NameWrapper-held.
 
+<a id="standard-approval-derivation"></a>
+### Standard approval derivation (`standard_approval`)
+
+the adapter-owned derivation path for declaration-backed Ethereum approval
+events whose manifests deliberately leave `normalized_events` empty. In the
+current scope it emits `AccountPermissionChanged` only for admitted ENSv1 and
+Basenames registry `ApprovalForAll` logs; declared registrar, resolver, and
+NameWrapper approvals still decode without normalized output.
+
 ## Discovery graph / discovery edge
 
 the time-versioned indexability and
