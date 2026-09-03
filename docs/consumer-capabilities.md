@@ -431,8 +431,123 @@ domains(
 ): [Domain!]!
 ```
 
-`account`, `accounts`, `resolver`, and `resolvers` are the named second-PR
-boundary of `#670/T2`; this slice does not add them through adjacent root work.
+The generated-style Account and Resolver roots have these signatures:
+
+```graphql
+account(
+  id: ID!
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): Account
+
+accounts(
+  skip: Int = 0
+  first: Int = 100
+  orderBy: Account_orderBy
+  orderDirection: OrderDirection
+  where: Account_filter
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): [Account!]!
+
+resolver(
+  id: ID!
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): Resolver
+
+resolvers(
+  skip: Int = 0
+  first: Int = 100
+  orderBy: Resolver_orderBy
+  orderDirection: OrderDirection
+  where: Resolver_filter
+  block: Block_height
+  subgraphError: _SubgraphErrorPolicy_! = deny
+): [Resolver!]!
+```
+
+`Account.id: ID!` is the lowercase address. `Account_filter` accepts exactly
+`id: ID` and `id_in: [ID!]`; `Account_orderBy` accepts only `id`. The entity
+source is the distinct set of current registrant, token-holder, and effective-
+controller addresses in `address_names_current`. An address with no current
+membership relation is absent, including a current address-record target that
+is not also a registrant, token holder, or effective controller. `#670/T4` owns
+historical Account persistence and `#670/T5` owns serving resolved-address
+Account membership. A former owner or registrant is therefore absent even
+though the ENS subgraph retains the Account created by an earlier ownership
+event; `#670/T4` owns that persistence
+gap (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L89-L92 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L146-L151 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L43-L56 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L163-L174 @ ens_subgraph@723f1b6).
+Account reverse fields remain deferred to `#670/T4`.
+`Domain.owner.id` can also serve the zero address while `account(id:)` returns
+null because the current address-name projection drops the zero address; this
+is the same zero-owner residual owned by `#670/T5` as the Domain owner filter.
+
+`Resolver.id: ID!` is
+`<lowercase-resolver-address>-<lowercase-domain-namehash>`, and
+`Resolver.address: Bytes!` continues to serialize as the same lowercase
+hexadecimal JSON string. `Resolver_filter` accepts exactly `id: ID`,
+`address: Bytes`, and `domain: String`; `Resolver_orderBy` accepts only `id`.
+One entity comes from each current resolver-address/namehash binding in
+`name_current`, so two names using one resolver address remain distinct. For
+rows produced by the normal projection builder, nested `Domain.resolver` and
+the Resolver roots form the same identity. The roots additionally reject zero-
+address and off-snapshot-chain bindings if out-of-builder data contains them.
+Changing a name's resolver removes the prior composite ID from local reads,
+although the ENS subgraph retains the prior Resolver entity; current Resolver
+materialization remains `#670/T6` work and event history remains `#670/T9`
+(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L167-L201 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_subgraph/src/resolver.ts:L233-L248 @ ens_subgraph@723f1b6).
+`Resolver.addr`, `Resolver.coinTypes`, `Resolver.events`, and `Resolver.domain`
+remain deferred to `#670/T6`. `Resolver.contentHash` remains the existing local
+`String` divergence under its existing `#670/T2` disposition rather than
+changing to upstream `Bytes` in this slice.
+
+Account point/filter IDs, composite Resolver point/filter IDs, and Resolver
+domain-namehash filters accept uppercase hexadecimal input and normalize it to
+the lowercase value served on the wire, a local widening over ordinary Graph
+Node string comparison (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L729 @
+graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L357-L379 @
+graph_node@aefe1737) (upstream: .refs/graph_node/graphql/src/store/query.rs:L332-L334 @
+graph_node@aefe1737). `Resolver_filter.address` uses `Bytes`: uppercase digits
+normalize in both systems, while bigname requires the `0x` prefix that Graph
+Node also permits clients to omit (upstream:
+.refs/graph_node/graph/src/data/store/scalar/bytes.rs:L41-L52 @ graph_node@aefe1737).
+
+All Account and Resolver filter members combine with logical AND, and an empty
+`Account_filter.id_in` matches no rows. Filtering, distinctness, ordering, and
+paging execute in PostgreSQL. Omitted ordering is `id` ascending. Account IDs
+use lexical lowercase-address order. Resolver SQL orders by the exact indexed
+lowercase-address expression and then `logical_name_id`. The interpreter mints
+that key as `namespace:namehash`, so within the filtered namespace this is
+identical to address/namehash composite-ID order. Admitted addresses and
+namehashes are fixed-width lowercase hexadecimal text, whose order is the same
+under the test database's `en_US.utf8` collation and PostgreSQL `COLLATE "C"`.
+The acceptance test proves the served order directly without wrapping the
+indexed expression in another collation. An explicit-collation index would be
+schema work outside this API-only change.
+Pagination uses the Domain bounds: omitted `first`
+is `100`, positive `first` is capped at `200`, non-positive `first` returns an
+empty list after head validation, negative `skip` becomes zero, and positive
+`skip` is capped at `1_000_000`.
+
+The four roots inherit the Domain roots' current-snapshot-only block contract.
+Absent blocks and constraints satisfied by the served head are accepted;
+historical execution is not implemented. A singular refusal leaves its nullable
+field null with a path-local error, while a plural refusal propagates the error
+through its non-null root and makes `data` null.
+Absent-request-head behavior remains unchanged and is owned by `#743`.
+
+The composite Resolver ID is an intended wire change for every existing
+`Domain.resolver { id }` selection. The [locally committed Manager fixture](../apps/api/src/tests/fixtures/manager-graphql/README.md),
+copied from Manager commit `759860f5acc62ea287b0feefa23c0d17aeb862a9`, selects none of the four new
+roots, but its Resolver fragment selects both `id` and `address`. The Manager
+Domain response fixtures therefore receive the composite ID while the address
+JSON remains unchanged.
+
 `Domain.id` is `ID!` and remains a JSON string. `domain(id:)` also retains a
 local runtime extension that accepts an ENS name string. A canonical `0x` plus
 64-hex input attempts namehash lookup before the name fallback, preventing a

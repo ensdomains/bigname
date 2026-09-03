@@ -123,9 +123,9 @@ to the applicable entries below.
 > **Why**: the hosted behavior reproduces the pinned schema/resolver mismatch; omitting a field outside the claimed schema index allows the reviewed live capture to complete without weakening any compared path.
 > **Since**: `2026-09-02`
 
-> **Generated Domain pagination retains bigname's safety bounds** — Graph Node rejects a non-positive or over-limit
-> `first` and a negative or over-limit `skip`. Bigname's generated-style `domains` root instead returns an empty page for
-> non-positive `first`, caps positive `first` at `200`, treats negative `skip` as zero, and caps
+> **Generated entity pagination retains bigname's safety bounds** — Graph Node rejects a non-positive or over-limit
+> `first` and a negative or over-limit `skip`. Bigname's generated-style `domains`, `accounts`, and `resolvers` roots
+> instead return an empty page for non-positive `first`, cap positive `first` at `200`, treat negative `skip` as zero, and cap
 > positive `skip` at `1_000_000`.
 > **Upstream**: Graph Node accepts `first` only in `1..=max_first` and `skip` only in `0..=max_skip`, returning a range
 > argument error otherwise (upstream: .refs/graph_node/graphql/src/store/query.rs:L62-L84 @ graph_node@aefe1737).
@@ -133,6 +133,62 @@ to the applicable entries below.
 > **Why**: the generated root preserves the existing bounded bigname paging behavior while publishing Graph Node's
 > generated argument defaults.
 > **Since**: `2026-09-02`
+
+> **Generated Account reads expose current address relations, not persistent historical entities** — bigname's
+> `account` and `accounts` roots select distinct addresses that currently appear as a registrant, token holder, or
+> effective controller. An address with no current membership relation is absent, including a current address-record
+> target that is not also a registrant, token holder, or effective controller, as well as an address seen only in past
+> events. `Domain.owner.id` can serve the zero address while `account(id:)` returns null because the current address-name
+> [projection](glossary.md#projection) drops the zero address; this is the same `#670/T5` zero-owner residual as the Domain owner filter.
+> **Upstream**: the ENS subgraph creates and saves an Account for each `NewOwner` and `Transfer` owner before assigning
+> that address to the Domain (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L89-L92 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L146-L157 @ ens_subgraph@723f1b6), and `AddrChanged` creates and
+> saves an Account for the resolved address (upstream: .refs/ens_subgraph/src/resolver.ts:L33-L35 @ ens_subgraph@723f1b6).
+> The registrar creates an Account for registration and transfer recipients before assigning it as the registrant
+> (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L43-L56 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L163-L174 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; task `#670/T4` owns Account persistence beyond
+> current membership and `#670/T5` owns resolved-address membership and zero-owner agreement.
+> **Why**: the authorized source for this slice is the current address-name projection, not event-history synthesis.
+> **Since**: `2026-09-02`
+
+> **Generated Account and Resolver hexadecimal filters are canonicalized** — bigname accepts uppercase hexadecimal
+> input for Account IDs, composite Resolver IDs, and Resolver domain namehashes, then compares the lowercase canonical
+> value served on the wire. Graph Node passes point IDs into an exact equality filter and preserves
+> ordinary string filter values (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L729 @
+> graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L357-L379 @ graph_node@aefe1737)
+> (upstream: .refs/graph_node/graphql/src/store/query.rs:L332-L334 @ graph_node@aefe1737). Resolver address filters are
+> `Bytes` in both systems and accept uppercase digits, but Graph Node's byte parser permits an omitted `0x` prefix while
+> bigname requires it (upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L41-L52 @ graph_node@aefe1737).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Why**: fields and filters select the same canonical lowercase identity, including for mixed-case client input.
+> **Since**: `2026-09-03`
+
+> **Generated Resolver reads expose current bindings, not persistent historical entities** — bigname uses the composite
+> `<lowercase-address>-<lowercase-namehash>` identity, excludes the zero address, and exposes one Resolver for each
+> current Domain binding. After a Domain switches resolvers, the old composite ID is absent locally.
+> **Upstream**: `NewResolver` constructs the composite identity, maps zero to no Resolver, assigns the Domain to the new
+> identity, and saves a newly observed Resolver (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L167-L201 @
+> ens_subgraph@723f1b6). Resolver event handlers load or create the same address/node identity and can save it
+> (upstream: .refs/ens_subgraph/src/resolver.ts:L233-L248 @ ens_subgraph@723f1b6)
+> (upstream: .refs/ens_subgraph/src/resolver.ts:L258-L262 @ ens_subgraph@723f1b6). The upstream schema defines
+> `Resolver.id` as that concatenation and `Resolver.address` as `Bytes!`
+> (upstream: .refs/ens_subgraph/schema.graphql:L281-L287 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; `#670/T6` owns current Resolver serving and
+> `#670/T9` owns event history that could support prior bindings.
+> **Why**: the authorized local source is the Domain's current `name_current` binding; this slice does not synthesize
+> durable Resolver entities from historical events.
+> **Since**: `2026-09-02`
+
+> **Generated Resolver content hashes retain the local String scalar** — `Resolver.contentHash` remains nullable
+> `String` while the other Resolver identity and address signatures move to the captured upstream types.
+> **Upstream**: the ENS subgraph declares `Resolver.contentHash` as `Bytes`
+> (upstream: .refs/ens_subgraph/schema.graphql:L290-L291 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility; the signature difference keeps its existing
+> `#670/T2` disposition while `#670/T6` owns the remaining Resolver serving fields.
+> **Why**: this Account/Resolver-root slice preserves the existing record-serving JSON contract and does not fold in
+> the independently owned content-hash scalar change.
+> **Since**: `2026-09-03`
 
 > **Generated Domain point lookup accepts an ENS name** — `domain(id:)` treats only a canonical `0x` plus 64-hex input
 > as a namehash first, then falls back to the local ENS-name lookup if the entity ID does not match. Every other input

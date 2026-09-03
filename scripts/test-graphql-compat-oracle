@@ -21,15 +21,21 @@ def enum(name, values): return {"kind": "ENUM", "name": name, "fields": None, "i
 S=lambda name: named(name); O=lambda name: named(name,"OBJECT"); I=lambda name: named(name,"INPUT_OBJECT"); E=lambda name: named(name,"ENUM")
 captured_surface=json.loads((root/"apps/api/src/tests/fixtures/graphql-oracle/v1/upstream/schema-surface.json").read_text())
 domain_filter_members=sorted(path.removeprefix("input:Domain_filter.") for path in captured_surface if path.startswith("input:Domain_filter."))
+account_filter_members=sorted(path.removeprefix("input:Account_filter.") for path in captured_surface if path.startswith("input:Account_filter."))
+resolver_filter_members=sorted(path.removeprefix("input:Resolver_filter.") for path in captured_surface if path.startswith("input:Resolver_filter."))
 domain_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID"))),"owner":S("String"),"owner_in":lst(nn(S("String"))),"name":S("String"),"name_contains":S("String")}
+account_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID")))}
+resolver_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID"))),"address":S("Bytes"),"address_in":lst(nn(S("Bytes"))),"domain":S("String"),"domain_in":lst(nn(S("String")))}
 types = [{"kind":"SCALAR","name":name,"fields":None,"inputFields":None,"enumValues":None,"possibleTypes":None} for name in ("String","Boolean","Int","Float","ID","BigInt","Bytes")]
 types += [
  obj("Account", [field("id", nn(S("ID"))),field("domains",nn(lst(nn(O("Domain"))))),field("registrations",nn(lst(nn(O("Registration"))))),field("wrappedDomains",nn(lst(nn(O("WrappedDomain")))))]),
+ inp("Account_filter", [input_field(name,account_filter_types.get(name,S("String"))) for name in account_filter_members]), enum("Account_orderBy",["id","domains","registrations","wrappedDomains"]),
  inp("Block_height", [input_field("hash",S("Bytes")),input_field("number",S("Int")),input_field("number_gte",S("Int"))]),
  obj("Domain", [field("createdAt",nn(S("BigInt"))),field("events",nn(lst(nn(O("DomainEvent"))))),field("expiryDate",S("BigInt")),field("id",nn(S("ID"))),field("isMigrated",nn(S("Boolean"))),field("labelName",S("String")),field("labelhash",S("Bytes")),field("name",S("String")),field("owner",nn(O("Account"))),field("parent",O("Domain")),field("registrant",O("Account")),field("registration",O("Registration")),field("resolvedAddress",O("Account")),field("resolver",O("Resolver")),field("subdomainCount",nn(S("Int"))),field("subdomains",nn(lst(nn(O("Domain"))))),field("ttl",S("BigInt")),field("wrappedDomain",O("WrappedDomain")),field("wrappedOwner",O("Account"))]),
  inp("Domain_filter", [input_field(name,domain_filter_types.get(name,S("String"))) for name in domain_filter_members]),
  enum("Domain_orderBy", ["createdAt","expiryDate","id","name"]), enum("OrderDirection",["asc","desc"]),
  obj("Resolver",[field("addr",O("Account")),field("address",nn(S("Bytes"))),field("coinTypes",lst(nn(S("BigInt")))),field("contentHash",S("Bytes")),field("domain",nn(O("Domain"))),field("events",nn(lst(nn(O("ResolverEvent"))))),field("id",nn(S("ID"))),field("texts",lst(nn(S("String"))))]),
+ inp("Resolver_filter", [input_field(name,resolver_filter_types.get(name,S("String"))) for name in resolver_filter_members]), enum("Resolver_orderBy",["id","address","domain","addr","contentHash","texts","coinTypes"]),
  obj("Transfer",[field("id",nn(S("ID"))),field("domain",nn(O("Domain")))]),
  obj("_Block_",[field("hash",S("Bytes")),field("number",nn(S("Int"))),field("parentHash",S("Bytes")),field("timestamp",S("Int"))]),
  obj("_Meta_",[field("block",nn(O("_Block_"))),field("deployment",nn(S("String"))),field("hasIndexingErrors",nn(S("Boolean")))]), enum("_SubgraphErrorPolicy_",["allow","deny"]),

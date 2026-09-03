@@ -1,3 +1,4 @@
+use anyhow::Result;
 use async_graphql::ID;
 use bigname_storage::NameCurrentListRow;
 use serde_json::Value;
@@ -5,7 +6,7 @@ use serde_json::Value;
 use super::record_inventory_query::PhaseGraphqlRecordInventoryRow;
 use super::{
     objects::{AddressRecord, Domain, Resolver},
-    scalars::BigInt,
+    scalars::{BigInt, Bytes},
 };
 
 /// Non-null `owner` fallback for ownerless names (all-zero address).
@@ -63,8 +64,9 @@ impl From<NameCurrentListRow> for Domain {
 /// no inventory row serves the empty shapes.
 pub(super) fn resolver_from_store(
     address: String,
+    namehash: &str,
     inventory: Option<&PhaseGraphqlRecordInventoryRow>,
-) -> Resolver {
+) -> Result<Resolver> {
     let texts = inventory
         .map(|row| {
             json_items(&row.selectors)
@@ -94,13 +96,23 @@ pub(super) fn resolver_from_store(
             .next()
     });
 
-    Resolver {
-        id: address.clone(),
+    let address = Bytes::parse_string(address)
+        .map_err(|message| anyhow::anyhow!("projected resolver address is not bytes: {message}"))?;
+    Ok(Resolver {
+        id: ID(composite_resolver_id(address.as_str(), namehash)),
         address,
         texts: Some(texts),
         content_hash,
         addresses: Some(addresses),
-    }
+    })
+}
+
+pub(super) fn composite_resolver_id(address: &str, namehash: &str) -> String {
+    format!(
+        "{}-{}",
+        address.to_ascii_lowercase(),
+        namehash.to_ascii_lowercase()
+    )
 }
 
 /// Cache entries of a record family whose value was retained (`status == "success"`), paired with

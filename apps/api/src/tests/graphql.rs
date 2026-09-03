@@ -888,7 +888,10 @@ fn graphql_sdl_matches_subgraph_compatibility_contract() {
     // golden file; kept so a failure names the broken contract directly).
     assert!(sdl.contains("owner: Account!"), "Domain.owner must be non-null");
     assert!(sdl.contains("createdAt: BigInt!"), "Domain.createdAt must be non-null");
-    assert!(sdl.contains("address: String!"), "Resolver.address must be non-null");
+    assert!(
+        sdl.contains("type Resolver {\n\tid: ID!\n\taddress: Bytes!"),
+        "Resolver.address must be non-null Bytes"
+    );
     assert!(sdl.contains("type Query {"), "the query root must be Query");
     assert!(sdl.contains("domain(id: ID!"), "domain.id must be ID!");
     assert!(!sdl.contains("BigDecimal"), "unused BigDecimal must stay absent");
@@ -2171,7 +2174,7 @@ async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> 
     let bob = post_graphql(
         database.app_state(),
         r#"query Domain($id: ID!) {
-            domain(id: $id) { resolver { texts contentHash addresses { coinType address } } }
+            domain(id: $id) { resolver { id address texts contentHash addresses { coinType address } } }
         }"#,
         json!({ "id": "bob.eth" }),
     )
@@ -2179,6 +2182,19 @@ async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> 
     assert_eq!(bob["data"]["domain"]["resolver"]["texts"], json!([]));
     assert_eq!(bob["data"]["domain"]["resolver"]["addresses"], json!([]));
     assert_eq!(bob["data"]["domain"]["resolver"]["contentHash"], Value::Null);
+
+    let roots = post_graphql(
+        database.app_state(),
+        r#"query { resolvers { id address texts contentHash addresses { coinType address } } }"#,
+        json!({}),
+    )
+    .await?;
+    let roots = roots["data"]["resolvers"]
+        .as_array()
+        .context("resolvers must be a list")?;
+    assert_eq!(roots.len(), 2);
+    assert!(roots.contains(&resolver.clone()));
+    assert!(roots.contains(&bob["data"]["domain"]["resolver"]));
 
     database.cleanup().await?;
     Ok(())
@@ -2190,7 +2206,7 @@ async fn graphql_ownerless_domain_resolver_uses_serving_resource_inventory() -> 
     seed_graphql_compat_fixture(&database).await?;
     seed_alice_record_inventory(&database).await?;
 
-    sqlx::query(
+    let update = sqlx::query(
         r#"
         UPDATE bigname_phase.name_current
         SET serving_resource_id = resource_id,
@@ -2207,17 +2223,31 @@ async fn graphql_ownerless_domain_resolver_uses_serving_resource_inventory() -> 
                 '{control}',
                 '{}'::jsonb
             )
-        WHERE logical_name_id = 'ens:alice.eth'
+        WHERE logical_name_id = 'ens:' || $1
         "#,
     )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
     .execute(&database.pool)
     .await?;
+    assert_eq!(update.rows_affected(), 1, "ownerless fixture must update Alice");
+    let (current_resource_id, serving_resource_id): (Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as(
+            "SELECT resource_id, serving_resource_id
+             FROM bigname_phase.name_current
+             WHERE logical_name_id = 'ens:' || $1",
+        )
+        .bind(GRAPHQL_ALICE_NAMEHASH)
+        .fetch_one(&database.pool)
+        .await?;
+    assert!(current_resource_id.is_none());
+    assert!(serving_resource_id.is_some());
+    assert_ne!(current_resource_id, serving_resource_id);
 
     let payload = post_graphql(
         database.app_state(),
         r#"query Domain($id: String!) {
             domain(id: $id) {
-                resolver { address texts contentHash addresses { coinType address } }
+                resolver { id address texts contentHash addresses { coinType address } }
             }
         }"#,
         json!({ "id": "alice.eth" }),
@@ -2234,6 +2264,19 @@ async fn graphql_ownerless_domain_resolver_uses_serving_resource_inventory() -> 
             { "coinType": 2_147_483_658u32, "address": "0x00000000000000000000000000000000000000bb" },
             { "coinType": 60, "address": "0x00000000000000000000000000000000000000aa" },
         ])
+    );
+
+    let root_payload = post_graphql(
+        database.app_state(),
+        r#"query Resolver($id: ID!) {
+            resolver(id: $id) { id address texts contentHash addresses { coinType address } }
+        }"#,
+        json!({ "id": resolver["id"] }),
+    )
+    .await?;
+    assert_eq!(
+        root_payload["data"]["resolver"], *resolver,
+        "the generated Resolver root must hydrate the same serving-resource inventory as Domain.resolver"
     );
 
     database.cleanup().await?;

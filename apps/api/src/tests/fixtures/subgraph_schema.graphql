@@ -2,7 +2,16 @@
 Subgraph `Account` — the lowercased address as `id`.
 """
 type Account {
-	id: String!
+	id: ID!
+}
+
+input Account_filter {
+	id: ID
+	id_in: [ID!]
+}
+
+enum Account_orderBy {
+	id
 }
 
 """
@@ -107,6 +116,8 @@ enum OrderDirection {
 }
 
 type Query {
+	account(id: ID!, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): Account
+	accounts(skip: Int = 0, first: Int = 100, orderBy: Account_orderBy, orderDirection: OrderDirection, where: Account_filter, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): [Account!]!
 	"""
 	`domain(id: ID!)` accepts either an ENS name string (for example `"alice.eth"`) or a
 	namehash. Canonical hash-shaped values resolve by namehash first, then fall back to the name,
@@ -118,6 +129,8 @@ type Query {
 	Generated-style offset-paged Domain list.
 	"""
 	domains(skip: Int = 0, first: Int = 100, orderBy: Domain_orderBy, orderDirection: OrderDirection, where: Domain_filter, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): [Domain!]!
+	resolver(id: ID!, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): Resolver
+	resolvers(skip: Int = 0, first: Int = 100, orderBy: Resolver_orderBy, orderDirection: OrderDirection, where: Resolver_filter, block: Block_height, subgraphError: _SubgraphErrorPolicy_! = deny): [Resolver!]!
 	"""
 	`registrationConnection(first: 0, where) { totalCount }` — backs `OwnedNamesCount`.
 	"""
@@ -148,17 +161,27 @@ input RegistrationFilter {
 }
 
 """
-Subgraph `Resolver`. `id`/`address` carry the resolver contract address; the record fields
-(`texts`/`contentHash`/`addresses`) are
+Subgraph `Resolver`. `id` combines the resolver address and Domain namehash while `address`
+carries the resolver contract bytes. The record fields (`texts`/`contentHash`/`addresses`) are
 read from the `record_inventory_current` projection by [`resolver_from_store`] — a name whose
 resolver has no projected records serves the empty shapes.
 """
 type Resolver {
-	id: String!
-	address: String!
+	id: ID!
+	address: Bytes!
 	texts: [String!]
 	contentHash: String
 	addresses: [AddressRecord!]
+}
+
+input Resolver_filter {
+	id: ID
+	address: Bytes
+	domain: String
+}
+
+enum Resolver_orderBy {
+	id
 }
 
 """

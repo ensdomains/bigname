@@ -6,37 +6,100 @@ use bigname_storage::{
 
 use crate::state::AppState;
 
-use super::enums::{DomainOrderBy, OrderDirection, SubgraphErrorPolicy};
+use super::account_queries::{
+    account_entity_filter_to_storage, load_phase_graphql_account_page_offset, resolve_account,
+};
+use super::enums::{
+    AccountOrderBy, DomainOrderBy, OrderDirection, ResolverOrderBy, SubgraphErrorPolicy,
+    generated_order,
+};
 use super::error::internal_error;
-use super::inputs::{BlockHeight, DomainEntityFilter, DomainFilter, RegistrationFilter};
+use super::inputs::{
+    AccountEntityFilter, BlockHeight, DomainEntityFilter, DomainFilter, RegistrationFilter,
+    ResolverEntityFilter,
+};
 use super::meta::{SubgraphMeta, resolve_meta};
 use super::name_queries::{
     GeneratedDomainIdFilter, GeneratedDomainSort, count_phase_graphql_name_list,
     load_phase_graphql_name_list_page_offset, load_phase_graphql_name_row_by_name,
     load_phase_graphql_name_row_by_namehash,
 };
-use super::objects::{Domain, DomainConnection, RegistrationConnection};
+use super::objects::{Account, Domain, DomainConnection, RegistrationConnection, Resolver};
+use super::resolver_queries::{
+    hydrate_resolver_rows, load_phase_graphql_resolver_page_offset, resolve_resolver,
+    resolver_entity_filter_to_storage,
+};
 use super::snapshot::{
-    graphql_snapshot_chain_ids, load_graphql_entity_head, load_graphql_head, require_count_at_head,
+    graphql_snapshot_chain_ids, load_graphql_entity_head, load_graphql_head,
+    require_account_rows_at_head, require_count_at_head, require_resolver_rows_at_head,
     require_rows_at_head, revalidate_graphql_head,
 };
 
-/// The compatibility surface is scoped to ENS names.
 const NAMESPACE: &str = "ens";
-/// Page size for `domains` when the subgraph `first` argument is omitted.
 const DEFAULT_DOMAINS_PAGE_SIZE: u64 = 100;
-/// Ceiling for client-supplied `first`, matching the REST surface's `MAX_PAGE_SIZE` so the public
-/// GraphQL path cannot request an unbounded page. Larger values are clamped silently so
-/// subgraph-shaped callers do not receive a GraphQL error for oversized windows.
 const MAX_DOMAINS_PAGE_SIZE: u64 = crate::v2::MAX_PAGE_SIZE;
-/// Ceiling for client-supplied `skip`, so a hostile deep offset cannot force Postgres to scan an
-/// arbitrary prefix of the filtered set.
 const MAX_DOMAINS_SKIP: u64 = 1_000_000;
 
 pub(crate) struct Query;
 
 #[Object]
 impl Query {
+    async fn account(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        block: Option<BlockHeight>,
+        #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
+    ) -> Option<Account> {
+        match resolve_account(ctx, id, block.as_ref(), subgraph_error).await {
+            Ok(account) => account,
+            Err(error) => {
+                ctx.add_error(ctx.set_error_path(error.into_server_error(ctx.item.pos)));
+                None
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn accounts(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(default = 0)] skip: Option<i32>,
+        #[graphql(default = 100)] first: Option<i32>,
+        #[graphql(name = "orderBy")] order_by: Option<AccountOrderBy>,
+        #[graphql(name = "orderDirection")] order_direction: Option<OrderDirection>,
+        #[graphql(name = "where")] filter: Option<AccountEntityFilter>,
+        block: Option<BlockHeight>,
+        #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
+    ) -> Result<Vec<Account>> {
+        let state = ctx.data::<AppState>()?;
+        let head =
+            load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "accounts").await?;
+        let Some((limit, offset)) = generated_page(first, skip) else {
+            revalidate_graphql_head(state, head.as_ref(), "accounts").await?;
+            return Ok(Vec::new());
+        };
+        let filter = account_entity_filter_to_storage(filter);
+        let chain_ids = graphql_snapshot_chain_ids(head.as_ref());
+        let rows = load_phase_graphql_account_page_offset(
+            &state.pool,
+            NAMESPACE,
+            &chain_ids,
+            &filter,
+            generated_order(order_by.map(|_| ()), order_direction),
+            limit,
+            offset,
+        )
+        .await
+        .map_err(|error| internal_error("accounts", error))?;
+        require_account_rows_at_head(&rows, head.as_ref(), "accounts")?;
+        revalidate_graphql_head(state, head.as_ref(), "accounts").await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| Account { id: ID(row.id) })
+            .collect())
+    }
+
     /// `domain(id: ID!)` accepts either an ENS name string (for example `"alice.eth"`) or a
     /// namehash. Canonical hash-shaped values resolve by namehash first, then fall back to the name,
     /// so a hash-shaped ENS name cannot shadow an entity ID. Ordinary names take the direct name
@@ -108,6 +171,61 @@ impl Query {
             .collect())
     }
 
+    async fn resolver(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        block: Option<BlockHeight>,
+        #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
+    ) -> Option<Resolver> {
+        match resolve_resolver(ctx, id, block.as_ref(), subgraph_error).await {
+            Ok(resolver) => resolver,
+            Err(error) => {
+                ctx.add_error(ctx.set_error_path(error.into_server_error(ctx.item.pos)));
+                None
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolvers(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(default = 0)] skip: Option<i32>,
+        #[graphql(default = 100)] first: Option<i32>,
+        #[graphql(name = "orderBy")] order_by: Option<ResolverOrderBy>,
+        #[graphql(name = "orderDirection")] order_direction: Option<OrderDirection>,
+        #[graphql(name = "where")] filter: Option<ResolverEntityFilter>,
+        block: Option<BlockHeight>,
+        #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
+    ) -> Result<Vec<Resolver>> {
+        let state = ctx.data::<AppState>()?;
+        let head =
+            load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "resolvers").await?;
+        let Some((limit, offset)) = generated_page(first, skip) else {
+            revalidate_graphql_head(state, head.as_ref(), "resolvers").await?;
+            return Ok(Vec::new());
+        };
+        let Some(filter) = resolver_entity_filter_to_storage(filter) else {
+            revalidate_graphql_head(state, head.as_ref(), "resolvers").await?;
+            return Ok(Vec::new());
+        };
+        let chain_ids = graphql_snapshot_chain_ids(head.as_ref());
+        let rows = load_phase_graphql_resolver_page_offset(
+            &state.pool,
+            NAMESPACE,
+            &chain_ids,
+            &filter,
+            generated_order(order_by.map(|_| ()), order_direction),
+            limit,
+            offset,
+        )
+        .await
+        .map_err(|error| internal_error("resolvers", error))?;
+        require_resolver_rows_at_head(&rows, head.as_ref(), "resolvers")?;
+        hydrate_resolver_rows(ctx, rows, head.as_ref(), "resolvers").await
+    }
+
     /// `registrationConnection(first: 0, where) { totalCount }` — backs `OwnedNamesCount`.
     #[graphql(name = "registrationConnection")]
     async fn registration_connection(
@@ -171,6 +289,20 @@ impl Query {
         block: Option<BlockHeight>,
     ) -> Result<Option<SubgraphMeta>> {
         resolve_meta(ctx, block).await
+    }
+}
+
+fn generated_page(first: Option<i32>, skip: Option<i32>) -> Option<(u64, u64)> {
+    match first {
+        Some(first) if first <= 0 => None,
+        Some(first) => Some((
+            (first as u64).min(MAX_DOMAINS_PAGE_SIZE),
+            (skip.unwrap_or(0).max(0) as u64).min(MAX_DOMAINS_SKIP),
+        )),
+        None => Some((
+            DEFAULT_DOMAINS_PAGE_SIZE,
+            (skip.unwrap_or(0).max(0) as u64).min(MAX_DOMAINS_SKIP),
+        )),
     }
 }
 
