@@ -3137,7 +3137,11 @@ async fn a_post_boundary_ens_v1_child_relation_blocks_mainnet_publication() -> R
 /// Seeds the same parent-child pair, but with the child's ENSv2 authority proven by a
 /// positive ENSv2 child registration under a migrated parent registry instead of by the
 /// child's own migration boundary. The ENSv1 relation is restated at `v1_block`.
-async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> Result<()> {
+async fn seed_positive_child_authority_fixture(
+    pool: &PgPool,
+    v1_block: i64,
+    parent_path: &str,
+) -> Result<()> {
     let subregistry_instance = Uuid::parse_str("00000000-0000-0000-0000-0000000000e4")?;
     let subregistry_address = "0x00000000000000000000000000000000000000e4";
     for block in 4..=6 {
@@ -3222,7 +3226,7 @@ async fn seed_positive_child_authority_fixture(pool: &PgPool, v1_block: i64) -> 
         "ens_v2_migration_l1",
         json!({
             "successor_binding":{"authority_epoch":"ens_v2"},
-            "migration_path":"unlocked_wrapped",
+            "migration_path":parent_path,
             "successor_registry_contract_instance_id":subregistry_instance
         }),
         json!({}),
@@ -3530,24 +3534,27 @@ async fn same_position_multi_candidate_child_conflict_is_replay_stable_within_ea
 // relation restated beneath an unlocked migrated parent is unreachable, so it cannot become a
 // dual-current contradiction or suppress the reachable ENSv2 relation.
 #[tokio::test]
-async fn an_unlocked_parent_filters_post_epoch_v1_before_positive_v2_child_integrity() -> Result<()>
-{
-    let scratch = ScratchDatabase::create("production_project_child_positive_conflict").await?;
-    seed_project_fixture(scratch.pool()).await?;
-    seed_positive_child_authority_fixture(scratch.pool(), 5).await?;
+async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Result<()> {
+    for path in ["unlocked_wrapped", "locked_wrapped"] {
+        let scratch =
+            ScratchDatabase::create(&format!("production_project_positive_child_{path}")).await?;
+        seed_project_fixture(scratch.pool()).await?;
+        seed_positive_child_authority_fixture(scratch.pool(), 5, path).await?;
 
-    run_project_phase(scratch.pool(), CHAIN, 5).await?;
-    assert_eq!(
-        child_relation(scratch.pool()).await?,
-        Some((None, Some(OWNER.to_owned()))),
-        "the reachable ENSv2 relation publishes after the ENSv1 arm is filtered"
-    );
-    assert!(
-        generation_failure_rows(scratch.pool(), CHAIN)
-            .await?
-            .is_empty()
-    );
-    scratch.cleanup().await
+        run_project_phase(scratch.pool(), CHAIN, 5).await?;
+        assert_eq!(
+            child_relation(scratch.pool()).await?,
+            Some((None, Some(OWNER.to_owned()))),
+            "the ENSv2 relation publishes after the ENSv1 arm is filtered for {path}"
+        );
+        assert!(
+            generation_failure_rows(scratch.pool(), CHAIN)
+                .await?
+                .is_empty()
+        );
+        scratch.cleanup().await?;
+    }
+    Ok(())
 }
 
 // Basenames subnames are their own authority arm. The child's authority selects `basenames`,

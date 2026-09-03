@@ -14,6 +14,7 @@ const V2_RESOURCE: &str = "33333333-3333-3333-3333-333333333333";
 const V2_BINDING: &str = "44444444-4444-4444-4444-444444444444";
 const REGISTRY: &str = "55555555-5555-5555-5555-555555555555";
 const OTHER_REGISTRY: &str = "66666666-6666-6666-6666-666666666666";
+const PARENT_REGISTRY: &str = "88888888-8888-8888-8888-888888888888";
 const REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000503";
 const OWNER: &str = "0x0000000000000000000000000000000000000001";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
@@ -150,10 +151,10 @@ async fn seed_wrapper(pool: &PgPool, fuses: i64, expiry: i64) -> Result<()> {
 }
 
 async fn seed_migration(pool: &PgPool, path: &str, block: i64, identity: &str) -> Result<i64> {
-    event(pool, identity, PARENT, None, "ens_v2_migration_l1", "MigrationApplied", block, 1, json!({"migration_path":path,"successor_registry_contract_instance_id":REGISTRY,"successor_binding":{"binding_id":V2_BINDING,"resource_id":V2_RESOURCE}})).await
+    event(pool, identity, PARENT, None, "ens_v2_migration_l1", "MigrationApplied", block, 1, json!({"migration_path":path,"successor_registry_contract_instance_id":PARENT_REGISTRY,"successor_binding":{"binding_id":V2_BINDING,"resource_id":V2_RESOURCE}})).await
 }
 
-async fn seed_v2_relation(pool: &PgPool, block: i64) -> Result<()> {
+async fn seed_parent_migration_registry(pool: &PgPool, block: i64) -> Result<()> {
     for registry in [REGISTRY, OTHER_REGISTRY] {
         sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1::uuid, $2, 'contract') ON CONFLICT DO NOTHING").bind(registry).bind(CHAIN).execute(pool).await?;
     }
@@ -171,6 +172,11 @@ async fn seed_v2_relation(pool: &PgPool, block: i64) -> Result<()> {
         json!({"subregistry":REGISTRY_ADDRESS}),
     )
     .await?;
+    Ok(())
+}
+
+async fn seed_v2_relation(pool: &PgPool, block: i64) -> Result<()> {
+    seed_parent_migration_registry(pool, block).await?;
     event(
         pool,
         "v2-child-registration",
@@ -186,14 +192,14 @@ async fn seed_v2_relation(pool: &PgPool, block: i64) -> Result<()> {
     Ok(())
 }
 
-async fn v2_history(pool: &PgPool, registry: &str, released: bool) -> Result<()> {
+async fn v2_history(pool: &PgPool, registry: &str, kind: &str, released: bool) -> Result<()> {
     event(
         pool,
         &format!("history-{registry}"),
         CHILD,
         None,
         "ens_v2_registry_l1",
-        "RegistrationGranted",
+        kind,
         10,
         6,
         json!({"registry_contract_instance_id":registry,"status":"registered","registrant":OWNER}),
@@ -247,7 +253,7 @@ struct Case<'a> {
     fuses: i64,
     expiry: i64,
     owner: &'a str,
-    history: Option<(&'a str, bool)>,
+    history: Option<(&'a str, &'a str, bool)>,
     v2: bool,
     child_arms: &'a [&'a str],
 }
@@ -257,12 +263,6 @@ async fn project_case(prefix: &str, case: Case<'_>) -> Result<bool> {
     seed_identity(&pool, case.child_arms).await?;
     seed_v1_relation(&pool, case.owner, 10).await?;
     seed_wrapper(&pool, case.fuses, case.expiry).await?;
-    if let Some(path) = case.path {
-        seed_migration(&pool, path, 10, "parent-migration").await?;
-    }
-    if let Some((registry, released)) = case.history {
-        v2_history(&pool, registry, released).await?;
-    }
     if case.v2 {
         seed_v2_relation(&pool, 10).await?;
         if case.child_arms == ["ens_v2"] {
@@ -279,6 +279,14 @@ async fn project_case(prefix: &str, case: Case<'_>) -> Result<bool> {
             )
             .await?;
         }
+    } else if matches!(case.path, Some("locked_wrapped" | "locked_child")) {
+        seed_parent_migration_registry(&pool, 10).await?;
+    }
+    if let Some(path) = case.path {
+        seed_migration(&pool, path, 10, "parent-migration").await?;
+    }
+    if let Some((registry, kind, released)) = case.history {
+        v2_history(&pool, registry, kind, released).await?;
     }
     run(&pool, 10, None, RunMode::Normal).await?;
     visible(&pool).await
@@ -327,6 +335,7 @@ async fn same_position_wrapper_case(prefix: &str, reverse: bool) -> Result<bool>
         )
         .await?;
     }
+    seed_parent_migration_registry(&pool, 10).await?;
     seed_migration(&pool, "locked_wrapped", 10, "parent-migration").await?;
     run(&pool, 10, None, RunMode::Normal).await?;
     visible(&pool).await
@@ -393,6 +402,7 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     seed_identity(&incremental, &["ens_v1"]).await?;
     seed_v1_relation(&incremental, OWNER, 10).await?;
     seed_wrapper(&incremental, 65_536, 1_800_000_010).await?;
+    seed_parent_migration_registry(&incremental, 10).await?;
     seed_migration(&incremental, "locked_wrapped", 10, "parent-migration").await?;
     run(&incremental, 10, None, RunMode::Normal).await?;
     assert!(visible(&incremental).await?);
@@ -402,16 +412,30 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     seed_identity(&fresh, &["ens_v1"]).await?;
     seed_v1_relation(&fresh, OWNER, 10).await?;
     seed_wrapper(&fresh, 65_536, 1_800_000_010).await?;
+    seed_parent_migration_registry(&fresh, 10).await?;
     seed_migration(&fresh, "locked_wrapped", 10, "parent-migration").await?;
     run(&fresh, 11, None, RunMode::Normal).await?;
 
     assert_eq!(rows(&incremental).await?, rows(&fresh).await?);
     assert!(!visible(&incremental).await?);
 
-    let (_redo_db, redo) = database("issue503_wrapper_retraction_incremental").await?;
+    for bound in [false, true] {
+        wrapper_retraction_converges(bound).await?;
+    }
+    Ok(())
+}
+
+async fn wrapper_retraction_converges(bound: bool) -> Result<()> {
+    let suffix = if bound { "bound" } else { "rotated" };
+    let (_redo_db, redo) = database(&format!("issue503_wrapper_retract_{suffix}_inc")).await?;
     seed_identity(&redo, &["ens_v1"]).await?;
+    if bound {
+        sqlx::query("UPDATE surface_bindings SET resource_id = $1::uuid WHERE surface_binding_id = $2::uuid")
+            .bind(V1_WRAPPER_RESOURCE).bind(V1_BINDING).execute(&redo).await?;
+    }
     seed_v1_relation(&redo, OWNER, 10).await?;
     seed_wrapper(&redo, 65_536, 2_000_000_000).await?;
+    seed_parent_migration_registry(&redo, 10).await?;
     seed_migration(&redo, "locked_wrapped", 10, "parent-migration").await?;
     run(&redo, 10, None, RunMode::Normal).await?;
     assert!(visible(&redo).await?);
@@ -422,12 +446,17 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     .await?;
     run(&redo, 11, Some(10), RunMode::Redo).await?;
 
-    let (_redo_fresh_db, redo_fresh) = database("issue503_wrapper_retraction_fresh").await?;
-    seed_identity(&redo_fresh, &["ens_v1"]).await?;
-    seed_v1_relation(&redo_fresh, OWNER, 10).await?;
-    seed_migration(&redo_fresh, "locked_wrapped", 10, "parent-migration").await?;
-    run(&redo_fresh, 11, None, RunMode::Normal).await?;
-    assert_eq!(rows(&redo).await?, rows(&redo_fresh).await?);
+    let (_fresh_db, fresh) = database(&format!("issue503_wrapper_retract_{suffix}_fresh")).await?;
+    seed_identity(&fresh, &["ens_v1"]).await?;
+    if bound {
+        sqlx::query("UPDATE surface_bindings SET resource_id = $1::uuid WHERE surface_binding_id = $2::uuid")
+            .bind(V1_WRAPPER_RESOURCE).bind(V1_BINDING).execute(&fresh).await?;
+    }
+    seed_v1_relation(&fresh, OWNER, 10).await?;
+    seed_parent_migration_registry(&fresh, 10).await?;
+    seed_migration(&fresh, "locked_wrapped", 10, "parent-migration").await?;
+    run(&fresh, 11, None, RunMode::Normal).await?;
+    assert_eq!(rows(&redo).await?, rows(&fresh).await?);
     assert!(!visible(&redo).await?);
     Ok(())
 }
@@ -481,7 +510,21 @@ visibility_test!(
         fuses: 65_536,
         expiry: 2_000_000_000,
         owner: OWNER,
-        history: Some((REGISTRY, true)),
+        history: Some((REGISTRY, "RegistrationGranted", true)),
+        v2: false,
+        child_arms: &["ens_v1"]
+    },
+    false
+);
+visibility_test!(
+    locked_parent_hides_child_with_lapsed_reservation,
+    "issue503_reserved_v2",
+    Case {
+        path: Some("locked_wrapped"),
+        fuses: 65_536,
+        expiry: 2_000_000_000,
+        owner: OWNER,
+        history: Some((REGISTRY, "RegistrationReserved", true)),
         v2: false,
         child_arms: &["ens_v1"]
     },
@@ -495,12 +538,67 @@ visibility_test!(
         fuses: 65_536,
         expiry: 2_000_000_000,
         owner: OWNER,
-        history: Some((OTHER_REGISTRY, false)),
+        history: Some((OTHER_REGISTRY, "RegistrationRenewed", false)),
         v2: false,
         child_arms: &["ens_v1"]
     },
     true
 );
+visibility_test!(
+    locked_child_parent_publishes_only_migratable_grandchild,
+    "issue503_locked_child",
+    Case {
+        path: Some("locked_child"),
+        fuses: 65_536,
+        expiry: 2_000_000_000,
+        owner: OWNER,
+        history: None,
+        v2: false,
+        child_arms: &["ens_v1"]
+    },
+    true
+);
+visibility_test!(
+    locked_child_parent_hides_non_migratable_grandchild,
+    "issue503_locked_child_no_pcc",
+    Case {
+        path: Some("locked_child"),
+        fuses: 0,
+        expiry: 2_000_000_000,
+        owner: OWNER,
+        history: None,
+        v2: false,
+        child_arms: &["ens_v1"]
+    },
+    false
+);
+visibility_test!(
+    emancipated_child_parent_hides_v1_descendants,
+    "issue503_emancipated_child",
+    Case {
+        path: Some("emancipated_child"),
+        fuses: 65_536,
+        expiry: 2_000_000_000,
+        owner: OWNER,
+        history: None,
+        v2: false,
+        child_arms: &["ens_v1"]
+    },
+    false
+);
+
+#[tokio::test]
+async fn unknown_parent_migration_path_is_a_generation_failure() -> Result<()> {
+    let (_db, pool) = database("issue503_unknown_path").await?;
+    seed_identity(&pool, &["ens_v1"]).await?;
+    seed_v1_relation(&pool, OWNER, 10).await?;
+    seed_migration(&pool, "future_path", 10, "parent-migration").await?;
+    let failure = run(&pool, 10, None, RunMode::Normal)
+        .await
+        .expect_err("unknown migration path must be visible");
+    assert!(failure.to_string().contains("future_path"));
+    Ok(())
+}
 
 #[tokio::test]
 async fn child_authority_selects_arm_after_parent_reachability_filter() -> Result<()> {
@@ -565,6 +663,11 @@ async fn convergence(
     seed_identity(&incremental, &["ens_v1"]).await?;
     seed_v1_relation(&incremental, OWNER, 10).await?;
     seed_wrapper(&incremental, 65_536, 2_000_000_000).await?;
+    for (path, block) in [(initial_path, 10), (replacement, 11)] {
+        if matches!(path, Some("locked_wrapped" | "locked_child")) {
+            seed_parent_migration_registry(&incremental, block).await?;
+        }
+    }
     if let Some(path) = initial_path {
         seed_migration(&incremental, path, 10, "old-migration").await?;
     }
@@ -584,6 +687,9 @@ async fn convergence(
     seed_identity(&fresh, &["ens_v1"]).await?;
     seed_v1_relation(&fresh, OWNER, 10).await?;
     seed_wrapper(&fresh, 65_536, 2_000_000_000).await?;
+    if matches!(replacement, Some("locked_wrapped" | "locked_child")) {
+        seed_parent_migration_registry(&fresh, 11).await?;
+    }
     if let Some(path) = replacement {
         seed_migration(&fresh, path, 11, "new-migration").await?;
     }

@@ -22,6 +22,7 @@ async fn candidates(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    validate_parent_migration_paths(transaction).await?;
     sqlx::query(
         r#"
         CREATE TEMP TABLE project_child_candidates ON COMMIT DROP AS
@@ -30,12 +31,31 @@ async fn candidates(
                    block_timestamp + interval '1 second' AS binding_cutoff
             FROM chain_lineage
             WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3
-        ), parent_migrations AS (
+        ), ranked_v2_subregistries AS (
+            SELECT event.*,
+                   row_number() OVER (
+                       PARTITION BY event.logical_name_id
+                       ORDER BY event.block_number DESC NULLS LAST,
+                                event.transaction_index DESC NULLS LAST,
+                                event.log_index DESC NULLS LAST,
+                                event.event_identity DESC
+                   ) AS current_rank
+            FROM project_events event
+            WHERE event.event_kind = 'SubregistryChanged'
+              AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+              AND event.logical_name_id IS NOT NULL
+        ), current_v2_subregistries AS (
+            SELECT event.*,
+                   lower(event.after_state ->> 'subregistry') AS subregistry_address
+            FROM ranked_v2_subregistries event
+            WHERE event.current_rank = 1
+              AND lower(COALESCE(event.after_state ->> 'subregistry', '')) NOT IN (
+                  '', '0x0000000000000000000000000000000000000000'
+              )
+        ), parent_boundaries AS (
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id,
                    event.after_state ->> 'migration_path' AS migration_path,
-                   event.after_state ->> 'successor_registry_contract_instance_id'
-                       AS successor_registry_contract_instance_id,
                    event.event_identity, event.raw_fact_ref
             FROM project_events event
             WHERE event.source_family = 'ens_v2_migration_l1'
@@ -46,6 +66,21 @@ async fn candidates(
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
                      event.event_identity DESC
+        ), parent_migrations AS (
+            SELECT boundary.*,
+                   address.contract_instance_id::text
+                       AS migration_registry_contract_instance_id
+            FROM parent_boundaries boundary
+            LEFT JOIN current_v2_subregistries subregistry
+              ON subregistry.logical_name_id = boundary.logical_name_id
+            LEFT JOIN contract_instance_addresses address
+              ON address.chain_id = subregistry.chain_id
+             AND lower(address.address) = subregistry.subregistry_address
+             AND (address.active_from_block_number IS NULL
+                  OR address.active_from_block_number <= $2)
+             AND (address.active_to_block_number IS NULL
+                  OR address.active_to_block_number > $2)
+             AND address.deactivated_at IS NULL
         ), latest_wrapper_modifiers AS (
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id, event.resource_id,
@@ -108,7 +143,9 @@ async fn candidates(
                        AS registry_contract_instance_id
             FROM project_events event
             WHERE event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-              AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed')
+              AND event.event_kind IN (
+                  'RegistrationReserved', 'RegistrationGranted', 'RegistrationRenewed'
+              )
               AND event.logical_name_id IS NOT NULL
               AND event.after_state ->> 'registry_contract_instance_id' IS NOT NULL
         ), ranked_v1 AS (
@@ -182,11 +219,11 @@ async fn candidates(
                    migration.raw_fact_ref AS parent_migration_raw_fact_ref,
                    wrapper.modifier_event_identity, wrapper.modifier_raw_fact_ref,
                    wrapper.expiry_event_identity, wrapper.expiry_raw_fact_ref,
-                   CASE WHEN migration.migration_path = 'locked_wrapped'
+                   CASE WHEN migration.migration_path IN ('locked_wrapped', 'locked_child')
                        THEN jsonb_build_object(
                            'derivation_kind', 'locked_parent_migratable_child',
-                           'successor_registry_contract_instance_id',
-                           migration.successor_registry_contract_instance_id
+                           'migration_registry_contract_instance_id',
+                           migration.migration_registry_contract_instance_id
                        )
                    END AS parent_reachability
             FROM ranked_v1 event
@@ -232,7 +269,8 @@ async fn candidates(
               -- (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f)
               AND (event.source_family <> 'ens_v1_registry_l1'
                    OR migration.logical_name_id IS NULL
-                   OR (migration.migration_path = 'locked_wrapped'
+                   OR (migration.migration_path IN ('locked_wrapped', 'locked_child')
+                       AND migration.migration_registry_contract_instance_id IS NOT NULL
                        AND (wrapper.fuses & 196608) = 65536
                        AND lower(COALESCE(
                            ownership.owner_getter, event.after_state ->> 'owner_getter',
@@ -243,35 +281,9 @@ async fn candidates(
                            WHERE history.logical_name_id = event.namespace || ':' ||
                                  lower(event.after_state ->> 'child_node')
                              AND history.registry_contract_instance_id =
-                                 migration.successor_registry_contract_instance_id
+                                 migration.migration_registry_contract_instance_id
                        )))
-        ),
-        ranked_v2_subregistries AS (
-            SELECT event.*,
-                   row_number() OVER (
-                       PARTITION BY event.logical_name_id
-                       ORDER BY event.block_number DESC NULLS LAST,
-                                event.transaction_index DESC NULLS LAST,
-                                event.log_index DESC NULLS LAST,
-                                -- Stable identity resolves only an exact-position duplicate;
-                                -- generated IDs never participate.
-                                event.event_identity DESC
-                   ) AS current_rank
-            FROM project_events event
-            WHERE event.event_kind = 'SubregistryChanged'
-              AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
-              AND event.logical_name_id IS NOT NULL
-        ),
-        current_v2_subregistries AS (
-            SELECT event.*,
-                   lower(event.after_state ->> 'subregistry') AS subregistry_address
-            FROM ranked_v2_subregistries event
-            WHERE event.current_rank = 1
-              AND lower(COALESCE(event.after_state ->> 'subregistry', '')) NOT IN (
-                  '', '0x0000000000000000000000000000000000000000'
-              )
-        ),
-        ranked_v2_registrations AS (
+        ), ranked_v2_registrations AS (
             SELECT event.*,
                    row_number() OVER (
                        PARTITION BY event.logical_name_id,
@@ -391,6 +403,39 @@ async fn candidates(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to index child candidates", error))?;
+    Ok(())
+}
+
+async fn validate_parent_migration_paths(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    let invalid: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT logical_name_id, migration_path
+         FROM (
+             SELECT DISTINCT ON (logical_name_id) logical_name_id,
+                    after_state ->> 'migration_path' AS migration_path
+             FROM project_events
+             WHERE source_family = 'ens_v2_migration_l1'
+               AND event_kind = 'MigrationApplied' AND logical_name_id IS NOT NULL
+             ORDER BY logical_name_id, block_number DESC NULLS LAST,
+                      transaction_index DESC NULLS LAST, log_index DESC NULLS LAST,
+                      event_identity DESC
+         ) latest
+         WHERE migration_path IS NULL OR migration_path NOT IN (
+             'unwrapped', 'unlocked_wrapped', 'locked_wrapped',
+             'locked_child', 'emancipated_child'
+         )
+         LIMIT 1",
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to validate parent migration paths", error))?;
+    if let Some((logical_name_id, migration_path)) = invalid {
+        return Err(ProjectError::data_integrity(format!(
+            "unsupported ENSv1→ENSv2 migration path {:?} for {logical_name_id}",
+            migration_path
+        )));
+    }
     Ok(())
 }
 
