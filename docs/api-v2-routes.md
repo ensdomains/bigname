@@ -798,11 +798,17 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   to the revision-bound storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
-  from the relation its own selected authority names. An unmigrated protected
-  child can remain ENSv1-backed; a migrated or otherwise currently registered
-  ENSv2 child is ENSv2-backed. A child whose arms disagree with no authority
-  proof is omitted entirely, and on the Mainnet deployment profile an ENSv1
-  relation asserted after a proven ENSv2 child authority began blocks Project
+  from the relation its own selected authority names. ENSv1 relations that are
+  unreachable through the parent's ENSv1→ENSv2 migration path are omitted. An
+  unwrapped or unlocked-wrapped migrated parent retains no ENSv1 children. A
+  locked-wrapped migrated parent retains only a migratable child: one never
+  registered in that parent's successor ENSv2 registry, whose current
+  expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH`
+  clear, and whose current ENSv1 registry owner is nonzero. The child's own
+  authority arm still chooses between the remaining ENSv1 and ENSv2 candidates.
+  A child whose arms disagree with no authority proof is omitted entirely, and
+  on the Mainnet deployment profile an ENSv1 relation asserted after a proven
+  ENSv2 child authority began blocks Project
   publication for that generation,
   so this route never chooses one by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
