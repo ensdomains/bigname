@@ -152,8 +152,9 @@ binding transition or change an authority epoch.
 Slice 3B selects direct-subname ownership per child, replacing the previous
 child recency tie-break rather than layering authority on top of it: recency now
 orders only the current relation within the one selected arm. Parent reachability
-first removes an ENSv1 relation below an unwrapped or unlocked-wrapped migrated
-parent. A locked-wrapped parent retains it only for a
+first removes an ENSv1 relation below a parent on the `unwrapped`,
+`unlocked_wrapped`, or `emancipated_child` path. A parent on the
+`locked_wrapped` or `locked_child` path retains it only for a
 [migratable child](glossary.md#migratable-child). Once that child migrates or
 otherwise obtains a current ENSv2
 registration, the published relation is the ENSv2 one and the retained ENSv1
@@ -181,15 +182,26 @@ Project transaction rolls back, the phase runner persists that evidence in the
 append-only `project_generation_failures` diagnostic audit described in
 [`storage.md`](storage.md#projection-publication). Slice 2E introduces that audit
 path for the exact-name invariant; slice 3B reuses it for the child invariant,
-whose condition is narrower. Because neither ENSv1→ENSv2 migration branch
-retracts the ENSv1 registry entry, both arms stating a relation for one pair is
-expected residue rather than an anomaly: the child assertion fails a
+whose condition is narrower. Because an ENSv1 relation can survive below an
+unmigrated parent or a locked path, both arms stating a relation for one pair
+can be expected residue rather than an anomaly. The child assertion runs after
+parent reachability and fails a
 [projection generation](glossary.md#projection-generation) with failure kind
-`dual_current_child_authority` only when a Mainnet child whose authority proof
-kind is `migration_authority_transition` or `positive_v2_child_registration`
-has an ENSv1 parent-child relation asserted after that child's authority epoch
-started. Sepolia selects the same way and never blocks publication on it. The
+`dual_current_child_authority` only when a surviving Mainnet child with an
+activated `migration_authority_transition` has an ENSv1 parent-child relation
+asserted after that child's authority epoch started. A positive ENSv2 child
+registration is permanent entry history in a locked parent's migration
+registry, so parent reachability filters that ENSv1 relation before the
+assertion even though the defensive integrity query recognizes that proof kind.
+Relations filtered by an
+unwrapped, unlocked-wrapped, or emancipated-child parent cannot trigger the
+assertion. Sepolia selects the same way and never blocks publication on it. The
 Sepolia distinction above is unchanged.
+
+Because neither ENSv1→ENSv2 migration branch
+retracts the ENSv1 registry entry, both arms stating a relation for one pair is
+historical residue even when parent reachability prevents it from entering the
+child-authority assertion.
 
 ## ENSv1→ENSv2 delivery slices
 

@@ -300,7 +300,9 @@ ENSv1→ENSv2 migration path. The parent rule is:
 | No activated `MigrationApplied` | Eligible under the existing live-owner rule. |
 | `migration_path = unwrapped` | Ineligible. |
 | `migration_path = unlocked_wrapped` | Ineligible. |
-| `migration_path = locked_wrapped` | Eligible only for a [migratable child](glossary.md#migratable-child): the child has never been registered in the parent's successor ENSv2 registry, its current expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set while `IS_DOT_ETH` is clear, and its current ENSv1 registry owner is nonzero. NameWrapper preserves fuse and expiry data when a child unwraps, so Project uses the latest wrapper resource evidence even when the active ENSv1 binding has rotated. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f) |
+| `migration_path = locked_wrapped` | Eligible only for a [migratable child](glossary.md#migratable-child): the label has never had a reserved, registered, or renewed entry in the parent's migration `WrapperRegistry`, its current expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set while `IS_DOT_ETH` is clear, and its current ENSv1 registry owner is nonzero. NameWrapper preserves fuse and expiry data when a child unwraps, so Project uses the latest wrapper resource evidence even when the active ENSv1 binding has rotated. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f) |
+| `migration_path = locked_child` | Eligible under the same migratable-child predicate. A locked child receives its own proxy-backed `WrapperRegistry`, so that nested registry becomes the parent migration registry for its descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L26-L32 @ ens_v2@a971bd64) |
+| `migration_path = emancipated_child` | Ineligible. The child is unwrapped into the Graveyard and injected into its parent's existing registry without receiving a registry for descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178-L188 @ ens_v2@a971bd64) |
 
 Unlocked ENSv1→ENSv2 migration registers the parent in ENSv2 without deploying a child
 subregistry, while the Graveyard clears the unreachable ENSv1 descendants.
@@ -308,7 +310,8 @@ subregistry, while the Graveyard clears the unreachable ENSv1 descendants.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L153-L166 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L96-L102 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L201 @ ens_v2@a971bd64)
-The locked-path registry instead routes only migratable children to the ENSv1
+The two locked paths deploy a `WrapperRegistry` for the migrated name. That
+registry routes only migratable children to the ENSv1
 resolver and blocks a new ENSv2 registration while that condition holds.
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L158-L186 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
@@ -316,6 +319,21 @@ The fuse predicate is exact: `PARENT_CANNOT_CONTROL` must be set and
 `IS_DOT_ETH` clear.
 (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f)
+
+Project identifies the parent migration registry from the parent's current
+ENSv2 `SubregistryChanged` relation and its admitted contract instance. The
+`successor_registry_contract_instance_id` on the parent's `MigrationApplied`
+event instead identifies the registry that the parent was registered into;
+the locked controller registers the parent there with its newly deployed
+`WrapperRegistry` as the subregistry.
+(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L103-L109 @ ens_v2@a971bd64)
+An entry in that migration registry is historical, not merely current:
+`RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each
+show that `getExpiry(labelId)` has been positive, which makes the child
+non-migratable even after the entry lapses.
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+An activated `MigrationApplied` path outside the five values above is a data
+integrity failure rather than a silently hidden child relation.
 
 Parent reachability filters only the ENSv1 candidate arm. Project then unions
 the surviving ENSv1 relation with the ENSv2 candidate, applies the child's own
@@ -337,14 +355,21 @@ and the emancipated branch unwraps the node into the Graveyard
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64),
 which sets a new registry owner rather than clearing the entry
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f).
-A migrated or positively registered child therefore ordinarily retains its
-ENSv1 relation. The slice 3B child assertion — ordered after the slice 2E
+A migrated or positively registered child can therefore retain its ENSv1
+relation only when parent reachability admits that relation. The slice 3B child
+assertion — ordered after parent reachability and the slice 2E
 exact-name assertion and keyed on the parent-child pair — fails the
 [projection generation](glossary.md#projection-generation) only when, on the
-Mainnet deployment profile, a child whose authority proof kind is
-`migration_authority_transition` or `positive_v2_child_registration` has an
-ENSv1 parent-child relation asserted at a position after that child's authority
-epoch start. Such a relation contradicts the selection instead of trailing it,
+Mainnet deployment profile, a child with an activated
+`migration_authority_transition` has an ENSv1 parent-child relation asserted at
+a position after that child's authority epoch start and that ENSv1 relation
+survives the parent filter. An unmigrated parent can expose this contradiction;
+the unwrapped, unlocked-wrapped, and emancipated-child paths cannot. Neither
+locked path can expose the `positive_v2_child_registration` form: the positive
+registration is itself permanent entry history in the migration registry, so
+the migratable-child predicate filters the ENSv1 relation first. The integrity
+query retains both proof kinds as a defensive assertion, but the positive-proof
+form is unreachable under this contract. A surviving relation contradicts the selection instead of trailing it,
 so the generation aborts with failure kind `dual_current_child_authority`
 through the same post-rollback audit path described below rather than dropping
 the contradiction silently. Sepolia selects by the same rule but never blocks

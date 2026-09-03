@@ -800,19 +800,27 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   Missing parent names return `404 not_found`. Each child appears at most once,
   from the relation its own selected authority names. ENSv1 relations that are
   unreachable through the parent's ENSv1→ENSv2 migration path are omitted. An
-  unwrapped or unlocked-wrapped migrated parent retains no ENSv1 children. A
-  locked-wrapped migrated parent retains only a [migratable child](glossary.md#migratable-child): one never
-  registered in that parent's successor ENSv2 registry, whose current
+  parent on the `unwrapped`, `unlocked_wrapped`, or `emancipated_child` path
+  retains no ENSv1 children. A parent on the `locked_wrapped` or `locked_child`
+  path retains only a [migratable child](glossary.md#migratable-child): one
+  whose label has never had a reserved, registered, or renewed entry in that
+  parent's migration `WrapperRegistry`, whose current
   expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH`
   clear, and whose current ENSv1 registry owner is nonzero. The wrapper fuse
   and expiry evidence remains effective across an ENSv1 binding rotation.
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f)
   The child's own
   authority arm still chooses between the remaining ENSv1 and ENSv2 candidates.
-  A child whose arms disagree with no authority proof is omitted entirely, and
-  on the Mainnet deployment profile an ENSv1 relation asserted after a proven
-  ENSv2 child authority began blocks Project
+  An unknown activated migration-path value blocks the Project generation as a
+  data-integrity failure instead of silently hiding relations. A child whose
+  arms disagree with no authority proof is omitted entirely. On the Mainnet
+  deployment profile, an ENSv1 relation that survives parent reachability and
+  was asserted after a proven ENSv2 child authority began blocks Project
   publication for that generation,
+  though a positive ENSv2 registration in a locked parent's migration registry
+  is itself entry history and therefore filters the ENSv1 relation before this
+  assertion. The reachable fatal shape is a child's own activated migration
+  boundary below an otherwise eligible parent.
   so this route never chooses one by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
   A V1 child with getter-visible owner zero is omitted unless a current
