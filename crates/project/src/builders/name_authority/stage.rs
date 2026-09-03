@@ -138,6 +138,9 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                                   event.event_kind <> 'TokenControlTransferred'
                                   OR event.transaction_hash IS DISTINCT FROM
                                      selected_wrapper.transaction_hash
+                                  OR lower(event.after_state ->> 'to') IS DISTINCT FROM
+                                     lower(selected_wrapper.raw_fact_ref ->>
+                                           'emitting_address')
                               )
                               AND selected_wrapper.after_state ->>
                                   'wrapped_registrar_resource_id' =
@@ -230,6 +233,9 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                                         event.event_kind <> 'TokenControlTransferred'
                                         OR event.transaction_hash IS DISTINCT FROM
                                            selected_wrapper.transaction_hash
+                                        OR lower(event.after_state ->> 'to') IS DISTINCT FROM
+                                           lower(selected_wrapper.raw_fact_ref ->>
+                                                 'emitting_address')
                                     )
                                     AND (registration.logical_name_id =
                                          selected_wrapper.logical_name_id
@@ -388,6 +394,9 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                              event.event_kind <> 'TokenControlTransferred'
                              OR event.transaction_hash IS DISTINCT FROM
                                 selected_wrapper.transaction_hash
+                             OR lower(event.after_state ->> 'to') IS DISTINCT FROM
+                                lower(selected_wrapper.raw_fact_ref ->>
+                                      'emitting_address')
                          )
                          AND selected_wrapper.after_state ->>
                              'wrapped_registrar_resource_id' = event.resource_id::text
@@ -447,6 +456,8 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                          AND wrapper_binding.transaction_hash = event.transaction_hash
                          AND wrapper_binding.after_state ->>
                              'wrapped_registrar_resource_id' = event.resource_id::text
+                         AND lower(event.after_state ->> 'to') =
+                             lower(wrapper_binding.raw_fact_ref ->> 'emitting_address')
                    )
                )
            )",

@@ -30,6 +30,7 @@ const TRANSITION_KIND: &str = "authority_transition";
 pub(super) struct RegistrarContext {
     pub(super) migration_enabled: bool,
     pub(super) graveyard_cleanup: bool,
+    pub(super) transaction_has_registry_setup: bool,
 }
 
 pub(super) fn registrar_context(
@@ -65,6 +66,7 @@ pub(super) fn registrar_context(
         graveyard_cleanup: super::protocol::migration::is_graveyard_cleanup(
             selected, raw, &graveyard,
         )?,
+        transaction_has_registry_setup: false,
     })
 }
 

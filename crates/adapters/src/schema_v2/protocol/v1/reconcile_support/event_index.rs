@@ -51,7 +51,7 @@ pub(super) struct EventFields {
     pub(super) resource_scope: bool,
     pub(super) grant: bool,
     pub(super) revocation: bool,
-    pub(super) current_registry_new_owner: bool,
+    pub(super) current_registry_setup: bool,
 }
 
 impl EventFields {
@@ -64,13 +64,14 @@ impl EventFields {
             Some(_) | None => SourceEvent::Other,
         };
         let scope = state.get("scope").cloned();
+        let family = match event.source_family.as_str() {
+            "ens_v1_registry_l1" | "basenames_base_registry" => SourceFamily::Registry,
+            "ens_v1_resolver_l1" | "basenames_base_resolver" => SourceFamily::Resolver,
+            _ => SourceFamily::Other,
+        };
         Self {
             position: event_position(event),
-            family: match event.source_family.as_str() {
-                "ens_v1_registry_l1" | "basenames_base_registry" => SourceFamily::Registry,
-                "ens_v1_resolver_l1" | "basenames_base_resolver" => SourceFamily::Resolver,
-                _ => SourceFamily::Other,
-            },
+            family,
             source_event,
             target_namehash: state
                 .get("child_node")
@@ -103,7 +104,10 @@ impl EventFields {
             revocation: state
                 .get("revocation_source")
                 .is_some_and(|source| !source.is_null()),
-            current_registry_new_owner: source_event == SourceEvent::NewOwner
+            current_registry_setup: matches!(
+                source_event,
+                SourceEvent::NewOwner | SourceEvent::Transfer
+            ) && family == SourceFamily::Registry
                 && state.get("emitter_role").and_then(Value::as_str) == Some("registry"),
         }
     }

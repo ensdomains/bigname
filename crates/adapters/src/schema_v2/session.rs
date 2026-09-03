@@ -8,6 +8,9 @@ use super::{
     state::State, state_residency::StateCacheCapacity,
 };
 
+type RegistrarRegistrySetupKey = (String, String, String, String);
+type RegistrarRegistrySetups = BTreeMap<RegistrarRegistrySetupKey, Vec<(i64, String)>>;
+
 /// Opaque retained adapter state that can be moved into the next batch for the same chain.
 #[derive(Debug, Eq, PartialEq)]
 pub struct AdapterSession {
@@ -248,6 +251,7 @@ fn interpret_loaded(
 ) -> anyhow::Result<BatchOutput> {
     let mut output = BatchOutput::default();
     let mut migration_observations = Vec::new();
+    let registrar_registry_setups = registrar_registry_setups(catalog, &raw_logs)?;
     let mut raw_logs = raw_logs.into_iter().peekable();
     let mut committed_state = state.clone();
     committed_state.begin_batch();
@@ -265,6 +269,7 @@ fn interpret_loaded(
                 &mut block_state,
                 &mut block_output,
                 &mut migration_observations,
+                &registrar_registry_setups,
             )?;
         }
         super::protocol::reconcile_batch(&mut block_output);
@@ -410,15 +415,35 @@ fn interpret_raw(
     state: &mut State,
     output: &mut BatchOutput,
     migration_observations: &mut Vec<super::protocol::MigrationObservation>,
+    registrar_registry_setups: &RegistrarRegistrySetups,
 ) -> anyhow::Result<()> {
     let Some(selected) = catalog.select(raw)? else {
         return Ok(());
     };
-    let registrar_context = if selected.source.source_family == "ens_v1_registrar_l1" {
+    let mut registrar_context = if selected.source.source_family == "ens_v1_registrar_l1" {
         super::migration::registrar_context(catalog, &selected, raw)?
     } else {
         super::migration::RegistrarContext::default()
     };
+    if let Some((namehash, owner)) =
+        super::protocol::v1::registrar_registration_namehash(&selected, raw)?
+    {
+        registrar_context.transaction_has_registry_setup = registrar_registry_setups
+            .get(&(
+                selected.source.namespace.clone(),
+                raw.block_hash.clone(),
+                raw.transaction_hash.clone(),
+                namehash,
+            ))
+            .is_some_and(|setups| {
+                setups
+                    .iter()
+                    .filter(|(log_index, _)| *log_index < raw.log_index)
+                    .max_by_key(|(log_index, _)| *log_index)
+                    .map(|(_, setup_owner)| setup_owner == &owner)
+                    .unwrap_or_else(|| setups.iter().any(|(_, setup_owner)| setup_owner == &owner))
+            });
+    }
     let registrar_migration_source = registrar_context
         .migration_enabled
         .then(|| catalog.source_for_family("ens_v2_migration_l1").cloned())
@@ -488,6 +513,35 @@ fn interpret_raw(
         migration_observations.extend(interpreted.migration_observations);
     }
     Ok(())
+}
+
+fn registrar_registry_setups(
+    catalog: &Catalog,
+    raw_logs: &[RawLogInput],
+) -> anyhow::Result<RegistrarRegistrySetups> {
+    let mut setups = BTreeMap::<RegistrarRegistrySetupKey, Vec<(i64, String)>>::new();
+    for raw in raw_logs {
+        let Some(selected) = catalog.select(raw)? else {
+            continue;
+        };
+        if selected.source.source_family != "ens_v1_registry_l1" {
+            continue;
+        }
+        if let Some((namehash, owner)) =
+            super::protocol::v1::registry_registration_setup_namehash(&selected, raw)?
+        {
+            setups
+                .entry((
+                    selected.source.namespace,
+                    raw.block_hash.clone(),
+                    raw.transaction_hash.clone(),
+                    namehash,
+                ))
+                .or_default()
+                .push((raw.log_index, owner));
+        }
+    }
+    Ok(setups)
 }
 
 #[cfg(test)]

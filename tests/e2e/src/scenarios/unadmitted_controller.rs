@@ -10,9 +10,9 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 /// An owner-added controller registers directly on the registrar
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L79 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f).
-/// The admitted registrar event retains a lease identified by its registrar
-/// resource ID even though the unadmitted controller contributes no plaintext
-/// name. Exact-name and address-name routes therefore remain empty.
+/// The admitted registrar event retains the authoritative lease even though the
+/// unadmitted controller contributes no plaintext name. Exact-name and address-name
+/// routes therefore remain empty.
 #[tokio::test]
 async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lease() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -64,8 +64,8 @@ async fn unadmitted_controller_registration_retains_resource_keyed_registrar_lea
     );
 
     // Schema-v2 retains both the registry observation and the authoritative
-    // BaseRegistrar lifecycle. Those rows have a registrar resource ID but no
-    // logical name ID.
+    // BaseRegistrar lifecycle. Those rows have `resource_id` but no
+    // `logical_name_id`.
     let derived_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT event_kind, source_family FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",

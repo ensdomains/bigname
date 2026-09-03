@@ -48,6 +48,20 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
     reconcile_support::reconcile(output);
 }
 
+pub(in crate::schema_v2) fn registrar_registration_namehash(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, String)>> {
+    registrar::base::registration_namehash(selected, raw)
+}
+
+pub(in crate::schema_v2) fn registry_registration_setup_namehash(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, String)>> {
+    registry::node::registration_setup_node(selected, raw)
+}
+
 fn authority_arm(namespace: &str) -> &'static str {
     if namespace == "basenames" {
         "basenames"

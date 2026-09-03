@@ -17,8 +17,11 @@ mod tests;
 #[path = "state_wrapper.rs"]
 mod wrapper;
 
+#[path = "state_registrar.rs"]
+mod registrar;
 #[path = "state_surfaces.rs"]
 mod surfaces;
+pub(super) use self::registrar::v1_key;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1NameState {
@@ -692,8 +695,4 @@ fn v1_registration_is_live(expiry: Option<i64>, at_unix_timestamp: i64) -> bool 
             .checked_add(ENS_GRACE_PERIOD_SECS)
             .is_none_or(|release| at_unix_timestamp <= release)
     })
-}
-
-fn v1_key(namespace: &str, namehash: &str) -> String {
-    format!("{namespace}:{}", namehash.to_ascii_lowercase())
 }

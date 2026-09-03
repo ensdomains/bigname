@@ -21,7 +21,7 @@ use crate::schema_v2::{
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const LLL_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
-mod node;
+pub(super) mod node;
 mod owner;
 mod surface;
 use node::child_node;

@@ -700,6 +700,262 @@ mod v1_registrar {
     }
 
     #[test]
+    fn register_only_preserves_retained_divergent_registry_authority_live_and_cold()
+    -> anyhow::Result<()> {
+        const REGISTRY_OWNER: &str = "0x0000000000000000000000000000000000000077";
+        let label = "register-only-divergence";
+        let labelhash = keccak256(label.as_bytes());
+        let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+        let release_block = 2 + 90 * 24 * 60 * 60 + 1;
+        let mut initial_registration = base_registration(label, 2, 0);
+        initial_registration.transaction_hash = "initial-registration".to_owned();
+        initial_registration.transaction_index = 0;
+        let mut initial_enrichment = controller_registration(label, 2, 1);
+        initial_enrichment.transaction_hash = "initial-registration".to_owned();
+        initial_enrichment.transaction_index = 0;
+        let divergence = raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner: REGISTRY_OWNER.parse()?,
+            }
+            .encode_log_data(),
+            1,
+            1,
+            2,
+            REGISTRY,
+        );
+        let manifests = vec![lifecycle_manifest(), registry_manifest()];
+        let admissions = admissions()
+            .into_iter()
+            .chain([registry_admission()])
+            .collect::<Vec<_>>();
+        let first = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: manifests.clone(),
+            discovery_rules: vec![],
+            admissions: admissions.clone(),
+            prior_events: vec![],
+            blocks: vec![
+                RawBlockInput {
+                    chain_id: CHAIN.to_owned(),
+                    block_hash: "block-1".to_owned(),
+                    block_number: 1,
+                    block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+                    canonicality_state: "canonical".to_owned(),
+                },
+                RawBlockInput {
+                    chain_id: CHAIN.to_owned(),
+                    block_hash: format!("block-{release_block}"),
+                    block_number: release_block,
+                    block_timestamp: OffsetDateTime::UNIX_EPOCH
+                        + time::Duration::seconds(release_block),
+                    canonicality_state: "canonical".to_owned(),
+                },
+            ],
+            raw_logs: vec![initial_registration, initial_enrichment, divergence],
+        })?;
+        let retained_registry = first
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.event_kind == "AuthorityTransferred"
+                    && event.after_state["source_event"] == "Transfer"
+                    && event.after_state["owner"] == REGISTRY_OWNER
+            })
+            .and_then(|event| event.resource_id)
+            .expect("retained divergent registry resource");
+        assert!(first.normalized_events.iter().any(|event| {
+            event.event_kind == "RegistrationReleased"
+                && event.after_state["source_event"] == "RegistrationReleased"
+        }));
+
+        let reregistration_block = release_block + 1;
+        let register_only = raw_at_transaction(
+            with_topic0(
+                BaseNameRegistered {
+                    id: U256::from_be_slice(labelhash.as_slice()),
+                    owner: CONTRACT.parse()?,
+                    expires: U256::from(release_block + 100),
+                }
+                .encode_log_data(),
+                keccak256(b"NameRegistered(uint256,address,uint256)"),
+            ),
+            reregistration_block,
+            0,
+            0,
+            CONTRACT,
+        );
+        let later_resolver = raw_at_transaction(
+            super::v1_registry::NewResolver {
+                node: node.parse()?,
+                resolver: CONTROLLER.parse()?,
+            }
+            .encode_log_data(),
+            reregistration_block,
+            1,
+            0,
+            REGISTRY,
+        );
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests,
+            discovery_rules: vec![],
+            admissions,
+            prior_events: first.normalized_events.iter().map(prior_event).collect(),
+            blocks: vec![],
+            raw_logs: vec![register_only, later_resolver],
+        })?;
+        let successor_registrar = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RegistrationGranted")
+            .and_then(|event| event.resource_id)
+            .expect("successor registrar resource");
+        assert_ne!(successor_registrar, retained_registry);
+        let resolver = output
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.event_kind == "ResolverChanged"
+                    && event.after_state["source_event"] == "NewResolver"
+            })
+            .expect("later registry resolver observation");
+        assert_eq!(
+            resolver.resource_id,
+            Some(retained_registry),
+            "registerOnly must leave the retained registry owner authoritative"
+        );
+        assert!(!output.normalized_events.iter().any(|event| {
+            event.after_state["source_event"] == "AuthorityEpochChanged"
+                && event.resource_id == Some(successor_registrar)
+        }));
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn mismatched_pre_anchor_registry_owner_does_not_turn_register_only_into_setup() -> anyhow::Result<()> {
+        const RETAINED_OWNER: &str = "0x0000000000000000000000000000000000000077";
+        const PRE_ANCHOR_OWNER: &str = "0x0000000000000000000000000000000000000088";
+        let label = "register-only-mismatched-setup"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]); let release_block = 2 + 90 * 24 * 60 * 60 + 1;
+        let manifests = vec![lifecycle_manifest(), registry_manifest()]; let admissions = admissions().into_iter().chain([registry_admission()]).collect::<Vec<_>>();
+        let first = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![RawBlockInput { chain_id: CHAIN.to_owned(), block_hash: "block-1".to_owned(), block_number: 1, block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1), canonicality_state: "canonical".to_owned() }, RawBlockInput { chain_id: CHAIN.to_owned(), block_hash: format!("block-{release_block}"), block_number: release_block, block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(release_block), canonicality_state: "canonical".to_owned() }], raw_logs: vec![base_registration(label, 2, 0), controller_registration(label, 2, 1), raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: RETAINED_OWNER.parse()? }.encode_log_data(), 1, 2, REGISTRY)] })?;
+        let block = release_block + 1;
+        let matching_setup = raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTRACT.parse()? }.encode_log_data(), block, 0, 0, REGISTRY);
+        let pre_anchor_divergence = raw_at_transaction(super::v1_registry::Transfer { node: node.parse()?, owner: PRE_ANCHOR_OWNER.parse()? }.encode_log_data(), block, 0, 1, REGISTRY);
+        let numeric = raw_at_transaction(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTRACT.parse()?, expires: U256::from(release_block + 100) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), block, 0, 2, CONTRACT);
+        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: vec![matching_setup, pre_anchor_divergence, numeric] })?;
+        let grant = output.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").expect("registration grant");
+        assert_ne!(grant.after_state["registry_migrated"], true, "a setup owner different from the registrar owner cannot prove that registration updated the registry");
+        let divergent = output.normalized_events.iter().find(|event| event.event_kind == "AuthorityTransferred" && event.after_state["source_event"] == "Transfer" && event.after_state["owner"] == PRE_ANCHOR_OWNER).expect("pre-anchor registry divergence");
+        assert_eq!(divergent.after_state["authority_kind"], "registry_only", "reconciliation must retain the mismatched registry authority");
+        let divergent_resource = divergent.resource_id.expect("divergent registry resource");
+        let later_resolver = raw_at_transaction(super::v1_registry::NewResolver { node: node.parse()?, resolver: CONTROLLER.parse()? }.encode_log_data(), block + 1, 0, 0, REGISTRY);
+        let restored = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: first.normalized_events.iter().chain(&output.normalized_events).map(prior_event).collect(), blocks: vec![], raw_logs: vec![later_resolver] })?;
+        let resolver = restored.normalized_events.iter().find(|event| event.event_kind == "ResolverChanged" && event.after_state["source_event"] == "NewResolver").expect("later resolver event");
+        assert_eq!(resolver.resource_id, Some(divergent_resource), "cold restore must keep the independently owned registry authority");
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_only_registration_setup_restores_like_live() -> anyhow::Result<()> {
+        let label = "transfer-only-setup";
+        let labelhash = keccak256(label.as_bytes());
+        let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+        let parent = super::common::namehash(&["eth".to_owned()]);
+        let manifests = vec![lifecycle_manifest(), registry_manifest()];
+        let admissions = admissions()
+            .into_iter()
+            .chain([registry_admission(), old_registry_admission()])
+            .collect::<Vec<_>>();
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: manifests.clone(),
+            discovery_rules: vec![],
+            admissions: admissions.clone(),
+            prior_events: vec![],
+            blocks: vec![],
+            raw_logs: vec![
+                base_registration(label, 42, 0),
+                raw_at(
+                    super::v1_registry::Transfer {
+                        node: node.parse()?,
+                        owner: CONTRACT.parse()?,
+                    }
+                    .encode_log_data(),
+                    1,
+                    1,
+                    REGISTRY,
+                ),
+            ],
+        })?;
+        let grant = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "RegistrationGranted")
+            .expect("registration grant");
+        assert_eq!(
+            grant.after_state["registration_window"],
+            "whole_transaction"
+        );
+        assert_eq!(
+            grant.after_state["registration_registry_setup"], true,
+            "Transfer-only setup must retain its own replay marker"
+        );
+        assert_ne!(
+            grant.after_state["registry_migrated"], true,
+            "Transfer alone must not mark the node as cut over from ENSRegistryOld"
+        );
+        let old_registry = raw_at(
+            super::v1_registry::NewOwner {
+                node: parent.parse()?,
+                label: labelhash,
+                owner: CONTROLLER.parse()?,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            OLD_REGISTRY,
+        );
+        let restored = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests,
+            discovery_rules: vec![],
+            admissions,
+            prior_events: output.normalized_events.iter().map(prior_event).collect(),
+            blocks: vec![],
+            raw_logs: vec![old_registry],
+        })?;
+        assert!(
+            restored
+                .normalized_events
+                .iter()
+                .any(|event| event.raw_fact_ref["emitting_address"] == OLD_REGISTRY),
+            "Transfer-only registrar setup must not suppress a later ENSRegistryOld ownership observation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn retired_registry_log_cannot_supply_registration_setup() -> anyhow::Result<()> {
+        const DIVERGED: &str = "0x0000000000000000000000000000000000000077";
+        let label = "retired-registry-setup"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]);
+        let manifests = vec![lifecycle_manifest(), registry_manifest()]; let admissions = admissions().into_iter().chain([registry_admission(), old_registry_admission()]).collect::<Vec<_>>();
+        let first = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: vec![raw_at(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 1, 0, REGISTRY), base_registration(label, 42, 1), raw_at(super::v1_registry::Transfer { node: node.parse()?, owner: DIVERGED.parse()? }.encode_log_data(), 1, 2, REGISTRY), controller_registration(label, 42, 3)] })?;
+        let retained_registry = first.normalized_events.iter().find(|event| event.event_kind == "AuthorityTransferred" && event.after_state["source_event"] == "Transfer" && event.after_state["owner"] == DIVERGED).and_then(|event| event.resource_id).expect("retained registry authority");
+        let retired_setup = raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTRACT.parse()? }.encode_log_data(), 2, 0, 0, OLD_REGISTRY);
+        let numeric = raw_at_transaction(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTRACT.parse()?, expires: U256::from(84) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 2, 0, 1, CONTRACT);
+        let later_resolver = raw_at_transaction(super::v1_registry::NewResolver { node: node.parse()?, resolver: CONTROLLER.parse()? }.encode_log_data(), 2, 1, 0, REGISTRY);
+        let output = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: vec![retired_setup, numeric, later_resolver] })?;
+        let grant = output.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").expect("registration grant");
+        assert_ne!(grant.after_state["registry_migrated"], true, "a suppressed retired-registry log cannot become replay evidence");
+        let resolver = output.normalized_events.iter().find(|event| event.event_kind == "ResolverChanged" && event.after_state["source_event"] == "NewResolver").expect("later resolver event");
+        assert_eq!(resolver.resource_id, Some(retained_registry), "a retired registry log must not move later observations to the new registrar");
+        Ok(())
+    }
+
+    #[test]
     #[rustfmt::skip]
     fn whole_transaction_reconciliation_preserves_post_registration_registry_divergence() -> anyhow::Result<()> {
         const DIVERGED: &str = "0x0000000000000000000000000000000000000077";

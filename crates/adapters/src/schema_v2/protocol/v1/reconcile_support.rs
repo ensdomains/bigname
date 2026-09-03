@@ -54,10 +54,36 @@ fn reconcile_registration(
         .get(&registration.key)
         .cloned()
         .unwrap_or_default();
-    if target_candidates
+    let current_registry_setups = target_candidates
         .iter()
-        .any(|index| events.fields[*index].current_registry_new_owner)
-    {
+        .map(|index| &events.fields[*index])
+        .filter(|fields| fields.current_registry_setup);
+    let latest_pre_anchor_setup = current_registry_setups
+        .clone()
+        .filter(|fields| {
+            fields
+                .position
+                .is_some_and(|position| position < registration.position)
+        })
+        .max_by_key(|fields| fields.position);
+    let registry_setup_proven = registration.window == RegistrationWindow::WholeTransaction
+        && latest_pre_anchor_setup
+            .map(|fields| fields.owner.as_ref() == Some(&registration.provisional_owner))
+            .unwrap_or_else(|| {
+                current_registry_setups
+                    .clone()
+                    .any(|fields| fields.owner.as_ref() == Some(&registration.provisional_owner))
+            });
+    if registry_setup_proven {
+        output.normalized_events[registration.event_index].after_state["registration_registry_setup"] =
+            serde_json::Value::Bool(true);
+    }
+    let registry_cutover_proven = registry_setup_proven
+        && current_registry_setups.clone().any(|fields| {
+            fields.source_event == SourceEvent::NewOwner
+                && fields.owner.as_ref() == Some(&registration.provisional_owner)
+        });
+    if registry_cutover_proven {
         output.normalized_events[registration.event_index].after_state["registry_migrated"] =
             serde_json::Value::Bool(true);
     }
@@ -110,7 +136,18 @@ fn reconcile_registration(
     let eligible = |fields: &EventFields| {
         fields.position.is_some_and(|position| {
             if registration.window == RegistrationWindow::WholeTransaction {
-                divergence_start.is_none_or(|start| position < start)
+                let pre_anchor_setup_is_proven =
+                    position >= registration.position || registry_setup_proven;
+                let pre_anchor_owner_matches = !(fields.family == SourceFamily::Registry
+                    && matches!(
+                        fields.source_event,
+                        SourceEvent::NewOwner | SourceEvent::Transfer
+                    )
+                    && position < registration.position)
+                    || fields.owner.as_ref() == Some(&registration.provisional_owner);
+                pre_anchor_setup_is_proven
+                    && pre_anchor_owner_matches
+                    && divergence_start.is_none_or(|start| position < start)
             } else {
                 position.2 < registration.log_index
             }

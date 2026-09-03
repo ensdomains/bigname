@@ -436,7 +436,6 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                 return;
             };
             let registration = source_event == Some("NameRegistered");
-            let current = state.v1_name(&event.namespace, namehash);
             let retained_authority_owner = event
                 .after_state
                 .get("authority_owner")
@@ -457,11 +456,15 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
             let registrar_owner = retained_authority_owner
                 .or(registration_registry_owner)
                 .or(event_registrant);
-            let make_current = current.is_none_or(|current| {
-                let same_family = current.authority_source_family == event.source_family;
-                current.authority_source_family != "ens_v1_wrapper_l1"
-                    && (registration || same_family)
-            });
+            let make_current = state.v1_registrar_event_makes_current(
+                &event.namespace,
+                namehash,
+                &event.source_family,
+                registrar_owner.as_deref(),
+                registration,
+                event.after_state["registration_window"] == "whole_transaction"
+                    && event.after_state["registration_registry_setup"] == true,
+            );
             state.observe_v1_registrar(
                 &event.namespace,
                 namehash,

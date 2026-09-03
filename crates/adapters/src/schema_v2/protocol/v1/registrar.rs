@@ -18,7 +18,7 @@ use crate::schema_v2::{
 };
 mod identity;
 use identity::{new_registrar_identity, registrar_namehash};
-mod base;
+pub(super) mod base;
 mod decode;
 mod enrichment;
 mod wrapper_renewal;
@@ -55,7 +55,7 @@ pub(super) fn interpret(
             let mut ordinary = if context.graveyard_cleanup || !lifecycle_enabled {
                 Interpreted::new()
             } else {
-                base::interpret(selected, raw, state)?
+                base::interpret(selected, raw, state, context.transaction_has_registry_setup)?
             };
             ordinary.append(&mut correlated);
             return Ok(ordinary);

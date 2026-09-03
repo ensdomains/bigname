@@ -151,7 +151,7 @@
           "0xd4735d920b0f87494915f556dd9b54c8f309026070caea5c737245152564d266",
           "0x4e170399560e4ac2aa15f173565ddd572f7dc55acc67304d8dfcd81f97c45e02"
         ],
-        "data": "0x0000000000000000000000001111111111111111111111111111111111111111"
+        "data": "0x0000000000000000000000002222222222222222222222222222222222222222"
       },
       {
         "chain": "ethereum-mainnet",
@@ -184,7 +184,7 @@
         "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000ef0396e8215f0d00000000000000000000000000000000000000000000000000000000713fb30000000000000000000000000000000000000000000000000000000000000000037075790000000000000000000000000000000000000000000000000000000000"
       }
     ],
-    "synthetic_logs": "The three logs in transaction 0xd3d3... are hand-built: a registry Transfer, the authoritative numeric BaseRegistrar NameRegistered, and the legacy-controller plaintext NameRegistered. The reduced transaction omits the registrar ERC721 Transfer and registry NewOwner emitted by a full registration flow (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f). Every other log, block hash and timestamp is production."
+    "synthetic_logs": "The three logs in transaction 0xd3d3... are hand-built: a registry Transfer to the provisional registrar owner, the authoritative numeric BaseRegistrar NameRegistered, and the legacy-controller plaintext NameRegistered. The reduced transaction omits the registrar ERC721 Transfer and registry NewOwner emitted by a full registration flow (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L155 @ ens_v1@91c966f). Every other log, block hash and timestamp is production."
   },
   "batches": [
     {

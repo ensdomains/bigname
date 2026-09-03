@@ -17,9 +17,12 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    transaction_has_registry_setup: bool,
 ) -> anyhow::Result<Interpreted> {
     match selected.event.signature.as_str() {
-        "NameRegistered(uint256,address,uint256)" => name_registered(selected, raw, state),
+        "NameRegistered(uint256,address,uint256)" => {
+            name_registered(selected, raw, state, transaction_has_registry_setup)
+        }
         "NameRenewed(uint256,uint256)" => name_renewed(selected, raw, state),
         signature => anyhow::bail!("unsupported BaseRegistrar lifecycle event {signature}"),
     }
@@ -28,6 +31,7 @@ fn name_registered(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    transaction_has_registry_setup: bool,
 ) -> anyhow::Result<Interpreted> {
     super::super::super::ensure_declared(selected, &["RegistrationGranted"])?;
     let event = decode_event_log::<NameRegistered>(
@@ -46,6 +50,14 @@ fn name_registered(
     let expiry = saturating_u256_i64(event.expires);
     let owner = address_hex(event.owner);
     let surface_known = state.v1_active_surface_materialized(&selected.source.namespace, &namehash);
+    let make_current = state.v1_registrar_event_makes_current(
+        &selected.source.namespace,
+        &namehash,
+        &selected.source.source_family,
+        Some(&owner),
+        true,
+        transaction_has_registry_setup,
+    );
     state.observe_v1_registrar(
         &selected.source.namespace,
         &namehash,
@@ -60,7 +72,7 @@ fn name_registered(
         Some(owner.clone()),
         authority_key.clone(),
         false,
-        true,
+        make_current,
     );
     let after = json!({
         "source_event":"NameRegistered", "namehash":namehash, "labelhash":labelhash_hex,
@@ -116,6 +128,24 @@ fn name_registered(
             .for_each(|event| event.logical_name_id = None);
     }
     Ok(output)
+}
+
+pub(in crate::schema_v2) fn registration_namehash(
+    selected: &Selected,
+    raw: &RawLogInput,
+) -> anyhow::Result<Option<(String, String)>> {
+    if selected.event.signature != "NameRegistered(uint256,address,uint256)" {
+        return Ok(None);
+    }
+    let event = decode_event_log::<NameRegistered>(
+        &raw.topics,
+        &raw.data,
+        "BaseRegistrar NameRegistered log is malformed",
+    )?;
+    Ok(Some((
+        registrar_namehash(selected, B256::from(event.id.to_be_bytes::<32>())),
+        address_hex(event.owner),
+    )))
 }
 fn name_renewed(
     selected: &Selected,

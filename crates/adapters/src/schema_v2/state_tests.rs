@@ -128,7 +128,7 @@ fn release_returns_the_promoted_retained_registry_authority() {
 
     assert!(
         next.surface_known,
-        "the release output must carry the surface promotion performed during activation"
+        "the release output must carry the surface-known state established during activation"
     );
 }
 
