@@ -407,6 +407,28 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
 
     assert_eq!(rows(&incremental).await?, rows(&fresh).await?);
     assert!(!visible(&incremental).await?);
+
+    let (_redo_db, redo) = database("issue503_wrapper_retraction_incremental").await?;
+    seed_identity(&redo, &["ens_v1"]).await?;
+    seed_v1_relation(&redo, OWNER, 10).await?;
+    seed_wrapper(&redo, 65_536, 2_000_000_000).await?;
+    seed_migration(&redo, "locked_wrapped", 10, "parent-migration").await?;
+    run(&redo, 10, None, RunMode::Normal).await?;
+    assert!(visible(&redo).await?);
+    sqlx::query(
+        "DELETE FROM normalized_events WHERE event_identity IN ('wrapper-fuses', 'wrapper-expiry')",
+    )
+    .execute(&redo)
+    .await?;
+    run(&redo, 11, Some(10), RunMode::Redo).await?;
+
+    let (_redo_fresh_db, redo_fresh) = database("issue503_wrapper_retraction_fresh").await?;
+    seed_identity(&redo_fresh, &["ens_v1"]).await?;
+    seed_v1_relation(&redo_fresh, OWNER, 10).await?;
+    seed_migration(&redo_fresh, "locked_wrapped", 10, "parent-migration").await?;
+    run(&redo_fresh, 11, None, RunMode::Normal).await?;
+    assert_eq!(rows(&redo).await?, rows(&redo_fresh).await?);
+    assert!(!visible(&redo).await?);
     Ok(())
 }
 visibility_test!(

@@ -310,6 +310,12 @@ is `registrant`, `token_holder`, and `effective_controller`. Surface is the
 default unit; resource deduplication is explicit.
 
 `children_current` stores direct and classified child relations. For registry
+events from ENSv1, Project first filters the relation by the parent's
+ENSv1→ENSv2 migration path: unwrapped and unlocked-wrapped parents retain no
+ENSv1 children, while a locked-wrapped parent retains only a
+[migratable child](glossary.md#migratable-child). Child authority selection then
+chooses among the surviving arms; cross-era recency never chooses the arm.
+For registry
 events that expose only a labelhash, Project composes the child name from a
 verified label preimage when one exists and its normalization verdict is true,
 and leaves the name columns null when none does — the labelhash and child node
