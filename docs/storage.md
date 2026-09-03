@@ -785,6 +785,13 @@ by `after_state.state_derived=true`. The earlier pre-surface
 `ResolverChanged` remains null-linked and immutable. This behavior requires no
 `normalized_events` check change or schema-migration.
 
+Only active manifests participate in raw-log selection and watch authority.
+Interpret separately retains metadata for stored deprecated manifest versions
+so a state-derived event can preserve the manifest identifier and source family
+of the state it surfaces. A retained manifest identifier absent from all stored
+versions is a data-integrity error in both live interpretation and restoration;
+it is never attributed to the currently active triggering source.
+
 ### Interpret process memory
 
 `normalized_events` is the working store for each [interpreter state

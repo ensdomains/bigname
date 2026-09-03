@@ -112,6 +112,8 @@ pub(super) struct State {
     v1_registry_read_anchors: OrdMap<String, V1RegistryReadAnchor>,
     v1_resolvers: OrdMap<String, String>,
     v1_resolver_links: OrdMap<String, V1ResolverLink>,
+    known_source_manifest_ids: Option<OrdSet<i64>>,
+    restore_error: Option<String>,
     v1_migrated_nodes: OrdSet<String>,
     v1_materialized_surfaces: OrdSet<String>,
     known_surfaces: OrdSet<String>,
@@ -482,48 +484,6 @@ impl State {
         let before = current.clone();
         current.owner = Some(owner);
         Some((before, current.clone()))
-    }
-
-    pub(super) fn set_v1_resolver_link(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-        resolver: Option<String>,
-        resource_id: Option<Uuid>,
-        logical_name_id: Option<String>,
-        source_role: Option<String>,
-    ) -> Option<V1ResolverLink> {
-        let key = v1_key(namespace, namehash);
-        let previous = self.v1_resolver_links.remove(&key);
-        self.v1_resolvers.remove(&key);
-        if let Some(resolver_address) = resolver {
-            self.v1_resolvers
-                .insert(key.clone(), resolver_address.clone());
-            self.v1_resolver_links.insert(
-                key,
-                V1ResolverLink {
-                    resolver_address,
-                    resource_id,
-                    logical_name_id,
-                    source_role,
-                },
-            );
-        }
-        previous
-    }
-
-    pub(super) fn v1_resolver_link(
-        &self,
-        namespace: &str,
-        namehash: &str,
-    ) -> Option<V1ResolverLink> {
-        self.v1_resolver_links
-            .get(&v1_key(namespace, namehash))
-            .cloned()
-    }
-
-    pub(super) fn v1_resolver(&self, namespace: &str, namehash: &str) -> Option<String> {
-        self.v1_resolvers.get(&v1_key(namespace, namehash)).cloned()
     }
 
     pub(super) fn reactivate_v1_registrar(

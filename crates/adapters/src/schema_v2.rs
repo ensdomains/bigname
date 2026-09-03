@@ -25,8 +25,9 @@ mod state_restore;
 pub use model::*;
 pub use session::{
     AdapterSession, AdapterSessionRestore, InterpreterStateRequest, InterpreterStateValue,
-    PreparedAdapterBatch, begin_schema_v2_adapter_restore, interpret_schema_v2_batch,
-    prepare_schema_v2_batch_incremental,
+    PreparedAdapterBatch, begin_schema_v2_adapter_restore,
+    begin_schema_v2_adapter_restore_with_provenance, interpret_schema_v2_batch,
+    prepare_schema_v2_batch_incremental, prepare_schema_v2_batch_incremental_with_provenance,
 };
 pub use state_residency::StateCacheCapacity;
 

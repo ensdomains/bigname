@@ -199,6 +199,35 @@ fn run_live_and_restored(owner: &str, clear: bool) -> anyhow::Result<(BatchOutpu
     Ok((live, restored))
 }
 
+fn prepare_with_provenance(
+    mut batch: BatchInput,
+    provenance: Vec<ManifestInput>,
+    session: Option<AdapterSession>,
+) -> anyhow::Result<(BatchOutput, AdapterSession)> {
+    if batch.blocks.is_empty() {
+        let mut blocks = std::collections::BTreeMap::new();
+        for raw in &batch.raw_logs {
+            blocks
+                .entry((raw.block_number, raw.block_hash.clone()))
+                .or_insert_with(|| RawBlockInput {
+                    chain_id: raw.chain_id.clone(),
+                    block_hash: raw.block_hash.clone(),
+                    block_number: raw.block_number,
+                    block_timestamp: raw.block_timestamp,
+                    canonicality_state: raw.canonicality_state.clone(),
+                });
+        }
+        batch.blocks = blocks.into_values().collect();
+    }
+    super::super::prepare_schema_v2_batch_incremental_with_provenance(
+        batch,
+        provenance,
+        session,
+        StateCacheCapacity::Unlimited,
+    )?
+    .finish(Vec::new())
+}
+
 fn state_derived_pointer(output: &BatchOutput) -> Option<&NormalizedEvent> {
     output.normalized_events.iter().find(|event| {
         event.event_kind == "ResolverChanged"
@@ -554,4 +583,137 @@ fn pre_surface_registry_resolver_surface_promotion_restores_exactly() -> anyhow:
 #[test]
 fn pre_surface_ownerless_resolver_surface_promotion_restores_exactly() -> anyhow::Result<()> {
     assert_restore(REGISTRY)
+}
+
+#[test]
+fn deprecated_registry_manifest_remains_available_for_materialization_provenance()
+-> anyhow::Result<()> {
+    let (provenance, admissions, node) = fixture();
+    let active = vec![provenance[1].clone()];
+    let registrar_admissions = vec![admissions[2].clone()];
+    let (prefix_output, session) = interpret_test_batch_incremental(
+        input(
+            provenance.clone(),
+            admissions,
+            Vec::new(),
+            prefix(OWNER, node, false)?,
+        ),
+        None,
+    )?;
+    let suffix = renewal(3);
+    let (live, _) = prepare_with_provenance(
+        input(
+            active.clone(),
+            registrar_admissions.clone(),
+            Vec::new(),
+            vec![suffix.clone()],
+        ),
+        provenance.clone(),
+        Some(session),
+    )?;
+    let prior = prefix_output
+        .normalized_events
+        .iter()
+        .map(prior_event)
+        .collect();
+    let (restored, _) = prepare_with_provenance(
+        input(active, registrar_admissions, prior, vec![suffix]),
+        provenance,
+        None,
+    )?;
+    let pointer = state_derived_pointer(&live).expect("deprecated-manifest pointer");
+    assert_eq!(pointer.source_manifest_id, Some(REGISTRY_MANIFEST_ID));
+    assert_eq!(pointer.source_family, "ens_v1_registry_l1");
+    assert_eq!(live, restored);
+    Ok(())
+}
+
+#[test]
+fn unknown_registry_manifest_fails_live_and_cold_restore_with_context() -> anyhow::Result<()> {
+    let (manifests, admissions, node) = fixture();
+    let active = vec![manifests[1].clone()];
+    let registrar_admissions = vec![admissions[2].clone()];
+    let (prefix_output, session) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            prefix(OWNER, node, false)?,
+        ),
+        None,
+    )?;
+    let live_error = prepare_with_provenance(
+        input(
+            active.clone(),
+            registrar_admissions.clone(),
+            Vec::new(),
+            vec![renewal(3)],
+        ),
+        active.clone(),
+        Some(session),
+    )
+    .expect_err("live materialization must reject unknown provenance");
+
+    let mut history = prefix(OWNER, node, false)?;
+    history.push(renewal(3));
+    let complete = interpret_test_batch(input(manifests, admissions, Vec::new(), history))?;
+    let mut restore = super::super::begin_schema_v2_adapter_restore_with_provenance(
+        CHAIN.to_owned(),
+        active.clone(),
+        active,
+        Vec::new(),
+        registrar_admissions,
+        StateCacheCapacity::Unlimited,
+    )?;
+    let restore_error = restore
+        .apply_prior_events(complete.normalized_events.iter().map(prior_event).collect())
+        .expect_err("cold restore must reject unknown provenance");
+    let expected = format!(
+        "state-derived source manifest is missing for namespace ens, namehash {node:#x}, manifest {REGISTRY_MANIFEST_ID}"
+    );
+    assert!(
+        format!("{live_error:#}").contains(&expected),
+        "{live_error:#}"
+    );
+    assert!(
+        restore_error.to_string().contains(&expected),
+        "{restore_error:#}"
+    );
+    assert!(prefix_output.normalized_events.iter().any(|event| {
+        event.event_kind == "ResolverChanged"
+            && event.source_manifest_id == Some(REGISTRY_MANIFEST_ID)
+    }));
+    Ok(())
+}
+
+#[test]
+fn surfaced_transfer_fallback_without_manifest_never_requires_materialization_provenance()
+-> anyhow::Result<()> {
+    let mut state = super::super::state::State::new(Vec::new(), Vec::new());
+    let namehash = format!("{:#x}", B256::ZERO);
+    let authority = super::super::state::V1NameState {
+        logical_name_id: format!("ens:{namehash}"),
+        surface_known: true,
+        resource_id: Uuid::from_u128(613),
+        token_lineage_id: None,
+        authority_source_family: "ens_v1_registry_l1".to_owned(),
+        source_manifest_id: None,
+        labelhash: Some(format!("{:#x}", B256::ZERO)),
+        expiry: None,
+        owner: Some(OWNER.to_owned()),
+        authority_key: Some("transfer-fallback".to_owned()),
+        wrapper_fallback: false,
+    };
+    state.remember_v1_registry_authority("ens", &namehash, authority.clone());
+    state.activate_v1_authority("ens", &namehash, Some(authority));
+    assert_eq!(
+        state.materialize_v1_active_surface(
+            "ens",
+            &namehash,
+            &format!("ens:{namehash}"),
+            &format!("{:#x}", B256::ZERO),
+        )?,
+        super::super::state::V1SurfaceMaterialization::AlreadyMaterialized
+    );
+    Ok(())
 }

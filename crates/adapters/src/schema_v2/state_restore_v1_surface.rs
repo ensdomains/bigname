@@ -32,12 +32,14 @@ pub(super) fn restore_preimage(state: &mut State, event: &PriorEventInput) {
             .get("labelhash")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        let _ = state.materialize_v1_active_surface(
+        if let Err(error) = state.materialize_v1_active_surface(
             &event.namespace,
             namehash,
             logical_name_id,
             labelhash,
-        );
+        ) {
+            state.record_restore_error(error);
+        }
     }
 }
 
@@ -133,12 +135,14 @@ pub(super) fn restore_registrar(
                 );
             }
             if surface_known && event.source_family.starts_with("ens_v1_") {
-                let _ = state.materialize_v1_active_surface(
+                if let Err(error) = state.materialize_v1_active_surface(
                     &event.namespace,
                     namehash,
                     logical_name_id,
                     &labelhash,
-                );
+                ) {
+                    state.record_restore_error(error);
+                }
             }
             true
         }
@@ -212,12 +216,14 @@ pub(super) fn restore_registrar(
                 );
             }
             if surface_known && event.source_family.starts_with("ens_v1_") {
-                let _ = state.materialize_v1_active_surface(
+                if let Err(error) = state.materialize_v1_active_surface(
                     &event.namespace,
                     namehash,
                     logical_name_id,
                     &labelhash,
-                );
+                ) {
+                    state.record_restore_error(error);
+                }
             }
             true
         }

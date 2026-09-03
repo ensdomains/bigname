@@ -22,13 +22,13 @@ pub(super) fn materialize(
             .and_then(|event| event.after_state.get("node"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
-        let source = catalog.source(batch.source_manifest_id).with_context(|| {
+        let source = catalog.provenance(batch.source_manifest_id).with_context(|| {
             format!(
                 "state-derived source manifest is missing for namespace {namespace}, namehash {node}, manifest {}",
                 batch.source_manifest_id
             )
         })?;
-        super::normalized::materialize_for_source(source, raw, batch.events, state, output);
+        super::normalized::materialize_for_provenance(source, raw, batch.events, state, output);
     }
     Ok(())
 }

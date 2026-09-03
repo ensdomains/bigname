@@ -1,4 +1,6 @@
-use super::{State, V1NameState, V1RegistryReadAnchor, v1_key};
+use uuid::Uuid;
+
+use super::{State, V1NameState, V1RegistryReadAnchor, V1ResolverLink, v1_key};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::schema_v2) enum V1SurfaceMaterialization {
@@ -17,6 +19,90 @@ pub(in crate::schema_v2) enum V1SurfaceMaterialization {
 }
 
 impl State {
+    pub(in crate::schema_v2) fn set_v1_resolver_link(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        resolver: Option<String>,
+        resource_id: Option<Uuid>,
+        logical_name_id: Option<String>,
+        source_role: Option<String>,
+    ) -> Option<V1ResolverLink> {
+        let key = v1_key(namespace, namehash);
+        let previous = self.v1_resolver_links.remove(&key);
+        self.v1_resolvers.remove(&key);
+        if let Some(resolver_address) = resolver {
+            self.v1_resolvers
+                .insert(key.clone(), resolver_address.clone());
+            self.v1_resolver_links.insert(
+                key,
+                V1ResolverLink {
+                    resolver_address,
+                    resource_id,
+                    logical_name_id,
+                    source_role,
+                },
+            );
+        }
+        previous
+    }
+
+    pub(in crate::schema_v2) fn v1_resolver_link(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<V1ResolverLink> {
+        self.v1_resolver_links
+            .get(&v1_key(namespace, namehash))
+            .cloned()
+    }
+
+    pub(in crate::schema_v2) fn v1_resolver(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<String> {
+        self.v1_resolvers.get(&v1_key(namespace, namehash)).cloned()
+    }
+
+    pub(in crate::schema_v2) fn replace_known_source_manifest_ids(
+        &mut self,
+        manifest_ids: imbl::OrdSet<i64>,
+    ) {
+        self.known_source_manifest_ids = Some(manifest_ids);
+    }
+
+    pub(in crate::schema_v2) fn ensure_restore_succeeded(&self) -> anyhow::Result<()> {
+        if let Some(error) = self.restore_error.as_deref() {
+            anyhow::bail!("{error}");
+        }
+        Ok(())
+    }
+
+    pub(in crate::schema_v2) fn record_restore_error(&mut self, error: anyhow::Error) {
+        if self.restore_error.is_none() {
+            self.restore_error = Some(format!("{error:#}"));
+        }
+    }
+
+    fn require_source_manifest(
+        &self,
+        namespace: &str,
+        namehash: &str,
+        manifest_id: i64,
+    ) -> anyhow::Result<()> {
+        if self
+            .known_source_manifest_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.contains(&manifest_id))
+        {
+            anyhow::bail!(
+                "state-derived source manifest is missing for namespace {namespace}, namehash {namehash}, manifest {manifest_id}"
+            );
+        }
+        Ok(())
+    }
+
     pub(in crate::schema_v2) fn mark_v1_migrated(&mut self, namespace: &str, namehash: &str) {
         let key = v1_key(namespace, namehash);
         self.v1_migrated_nodes.insert(key.clone());
@@ -90,6 +176,7 @@ impl State {
                     "registry authority for {namespace}:{namehash} has no source manifest"
                 )
             })?;
+            self.require_source_manifest(namespace, namehash, source_manifest_id)?;
             let mut promoted = previous.clone();
             promoted.logical_name_id = logical_name_id.to_owned();
             promoted.labelhash = Some(labelhash.to_owned());
@@ -131,6 +218,7 @@ impl State {
                     "registry read anchor for {namespace}:{namehash} has no source manifest"
                 )
             })?;
+            self.require_source_manifest(namespace, namehash, source_manifest_id)?;
             anchor.logical_name_id = logical_name_id.to_owned();
             anchor.surface_known = true;
             self.v1_registry_read_anchors
