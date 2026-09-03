@@ -445,7 +445,7 @@
           "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:2:ResolverChanged:0",
           "event_kind": "ResolverChanged",
           "log_index": 2,
-          "logical_name_id": null,
+          "logical_name_id": "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
@@ -482,7 +482,7 @@
           "event_identity": "ens_v1_unwrapped_authority:2:ethereum-mainnet:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:2:ResolverChanged:registry-read:0x00000000000000000000000000000000000010cc:1",
           "event_kind": "ResolverChanged",
           "log_index": 2,
-          "logical_name_id": null,
+          "logical_name_id": "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
           "manifest_version": 1,
           "namespace": "ens",
           "raw_fact_ref": {
@@ -497,7 +497,7 @@
             "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
             "transaction_index": 0
           },
-          "resource_id": "9a09a032-5ad4-59c1-b6c7-d94b942c2eb1",
+          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
           "source_family": "ens_v1_registry_l1",
           "source_manifest_id": 2,
           "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",

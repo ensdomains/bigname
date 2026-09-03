@@ -159,6 +159,11 @@ fn reconcile_registration(
         .filter(|index| {
             events.active[*index]
                 && events.fields[*index].family == SourceFamily::Registry
+                && (registration.window != RegistrationWindow::WholeTransaction
+                    || matches!(
+                        events.fields[*index].source_event,
+                        SourceEvent::NewOwner | SourceEvent::Transfer
+                    ))
                 && eligible(&events.fields[*index])
         })
         .collect::<Vec<_>>();
@@ -287,8 +292,18 @@ fn reconcile_registration(
             continue;
         }
         let fields = &events.fields[index];
+        let registry_ownership = matches!(
+            fields.source_event,
+            SourceEvent::NewOwner | SourceEvent::Transfer
+        );
+        let follows_registry_setup = fields.position.is_some_and(|position| {
+            first_ownership_log_index.is_some_and(|first_log_index| position.2 > first_log_index)
+        });
         let targets_registry = fields.family == SourceFamily::Registry
             && eligible(fields)
+            && (registration.window != RegistrationWindow::WholeTransaction
+                || registry_ownership
+                || (registry_setup_proven && follows_registry_setup))
             && target_candidates.binary_search(&index).is_ok();
         let targets_resolver = fields.family == SourceFamily::Resolver
             && fields

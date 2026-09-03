@@ -792,8 +792,8 @@ mod v1_registrar {
             }
             .encode_log_data(),
             reregistration_block,
-            1,
             0,
+            1,
             REGISTRY,
         );
         let output = interpret_test_batch(BatchInput {

@@ -116,8 +116,9 @@ step-3-gate vocabulary needed by the route schemas:
 A controller-free ENSv1 BaseRegistrar registration is initially addressable by its
 `registration_id`, not by name: its lifecycle history is keyed to that registration while no
 plaintext name exists. After plaintext enrichment binds the name to the same registration, name
-detail and name-scoped history expose the registrar-derived owner and expiry; the earlier events
-remain registration-scoped and are not rewritten.
+detail exposes the registrar-derived owner and expiry. History with `scope=registration` or
+`scope=both` exposes the linked lifecycle event rows; `scope=name` excludes the earlier rows that
+have no `logical_name_id`. Those earlier events remain registration-scoped and are not rewritten.
 
 For a registration that becomes wrapped before it is name-addressable, the later wrapper
 [surface binding](glossary.md#surface-binding) makes the registrar-derived registrant and expiry
