@@ -20,6 +20,14 @@ impl AdapterSession {
     pub(super) fn has_v1_registry_authority(&self, namespace: &str, namehash: &str) -> bool {
         self.state.has_v1_registry_authority(namespace, namehash)
     }
+
+    pub(super) fn v1_name(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> Option<super::state::V1NameState> {
+        self.state.v1_name(namespace, namehash)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

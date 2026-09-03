@@ -351,14 +351,19 @@ fn name_event(
     let ens_v1_registrar = selected.source.source_family.starts_with("ens_v1_");
     let explicit_ownerless_registry = ens_v1_registrar
         && state.v1_explicit_ownerless_registry_evidence(&selected.source.namespace, &raw_namehash);
-    let make_current = !explicit_ownerless_registry
-        && state
-            .v1_name(&selected.source.namespace, &raw_namehash)
-            .is_none_or(|current| {
+    let refresh_current_registrar = !registration
+        && existing.is_some()
+        && previous_active.as_ref().is_some_and(|current| {
+            current.resource_id == resource_id
+                && current.authority_source_family == selected.source.source_family
+        });
+    let make_current = refresh_current_registrar
+        || (!explicit_ownerless_registry
+            && previous_active.as_ref().is_none_or(|current| {
                 let same_family = current.authority_source_family == selected.source.source_family;
                 current.authority_source_family != "ens_v1_wrapper_l1"
                     && (registration || same_family)
-            });
+            }));
     let labelhash = format!("{explicit_labelhash:#x}");
     state.observe_v1_registrar(
         &selected.source.namespace,
@@ -419,6 +424,9 @@ fn name_event(
         Value::String(format!("{explicit_labelhash:#x}")),
     );
     after_object.insert("token_lineage_id".to_owned(), json!(token_lineage_id));
+    if explicit_ownerless_registry && refresh_current_registrar {
+        after_object.insert("authority_current".to_owned(), Value::Bool(true));
+    }
     if let Some(owner) = owner.as_ref() {
         after_object
             .entry("registrant")

@@ -41,7 +41,12 @@ fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
         "NameRenewed",
         "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
         &["registrar"],
-        &["RegistrationGranted", "PreimageObserved"],
+        &[
+            "RegistrationGranted",
+            "RegistrationRenewed",
+            "ExpiryChanged",
+            "PreimageObserved",
+        ],
     );
     let mut registry = admission(REGISTRY_MANIFEST_ID, "registry");
     registry.address = REGISTRY.to_owned();
@@ -97,11 +102,15 @@ fn prefix(owner: &str, node: B256, clear: bool) -> anyhow::Result<Vec<RawLogInpu
 }
 
 fn renewal(block: i64) -> RawLogInput {
+    renewal_with_expiry(block, 9_999)
+}
+
+fn renewal_with_expiry(block: i64, expiry: u64) -> RawLogInput {
     raw_at(
         NameRenewed {
             name: "pointer".to_owned(),
             label: keccak256(b"pointer"),
-            expires: U256::from(9_999_u64),
+            expires: U256::from(expiry),
         }
         .encode_log_data(),
         block,
@@ -715,5 +724,72 @@ fn surfaced_transfer_fallback_without_manifest_never_requires_materialization_pr
         )?,
         super::super::state::V1SurfaceMaterialization::AlreadyMaterialized
     );
+    Ok(())
+}
+
+#[test]
+fn ownerless_renewal_refreshes_already_current_registrar_state() -> anyhow::Result<()> {
+    let (manifests, admissions, node) = fixture();
+    let (initial, session) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            vec![renewal_with_expiry(1, 100)],
+        ),
+        None,
+    )?;
+    let (ownerless, session) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            vec![current_transfer(node, ZERO_ADDRESS, 2)?],
+        ),
+        Some(session),
+    )?;
+    let (output, session) = interpret_test_batch_incremental(
+        input(
+            manifests,
+            admissions,
+            Vec::new(),
+            vec![renewal_with_expiry(3, 9_999)],
+        ),
+        Some(session),
+    )?;
+    let current = session
+        .v1_name("ens", &format!("{node:#x}"))
+        .expect("current registrar");
+    assert_eq!(current.expiry, Some(9_999));
+    assert_eq!(current.authority_source_family, "ens_v1_registrar_l1");
+    assert!(output.normalized_events.iter().all(|event| {
+        !(event.block_number == Some(3)
+            && matches!(
+                event.event_kind.as_str(),
+                "SurfaceBound" | "AuthorityEpochChanged" | "PermissionChanged"
+            ))
+    }));
+    let complete = initial
+        .normalized_events
+        .iter()
+        .chain(&ownerless.normalized_events)
+        .chain(&output.normalized_events)
+        .cloned()
+        .collect::<Vec<_>>();
+    for prior in [
+        complete.iter().map(prior_event).collect(),
+        compact_prior(&complete),
+    ] {
+        let (_, restored) = interpret_test_batch_incremental(
+            input(fixture().0, fixture().1, prior, Vec::new()),
+            None,
+        )?;
+        assert_eq!(
+            restored
+                .v1_name("ens", &format!("{node:#x}"))
+                .and_then(|current| current.expiry),
+            Some(9_999)
+        );
+    }
     Ok(())
 }

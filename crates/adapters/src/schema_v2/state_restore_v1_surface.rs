@@ -158,10 +158,22 @@ pub(super) fn restore_registrar(
             };
             let ens_v1_ownerless = event.source_family.starts_with("ens_v1_")
                 && state.v1_explicit_ownerless_registry_evidence(&event.namespace, namehash);
-            let make_current = !ens_v1_ownerless
-                && state
-                    .v1_name(&event.namespace, namehash)
-                    .is_none_or(|current| current.authority_source_family == event.source_family);
+            let current = state.v1_name(&event.namespace, namehash);
+            let refresh_current_registrar = current.as_ref().is_some_and(|current| {
+                current.resource_id == resource_id
+                    && current.authority_source_family == event.source_family
+            });
+            let retained_current_registrar = event
+                .after_state
+                .get("authority_current")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let make_current = retained_current_registrar
+                || refresh_current_registrar
+                || (!ens_v1_ownerless
+                    && current.is_none_or(|current| {
+                        current.authority_source_family == event.source_family
+                    }));
             let retained = state.v1_registrar(&event.namespace, namehash);
             let surface_known = event
                 .after_state
