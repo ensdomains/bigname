@@ -410,8 +410,10 @@ effective powers. Project never fans this account mapping out into per-name
 rows. The permission resource summary carries the latest
 [registry-owner binding](glossary.md#registry-owner-binding), ranked from
 admitted ENSv1 and Basenames registry-family owner observations independently
-of the headline authority winner. A latest zero owner or `SurfaceUnbound`
-transition clears that binding.
+of the headline authority winner. A latest zero owner or an admitted registry- or
+registrar-family `SurfaceUnbound` transition clears that binding. A registrar-family
+`SurfaceBound` carries the remembered registry owner and emitter-derived registry contract, so the
+new current authority receives the binding without attribution to the registrar emitter; wrapper-family authority transitions remain outside this rule.
 
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)

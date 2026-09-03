@@ -176,9 +176,9 @@ The registry-operator projection release adds the ordered schema-migrations
 `20260902160100_registry_operator_account_permissions_validate.sql`, and
 `20260902160200_registry_operator_account_permissions_swap.sql`. Apply all
 three in step 4 before deploying the new binary. Before starting Project,
-confirm that the account-state table, both account lookup indexes, the four
-registry-binding summary columns, and the validated final binding constraint
-exist with the query below.
+confirm that the [account-permission state](../glossary.md#account-permission-state) table,
+both account lookup indexes, the four [registry-owner binding](../glossary.md#registry-owner-binding)
+summary columns, and the validated final binding constraint exist with the query below.
 
 ```sql
 SELECT
