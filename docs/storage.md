@@ -795,7 +795,8 @@ it is never attributed to the currently active triggering source.
 A current-registry `NewOwner` or `Transfer` that ends old-registry fallback
 resolution persists that handoff at the ownership log's raw position. When an
 old-registry pointer was already linked, the current registry source emits an
-additive linked `ResolverChanged` with the zero address and
+additive linked `ResolverChanged` rows with the zero address for every retained
+registry, registrar, or wrapper resource that could carry the old pointer, and
 `after_state.registry_fallback_handoff=true`; the earlier selection and surface
 materialization rows remain immutable. A same-owner `Transfer` still leaves a
 normalized handoff row when it would otherwise produce no state delta, so

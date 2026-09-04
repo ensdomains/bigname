@@ -116,6 +116,14 @@ mod legacy_registrar_controller_events {
     }
 }
 
+mod base_registrar_events {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    }
+}
+
 mod v2_registry_events {
     use alloy_sol_types::sol;
 
@@ -1629,11 +1637,11 @@ async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_
         scratch.pool(),
         "ethereum-mainnet",
         0,
-        3,
+        4,
         InterpretRunMode::Normal,
     )
     .await?;
-    complete_interpret_state(&scratch, 3).await?;
+    complete_interpret_state(&scratch, 4).await?;
     let raw_before = raw_log_digest(scratch.pool()).await?;
     let phases = PhaseSet::with_ingest_and_interpret(
         Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
@@ -1649,32 +1657,31 @@ async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_
     .redo(
         &chain_config("ethereum-mainnet")?,
         RedoPhase::Phase(PhaseName::Interpret),
-        BlockRange::new(3, 3)?,
+        BlockRange::new(4, 4)?,
         CancellationToken::new(),
     )
     .await?;
     assert_eq!(raw_before, raw_log_digest(scratch.pool()).await?);
-    let clear: (String, String, bool, bool) = sqlx::query_as(
+    let clears: Vec<(String, String, bool, Uuid)> = sqlx::query_as(
         "SELECT after_state ->> 'resolver', after_state ->> 'previous_resolver',
-                logical_name_id IS NOT NULL, resource_id IS NOT NULL
+                logical_name_id IS NOT NULL, resource_id
          FROM normalized_events
          WHERE chain_id = 'ethereum-mainnet'
-           AND block_number = 3
+           AND block_number = 4
            AND event_kind = 'ResolverChanged'
-           AND after_state ->> 'registry_fallback_handoff' = 'true'",
+           AND after_state ->> 'registry_fallback_handoff' = 'true'
+         ORDER BY resource_id",
     )
-    .fetch_one(scratch.pool())
+    .fetch_all(scratch.pool())
     .await?;
-    assert_eq!(
-        clear,
-        (
-            "0x0000000000000000000000000000000000000000".into(),
-            "0xF29100983E058B709F3D539b0c765937B804AC15".to_ascii_lowercase(),
-            true,
-            true,
-        )
-    );
-    run_project(scratch.pool(), "ethereum-mainnet", 3, 0, 3).await?;
+    assert_eq!(clears.len(), 2, "both linked resources must be retracted");
+    assert!(clears.iter().all(|clear| {
+        clear.0 == "0x0000000000000000000000000000000000000000"
+            && clear.1 == "0xF29100983E058B709F3D539b0c765937B804AC15".to_ascii_lowercase()
+            && clear.2
+    }));
+    assert_ne!(clears[0].3, clears[1].3);
+    run_project(scratch.pool(), "ethereum-mainnet", 4, 0, 4).await?;
     let resolver: Option<String> = sqlx::query_scalar(
         "SELECT declared_summary #>> '{resolver,address}'
          FROM name_current WHERE raw_name = 'pointer.eth'",
@@ -6357,6 +6364,7 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
     const REGISTRY_ADDRESS: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
     const OLD_REGISTRY_ADDRESS: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
     const CONTROLLER: &str = "0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5";
+    const REGISTRAR: &str = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85";
     const OLD_RESOLVER: &str = "0xF29100983E058B709F3D539b0c765937B804AC15";
     let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -6366,7 +6374,7 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
         "WITH declarations AS (
            UPDATE manifest_contract_instances SET start_block_number = 0
            WHERE chain_id = $1
-             AND lower(declared_address) IN (lower($2), lower($3), lower($4))
+             AND lower(declared_address) IN (lower($2), lower($3), lower($4), lower($5))
            RETURNING contract_instance_id
          )
          UPDATE contract_instance_addresses SET active_from_block_number = 0
@@ -6376,11 +6384,12 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
     .bind(REGISTRY_ADDRESS)
     .bind(OLD_REGISTRY_ADDRESS)
     .bind(CONTROLLER)
+    .bind(REGISTRAR)
     .execute(pool)
     .await?;
     sqlx::query(
         "WITH blocks(block_number, emitter) AS (
-           VALUES (0::bigint, $2), (1, $2), (2, $3), (3, $4)
+           VALUES (0::bigint, $2), (1, $2), (2, $3), (3, $4), (4, $5)
          ), lineage AS (
            INSERT INTO chain_lineage (
              chain_id, block_hash, parent_hash, block_number, block_timestamp,
@@ -6401,12 +6410,13 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
          SELECT $1, $1 || '-block-' || blocks.block_number,
                 blocks.block_number,
                 $1 || '-old-handoff-transaction-' || blocks.block_number,
-                0, $5, emitter
+                0, $6, emitter
          FROM blocks JOIN lineage USING (block_number)",
     )
     .bind(CHAIN)
     .bind(OLD_REGISTRY_ADDRESS)
     .bind(CONTROLLER)
+    .bind(REGISTRAR)
     .bind(REGISTRY_ADDRESS)
     .bind(SENDER)
     .execute(pool)
@@ -6437,6 +6447,15 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
                 label: keccak256(b"pointer"),
                 cost: U256::from(1),
                 expires: U256::from(1_000_000),
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRAR,
+            base_registrar_events::Transfer {
+                from: PRIOR_REGISTRY_OWNER.parse()?,
+                to: PRIOR_REGISTRY_OWNER.parse()?,
+                tokenId: U256::from_be_slice(keccak256(b"pointer").as_slice()),
             }
             .encode_log_data(),
         ),

@@ -469,11 +469,14 @@ direct-registry owner instead of losing the known name.
 An old-registry resolver selection stops being eligible when either a
 current-registry `NewOwner` or `Transfer` creates that node's current-registry
 record. The ownership observation persists the fallback handoff across replay;
-if the old pointer was already linked, a later linked zero-resolver event
-retracts it from serving. An old-registry `Transfer` cannot clear a resolver
+if the old pointer was already linked, later linked zero-resolver events
+retract it from every registry, registrar, or wrapper resource to which it was
+linked. An old-registry `Transfer` cannot clear a resolver
 selected from the current registry.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)
 A resource-less record event cannot create a binding, and name and record reads
 expose the inventory only when the name's current readable control resource or

@@ -1699,6 +1699,19 @@ classification and then into record-inventory read rules. It authorizes a
 deterministic indexed read from projected records; it does not create record
 events, synthetic selectors, or reusable provider results.
 
+<a id="registry-fallback-handoff"></a>
+## Registry fallback handoff
+
+the replayed transition at the first current ENS registry ownership record for
+a node. That record ends delegation to `ENSRegistryOld`, suppresses later old-
+registry input for the node, and retracts an old-registry resolver pointer from
+every retained serving resource to which it was linked. The root resolver is
+the documented exception.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
+
 ## Resolution divergence ledger
 
 the schema-v2 audit table whose active rows

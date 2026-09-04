@@ -107,7 +107,7 @@ impl State {
         &mut self,
         namespace: &str,
         namehash: &str,
-    ) -> (bool, Option<V1ResolverLink>) {
+    ) -> (bool, Vec<V1ResolverLink>) {
         let key = v1_key(namespace, namehash);
         let newly_migrated = self.v1_migrated_nodes.insert(key.clone()).is_none();
         let retired_resolver = if self
@@ -121,7 +121,44 @@ impl State {
         } else {
             None
         };
-        (newly_migrated, retired_resolver)
+        let mut retired_links = Vec::new();
+        if let Some(retired) = retired_resolver {
+            let mut remember = |link: V1ResolverLink| {
+                if !retired_links
+                    .iter()
+                    .any(|known: &V1ResolverLink| known.resource_id == link.resource_id)
+                {
+                    retired_links.push(link);
+                }
+            };
+            remember(retired.clone());
+            for authority in [
+                self.v1_names.get(&key),
+                self.v1_registrars.get(&key),
+                self.v1_registry_authorities.get(&key),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                remember(V1ResolverLink {
+                    resolver_address: retired.resolver_address.clone(),
+                    resource_id: Some(authority.resource_id),
+                    logical_name_id: authority
+                        .surface_known
+                        .then(|| authority.logical_name_id.clone()),
+                    source_role: retired.source_role.clone(),
+                });
+            }
+            if let Some(anchor) = self.v1_registry_read_anchors.get(&key) {
+                remember(V1ResolverLink {
+                    resolver_address: retired.resolver_address,
+                    resource_id: Some(anchor.resource_id),
+                    logical_name_id: anchor.surface_known.then(|| anchor.logical_name_id.clone()),
+                    source_role: retired.source_role,
+                });
+            }
+        }
+        (newly_migrated, retired_links)
     }
 
     pub(in crate::schema_v2) fn sync_registry_surface_from_registrar(

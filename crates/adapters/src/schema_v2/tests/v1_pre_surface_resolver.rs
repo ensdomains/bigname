@@ -66,6 +66,19 @@ fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
                     "PreimageObserved",
                 ],
             ),
+            (
+                "Transfer",
+                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                &["registrar"],
+                &[
+                    "TokenControlTransferred",
+                    "PermissionChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "ResolverChanged",
+                ],
+            ),
         ],
     );
     let mut registry = admission(REGISTRY_MANIFEST_ID, "registry");
@@ -146,6 +159,20 @@ fn registration(block: i64, expiry: u64) -> anyhow::Result<RawLogInput> {
             label: keccak256(b"pointer"),
             owner: OWNER_2.parse()?,
             expires: U256::from(expiry),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        REGISTRAR,
+    ))
+}
+
+fn registrar_transfer(from: &str, to: &str, block: i64) -> anyhow::Result<RawLogInput> {
+    Ok(raw_at(
+        v1_registrar::Transfer {
+            from: from.parse()?,
+            to: to.parse()?,
+            tokenId: U256::from_be_slice(keccak256(b"pointer").as_slice()),
         }
         .encode_log_data(),
         block,
@@ -852,6 +879,47 @@ fn current_registry_record_retracts_a_surfaced_old_registry_resolver() -> anyhow
                 && event.after_state["effective_powers"] == json!([])
                 && event.after_state["scope"]["resolver_address"] == RESOLVER_A
         }));
+    }
+    Ok(())
+}
+
+#[test]
+fn current_registry_handoff_retracts_old_resolver_from_every_linked_resource() -> anyhow::Result<()>
+{
+    let (_, _, node) = fixture();
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
+        renewal(3),
+        registrar_transfer(OWNER, OWNER, 4)?,
+        current_new_owner(OWNER, 5)?,
+    ];
+    let (single, _) = assert_four_way_and_restore_parity(&history, 4)?;
+    let linked_nonzero = single
+        .iter()
+        .filter(|event| {
+            event.event_kind == "ResolverChanged"
+                && event.after_state["resolver"] == RESOLVER_A
+                && event.resource_id.is_some()
+        })
+        .filter_map(|event| event.resource_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        linked_nonzero.len(),
+        2,
+        "fixture must create dual-resource pointers"
+    );
+    for resource_id in linked_nonzero {
+        assert!(
+            single.iter().any(|event| {
+                event.block_number == Some(5)
+                    && event.event_kind == "ResolverChanged"
+                    && event.resource_id == Some(resource_id)
+                    && event.after_state["resolver"] == ZERO_ADDRESS
+                    && event.after_state["registry_fallback_handoff"] == true
+            }),
+            "current-registry handoff did not retract resolver from {resource_id}"
+        );
     }
     Ok(())
 }

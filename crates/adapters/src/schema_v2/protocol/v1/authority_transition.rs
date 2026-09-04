@@ -60,57 +60,76 @@ pub(super) fn classify_registry_owner(
 
 pub(super) fn registry_fallback_handoff_kind(
     source_event: &str,
-    handoff: Option<&(bool, Option<V1ResolverLink>)>,
+    handoff: Option<&(bool, Vec<V1ResolverLink>)>,
 ) -> Option<&'static str> {
     match handoff {
-        Some((_, Some(_))) => Some("ResolverChanged"),
-        Some((true, None)) if source_event == "Transfer" => Some("AuthorityTransferred"),
+        Some((_, retired)) if !retired.is_empty() => Some("ResolverChanged"),
+        Some((true, retired)) if retired.is_empty() && source_event == "Transfer" => {
+            Some("AuthorityTransferred")
+        }
         _ => None,
     }
 }
 
 pub(super) fn append_registry_fallback_handoff(
     output: &mut Interpreted,
-    handoff: Option<&(bool, Option<V1ResolverLink>)>,
+    handoff: Option<&(bool, Vec<V1ResolverLink>)>,
     previous: Option<&V1NameState>,
     raw: &RawLogInput,
     observation: &Value,
     node: &str,
 ) {
-    let Some((_, Some(retired))) = handoff else {
+    let Some((_, retired_links)) = handoff.filter(|(_, links)| !links.is_empty()) else {
         return;
     };
     let source_event = observation
         .get("source_event")
         .and_then(Value::as_str)
         .unwrap_or("RegistryOwnershipChanged");
-    let event = output
+    let mut events = retired_links.iter().map(|retired| EventDraft {
+        event_kind: "ResolverChanged".to_owned(),
+        logical_name_id: retired.logical_name_id.clone(),
+        resource_id: retired.resource_id,
+        identity_suffix: format!(
+            "ResolverChanged:registry-fallback-handoff:{node}:{}:{}",
+            retired
+                .resource_id
+                .map_or_else(|| "unlinked".to_owned(), |id| id.to_string()),
+            retired.resolver_address
+        ),
+        explicit_before: Some(json!({"resolver":retired.resolver_address})),
+        after_state: merge_observation(
+            observation,
+            json!({
+                "state_derived":true,
+                "registry_fallback_handoff":true,
+                "source_event":source_event,
+                "node":node,
+                "resolver":ZERO_ADDRESS,
+                "previous_resolver":retired.resolver_address,
+                "pointer_reason":"current_registry_record_suppresses_old_fallback",
+            }),
+        ),
+        state_scope: format!(
+            "registry-fallback-handoff:{node}:resolver:{}",
+            retired
+                .resource_id
+                .map_or_else(|| "unlinked".to_owned(), |id| id.to_string())
+        ),
+    });
+    let declared = output
         .events
         .iter_mut()
         .find(|event| event.event_kind == "ResolverChanged")
         .expect("fallback handoff kind was declared");
-    event.logical_name_id = retired.logical_name_id.clone();
-    event.resource_id = retired.resource_id;
-    event.identity_suffix = format!(
-        "ResolverChanged:registry-fallback-handoff:{node}:{}",
-        retired.resolver_address
-    );
-    event.explicit_before = Some(json!({"resolver":retired.resolver_address}));
-    event.after_state = merge_observation(
-        observation,
-        json!({
-            "state_derived":true,
-            "registry_fallback_handoff":true,
-            "source_event":source_event,
-            "node":node,
-            "resolver":ZERO_ADDRESS,
-            "previous_resolver":retired.resolver_address,
-            "pointer_reason":"current_registry_record_suppresses_old_fallback",
-        }),
-    );
-    event.state_scope = format!("registry-fallback-handoff:{node}:resolver");
+    *declared = events.next().expect("retired links are nonempty");
+    output.events.extend(events);
 
-    let Some(authority) = previous else {
+    let Some(authority) = previous.filter(|authority| {
+        retired_links
+            .iter()
+            .any(|retired| retired.resource_id == Some(authority.resource_id))
+    }) else {
         return;
     };
     let (Some(subject), Some(authority_key)) = (
@@ -119,12 +138,13 @@ pub(super) fn append_registry_fallback_handoff(
     ) else {
         return;
     };
+    let resolver = &retired_links[0].resolver_address;
     let (before, after) = v1_revoke_states(
         subject,
         json!({
             "kind":"resolver",
             "chain_id":raw.chain_id,
-            "resolver_address":retired.resolver_address,
+            "resolver_address":resolver,
         }),
         "resolver_control",
         authority_kind(authority),
@@ -139,11 +159,14 @@ pub(super) fn append_registry_fallback_handoff(
         resource_id: Some(authority.resource_id),
         identity_suffix: format!(
             "PermissionChanged:registry-fallback-handoff:{node}:{}",
-            retired.resolver_address
+            resolver
         ),
         explicit_before: Some(before),
         after_state: after,
-        state_scope: format!("registry-fallback-handoff:{node}:resolver-control"),
+        state_scope: format!(
+            "registry-fallback-handoff:{node}:resolver-control:{}",
+            authority.resource_id
+        ),
     });
 }
 
