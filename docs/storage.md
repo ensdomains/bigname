@@ -784,11 +784,9 @@ the existing `ens_v1_unwrapped_authority` derivation kind and is distinguished
 by `after_state.state_derived=true`. The earlier [pre-surface](glossary.md#pre-surface)
 `ResolverChanged` keeps null `logical_name_id` and `resource_id` and remains immutable. This behavior requires no
 `normalized_events` check change or schema-migration.
-State-derived resolver rows emitted while materializing a surface or copying a
-pointer during a per-log authority transition carry
-`after_state.resolver_source_role`. The field preserves whether that pointer came
-from the old or current registry so compacted restoration can rebuild the same
-resource-specific fallback state after a later global resolver selection.
+Surface-materialization and per-log authority-transition resolver copies carry
+`after_state.resolver_source_role`, preserving their old- or current-registry origin
+so compacted restoration survives a later global resolver selection.
 
 Only active manifests participate in raw-log selection and watch authority.
 Interpret separately retains metadata for stored deprecated manifest versions
@@ -810,6 +808,8 @@ leaves a normalized handoff row when it would otherwise produce no state delta,
 so compacted restoration cannot reopen old-registry input. Same-transaction
 registration reconciliation leaves each resource-specific handoff row attached
 to its original resource.
+An old-registry zero selection clears active copies but retains an inactive resource
+carrying the prior pointer. Reactivation emits a zero `ResolverChanged` before handoff.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
