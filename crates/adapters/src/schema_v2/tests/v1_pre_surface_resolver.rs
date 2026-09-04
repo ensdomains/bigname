@@ -1335,10 +1335,9 @@ fn current_registry_resolver_replacement_survives_the_ownership_handoff() -> any
     for resource in resources {
         let latest = single
             .iter()
-            .filter(|event| {
+            .rfind(|event| {
                 event.event_kind == "ResolverChanged" && event.resource_id == Some(resource)
             })
-            .next_back()
             .expect("resource resolver history");
         assert_eq!(
             latest.after_state["resolver"], RESOLVER_B,
