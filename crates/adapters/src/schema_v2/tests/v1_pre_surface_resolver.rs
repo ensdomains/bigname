@@ -731,23 +731,19 @@ fn pre_surface_registry_resolver_materialization_links_current_authority() -> an
     assert_eq!(pointer.transaction_hash.as_deref(), Some("transaction-3"));
     assert_eq!(pointer.log_index, Some(0));
     assert_eq!(output.surface_bindings.len(), 1);
-    assert_eq!(
-        output
-            .normalized_events
-            .iter()
-            .filter(|event| event.event_kind == "SurfaceBound" && event.block_number == Some(3))
-            .count(),
-        1
-    );
-    let authority_boundary = output
+    let surface = output
         .normalized_events
         .iter()
-        .find(|event| event.block_number == Some(3) && event.event_kind == "AuthorityEpochChanged")
+        .find(|event| event.block_number == Some(3) && event.event_kind == "SurfaceBound")
         .expect("surface materialization must make the retained owner projectable");
-    assert_eq!(authority_boundary.resource_id, Some(authority_resource));
-    assert_eq!(authority_boundary.after_state["owner"], OWNER);
+    assert_eq!(surface.resource_id, Some(authority_resource));
+    assert_eq!(surface.after_state["owner"], OWNER);
     assert!(output.normalized_events.iter().all(|event| {
-        !(event.block_number == Some(3) && event.event_kind == "PermissionChanged")
+        !(event.block_number == Some(3)
+            && matches!(
+                event.event_kind.as_str(),
+                "AuthorityEpochChanged" | "PermissionChanged"
+            ))
     }));
     Ok(())
 }

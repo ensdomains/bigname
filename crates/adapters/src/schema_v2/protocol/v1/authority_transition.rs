@@ -236,38 +236,21 @@ pub(super) fn append_surface_materialization_for_trigger(
                 "binding_kind":"declared_registry_path",
                 "pointer_reason":"surface_materialization_current_resolver",
             });
-            let mut events = vec![
-                EventDraft {
-                    event_kind: "SurfaceBound".to_owned(),
-                    logical_name_id: Some(promoted.logical_name_id.clone()),
-                    resource_id: Some(promoted.resource_id),
-                    identity_suffix: format!(
-                        "SurfaceBound:surface-materialization:{node}:{}",
-                        promoted.resource_id
-                    ),
-                    explicit_before: Some(json!({})),
-                    after_state: merge_observation(
-                        &common,
-                        json!({"active_from":raw.block_timestamp.unix_timestamp()}),
-                    ),
-                    state_scope: format!("surface-materialization:{node}:{}", promoted.resource_id),
-                },
-                EventDraft {
-                    event_kind: "AuthorityEpochChanged".to_owned(),
-                    logical_name_id: Some(promoted.logical_name_id.clone()),
-                    resource_id: Some(promoted.resource_id),
-                    identity_suffix: format!(
-                        "AuthorityEpochChanged:surface-materialization:{node}:{}",
-                        promoted.resource_id
-                    ),
-                    explicit_before: Some(json!({})),
-                    after_state: common.clone(),
-                    state_scope: format!(
-                        "surface-materialization:{node}:{}:authority",
-                        promoted.resource_id
-                    ),
-                },
-            ];
+            let mut events = vec![EventDraft {
+                event_kind: "SurfaceBound".to_owned(),
+                logical_name_id: Some(promoted.logical_name_id.clone()),
+                resource_id: Some(promoted.resource_id),
+                identity_suffix: format!(
+                    "SurfaceBound:surface-materialization:{node}:{}",
+                    promoted.resource_id
+                ),
+                explicit_before: Some(json!({})),
+                after_state: merge_observation(
+                    &common,
+                    json!({"active_from":raw.block_timestamp.unix_timestamp()}),
+                ),
+                state_scope: format!("surface-materialization:{node}:{}", promoted.resource_id),
+            }];
             if let Some(resolver) = resolver {
                 events.push(EventDraft {
                     event_kind: "ResolverChanged".to_owned(),
