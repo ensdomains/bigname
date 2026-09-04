@@ -288,7 +288,7 @@ to the applicable entries below.
 > **Since**: `2026-09-04`
 
 > **Uppercase `0X` handling is entry-point specific** — Account point IDs and generated Domain-filter IDs remain valid GraphQL text
-> but compare exactly, a non-lowercase Resolver point ID is a no-match, the pre-existing `Resolver_filter.id` remains case-canonicalizing, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
+> but compare exactly, a non-lowercase Resolver point ID is a no-match, the pre-existing `Resolver_filter.id` canonicalizes hexadecimal digit case only when both components keep lowercase `0x`, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
 > digits after lowercase `0x` remain valid Bytes input and serialize canonically.
 > **Upstream**: Graph Node's Bytes parser strips only lowercase `0x`
 > (upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).

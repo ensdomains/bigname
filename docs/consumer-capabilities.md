@@ -517,9 +517,10 @@ name extension. Graph Node applies point IDs as exact string equality (upstream:
 .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @ graph_node@aefe1737).
 A Resolver point ID must use the exact lowercase `<address>-<namehash>` composite
 form; a case-different form is a no-match. The pre-existing
-`Resolver_filter.id` path remains case-canonicalizing in this slice, so that
-filter can match a case-different composite ID. `Resolver_filter.address` uses
-`Bytes`: lowercase `0x` followed by
+`Resolver_filter.id` path remains hexadecimal-digit-canonicalizing when both
+components retain lowercase `0x`, so that filter can match a composite ID whose
+hexadecimal digits differ only by case. Uppercase `0X` remains a no-match.
+`Resolver_filter.address` uses `Bytes`: lowercase `0x` followed by
 uppercase or lowercase hexadecimal digits is accepted and byte-canonicalized,
 while uppercase `0X` is a scalar-coercion error. Graph Node's Bytes parser strips
 only lowercase `0x` (upstream:

@@ -109,7 +109,7 @@ async fn graphql_generated_domain_operator_plans_are_index_bounded_or_linear() -
     seed_graphql_compat_fixture(&database).await?;
     pad_generated_domain_plans(&database).await?;
     let chains = vec!["ethereum-mainnet".to_owned()];
-    let late_id = format!("0x{:064x}", 5_999);
+    let target_id = format!("0x{:064x}", 5_999);
     let locale = sqlx::query("SELECT VERSION() AS version, datlocprovider::TEXT AS provider, datcollate AS locale FROM pg_database WHERE datname = CURRENT_DATABASE()")
         .fetch_one(&database.lookup_pool).await?;
     let version: String = locale.try_get("version")?;
@@ -156,7 +156,7 @@ async fn graphql_generated_domain_operator_plans_are_index_bounded_or_linear() -
             "id_not" | "id_not_in" => "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe",
             "id_gt" | "id_gte" => "0x000000000000000000000000000000000000000000000000000000000000176e",
             "id_lt" | "id_lte" => "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            value if value.starts_with("id") => late_id.as_str(),
+            value if value.starts_with("id") => target_id.as_str(),
             value if value.starts_with("name_not") => "never-present",
             "name_gt" | "name_gte" => "alice.eth5998",
             "name_lt" | "name_lte" => "zzzz",
@@ -186,8 +186,27 @@ async fn graphql_generated_domain_operator_plans_are_index_bounded_or_linear() -
             &chains, &filter, crate::graphql::GeneratedDomainSort::Id,
             bigname_storage::NameCurrentListOrder::Desc, 200, 0,
         ).await?;
-        assert!(returned.iter().any(|row| row.row.row.namehash == late_id), "late target: {member}");
+        assert!(returned.iter().any(|row| row.row.row.namehash == target_id), "target: {member}");
     }
+
+    let late_name = plan_domain_filter("name", "alice.eth5999");
+    let late_explain = crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool, &chains, &late_name,
+        crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Asc,
+        200, 0,
+    ).await?;
+    let late_scan = plan_nodes(&late_explain)
+        .into_iter()
+        .find(|node| node["Relation Name"] == "name_current" && node["Alias"] == "nc")
+        .context("name_current plan for late name match")?;
+    assert!(late_scan["Rows Removed by Filter"].as_u64().unwrap_or(0) >= 5_000, "late name predicate must be exercised after scanning the fixture: {late_scan}");
+    let returned = crate::graphql::load_phase_graphql_name_list_page_offset(
+        &database.lookup_pool,
+        &bigname_storage::NameCurrentListFilter { namespace: Some("ens".into()), ..Default::default() },
+        &chains, &late_name, crate::graphql::GeneratedDomainSort::Id,
+        bigname_storage::NameCurrentListOrder::Asc, 200, 0,
+    ).await?;
+    assert!(returned.iter().any(|row| row.row.row.namehash == target_id), "late name target");
     database.cleanup().await
 }
 
