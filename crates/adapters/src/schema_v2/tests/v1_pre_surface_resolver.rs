@@ -1287,8 +1287,8 @@ fn changed_old_registry_selection_retains_inactive_wrapper_until_handoff() -> an
     for replacement in [RESOLVER_B, ZERO_ADDRESS] {
         let history = vec![
             old_new_owner(OWNER, 1)?,
-            resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
-            renewal(3),
+            renewal(2),
+            resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 3)?,
             wrapped(4)?,
             unwrapped(5)?,
             resolver_selection(OLD_REGISTRY, node, replacement, 6)?,

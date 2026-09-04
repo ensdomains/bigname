@@ -7,12 +7,12 @@ pub(in crate::schema_v2) enum V1SurfaceMaterialization {
     RegistryAuthority {
         previous: Box<V1NameState>,
         promoted: Box<V1NameState>,
-        resolver: Option<String>,
+        resolver: Option<V1ResolverLink>,
         source_manifest_id: i64,
     },
     RegistryRead {
         anchor: V1RegistryReadAnchor,
-        resolver: Option<String>,
+        resolver: Option<V1ResolverLink>,
         source_manifest_id: i64,
     },
     AlreadyMaterialized,
@@ -85,6 +85,37 @@ impl State {
                     resource_id: Some(resource_id),
                     logical_name_id,
                     source_role: selected.source_role.clone(),
+                },
+            );
+    }
+
+    pub(in crate::schema_v2) fn restore_v1_resolver_linked_resource(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        resolver: &str,
+        resource_id: Uuid,
+        logical_name_id: Option<String>,
+        source_role: &str,
+    ) {
+        let key = v1_key(namespace, namehash);
+        if resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
+            self.remove_v1_resolver_linked_resource(&key, resource_id);
+            return;
+        }
+        if source_role != "registry_old" {
+            return;
+        }
+        self.v1_resolver_linked_resources
+            .entry(key)
+            .or_default()
+            .insert(
+                resource_id,
+                V1ResolverLink {
+                    resolver_address: resolver.to_owned(),
+                    resource_id: Some(resource_id),
+                    logical_name_id,
+                    source_role: Some(source_role.to_owned()),
                 },
             );
     }
@@ -313,10 +344,7 @@ impl State {
                 anchor.logical_name_id = logical_name_id.to_owned();
                 anchor.surface_known = true;
             }
-            let resolver = self
-                .v1_resolver_links
-                .get(&key)
-                .map(|link| link.resolver_address.clone());
+            let resolver = self.v1_resolver_links.get(&key).cloned();
             if let Some(link) = self.v1_resolver_links.get_mut(&key) {
                 link.resource_id = Some(promoted.resource_id);
                 link.logical_name_id = Some(logical_name_id.to_owned());
@@ -357,10 +385,7 @@ impl State {
                 true,
                 Some(labelhash),
             );
-            let resolver = self
-                .v1_resolver_links
-                .get(&key)
-                .map(|link| link.resolver_address.clone());
+            let resolver = self.v1_resolver_links.get(&key).cloned();
             if let Some(link) = self.v1_resolver_links.get_mut(&key) {
                 link.resource_id = Some(anchor.resource_id);
                 link.logical_name_id = Some(logical_name_id.to_owned());

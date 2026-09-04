@@ -216,7 +216,7 @@ fn transfer(
         active_after.as_ref(),
         raw,
         &json!({"source_event":"Transfer"}),
-        state.v1_resolver(&selected.source.namespace, &raw_namehash),
+        state.v1_resolver_link(&selected.source.namespace, &raw_namehash),
         fallback_active_from,
     );
     Ok(output)
@@ -561,7 +561,7 @@ fn name_event(
             active_after.as_ref(),
             raw,
             &after,
-            state.v1_resolver(&selected.source.namespace, &raw_namehash),
+            state.v1_resolver_link(&selected.source.namespace, &raw_namehash),
             None,
         );
     }

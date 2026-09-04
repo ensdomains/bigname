@@ -403,9 +403,9 @@ pub(super) fn interpret(
         linked.as_ref(),
         raw,
         &after,
-        linked_resolver
-            .as_ref()
-            .and_then(|link| link.resource_id.map(|_| link.resolver_address.clone())),
+        // Keep the selected registry role with any published authority pointer.
+        // Unlinked selections have no authority resource on which to publish the pointer.
+        linked_resolver.filter(|link| link.resource_id.is_some()),
         None,
     );
     if selected.event.name == "NewResolver" {

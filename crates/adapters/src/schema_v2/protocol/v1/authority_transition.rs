@@ -257,16 +257,23 @@ pub(super) fn append_surface_materialization_for_trigger(
                 state_scope: format!("surface-materialization:{node}:{}", promoted.resource_id),
             }];
             if let Some(resolver) = resolver {
+                let resolver_address = &resolver.resolver_address;
                 events.push(EventDraft {
                     event_kind: "ResolverChanged".to_owned(),
                     logical_name_id: Some(promoted.logical_name_id.clone()),
                     resource_id: Some(promoted.resource_id),
                     identity_suffix: format!(
-                        "ResolverChanged:surface-materialization:{node}:{}:{resolver}",
+                        "ResolverChanged:surface-materialization:{node}:{}:{resolver_address}",
                         promoted.resource_id
                     ),
                     explicit_before: Some(json!({"resolver":Value::Null})),
-                    after_state: merge_observation(&common, json!({"resolver":resolver})),
+                    after_state: merge_observation(
+                        &common,
+                        json!({
+                            "resolver":resolver_address,
+                            "resolver_source_role":resolver.source_role,
+                        }),
+                    ),
                     state_scope: format!(
                         "surface-materialization:{node}:{}:resolver",
                         promoted.resource_id
@@ -288,12 +295,13 @@ pub(super) fn append_surface_materialization_for_trigger(
             let events = resolver
                 .as_ref()
                 .map(|resolver| {
+                    let resolver_address = &resolver.resolver_address;
                     vec![EventDraft {
                         event_kind: "ResolverChanged".to_owned(),
                         logical_name_id: Some(anchor.logical_name_id.clone()),
                         resource_id: Some(anchor.resource_id),
                         identity_suffix: format!(
-                            "ResolverChanged:surface-materialization:{node}:{}:{resolver}",
+                            "ResolverChanged:surface-materialization:{node}:{}:{resolver_address}",
                             anchor.resource_id
                         ),
                         explicit_before: Some(json!({"resolver":Value::Null})),
@@ -306,7 +314,8 @@ pub(super) fn append_surface_materialization_for_trigger(
                             "authority_key":Value::Null,
                             "binding_kind":"declared_registry_path",
                             "pointer_reason":"surface_materialization_current_resolver",
-                            "resolver":resolver,
+                            "resolver":resolver_address,
+                            "resolver_source_role":resolver.source_role,
                         }),
                         state_scope: format!(
                             "surface-materialization:{node}:{}:resolver",
@@ -336,7 +345,7 @@ pub(super) fn append_authority_transition(
     linked: Option<&V1NameState>,
     raw: &RawLogInput,
     observation_state: &Value,
-    resolver: Option<String>,
+    resolver: Option<V1ResolverLink>,
     binding_active_from: Option<time::OffsetDateTime>,
 ) {
     if let Some(linked) = linked.filter(|state| state.token_lineage_id.is_none()) {
@@ -453,13 +462,17 @@ pub(super) fn append_authority_transition(
             event_kind: "ResolverChanged".to_owned(),
             logical_name_id: Some(logical_name_id),
             resource_id: Some(linked.resource_id),
-            identity_suffix: format!("ResolverChanged:authority:{source_event}:{resolver}"),
+            identity_suffix: format!(
+                "ResolverChanged:authority:{source_event}:{}",
+                resolver.resolver_address
+            ),
             explicit_before: Some(json!({"resolver":Value::Null})),
             after_state: merge_observation(
                 observation_state,
                 json!({
                     "source_event":"AuthorityEpochChanged",
-                    "resolver":resolver,
+                    "resolver":resolver.resolver_address,
+                    "resolver_source_role":resolver.source_role,
                 }),
             ),
             state_scope: String::new(),

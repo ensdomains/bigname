@@ -306,13 +306,28 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             event.resource_id,
         )
     {
-        state.remember_v1_resolver_linked_resource(
-            &event.namespace,
-            namehash,
-            resolver,
-            resource_id,
-            event.logical_name_id.clone(),
-        );
+        if let Some(source_role) = event
+            .after_state
+            .get("resolver_source_role")
+            .and_then(Value::as_str)
+        {
+            state.restore_v1_resolver_linked_resource(
+                &event.namespace,
+                namehash,
+                resolver,
+                resource_id,
+                event.logical_name_id.clone(),
+                source_role,
+            );
+        } else {
+            state.remember_v1_resolver_linked_resource(
+                &event.namespace,
+                namehash,
+                resolver,
+                resource_id,
+                event.logical_name_id.clone(),
+            );
+        }
     }
     if event.source_family == "ens_v1_wrapper_l1"
         && event.event_kind == "PermissionScopeChanged"

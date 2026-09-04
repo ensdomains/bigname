@@ -371,7 +371,7 @@ fn name_wrapped(
             .as_ref(),
         raw,
         &after,
-        state.v1_resolver(&selected.source.namespace, &raw_namehash),
+        state.v1_resolver_link(&selected.source.namespace, &raw_namehash),
         None,
     );
     if let Some(labels) = labels {
@@ -444,7 +444,7 @@ fn name_unwrapped(
         reactivated.as_ref(),
         raw,
         &after,
-        state.v1_resolver(&selected.source.namespace, &namehash),
+        state.v1_resolver_link(&selected.source.namespace, &namehash),
         None,
     );
     Ok(output)
