@@ -997,6 +997,37 @@ mod v1_registrar {
     }
 
     #[test]
+    #[rustfmt::skip]
+    fn whole_transaction_reconciliation_preserves_new_owner_divergence_before_transfer_back() -> anyhow::Result<()> {
+        const DIVERGED: &str = "0x0000000000000000000000000000000000000077";
+        let label = "new-owner-reconverged"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]);
+        let manifests = vec![lifecycle_manifest(), registry_manifest()]; let admissions = admissions().into_iter().chain([registry_admission()]).collect::<Vec<_>>();
+        let initial_logs = vec![base_registration(label, 42, 0), controller_registration(label, 42, 1)];
+        let first = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: initial_logs.clone() })?;
+        let numeric = raw_at_transaction(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTRACT.parse()?, expires: U256::from(84) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 2, 0, 0, CONTRACT);
+        let diverge = raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: DIVERGED.parse()? }.encode_log_data(), 2, 0, 1, REGISTRY);
+        let return_to_registrar = raw_at_transaction(super::v1_registry::Transfer { node: node.parse()?, owner: CONTRACT.parse()? }.encode_log_data(), 2, 0, 2, REGISTRY);
+        let current_logs = vec![numeric, diverge, return_to_registrar];
+        let prior_events = first.normalized_events.iter().map(prior_event).collect::<Vec<_>>();
+        let restored_input = BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events, blocks: vec![], raw_logs: current_logs.clone() };
+        let output = interpret_test_batch(restored_input.clone())?;
+        let redo = interpret_test_batch(restored_input)?;
+        assert_eq!(output.normalized_events, redo.normalized_events, "redo must preserve the divergent interval");
+        assert_eq!(output.surface_bindings, redo.surface_bindings, "redo must preserve the divergent binding interval");
+        let fresh = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: vec![], blocks: vec![], raw_logs: initial_logs.into_iter().chain(current_logs).collect() })?;
+        assert_eq!(output.normalized_events, fresh.normalized_events.into_iter().filter(|event| event.block_number == Some(2)).collect::<Vec<_>>(), "cold restore and from-zero replay must retain identical post-registration divergence history");
+        assert_eq!(output.surface_bindings, fresh.surface_bindings.into_iter().filter(|binding| binding.block_number == 2).collect::<Vec<_>>(), "cold restore and from-zero replay must retain identical post-registration binding history");
+        let registrar_resource = output.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").and_then(|event| event.resource_id).expect("successor registrar resource");
+        let divergence = output.normalized_events.iter().find(|event| event.log_index == Some(1) && event.event_kind == "AuthorityTransferred" && event.after_state["source_event"] == "NewOwner").expect("intermediate NewOwner divergence");
+        assert_eq!(divergence.after_state["authority_kind"], "registry_only");
+        assert_ne!(divergence.resource_id, Some(registrar_resource));
+        let epoch = output.normalized_events.iter().find(|event| event.log_index == Some(1) && event.event_kind == "AuthorityEpochChanged").expect("intermediate registry authority epoch");
+        assert_eq!(epoch.resource_id, divergence.resource_id);
+        assert!(output.surface_bindings.iter().any(|binding| Some(binding.resource_id) == divergence.resource_id), "the intermediate NewOwner divergence lost its exact-name binding");
+        Ok(())
+    }
+
+    #[test]
     fn unknown_registry_node_does_not_emit_null_authority_epoch() -> anyhow::Result<()> {
         let labelhash = keccak256(b"unknown-registry-node");
         let parent = super::common::namehash(&["eth".to_owned()]);

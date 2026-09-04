@@ -107,24 +107,11 @@ fn reconcile_registration(
         .iter()
         .filter_map(|index| {
             let fields = &events.fields[*index];
-            let returns_to_registrar = fields.position.is_some_and(|position| {
-                target_candidates.iter().any(|later| {
-                    let later = &events.fields[*later];
-                    later.family == SourceFamily::Registry
-                        && matches!(
-                            later.source_event,
-                            SourceEvent::NewOwner | SourceEvent::Transfer
-                        )
-                        && later.position.is_some_and(|later| later > position)
-                        && later.owner.as_ref() == Some(&registrar_owner)
-                })
-            });
             (fields.family == SourceFamily::Registry
                 && matches!(
                     fields.source_event,
                     SourceEvent::NewOwner | SourceEvent::Transfer
                 )
-                && (fields.source_event == SourceEvent::Transfer || !returns_to_registrar)
                 && fields
                     .position
                     .is_some_and(|position| position > registration.position))
