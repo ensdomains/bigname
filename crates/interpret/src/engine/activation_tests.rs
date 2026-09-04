@@ -198,11 +198,12 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     .await?;
     assert_eq!(successor_count, 1);
 
-    // This reduced transition-writer fixture omits the ENSv1→ENSv2 migration transaction's
-    // registry `NewOwner` reclaim, registry `Transfer` to the Graveyard, and
-    // resolver-clear logs. It proves exactly-one predecessor materialization,
-    // not a production publication path. The faithful path remains ignored
-    // below until #822 is resolved.
+    // This reduced transition-writer fixture omits the migration transaction's
+    // user-to-controller registrar `Transfer`, registry `NewOwner` reclaim,
+    // registry `Transfer` to the Graveyard, conditional `NewResolver`, ENSv2
+    // `TransferSingle`, `EACRolesChanged`, and `ResolverUpdated` logs. It proves
+    // exactly-one predecessor materialization, not a production publication
+    // path. The faithful path remains ignored below until #822 is resolved.
 
     database.cleanup().await?;
     Ok(())
@@ -245,6 +246,13 @@ async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResul
     .await?;
     assert_eq!(predecessor_count, 1);
 
+    // The migration block has the same ordered ten-event shape as U-01 logs
+    // 0-9, using the checked-in Sepolia deployment and fixture values. The
+    // pre-state is a controller-owned wrapped-then-unwrapped name, unlike
+    // U-01's user-owned name with a resolver, so plain-registration predecessor
+    // materialization remains a separate open question. This test flips to an
+    // activation and publication assertion when #822 lands.
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
     seed_faithful_unwrapped_migration(pool, label, labelhash, namehash).await?;
     let error = Engine::new(pool.clone())
         .run_batch(BatchRequest {
@@ -267,7 +275,7 @@ async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResul
         "unexpected faithful-path failure: {message}"
     );
     database.cleanup().await?;
-    Err(error.into())
+    Ok(())
 }
 
 #[tokio::test]
@@ -448,11 +456,11 @@ async fn seed_faithful_unwrapped_migration(
     let token = U256::from_be_bytes(versioned);
     insert_transaction(pool, MIGRATION_BLOCK, UNLOCKED_CONTROLLER).await?;
 
-    // U-01's validated order follows the controller's reclaim, ENSv1 record
-    // cleanup, registrar cleanup, and ENSv2 injection. The registry calls and
-    // emitted events are fixed by the pinned contracts.
+    // U-01's validated block-236 transaction order follows the controller's
+    // reclaim, ENSv1 record cleanup, registrar cleanup, and ENSv2 injection.
+    // The registry calls and emitted events are fixed by the pinned contracts.
     // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
-    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L82 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33-L44 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L82 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L186 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
     // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L182-L208 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L250-L274 @ ens_v2@a971bd64)
     insert_log(

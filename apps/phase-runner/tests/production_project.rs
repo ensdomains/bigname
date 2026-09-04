@@ -9376,21 +9376,31 @@ async fn manifest_admission_reclassifies_v2_resolver_inline_without_a_queue() ->
 #[tokio::test]
 async fn authority_selector_uses_successor_after_closed_predecessor_across_positions() -> Result<()>
 {
-    for (database_prefix, chain, v2_block) in [
+    for (database_prefix, chain, v2_block, v1_block, boundary_block) in [
         (
             "production_project_authority_v2_older",
             "project-authority-v2-older",
-            2,
+            1,
+            3,
+            5,
         ),
         (
             "production_project_authority_v2_newer",
             "project-authority-v2-newer",
             4,
+            1,
+            4,
         ),
     ] {
         let scratch = ScratchDatabase::create(database_prefix).await?;
-        let logical_name_id =
-            seed_closed_predecessor_cross_arm_fixture(scratch.pool(), chain, v2_block).await?;
+        let logical_name_id = seed_closed_predecessor_cross_arm_fixture(
+            scratch.pool(),
+            chain,
+            v2_block,
+            v1_block,
+            boundary_block,
+        )
+        .await?;
         sqlx::query(
             "UPDATE surface_bindings
              SET surface_binding_id = CASE authority_arm
@@ -9433,10 +9443,28 @@ async fn authority_selector_uses_successor_after_closed_predecessor_across_posit
             "the ENSv1 predecessor is closed: {bindings:?}"
         );
         assert!(bindings[1].3.is_none(), "the ENSv2 successor is current");
+        if database_prefix.ends_with("v2_older") {
+            assert!(
+                bindings[1].2 < bindings[0].2,
+                "the older-successor case must place ENSv2 before ENSv1: {bindings:?}"
+            );
+        }
 
-        let (v2_binding, v2_resource, proof_identity) =
-            insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped")
-                .await?;
+        let (v2_binding, v2_resource, proof_identity) = insert_activated_authority_proof(
+            scratch.pool(),
+            chain,
+            &logical_name_id,
+            "unwrapped",
+            Some(boundary_block),
+        )
+        .await?;
+        let proof_block: i64 = sqlx::query_scalar(
+            "SELECT block_number FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(&proof_identity)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(proof_block, boundary_block);
         run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
         let projected: (Uuid, Uuid, Value) = sqlx::query_as(
             "SELECT surface_binding_id, resource_id,
@@ -9464,10 +9492,15 @@ async fn authority_selector_follows_post_migration_v2_binding_churn() -> Result<
     let scratch = ScratchDatabase::create("project_authority_v2_binding_churn").await?;
     let chain = "authority-v2-binding-churn";
     let logical_name_id =
-        seed_closed_predecessor_cross_arm_fixture(scratch.pool(), chain, 4).await?;
-    let (successor_binding, successor_resource, _) =
-        insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped")
-            .await?;
+        seed_closed_predecessor_cross_arm_fixture(scratch.pool(), chain, 4, 1, 4).await?;
+    let (successor_binding, successor_resource, _) = insert_activated_authority_proof(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "unwrapped",
+        None,
+    )
+    .await?;
     let churned_binding = Uuid::parse_str("00000000-0000-0000-0000-000000000020")?;
     sqlx::query(
         "UPDATE surface_bindings SET active_to = to_timestamp(5)
@@ -10297,7 +10330,7 @@ async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -
     let scratch = ScratchDatabase::create("project_authority_candidate_parity").await?;
     let chain = "authority-candidate-parity";
     let logical_name_id =
-        seed_closed_predecessor_cross_arm_fixture(scratch.pool(), chain, 2).await?;
+        seed_closed_predecessor_cross_arm_fixture(scratch.pool(), chain, 2, 1, 2).await?;
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
     normalize_projection_clocks(scratch.pool()).await?;
     let before: Value = sqlx::query_scalar(
@@ -10307,9 +10340,14 @@ async fn candidate_authority_is_inert_and_activation_names_every_changed_row() -
     .fetch_one(scratch.pool())
     .await?;
 
-    let (_, _, proof_identity) =
-        insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped")
-            .await?;
+    let (_, _, proof_identity) = insert_activated_authority_proof(
+        scratch.pool(),
+        chain,
+        &logical_name_id,
+        "unwrapped",
+        None,
+    )
+    .await?;
     sqlx::query(
         "UPDATE normalized_events SET consumer_visibility = 'candidate'
          WHERE event_identity = $1",
@@ -11193,7 +11231,8 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
     )
     .await?;
     let (proof_binding, proof_resource, _) =
-        insert_activated_authority_proof(scratch.pool(), chain, &proof_name, "unwrapped").await?;
+        insert_activated_authority_proof(scratch.pool(), chain, &proof_name, "unwrapped", None)
+            .await?;
     assert_eq!(proof_bindings.v2, Some((proof_binding, proof_resource)));
 
     let released_name = format!(
@@ -19471,7 +19510,8 @@ async fn sepolia_profile_blocks_the_same_proven_dual_current_corpus() -> Result<
             mode: InterpretRunMode::Normal,
         })
         .await?;
-    insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped").await?;
+    insert_activated_authority_proof(scratch.pool(), chain, &logical_name_id, "unwrapped", None)
+        .await?;
 
     run_project_phase(scratch.pool(), chain, 5)
         .await
@@ -19705,7 +19745,7 @@ async fn seed_mainnet_dual_current_conflict(pool: &PgPool, chain: &str) -> Resul
             mode: InterpretRunMode::Normal,
         })
         .await?;
-    insert_activated_authority_proof(pool, chain, &logical_name_id, "unwrapped").await?;
+    insert_activated_authority_proof(pool, chain, &logical_name_id, "unwrapped", None).await?;
     Ok(logical_name_id)
 }
 
@@ -23483,6 +23523,8 @@ async fn seed_closed_predecessor_cross_arm_fixture(
     pool: &PgPool,
     chain: &str,
     v2_block: i64,
+    v1_block: i64,
+    boundary_block: i64,
 ) -> Result<String> {
     seed_lineage(pool, chain, 5).await?;
     declare_sepolia_post_audit_profile(pool, chain).await?;
@@ -23507,9 +23549,30 @@ async fn seed_closed_predecessor_cross_arm_fixture(
         EnsArmSet::Both,
         EnsArmSet::Both,
         v2_block,
-        Some(v2_block),
+        Some(boundary_block),
     )
     .await?;
+    if v1_block != 1 {
+        let (binding, resource) = seeded.v1.expect("seeded ENSv1 binding");
+        sqlx::query(
+            "UPDATE surface_bindings
+             SET active_from = to_timestamp($1), block_number = $1, block_hash = $2
+             WHERE surface_binding_id = $3",
+        )
+        .bind(v1_block)
+        .bind(block_hash(chain, v1_block))
+        .bind(binding)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE resources SET block_number = $1, block_hash = $2 WHERE resource_id = $3",
+        )
+        .bind(v1_block)
+        .bind(block_hash(chain, v1_block))
+        .bind(resource)
+        .execute(pool)
+        .await?;
+    }
     sqlx::query("UPDATE normalized_events SET transaction_hash = concat(chain_id, '-v2-registration'), transaction_index = 0, log_index = 0 WHERE chain_id = $1 AND logical_name_id = $2 AND source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistrationGranted'").bind(chain).bind(&logical_name_id).execute(pool).await?;
     assert!(seeded.v1.is_some());
     assert!(seeded.v2.is_some());
@@ -23698,6 +23761,7 @@ async fn insert_activated_authority_proof(
     chain: &str,
     logical_name_id: &str,
     migration_path: &str,
+    boundary_block: Option<i64>,
 ) -> Result<(Uuid, Uuid, String)> {
     let (binding_id, resource_id, block_number, transaction_index, log_index): (
         Uuid,
@@ -23718,6 +23782,7 @@ async fn insert_activated_authority_proof(
     .bind(logical_name_id)
     .fetch_one(pool)
     .await?;
+    let block_number = boundary_block.unwrap_or(block_number);
     let proof_identity = format!("{chain}:MigrationApplied:authority-proof-fixture");
     sqlx::query(
         "INSERT INTO normalized_events (
@@ -23760,12 +23825,13 @@ async fn seed_authority_lifecycle_fixture(
     chain: &str,
     migration_path: &str,
 ) -> Result<(String, String)> {
-    let logical_name_id = seed_closed_predecessor_cross_arm_fixture(pool, chain, 4).await?;
+    let logical_name_id = seed_closed_predecessor_cross_arm_fixture(pool, chain, 4, 1, 4).await?;
     for block in 6..=9 {
         insert_lineage_block(pool, chain, block).await?;
     }
     let (_, v2_resource, proof_identity) =
-        insert_activated_authority_proof(pool, chain, &logical_name_id, migration_path).await?;
+        insert_activated_authority_proof(pool, chain, &logical_name_id, migration_path, None)
+            .await?;
     let v1_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM surface_bindings
          WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'
