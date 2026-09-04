@@ -236,6 +236,10 @@ pub(crate) mod primary_coherence_test_hooks {
 struct ReverseIdentityPageRow {
     input_index: usize,
     logical_name_id: String,
+    normalized_name: String,
+    canonical_display_name: String,
+    labelhash: Option<String>,
+    labelhash_count: Option<i32>,
     primary_name: Option<IdentityPrimaryNameSnapshot>,
 }
 
@@ -270,12 +274,16 @@ pub(crate) async fn load_reverse_identity_records_page_live(
 }
 
 pub(crate) async fn prepare_reverse_identity_additional_scan(
-    _pool: &PgPool,
+    pool: &PgPool,
+    served_head: Option<&crate::v2::lookup::head::ServedHead>,
 ) -> crate::v2::V2Result<()> {
     #[cfg(test)]
-    relation_page_test_hooks::pause_before_additional_scan(_pool)
+    relation_page_test_hooks::pause_before_additional_scan(pool)
         .await
         .map_err(|_| crate::v2::V2Error::internal_error("failed to run reverse-page test hook"))?;
+    if let Some(served_head) = served_head {
+        crate::v2::lookup::head::revalidate_served_head(pool, served_head).await?;
+    }
     Ok(())
 }
 
@@ -372,7 +380,11 @@ fn reverse_identity_record(
     input: &ReverseIdentityStorageInput,
     row: ReverseIdentityPageRow,
 ) -> Option<ReverseIdentityRecordRow> {
-    let name_record = name_records.get(&row.logical_name_id)?.clone();
+    let mut name_record = name_records.get(&row.logical_name_id)?.clone();
+    name_record.row.normalized_name = row.normalized_name;
+    name_record.row.canonical_display_name = row.canonical_display_name;
+    name_record.row.labelhash = row.labelhash;
+    name_record.row.labelhash_count = row.labelhash_count;
     let primary_name = row.primary_name;
     let mut relation_facets = name_record
         .relations

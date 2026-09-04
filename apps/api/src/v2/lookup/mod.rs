@@ -126,7 +126,7 @@ pub(crate) async fn get_lookup(
         &state,
         profile,
         &address_inputs,
-        selected_snapshot,
+        served_head.as_ref(),
         public_namespaces
             .as_ref()
             .map(|namespaces| namespaces.names())
@@ -242,7 +242,7 @@ async fn render_reverse_lookup_results(
     state: &AppState,
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
-    selected_snapshot: Option<&SelectedSnapshot>,
+    served_head: Option<&head::ServedHead>,
     public_namespaces: &[String],
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
@@ -250,7 +250,7 @@ async fn render_reverse_lookup_results(
         state,
         profile,
         inputs,
-        selected_snapshot,
+        served_head,
         public_namespaces,
         results,
     )
@@ -260,8 +260,7 @@ async fn render_reverse_lookup_results(
         .filter(|input| requires_relation_post_filter(input.relation.as_ref()))
     {
         let page =
-            load_exact_relation_reverse_page(state, input, selected_snapshot, public_namespaces)
-                .await?;
+            load_exact_relation_reverse_page(state, input, served_head, public_namespaces).await?;
         render_reverse_input_result(profile, input, page, results)?;
     }
     Ok(())
@@ -271,10 +270,11 @@ async fn render_storage_exact_reverse_lookup_results(
     state: &AppState,
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
-    selected_snapshot: Option<&SelectedSnapshot>,
+    served_head: Option<&head::ServedHead>,
     public_namespaces: &[String],
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
+    let selected_snapshot = served_head.map(head::ServedHead::selected);
     let storage_exact_inputs = inputs
         .iter()
         .filter(|input| !requires_relation_post_filter(input.relation.as_ref()))
@@ -339,9 +339,10 @@ async fn render_storage_exact_reverse_lookup_results(
 async fn load_exact_relation_reverse_page(
     state: &AppState,
     input: &ParsedAddressLookup,
-    selected_snapshot: Option<&SelectedSnapshot>,
+    served_head: Option<&head::ServedHead>,
     public_namespaces: &[String],
 ) -> V2Result<ReverseLookupPage> {
+    let selected_snapshot = served_head.map(head::ServedHead::selected);
     let target_len = input.page_size as usize;
     let scan_size = input.page_size.max(50);
     let scan_cap = scan_size.saturating_mul(EXACT_RELATION_SCAN_MULTIPLIER);
@@ -418,7 +419,7 @@ async fn load_exact_relation_reverse_page(
         if cursor.is_none() {
             break;
         }
-        super::support::prepare_reverse_identity_additional_scan(&state.pool).await?;
+        super::support::prepare_reverse_identity_additional_scan(&state.pool, served_head).await?;
     }
 
     let binding = LookupReverseCursorBinding {
@@ -502,27 +503,19 @@ fn address_lookup_result(
 
 fn result_unsupported_reason<'a>(
     status: Status,
-    records: impl Iterator<Item = &'a LookupRecord>,
+    mut records: impl Iterator<Item = &'a LookupRecord>,
 ) -> Option<String> {
     (status == Status::Unsupported)
-        .then(|| {
-            records
-                .filter_map(|record| record.unsupported_reason.clone())
-                .next()
-        })
+        .then(|| records.find_map(|record| record.unsupported_reason.clone()))
         .flatten()
 }
 
 fn result_failure_reason<'a>(
     status: Status,
-    records: impl Iterator<Item = &'a LookupRecord>,
+    mut records: impl Iterator<Item = &'a LookupRecord>,
 ) -> Option<String> {
     matches!(status, Status::Failed | Status::NotFound | Status::Mismatch)
-        .then(|| {
-            records
-                .filter_map(|record| record.failure_reason.clone())
-                .next()
-        })
+        .then(|| records.find_map(|record| record.failure_reason.clone()))
         .flatten()
 }
 

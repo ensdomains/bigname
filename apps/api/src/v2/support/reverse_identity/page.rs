@@ -76,7 +76,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                 cursor_normalized_name, cursor_namespace, cursor_namehash
             )
         )
-        SELECT requested.input_index, candidate.logical_name_id,
+        SELECT requested.input_index, candidate.logical_name_id, candidate.raw_name,
                requested.primary_names -> candidate.namespace AS primary_name
         FROM requested
         JOIN LATERAL (
@@ -85,14 +85,14 @@ pub(super) async fn load_reverse_identity_page_rows(
                 SELECT anc.logical_name_id,
                        bool_or(COALESCE(
                            requested.primary_names -> anc.namespace
-                               ->> 'normalized_claim_name' = anc.raw_name,
+                               ->> 'normalized_claim_name' = identity_nc.raw_name,
                            false
                        )) AS is_primary,
                        min(CASE
                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0
                            ELSE 1
                        END)::SMALLINT AS role_rank,
-                       anc.raw_name AS normalized_name,
+                       identity_nc.raw_name AS raw_name,
                        anc.namespace,
                        anc.namehash
                 FROM readable_relations anc
@@ -107,13 +107,14 @@ pub(super) async fn load_reverse_identity_page_rows(
                       OR (requested.roles = 'managed'
                           AND anc.relation = 'effective_controller')
                   )
-                GROUP BY anc.logical_name_id, anc.raw_name, anc.namespace, anc.namehash
+                GROUP BY anc.logical_name_id, identity_nc.raw_name,
+                         anc.namespace, anc.namehash
             ) grouped
             WHERE NOT requested.cursor_present
                OR (
                     NOT grouped.is_primary,
                     grouped.role_rank,
-                    grouped.normalized_name,
+                    grouped.raw_name,
                     grouped.namespace,
                     grouped.namehash
                ) > (
@@ -124,11 +125,11 @@ pub(super) async fn load_reverse_identity_page_rows(
                     requested.cursor_namehash
                )
             ORDER BY NOT grouped.is_primary, grouped.role_rank,
-                     grouped.normalized_name, grouped.namespace, grouped.namehash
+                     grouped.raw_name, grouped.namespace, grouped.namehash
             LIMIT requested.page_size + 1
         ) candidate ON TRUE
         ORDER BY requested.input_index, NOT candidate.is_primary,
-                 candidate.role_rank, candidate.normalized_name,
+                 candidate.role_rank, candidate.raw_name,
                  candidate.namespace, candidate.namehash
         "#
     );
@@ -162,13 +163,30 @@ pub(super) async fn load_reverse_identity_page_rows(
 
     rows.into_iter()
         .map(|row| {
+            let logical_name_id = row.try_get::<String, _>("logical_name_id")?;
+            let raw_name = row.try_get::<String, _>("raw_name")?;
+            let normalized = bigname_domain::normalization::normalize_name(&raw_name)
+                .with_context(|| {
+                    format!("reverse candidate {logical_name_id} has an unreadable name")
+                })?;
+            let labelhash = normalized.normalized_labels.first().map(|label| {
+                format!(
+                    "0x{}",
+                    alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
+                )
+            });
+            let labelhash_count = i32::try_from(normalized.normalized_labels.len()).ok();
             let primary_name = row
                 .try_get::<Option<Value>, _>("primary_name")?
                 .map(decode_primary_name)
                 .transpose()?;
             Ok(ReverseIdentityPageRow {
                 input_index: row.try_get::<i32, _>("input_index")? as usize,
-                logical_name_id: row.try_get("logical_name_id")?,
+                logical_name_id,
+                normalized_name: normalized.normalized_name,
+                canonical_display_name: normalized.canonical_display_name,
+                labelhash,
+                labelhash_count,
                 primary_name,
             })
         })
