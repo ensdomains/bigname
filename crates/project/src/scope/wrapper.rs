@@ -146,7 +146,7 @@ async fn include_all(
     Ok(())
 }
 
-async fn include_effect_resources(
+pub(super) async fn include_effect_resources(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target_block: i64,

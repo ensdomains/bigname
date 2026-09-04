@@ -626,6 +626,69 @@ async fn registration_history_retraction_converges(kind: &str) -> Result<()> {
     Ok(())
 }
 
+#[rustfmt::skip]
+async fn wrapper_disqualifier_retraction_converges(kind: &str) -> Result<()> {
+    let (suffix, state) = match kind {
+        "PermissionScopeChanged" => ("fuses", json!({"fuses":0,"wrapper_state":"emancipated"})),
+        _ => ("expiry", json!({"expiry":1_800_000_010_i64})),
+    };
+    let identity = format!("wrapper-disqualifier-{suffix}");
+    let (_redo_db, redo) = database(&format!("issue503_{suffix}_retract_redo")).await?;
+    seed_hash_only_locked(&redo, None).await?;
+    event(&redo, &identity, CHILD, Some(V1_WRAPPER_RESOURCE), "ens_v1_wrapper_l1", kind, 11, 6, state).await?;
+    run(&redo, 11, None, RunMode::Normal).await?;
+    assert!(!visible(&redo).await?);
+    sqlx::query("DELETE FROM normalized_events WHERE event_identity = $1")
+        .bind(&identity).execute(&redo).await?;
+    run(&redo, 12, Some(11), RunMode::Redo).await?;
+    let (_fresh_db, fresh) = database(&format!("issue503_{suffix}_retract_fresh")).await?;
+    seed_hash_only_locked(&fresh, None).await?;
+    run(&fresh, 12, None, RunMode::Normal).await?;
+    assert_eq!(rows(&redo).await?, rows(&fresh).await?);
+    assert!(visible(&redo).await?);
+    Ok(())
+}
+
+macro_rules! wrapper_disqualifier_retraction_test {
+    ($name:ident, $kind:literal) => {
+        #[tokio::test]
+        async fn $name() -> Result<()> {
+            wrapper_disqualifier_retraction_converges($kind).await
+        }
+    };
+}
+
+#[rustfmt::skip]
+wrapper_disqualifier_retraction_test!(
+    retracted_wrapper_fuse_disqualifier_restores_hash_only_child,
+    "PermissionScopeChanged"
+);
+#[rustfmt::skip]
+wrapper_disqualifier_retraction_test!(
+    retracted_wrapper_expiry_disqualifier_restores_hash_only_child,
+    "ExpiryChanged"
+);
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn unrelated_redo_does_not_scope_child_through_historical_wrapper_resource() -> Result<()> {
+    let (_db, pool) = database("issue503_unrelated_wrapper_resource_redo").await?;
+    seed_hash_only_locked(&pool, None).await?;
+    run(&pool, 10, None, RunMode::Normal).await?;
+    assert!(visible(&pool).await?);
+    raw_sql(
+        "CREATE TABLE child_scope_audit (operation text NOT NULL); CREATE FUNCTION audit_child_scope_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO child_scope_audit VALUES (TG_OP); RETURN NULL; END $$; CREATE TRIGGER audit_child_scope_delete AFTER DELETE ON children_current FOR EACH ROW WHEN (OLD.child_logical_name_id = 'ens:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') EXECUTE FUNCTION audit_child_scope_write(); CREATE TRIGGER audit_child_scope_insert AFTER INSERT ON children_current FOR EACH ROW WHEN (NEW.child_logical_name_id = 'ens:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') EXECUTE FUNCTION audit_child_scope_write();",
+    ).execute(&pool).await?;
+    event(&pool, "unrelated-wrapper-resource-event", CHILD, Some(V1_WRAPPER_RESOURCE), "ens_v1_resolver_l1", "PreimageObserved", 11, 7, json!({"observation":"unrelated"})).await?;
+    sqlx::query("UPDATE normalized_events SET logical_name_id = NULL WHERE event_identity = 'unrelated-wrapper-resource-event'").execute(&pool).await?;
+    run(&pool, 12, Some(10), RunMode::Redo).await?;
+    let writes: i64 = sqlx::query_scalar("SELECT count(*) FROM child_scope_audit")
+        .fetch_one(&pool).await?;
+    assert_eq!(writes, 0, "an unrelated redo changed child scope");
+    assert!(visible(&pool).await?);
+    Ok(())
+}
+
 macro_rules! history_retraction_test {
     ($name:ident, $kind:literal) => {
         #[tokio::test]
