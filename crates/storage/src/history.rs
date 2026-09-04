@@ -156,6 +156,7 @@ pub struct EventHistoryFilter {
 pub(in crate::history) struct EventHistoryReadFilter {
     pub(in crate::history) selectors: Vec<selectors::HistorySelector>,
     pub(in crate::history) registration_id: Option<Uuid>,
+    pub(in crate::history) registration_id_is_public: bool,
     pub(in crate::history) namespace: Option<String>,
     pub(in crate::history) event_kinds: Vec<String>,
     pub(in crate::history) bind_cursor_anchor_to_event_kinds: bool,
@@ -481,6 +482,19 @@ async fn event_history_read_filter(
     include_candidates: bool,
 ) -> Result<EventHistoryReadFilter> {
     let mut selectors = Vec::new();
+    let registration_id = (!include_candidates).then_some(filter.resource_id).flatten();
+    let registration_id_is_public = match registration_id {
+        Some(registration_id) => registration_identity::is_public_registration_id(
+            pool,
+            registration_id,
+            canonical_only,
+        )
+        .await
+        .with_context(|| {
+            format!("failed to validate public registration_id {registration_id}")
+        })?,
+        None => false,
+    };
 
     if let Some(logical_name_id) = filter.logical_name_id.as_deref() {
         let resource_ids =
@@ -520,7 +534,10 @@ async fn event_history_read_filter(
         selectors.push(if include_candidates {
             resource_history_selector(resource_id, &logical_name_ids, HistoryScope::Both)
         } else {
-            product_registration_history_selector(resource_ids, logical_name_ids)
+            product_registration_history_selector(
+                resource_ids,
+                registration_id_is_public.then_some(logical_name_ids).unwrap_or_default(),
+            )
         });
     }
 
@@ -557,11 +574,8 @@ async fn event_history_read_filter(
 
     Ok(EventHistoryReadFilter {
         selectors,
-        registration_id: if include_candidates {
-            None
-        } else {
-            filter.resource_id
-        },
+        registration_id,
+        registration_id_is_public,
         namespace: filter.namespace,
         event_kinds: filter.event_kinds,
         bind_cursor_anchor_to_event_kinds: filter.bind_cursor_anchor_to_event_kinds,

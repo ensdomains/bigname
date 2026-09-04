@@ -1,4 +1,5 @@
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder};
+use uuid::Uuid;
 
 pub(super) fn push_product_event_kind_predicate(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
@@ -11,6 +12,39 @@ pub(super) fn push_product_event_kind_predicate(builder: &mut QueryBuilder<'_, P
             'EACRolesChanged'
         )",
     );
+}
+
+pub(super) async fn is_public_registration_id(
+    pool: &PgPool,
+    registration_id: Uuid,
+    canonical_only: bool,
+) -> Result<bool, sqlx::Error> {
+    let mut builder = QueryBuilder::new(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM bigname_phase.normalized_events ne
+            LEFT JOIN bigname_phase.chain_lineage rb
+              ON rb.chain_id = ne.chain_id
+             AND rb.block_hash = ne.block_hash
+            WHERE ne.resource_id = ",
+    );
+    builder.push_bind(registration_id);
+    builder.push(" AND ne.consumer_visibility = 'activated'");
+    if canonical_only {
+        builder.push(
+            " AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND (
+                  ne.block_hash IS NULL
+                  OR rb.canonicality_state IN ('canonical', 'safe', 'finalized')
+              )",
+        );
+    }
+    builder.push(" AND (");
+    push_product_registration_id(&mut builder);
+    builder.push(" = ");
+    builder.push_bind(registration_id);
+    builder.push(") LIMIT 1)");
+    builder.build_query_scalar().fetch_one(pool).await
 }
 
 pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgres>) {

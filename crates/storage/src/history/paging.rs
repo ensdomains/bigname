@@ -332,6 +332,8 @@ pub(super) fn push_history_filters<'a>(
 
     if let Some(registration_id) = filter.registration_id.as_ref() {
         builder.push(" AND ((ne.resource_id IS NULL AND ");
+        builder.push_bind(filter.registration_id_is_public);
+        builder.push(" AND ");
         push_product_event_kind_predicate(builder);
         builder.push(") OR (");
         push_product_registration_id(builder);
