@@ -27,7 +27,7 @@ mod snapshot;
 #[cfg(test)]
 pub(crate) use account_queries::{GeneratedAccountFilter, explain_phase_graphql_account_page};
 #[cfg(test)]
-pub(crate) use generated_filter_ops::GeneratedDomainFilter;
+pub(crate) use generated_filter_ops::{GeneratedDomainFilter, push_generated_domain_filters};
 #[cfg(test)]
 pub(crate) use name_queries::{
     GeneratedDomainSort, count_phase_graphql_name_list, explain_phase_graphql_name_list_page,

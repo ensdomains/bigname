@@ -35,6 +35,14 @@ fn plan_domain_filter(member: &str, value: &str) -> crate::graphql::GeneratedDom
     filter
 }
 
+#[test]
+fn noncanonical_id_ranges_pin_c_collation() {
+    let mut sql = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+    let filter = plan_domain_filter("id_gt", "0xA");
+    crate::graphql::push_generated_domain_filters(&mut sql, &filter);
+    assert!(sql.sql().contains("(nc.namehash COLLATE \"C\") >"), "{}", sql.sql());
+}
+
 async fn pad_generated_domain_plans(database: &TestDatabase) -> Result<()> {
     pad_resolver_planner_statistics(database).await?;
     let alternate_owner = "0x0000000000000000000000000000000000000672";
