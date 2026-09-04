@@ -263,10 +263,10 @@ summaries use that stored event provenance rather than a prior resolver row's
 classification.
 
 When a retained direct-registry authority first becomes name-addressable, its
-state-derived surface and authority-boundary events carry the observed registry owner.
-`name_current.declared_summary.control.registry_owner` therefore exposes that
-owner on the same terms as a registrar-release rebound. `control.status`
-remains null unless another selected authority event supplies a status.
+[`state-derived normalized event`](glossary.md#state-derived-normalized-event)
+of kind `SurfaceBound` carries the observed registry owner. The exact-name
+control summary and effective-controller address relation expose that owner;
+`control.status` remains null unless another selected authority event supplies it.
 
 ENSv1 wrapper lifecycle and fuse effects are projected from canonical wrapper
 facts. During registrar grace, the holder and lifecycle state remain visible,
