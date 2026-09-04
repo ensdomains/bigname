@@ -200,8 +200,8 @@ subnames include a read-only row only while a current nonzero event-linked
 resolver exists; and resolver `bound_names` remains subject to the resolver
 family's existing binding-enumeration capability. Registration/control fields,
 address-name relations, and owner-derived permissions stay absent. When the
-latest nonzero registry resolver selection predates the name surface, first
-surface materialization links it to the retained serving resource without
+latest nonzero registry resolver selection predates the [name surface](glossary.md#surface-name-surface), the event that first makes the surface active
+links it to the retained serving resource without
 requiring a repeated selection; a latest zero-address selection remains a
 clear. The GraphQL compatibility surface uses the same serving resource for its
 resolver record fields; it does not infer registration or control from that
@@ -209,7 +209,7 @@ read path.
 
 For the fallback registry, a current-registry `NewOwner` or `Transfer` creates
 the current record and ends any resolver pointer inherited from the old
-registry. That handoff is retained across replay even for a same-owner
+registry. That [registry fallback handoff](glossary.md#registry-fallback-handoff) is retained across replay even for a same-owner
 `Transfer`; linked zero-resolver events retract an inherited pointer that had
 already become readable from every linked registry, registrar, or wrapper
 resource. An old-registry `Transfer` does not affect a resolver
