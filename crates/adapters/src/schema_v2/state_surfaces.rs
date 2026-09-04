@@ -10,7 +10,7 @@ pub(in crate::schema_v2) enum V1SurfaceMaterialization {
         resolver: Option<String>,
         source_manifest_id: i64,
     },
-    OwnerlessRegistryRead {
+    RegistryRead {
         anchor: V1RegistryReadAnchor,
         resolver: Option<String>,
         source_manifest_id: i64,
@@ -310,7 +310,11 @@ impl State {
         let explicitly_ownerless = self.v1_registry_owners.get(&key).is_some_and(|owner| {
             owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
         });
-        if explicitly_ownerless
+        let wrapper_is_current = self
+            .v1_names
+            .get(&key)
+            .is_some_and(|authority| authority.authority_source_family == "ens_v1_wrapper_l1");
+        if (explicitly_ownerless || wrapper_is_current)
             && let Some(mut anchor) = self.v1_registry_read_anchors.get(&key).cloned()
             && !anchor.surface_known
         {
@@ -324,6 +328,13 @@ impl State {
             anchor.surface_known = true;
             self.v1_registry_read_anchors
                 .insert(key.clone(), anchor.clone());
+            self.sync_registry_surface_from_registrar(
+                namespace,
+                namehash,
+                logical_name_id,
+                true,
+                Some(labelhash),
+            );
             let resolver = self
                 .v1_resolver_links
                 .get(&key)
@@ -332,7 +343,7 @@ impl State {
                 link.resource_id = Some(anchor.resource_id);
                 link.logical_name_id = Some(logical_name_id.to_owned());
             }
-            return Ok(V1SurfaceMaterialization::OwnerlessRegistryRead {
+            return Ok(V1SurfaceMaterialization::RegistryRead {
                 anchor,
                 resolver,
                 source_manifest_id,

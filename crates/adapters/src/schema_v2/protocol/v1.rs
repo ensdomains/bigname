@@ -16,11 +16,51 @@ use anyhow::bail;
 use super::Interpreted;
 use crate::schema_v2::{
     catalog::Selected,
+    common::hash_hex,
     model::{BatchOutput, NormalizedEvent, RawLogInput},
     seam::{INTERPRETER_STATE_KEY, STATE_SCOPE_KEY},
     state::State,
     state_key::interpreter_state_key,
 };
+
+pub(in crate::schema_v2) fn materialize_wrapper_surface(
+    selected: &Selected,
+    raw: &RawLogInput,
+    state: &mut State,
+    interpreted: &mut Interpreted,
+) -> anyhow::Result<()> {
+    if selected.source.source_family != "ens_v1_wrapper_l1" {
+        return Ok(());
+    }
+    let surfaces = interpreted
+        .names
+        .iter()
+        .filter_map(|name| {
+            Some((
+                name.namehash.clone(),
+                name.labels.first()?.clone(),
+                format!("{}:{}", selected.source.namespace, name.namehash),
+                name.authority_arm.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    for (namehash, label, logical_name_id, authority_arm) in surfaces {
+        let materialization = state.materialize_v1_active_surface(
+            &selected.source.namespace,
+            &namehash,
+            &logical_name_id,
+            &hash_hex(label.as_bytes()),
+        )?;
+        authority_transition::append_surface_materialization_for_trigger(
+            interpreted,
+            &authority_arm,
+            &materialization,
+            raw,
+            "NameWrapped",
+        );
+    }
+    Ok(())
+}
 
 fn is_registry_ownership_event(name: &str) -> bool {
     matches!(name, "NewOwner" | "Transfer")

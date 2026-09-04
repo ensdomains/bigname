@@ -977,6 +977,10 @@ registry-only authority and registry read anchor. This does not make the
 registry resource current while the registration is live; it preserves the
 known direct-registry fallback so a later registrar release can bind that
 existing registry resource in fresh, restored, resumed, and redo execution.
+A `NameWrapped` observation can be the first active surface too. In that case,
+Interpret links the retained registry read resource at the wrapper raw position
+without binding the registry resource or displacing wrapper control; an
+ownerless unwrap can later keep serving that registry-selected resolver.
 
 The retained ENSv1 resolver pointer records whether its selecting `NewResolver`
 came from the old or current registry. A current-registry `NewOwner` or

@@ -170,14 +170,6 @@ impl State {
             self.active_resources
                 .insert(logical_name_id.clone(), resource_id);
         }
-        if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
-            registry.logical_name_id = logical_name_id.clone();
-            registry.surface_known = surface_known;
-        }
-        if let Some(anchor) = self.v1_registry_read_anchors.get_mut(&key) {
-            anchor.logical_name_id = logical_name_id.clone();
-            anchor.surface_known |= surface_known;
-        }
         self.v1_names.insert(
             key,
             V1NameState {

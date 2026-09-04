@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::{
     BatchInput, BatchOutput, RawLogInput, catalog::Catalog, seam::INTERPRETER_STATE_KEY,
-    sourced_events::remember_v1_resolver_linked_resources as remember_links, state::State,
+    sourced_events::prepare_v1_state_derived_events as prepare_v1, state::State,
     state_residency::StateCacheCapacity,
 };
 
@@ -486,7 +486,7 @@ fn interpret_raw(
     };
     // Interpret on a structurally shared candidate so a malformed log cannot retain partial state.
     let mut candidate_state = state.clone();
-    let interpreted = match super::protocol::interpret(
+    let mut interpreted = match super::protocol::interpret(
         &selected,
         raw,
         &mut candidate_state,
@@ -520,8 +520,7 @@ fn interpret_raw(
             });
         }
     };
-    let namespace = &selected.source.namespace;
-    remember_links(namespace, &interpreted, &mut candidate_state);
+    prepare_v1(&selected, raw, &mut interpreted, &mut candidate_state)?;
     *state = candidate_state;
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
     super::sourced_events::materialize(

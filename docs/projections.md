@@ -460,8 +460,10 @@ resolver selection suppresses this materialization pointer rather than reviving
 an older nonzero selection. The original raw-derived normalized row remains
 immutable; the linked pointer is an additive
 [state-derived normalized event](glossary.md#state-derived-normalized-event) at
-the surface-materializing renewal. Record attribution remains node-keyed and
-provider-free. If a registrar registration makes the registrar resource current
+the raw event that first materializes the active surface. A wrapper-provided
+surface links the retained registry read resource without binding that dormant
+registry resource while wrapper control remains current. Record attribution
+remains node-keyed and provider-free. If a registrar registration makes the registrar resource current
 before the retained registry-only authority can be materialized, the same
 observation still marks that retained authority's surface known. A later
 registrar release can therefore restore the existing registry resource and its

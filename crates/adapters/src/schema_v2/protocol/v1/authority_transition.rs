@@ -183,6 +183,22 @@ pub(super) fn append_surface_materialization(
     materialization: &V1SurfaceMaterialization,
     raw: &RawLogInput,
 ) {
+    append_surface_materialization_for_trigger(
+        output,
+        authority_arm,
+        materialization,
+        raw,
+        "NameRenewed",
+    );
+}
+
+pub(super) fn append_surface_materialization_for_trigger(
+    output: &mut Interpreted,
+    authority_arm: &str,
+    materialization: &V1SurfaceMaterialization,
+    raw: &RawLogInput,
+    source_event: &str,
+) {
     let (source_manifest_id, events) = match materialization {
         V1SurfaceMaterialization::RegistryAuthority {
             previous,
@@ -212,7 +228,7 @@ pub(super) fn append_surface_materialization(
             let common = json!({
                 "state_derived":true,
                 "surface_materialization":true,
-                "source_event":"NameRenewed",
+                "source_event":source_event,
                 "node":node,
                 "authority_kind":"registry_only",
                 "authority_key":promoted.authority_key,
@@ -253,7 +269,7 @@ pub(super) fn append_surface_materialization(
             }
             (*source_manifest_id, events)
         }
-        V1SurfaceMaterialization::OwnerlessRegistryRead {
+        V1SurfaceMaterialization::RegistryRead {
             anchor,
             resolver,
             source_manifest_id,
@@ -278,7 +294,7 @@ pub(super) fn append_surface_materialization(
                         after_state: json!({
                             "state_derived":true,
                             "surface_materialization":true,
-                            "source_event":"NameRenewed",
+                            "source_event":source_event,
                             "node":node,
                             "authority_kind":"registry_only",
                             "authority_key":Value::Null,

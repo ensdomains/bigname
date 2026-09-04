@@ -1139,6 +1139,42 @@ fn current_registry_handoff_retracts_old_resolver_from_historical_wrapper_resour
 }
 
 #[test]
+fn wrapper_first_surface_links_the_retained_registry_read_resource() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        current_transfer(node, OWNER, 1)?,
+        resolver_selection(REGISTRY, node, RESOLVER_A, 2)?,
+        wrapped(3)?,
+        current_transfer(node, ZERO_ADDRESS, 4)?,
+        unwrapped(5)?,
+    ];
+    let (single, _) = assert_four_way_and_restore_parity(&history, 3)?;
+    let registry_resource =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{node:#x}"));
+    assert!(
+        single.iter().any(|event| {
+            event.block_number == Some(3)
+                && event.event_kind == "ResolverChanged"
+                && event.source_family == "ens_v1_registry_l1"
+                && event.logical_name_id.is_some()
+                && event.resource_id == Some(registry_resource)
+                && event.after_state["resolver"] == RESOLVER_A
+                && event.after_state["surface_materialization"] == true
+        }),
+        "wrapper-first materialization did not link the retained registry read resource"
+    );
+    assert!(
+        single.iter().all(|event| {
+            !(event.block_number == Some(3)
+                && event.event_kind == "SurfaceBound"
+                && event.resource_id == Some(registry_resource))
+        }),
+        "wrapper-first materialization must not bind the dormant registry resource"
+    );
+    Ok(())
+}
+
+#[test]
 fn current_registry_ownership_preserves_the_old_registry_root_resolver() -> anyhow::Result<()> {
     const ROOT_NODE: B256 = B256::ZERO;
     let history = vec![

@@ -1,17 +1,19 @@
 use anyhow::Context;
 
 use super::{
-    catalog::Catalog,
+    catalog::{Catalog, Selected},
     model::{BatchOutput, RawLogInput},
     protocol::{Interpreted, SourcedEventBatch},
     state::State,
 };
 
-pub(super) fn remember_v1_resolver_linked_resources(
-    namespace: &str,
-    interpreted: &Interpreted,
+pub(super) fn prepare_v1_state_derived_events(
+    selected: &Selected,
+    raw: &RawLogInput,
+    interpreted: &mut Interpreted,
     state: &mut State,
-) {
+) -> anyhow::Result<()> {
+    super::protocol::v1::materialize_wrapper_surface(selected, raw, state, interpreted)?;
     for event in interpreted.events.iter().chain(
         interpreted
             .sourced_events
@@ -34,13 +36,14 @@ pub(super) fn remember_v1_resolver_linked_resources(
             continue;
         }
         state.remember_v1_resolver_linked_resource(
-            namespace,
+            &selected.source.namespace,
             node,
             resolver,
             resource_id,
             event.logical_name_id.clone(),
         );
     }
+    Ok(())
 }
 
 pub(super) fn materialize(
