@@ -958,7 +958,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   per-registration permission summary classifies the result. Independently
   proven full support adds no completeness metadata. A non-wrapper resource
   whose standard operator, token-approval, or resolver-delegation paths are not
-  indexed returns `meta.completeness=partial` with
+  fully served returns `meta.completeness=partial` with
   `unsupported_reason=approval_and_delegation_permissions_not_supported`.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)

@@ -1375,12 +1375,16 @@ creating per-name approval rows.
 
 ## Registry-owner binding
 
-the current, evidence-backed association between a permission resource, its
-registry contract, and its registry owner. Registry-wide account permission is
-applicable only when this binding matches the approval's chain, contract, and
-owner. The latest admitted registry observation wins before its owner value is
-interpreted, so a zero owner clears the binding instead of exposing an older
-nonzero owner.
+the current, evidence-backed association between an ENSv1 or Basenames permission
+resource, its registry contract, and its registry owner. Registry-wide account
+permission is applicable only when this binding matches the approval's chain,
+contract, and owner. Project first selects `name_current`, then carries registry
+owner observations onto that selected resource rather than the separate resource
+that retains registry observations. An observation without an eligible selected resource or
+logical name stays on its emitting resource, and the remapping never crosses onto
+an ENSv2 resource. The latest admitted registry observation wins before its owner
+value is interpreted, so a zero owner clears the binding instead of exposing an
+older nonzero owner.
 
 ## Interpreter content hash
 
