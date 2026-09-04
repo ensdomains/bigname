@@ -37,6 +37,9 @@ const OLD_REGISTRAR_RESOURCE: &str = "abababab-abab-abab-abab-abababababab";
 const OWNERLESS_BINDING: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
 const RELEASE_REGISTRY_RESOURCE: &str = "edededed-eded-eded-eded-edededededed";
 const RELEASE_REGISTRY_BINDING: &str = "efefefef-efef-efef-efef-efefefefefef";
+const REWRAPPED_RESOURCE: &str = "acacacac-acac-acac-acac-acacacacacac";
+const REWRAPPED_BINDING: &str = "adadadad-adad-adad-adad-adadadadadad";
+const REWRAPPED_LINEAGE: &str = "aeaeaeae-aeae-aeae-aeae-aeaeaeaeaeae";
 const WRAPPER_LINEAGE: &str = "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd";
 const REGISTRY_ADDRESS: &str = "0x9999999999999999999999999999999999999999";
 const RESOLVER_ADDRESS: &str = "0x8888888888888888888888888888888888888888";
@@ -452,6 +455,7 @@ async fn later_wrapper_projection_joins_only_the_wrapped_registrar_lineage() -> 
 #[derive(Clone, Copy, Debug)]
 enum LaterWrapperDelta {
     HolderTransfer,
+    Rewrap,
     ResolverUpdate,
     RegistrarRenewal,
     RegistrarRelease,
@@ -679,6 +683,89 @@ async fn project_later_wrapper_delta(
                 11,
                 1,
                 json!({"source_event":"TransferSingle","from":PRIOR_CONTROLLER,"to":LATEST_WRAPPER_OWNER}),
+                json!({}),
+            )
+            .await?;
+        }
+        LaterWrapperDelta::Rewrap => {
+            seed_next_binding(
+                &pool,
+                OWNERLESS_NAMEHASH,
+                REWRAPPED_RESOURCE,
+                REWRAPPED_BINDING,
+                11,
+                "2026-08-01T00:00:11Z",
+            )
+            .await?;
+            seed_binding_provenance(&pool, REWRAPPED_BINDING, 0, 1).await?;
+            sqlx::query(
+                "INSERT INTO token_lineages (
+                     token_lineage_id, chain_id, block_hash, block_number,
+                     canonicality_state
+                 ) VALUES ($1::uuid, $2, $3, 11, 'canonical')",
+            )
+            .bind(REWRAPPED_LINEAGE)
+            .bind(CHAIN)
+            .bind(block_hash(11))
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "UPDATE resources SET token_lineage_id = $1::uuid
+                 WHERE resource_id = $2::uuid",
+            )
+            .bind(REWRAPPED_LINEAGE)
+            .bind(REWRAPPED_RESOURCE)
+            .execute(&pool)
+            .await?;
+            seed_normalized_event(
+                &pool,
+                "fixture:incremental-rewrap-binding",
+                Some(OWNERLESS_LOGICAL),
+                Some(REWRAPPED_RESOURCE),
+                "SurfaceBound",
+                "ens_v1_wrapper_l1",
+                11,
+                1,
+                json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapped_registrar_resource_id":OWNERLESS_RESOURCE}),
+                json!({"emitting_address":WRAPPER_CONTRACT}),
+            )
+            .await?;
+            seed_normalized_event(
+                &pool,
+                "fixture:incremental-rewrap-holder",
+                Some(OWNERLESS_LOGICAL),
+                Some(REWRAPPED_RESOURCE),
+                "TokenControlTransferred",
+                "ens_v1_wrapper_l1",
+                11,
+                2,
+                json!({"source_event":"TransferSingle","from":WRAPPER_CONTRACT,"to":LATEST_WRAPPER_OWNER}),
+                json!({}),
+            )
+            .await?;
+            seed_normalized_event(
+                &pool,
+                "fixture:incremental-rewrap-scope",
+                Some(OWNERLESS_LOGICAL),
+                Some(REWRAPPED_RESOURCE),
+                "PermissionScopeChanged",
+                "ens_v1_wrapper_l1",
+                11,
+                1,
+                json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"wrapper_state":"wrapped","fuses":0}),
+                json!({}),
+            )
+            .await?;
+            seed_normalized_event(
+                &pool,
+                "fixture:incremental-rewrap-expiry",
+                Some(OWNERLESS_LOGICAL),
+                Some(REWRAPPED_RESOURCE),
+                "ExpiryChanged",
+                "ens_v1_wrapper_l1",
+                11,
+                1,
+                json!({"source_event":"NameWrapped","node":OWNERLESS_NAMEHASH,"expiry":5252}),
                 json!({}),
             )
             .await?;
@@ -944,6 +1031,18 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
             "the selected registration rows admitted an older same-label registrar lineage"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn born_wrapped_rewrap_keeps_the_first_wrapper_registration_identity() -> Result<()> {
+    let incremental = project_later_wrapper_delta(LaterWrapperDelta::Rewrap, true, false, true).await?;
+    let from_zero = project_later_wrapper_delta(LaterWrapperDelta::Rewrap, false, false, true).await?;
+    assert_eq!(incremental, from_zero, "re-wrap projection diverged between an incremental batch and from-zero rebuild");
+    assert_eq!(incremental.registration_resource_id.as_deref(), Some(CONTROL_RESOURCE), "a later wrapper split the registrar-born lifecycle away from its first wrapper handle");
+    assert_eq!(incremental.registrant.as_deref(), Some("0x7777777777777777777777777777777777777777"));
+    assert_eq!(incremental.registrant, incremental.address_registrant);
     Ok(())
 }
 

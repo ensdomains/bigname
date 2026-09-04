@@ -1185,20 +1185,26 @@ async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> 
     database.cleanup().await
 }
 
-#[tokio::test] #[rustfmt::skip]
+#[tokio::test]
+#[rustfmt::skip]
 async fn born_wrapped_detail_and_history_keep_the_wrapper_registration_handle() -> Result<()> {
     const NAME: &str = "born-wrapped-history.eth"; const LOGICAL: &str = "ens:born-wrapped-history.eth";
-    let database = TestDatabase::new_migrated().await?; let wrapper = Uuid::from_u128(0x7140); let registrar = Uuid::from_u128(0x7141); let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
+    let database = TestDatabase::new_migrated().await?; let wrapper = Uuid::from_u128(0x7140); let registrar = Uuid::from_u128(0x7141); let rewrapper = Uuid::from_u128(0x7142); let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
     seed_identity_name(&database, LOGICAL, NAME, NAME, &namehash, wrapper, Uuid::from_u128(0x8140), Uuid::from_u128(0x9140), "0x0000000000000000000000000000000000007140", bigname_storage::AddressNameRelation::Registrant, 80).await?;
-    let orphan_wrapper = Uuid::from_u128(0x7142); upsert_test_resources(&database.pool, &[address_name_resource(registrar, None, "0xborn-wrap-registrar", 79), address_name_resource(orphan_wrapper, None, "0xborn-wrap-orphan", 79)]).await?; seed_v2_history_blocks(&database, 130..=132).await?;
+    let orphan_wrapper = Uuid::from_u128(0x7143); upsert_test_resources(&database.pool, &[address_name_resource(registrar, None, "0xborn-wrap-registrar", 79), address_name_resource(rewrapper, None, "0xborn-wrap-rewrapper", 79), address_name_resource(orphan_wrapper, None, "0xborn-wrap-orphan", 79)]).await?; seed_v2_history_blocks(&database, 130..=134).await?;
     let mut grant = v2_history_event("born-wrap-grant", None, Some(registrar), "RegistrationGranted", 130); grant.after_state["namehash"] = json!(namehash); let mut setup = v2_history_event("born-wrap-setup", None, Some(registrar), "AuthorityTransferred", 130); setup.source_family = "ens_v1_registry_l1".to_owned(); setup.after_state = json!({"source_event":"NewOwner","child_node":namehash,"owner":"0x0000000000000000000000000000000000007140"}); let mut binding = v2_history_event("born-wrap-binding", Some(LOGICAL), Some(wrapper), "SurfaceBound", 130); binding.source_family = "ens_v1_wrapper_l1".to_owned(); binding.after_state = json!({"source_event":"NameWrapped","node":namehash,"wrapped_registrar_resource_id":registrar});
     let mut transfer = v2_history_event("born-wrap-transfer", Some(LOGICAL), Some(wrapper), "TokenControlTransferred", 131); transfer.source_family = "ens_v1_wrapper_l1".to_owned();
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, setup, binding, transfer]).await?; let detail = v2_history_payload_for_database(&database, &format!("/v2/names/{NAME}")).await?; assert_eq!(detail["data"]["registration_id"], json!(wrapper.to_string()));
+    let mut rewrap_binding = v2_history_event("born-wrap-rewrap-binding", Some(LOGICAL), Some(rewrapper), "SurfaceBound", 132); rewrap_binding.source_family = "ens_v1_wrapper_l1".to_owned(); rewrap_binding.after_state = json!({"source_event":"NameWrapped","node":namehash,"wrapped_registrar_resource_id":registrar});
+    let mut rewrap_transfer = v2_history_event("born-wrap-rewrap-transfer", Some(LOGICAL), Some(rewrapper), "TokenControlTransferred", 133); rewrap_transfer.source_family = "ens_v1_wrapper_l1".to_owned();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, setup, binding, transfer, rewrap_binding, rewrap_transfer]).await?; let detail = v2_history_payload_for_database(&database, &format!("/v2/names/{NAME}")).await?; assert_eq!(detail["data"]["registration_id"], json!(wrapper.to_string()));
     let history = v2_history_payload_for_database(&database, &format!("/v2/names/{NAME}/history?scope=registration&page_size=20")).await?; let rows = history["data"].as_array().expect("history data"); let direct = v2_history_payload_for_database(&database, &format!("/v2/events?registration_id={wrapper}&page_size=20")).await?; let direct_rows = direct["data"].as_array().expect("direct history data");
-    assert_eq!(history_types(direct_rows), vec!["transfer", "authority", "registration"], "wrapper registration_id lost its pre-surface registrar setup: {direct_rows:?}"); assert!(rows.iter().filter(|row| matches!(row["type"].as_str(), Some("registration" | "transfer" | "authority"))).all(|row| row["registration_id"] == json!(wrapper.to_string())), "born-wrapped history split its wrapper handle: {rows:?}");
-    let orphan_grant = v2_history_event("born-wrap-orphan-grant", None, Some(registrar), "RegistrationGranted", 132); let mut orphan_binding = v2_history_event("born-wrap-orphan-binding", Some(LOGICAL), Some(orphan_wrapper), "SurfaceBound", 132); orphan_binding.source_family = "ens_v1_wrapper_l1".to_owned(); orphan_binding.after_state = json!({"source_event":"NameWrapped","node":namehash,"wrapped_registrar_resource_id":registrar});
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[orphan_grant, orphan_binding]).await?; sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xhistory132'").execute(&database.pool).await?;
-    let canonical = v2_history_payload_for_database(&database, &format!("/v2/events?registration_id={wrapper}&page_size=20")).await?; let canonical_rows = canonical["data"].as_array().expect("canonical history data"); assert_eq!(history_types(canonical_rows), vec!["transfer", "authority", "registration"], "orphaned born-wrap evidence hid canonical registration history: {canonical_rows:?}"); assert!(canonical_rows.iter().filter(|row| matches!(row["type"].as_str(), Some("registration" | "transfer" | "authority"))).all(|row| row["registration_id"] == json!(wrapper.to_string())), "orphaned born-wrap evidence changed canonical registration identity: {canonical_rows:?}");
+    assert_eq!(history_types(direct_rows), vec!["transfer", "transfer", "authority", "registration"], "wrapper registration_id lost registrar or later-wrapper history: {direct_rows:?}"); assert!(rows.iter().filter(|row| matches!(row["type"].as_str(), Some("registration" | "transfer" | "authority"))).all(|row| row["registration_id"] == json!(wrapper.to_string())), "born-wrapped history split its first wrapper handle after re-wrap: {rows:?}"); assert!(direct_rows.iter().any(|row| row["block_number"] == json!(133) && row["registration_id"] == json!(wrapper.to_string())), "the first wrapper handle did not follow the later wrapper row: {direct_rows:?}");
+    let plan = bigname_storage::explain_registration_history_filter_for_test(&database.pool, wrapper, LOGICAL, "ethereum-mainnet", "ens", &namehash).await?;
+    assert!(!plan.contains("Index Cond: (event_kind = 'SurfaceBound'::text)"), "registration identity must not scan every SurfaceBound row per history result:\n{plan}");
+    assert!(!plan.contains("Index Cond: (chain_id = wrapper_binding"), "registration identity must not scan every registrar event on the chain per wrapper candidate:\n{plan}");
+    let orphan_grant = v2_history_event("born-wrap-orphan-grant", None, Some(registrar), "RegistrationGranted", 134); let mut orphan_binding = v2_history_event("born-wrap-orphan-binding", Some(LOGICAL), Some(orphan_wrapper), "SurfaceBound", 134); orphan_binding.source_family = "ens_v1_wrapper_l1".to_owned(); orphan_binding.after_state = json!({"source_event":"NameWrapped","node":namehash,"wrapped_registrar_resource_id":registrar});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[orphan_grant, orphan_binding]).await?; sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xhistory134'").execute(&database.pool).await?;
+    let canonical = v2_history_payload_for_database(&database, &format!("/v2/events?registration_id={wrapper}&page_size=20")).await?; let canonical_rows = canonical["data"].as_array().expect("canonical history data"); assert_eq!(history_types(canonical_rows), vec!["transfer", "transfer", "authority", "registration"], "orphaned born-wrap evidence hid canonical registration history: {canonical_rows:?}"); assert!(canonical_rows.iter().filter(|row| matches!(row["type"].as_str(), Some("registration" | "transfer" | "authority"))).all(|row| row["registration_id"] == json!(wrapper.to_string())), "orphaned born-wrap evidence changed canonical registration identity: {canonical_rows:?}");
     database.cleanup().await
 }
 
@@ -1453,6 +1459,14 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
     assert!(
         !plan.contains("Seq Scan on normalized_events"),
         "registration history and association discovery must not scan the complete normalized-event table:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Index Cond: (event_kind = 'SurfaceBound'::text)"),
+        "registration identity must not scan every SurfaceBound row per history result:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Index Cond: (chain_id = wrapper_binding"),
+        "registration identity must not scan every registrar event on the chain per wrapper candidate:\n{plan}"
     );
     let older_registration_payload = v2_history_payload_for_database(
         &database,

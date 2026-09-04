@@ -1058,6 +1058,40 @@ mod v1_registrar {
 
     #[test]
     #[rustfmt::skip]
+    fn forwarded_registration_keeps_a_later_registrar_restoration() -> anyhow::Result<()> {
+        const PROXY: &str = "0x0000000000000000000000000000000000000055"; const USER: &str = "0x0000000000000000000000000000000000000066";
+        let label = "forwarded-restoration"; let labelhash = keccak256(label.as_bytes()); let parent = super::common::namehash(&["eth".to_owned()]);
+        let manifests = vec![lifecycle_manifest(), registry_manifest()]; let admissions = admissions().into_iter().chain([registry_admission()]).collect::<Vec<_>>();
+        let initial_logs = vec![base_registration(label, 42, 0), controller_registration(label, 42, 1)];
+        let registration_logs = vec![
+            raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: CONTROLLER.parse()? }.encode_log_data(), 2, 0, 0, REGISTRY),
+            raw_at_transaction(with_topic0(BaseNameRegistered { id: U256::from_be_slice(labelhash.as_slice()), owner: CONTROLLER.parse()?, expires: U256::from(84) }.encode_log_data(), keccak256(b"NameRegistered(uint256,address,uint256)")), 2, 0, 1, CONTRACT),
+            raw_at_transaction(super::v1_registry::NewOwner { node: parent.parse()?, label: labelhash, owner: PROXY.parse()? }.encode_log_data(), 2, 0, 2, REGISTRY),
+            raw_at_transaction(Transfer { from: CONTROLLER.parse()?, to: PROXY.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 2, 0, 3, CONTRACT),
+            raw_at_transaction(super::NameRegistered { name: label.to_owned(), label: labelhash, owner: PROXY.parse()?, expires: U256::from(84) }.encode_log_data(), 2, 0, 4, CONTROLLER),
+            raw_at_transaction(Transfer { from: PROXY.parse()?, to: USER.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 2, 0, 5, CONTRACT),
+            raw_at_transaction(Transfer { from: USER.parse()?, to: PROXY.parse()?, tokenId: U256::from_be_slice(labelhash.as_slice()) }.encode_log_data(), 2, 0, 6, CONTRACT),
+        ];
+        let first_input = BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: initial_logs.clone() };
+        let first = interpret_test_batch(first_input.clone())?; let (first_live, session) = interpret_test_batch_incremental(first_input, None)?; assert_eq!(first_live, first);
+        let restored_input = BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: first.normalized_events.iter().map(prior_event).collect(), blocks: vec![], raw_logs: registration_logs.clone() };
+        let cold = interpret_test_batch(restored_input.clone())?; let redo = interpret_test_batch(restored_input)?;
+        let live_input = BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: registration_logs.clone() };
+        let (live, _) = interpret_test_batch_incremental(live_input, Some(session))?;
+        let fresh = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests, discovery_rules: vec![], admissions, prior_events: vec![], blocks: vec![], raw_logs: initial_logs.into_iter().chain(registration_logs).collect() })?;
+        let fresh_tail = BatchOutput { normalized_events: fresh.normalized_events.into_iter().filter(|event| event.block_number == Some(2)).collect(), surface_bindings: fresh.surface_bindings.into_iter().filter(|binding| binding.block_number == 2).collect(), ..BatchOutput::default() };
+        for (label, output) in [("cold restore", &cold), ("redo", &redo), ("live split", &live)] {
+            assert_eq!(output.normalized_events, fresh_tail.normalized_events, "{label} normalized events diverged from from-zero replay");
+            assert_eq!(output.surface_bindings, fresh_tail.surface_bindings, "{label} bindings diverged from from-zero replay");
+        }
+        let mut epochs = cold.normalized_events.iter().filter(|event| event.event_kind == "AuthorityEpochChanged").collect::<Vec<_>>(); epochs.sort_by_key(|event| event.log_index);
+        assert!(epochs.iter().any(|event| event.log_index == Some(6) && event.after_state["authority_kind"] == "registrar"), "the transfer that restored the token to the registry owner lost its registrar epoch: {epochs:#?}");
+        assert_eq!(epochs.last().and_then(|event| event.after_state["authority_kind"].as_str()), Some("registrar"), "equal registrar and registry owners ended in registry-only authority: {epochs:#?}");
+        Ok(())
+    }
+
+    #[test]
+    #[rustfmt::skip]
     fn reconciled_legacy_registration_keeps_a_consistent_authority_epoch_chain() -> anyhow::Result<()> {
         const OWNER: &str = "0x0000000000000000000000000000000000000055";
         let label = "legacy-epoch-chain"; let labelhash = keccak256(label.as_bytes()); let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]); let parent = super::common::namehash(&["eth".to_owned()]);
