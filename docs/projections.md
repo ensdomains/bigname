@@ -410,8 +410,10 @@ effective powers. Project never fans this account mapping out into per-name
 rows. After constructing `name_current`, Project carries the latest
 [registry-owner binding](glossary.md#registry-owner-binding) onto the resource
 selected for an ENSv1 or Basenames name. Registry-family owner observations are
-ranked under that selected resource instead of the separate resource that retains
-registry observations. When `name_current` has no eligible selected resource, or the event has
+first ranked by logical name or emitting resource to suppress detached history,
+then mapped onto that selected resource and ranked again by output resource.
+The separate resource that retains registry observations is bypassed by that
+mapping. When `name_current` has no eligible selected resource, or the event has
 no logical name, the observation stays on its emitting resource. This remapping
 never crosses onto an ENSv2 resource. A latest zero owner or an admitted registry-
 or registrar-family `SurfaceUnbound` transition clears the binding. A registrar-
