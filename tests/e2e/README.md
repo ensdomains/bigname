@@ -26,10 +26,10 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `84 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shard 1 requires `42 passed; 0 failed; 2
-ignored; 43 filtered out`, and shard 2 requires `42 passed; 0 failed; 1
-ignored; 44 filtered out`. The gate checks both Cargo's exit status and every
+The default gate requires the exact library-test summary `87 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shard 1 requires `43 passed; 0 failed; 2
+ignored; 45 filtered out`, and shard 2 requires `44 passed; 0 failed; 1
+ignored; 45 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
 
@@ -125,10 +125,11 @@ the ordered `LibMigration.Data` tuple `label`, `owner`, `subregistry`, and
 For the unlocked path, the child exists before wrapping; the parent retains an
 unset `CANNOT_UNWRAP` bit, transfers to the unlocked controller, and is then
 followed by an explicit `Graveyard.clear` for the child. The controller rejects
-locked tokens and otherwise clears the resolver, unwraps to Graveyard, and
-claims the reservation
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L139-L140 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L153 @ ens_v2@a971bd64).
+locked tokens
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L139-L140 @ ens_v2@a971bd64).
+For an accepted token it clears the resolver, unwraps to Graveyard, and claims
+the reservation
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L165 @ ens_v2@a971bd64).
 `Graveyard.clear` processes the supplied names, and its `OWNED` descendant
 branch assigns the child to Graveyard with a zero resolver
 (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L98-L102 @ ens_v2@a971bd64)
@@ -138,7 +139,7 @@ For the locked path, the parent first burns `CANNOT_UNWRAP`; two wrapped
 children remain live and ENSv1-owned, but only `bridged` burns
 `PARENT_CANNOT_CONTROL`. The ENSv1 wrapper permits that parent-controlled fuse
 only after the parent has burned `CANNOT_UNWRAP`
-(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L963-L971 @ ens_v1@91c966f).
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L963-L975 @ ens_v1@91c966f).
 The locked controller transfer moves the parent token to Graveyard, deploys and
 initializes a `WrapperRegistry` proxy through `VerifiableFactory`, and registers
 the parent with that proxy as subregistry
@@ -154,7 +155,7 @@ The exact scenarios are:
 
 - `registry_migration::connected_ens_v1_v2_migration_paths_emit_expected_facts`,
   which independently proves both activated `MigrationApplied` paths and their
-  successor bindings;
+  [successor bindings](../../docs/glossary.md#migration-authority-transition);
 - `cross_protocol::unlocked_parent_hides_retained_ens_v1_children`, which proves
   the retained nonzero-owner ENSv1 child is unreachable after unlocked parent
   migration; and
@@ -163,7 +164,9 @@ The exact scenarios are:
 
 The two `cross_protocol` scenarios depend on the Project behavior merged in
 #821; the `registry_migration` scenario proves the deployment and interpreted
-facts independently. All logs still pass through ingest, interpret, and project.
+facts independently. The fixture records the Anvil block, transaction, receipt,
+and log snapshot as raw facts, then runs the real Interpret and Project phases;
+it does not exercise provider selection or RPC log acquisition in Ingest.
 Serving assertions call the route-shaped `ProjectionReader`: exact-name paths
 read `name_current`, children paths read `children_current`, and a missing exact
 projection returns `404`. This is the established projection-serving seam; it
@@ -226,7 +229,7 @@ Sort durations descending, seed shard 1 with
 `scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
 and shard 2 with the second-longest scenario by measured duration, then assign each remaining name
 to the lower predicted load subject to the required final capacities. The
-current runnable split is 42 on shard 1 and 42 on shard 2. Break equal-duration
+current runnable split is 43 on shard 1 and 44 on shard 2. Break equal-duration
 or equal-load ties by full test name, keep at most five of the measured top ten
 on either shard, and keep two ignored tests on shard 1 and one on shard 2.
 Update the lists, expected ignored-name set, counts, and predicted totals
@@ -241,28 +244,28 @@ gate deliberately fails closed if the inventory changes first.
 
 ## Coverage ledger
 
-The semantic inventory contains 62 scenario tests:
+The semantic inventory contains 65 scenario tests:
 
-- 59 retargeted and runnable;
+- 62 retargeted and runnable;
 - 3 explicitly retired with one-line reasons.
 
-The 59 runnable scenarios include the #154 known-defect reproduction described
+The 62 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 87 total tests when 25 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is -1: obsolete
+The crate contains 90 total tests when 25 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is +2: obsolete
 Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
 were removed, while deployment-profile binary lifecycle and normalized-event
-parity-completeness regression tests and the archived-artifact path check were
-added. The pure in-memory
+parity-completeness regression tests, the archived-artifact path check, and the
+three connected migration scenarios were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
 semantic scenario. The final worker-coordination stub, verified-resolution
 scenario, and stale observed-code-hash admission scenario were removed
 explicitly with issue #314.
 
-### Retargeted and runnable (59)
+### Retargeted and runnable (62)
 
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
@@ -276,7 +279,9 @@ explicitly with issue #314.
   `catchup_equivalence::upfront_facts_match_rpc_ingest_outputs`;
   `catchup_equivalence::upfront_facts_match_rpc_ingest_wrapper_reverse_outputs`;
   `cross_protocol::base_reorg_leaves_ethereum_canonicality_untouched`;
-  `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`.
+  `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`;
+  `cross_protocol::locked_parent_publishes_only_migratable_ens_v1_children`;
+  `cross_protocol::unlocked_parent_hides_retained_ens_v1_children`.
 - ENSv2:
   `ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage`;
   `ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow`;
@@ -308,6 +313,7 @@ explicitly with issue #314.
   `registry_driven_reads::registry_driven_reads`;
   `registry_driven_reads::same_label_under_two_parents_keeps_children_distinct`;
   `registry_driven_reads::zero_owner_subname_leaves_default_children_listing`;
+  `registry_migration::connected_ens_v1_v2_migration_paths_emit_expected_facts`;
   `registry_migration::registry_migration_legacy_to_current_semantics`;
   `registry_preimages::label_preimage_revealed_later_upgrades_child_listing`.
 - Resolver and reverse claims:
@@ -343,15 +349,15 @@ explicitly with issue #314.
 
 | Measure | Historical baseline | Retargeted suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 87 | -1 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 62 | -1 reclassified, -3 deleted, +4 added |
-| Runnable passed-count gate | 65 in the historical Anvil gate | 84 | +19 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 62 | -3 |
-| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 59 | -6 |
+| Total crate tests | 88 | 90 | +2 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 65 | -1 reclassified, -3 deleted, +7 added |
+| Runnable passed-count gate | 65 in the historical Anvil gate | 87 | +22 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 65 | 0 |
+| Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 62 | -3 |
 
 The two 65 comparisons are reported because that is the historical gate
-reference, but the current passed-count denominator is explicit: 59 runnable
-Anvil scenarios and 25 harness/support checks produce 84 passes. Three semantic
+reference, but the current passed-count denominator is explicit: 62 runnable
+Anvil scenarios and 25 harness/support checks produce 87 passes. Three semantic
 scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics

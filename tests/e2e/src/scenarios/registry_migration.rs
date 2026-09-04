@@ -119,8 +119,11 @@ async fn connected_ens_v1_v2_migration_paths_emit_expected_facts() -> Result<()>
 
 async fn migration_boundary(run: &support::PipelineRun, name: &str) -> Result<Value> {
     let logical_name_id = format!("ens:{:#x}", ens_v1::namehash(name));
-    let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT after_state::text FROM normalized_events \
+    let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT after_state::text, consumer_visibility, \
+                after_state->>'consumer_visibility', \
+                (after_state->>'candidate_authority_transition')::boolean \
+         FROM normalized_events \
          WHERE source_family = 'ens_v2_migration_l1' \
            AND event_kind = 'MigrationApplied' \
            AND canonicality_state = 'canonical' \
@@ -134,7 +137,10 @@ async fn migration_boundary(run: &support::PipelineRun, name: &str) -> Result<Va
         1,
         "expected one activated MigrationApplied transition for {name}"
     );
-    serde_json::from_str(&rows[0]).context("parse MigrationApplied after_state")
+    assert_eq!(rows[0].1, "activated");
+    assert_eq!(rows[0].2, "activated");
+    assert!(!rows[0].3);
+    serde_json::from_str(&rows[0].0).context("parse MigrationApplied after_state")
 }
 
 #[tokio::test]

@@ -35,6 +35,7 @@ pub struct ConnectedMigrationHarness {
 pub struct UnlockedMigrationPath {
     pub target_owner: Address,
     pub expiry: u64,
+    pub child_owner_before_migration: Address,
     pub child_owner_after_clear: Address,
 }
 
@@ -49,7 +50,7 @@ pub struct LockedMigrationPath {
 }
 
 pub async fn deploy_connected_migration_harness() -> Result<ConnectedMigrationHarness> {
-    let anvil = Anvil::spawn().await?;
+    let anvil = Anvil::spawn_ethereum_sepolia().await?;
     let rpc = anvil.client();
     let root = repo_root();
     let ens_v1 = ens_v1::deploy_ens_v1(&rpc, &root).await?;
@@ -141,6 +142,7 @@ pub async fn create_unlocked_migration_path(
     Ok(UnlockedMigrationPath {
         target_owner,
         expiry,
+        child_owner_before_migration: child_owner,
         child_owner_after_clear,
     })
 }
