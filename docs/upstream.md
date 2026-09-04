@@ -248,14 +248,27 @@ to the applicable entries below.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Since**: `2026-09-03`
 
-> **Generated GraphQL text uses expression-local C collation** — Graph Node rejects a store database whose collation or
+> **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or
 > character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
-> graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L164 @
-> graph_node@aefe173). Bigname applies `COLLATE "C"` to each generated Domain text comparison and order expression but does
-> not add a database-locale startup gate in this API-only slice.
+> graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons and name ordering, but deliberately
+> leaves fixed-width lowercase hexadecimal namehash predicates and order/tie-break expressions unwrapped so
+> `name_current_lookup_idx` remains usable. It does not add a database-locale startup gate in this API-only slice.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
-> **Divergence**: Graph Node enforces the locale for the database; bigname enforces it only on the generated expressions.
+> **Divergence**: Graph Node enforces the locale for the database; bigname enforces it only where collation can change the
+> generated expression's semantics.
 > **Since**: `2026-09-03`
+
+> **Most generated Domain name filters and non-ID orders are table-linear** — the default and explicit ID order and
+> selective positive ID predicates use `name_current_lookup_idx`. ID negations, every name operator, and the name, date,
+> owner, Resolver, and local registration-date orders have cost linear in bigname's eligible names table. Graph Node
+> creates indexes for eligible entity attributes and uses B-trees for ordinary scalar attributes (upstream:
+> .refs/graph_node/store/postgres/src/relational/ddl.rs:L251-L275 @ graph_node@aefe173) (upstream:
+> .refs/graph_node/store/postgres/src/relational/ddl.rs:L277-L342 @ graph_node@aefe173); its substring, suffix, nocase, and
+> negated patterns are nevertheless scan-shaped under that ordinary-index design.
+> **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
+> **Divergence**: bigname lacks equivalent raw-name and expression indexes for name equality/range/prefix and the non-ID
+> order keys. Those indexes require a separate schema-migration slice; they are not hidden in this API-only change.
+> **Since**: `2026-09-04`
 
 > **Uppercase `0X` is never canonicalized** — Account point IDs and generated Domain-filter IDs remain valid GraphQL text
 > but compare exactly, a non-lowercase Resolver composite ID is a no-match, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal

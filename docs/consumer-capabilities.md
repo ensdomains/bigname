@@ -571,11 +571,15 @@ Empty `in` and `not_in` lists both match no rows, as Graph Node emits SQL
 graph_node@aefe173).
 
 Generated ID operators compare the supplied text directly with the served
-namehash text. Generated name equality, range, membership, and pattern operators
+namehash text. Because namehashes are fixed-width lowercase hexadecimal text,
+those predicates and their order/tie-break expressions deliberately omit
+`COLLATE "C"` so PostgreSQL can use `name_current_lookup_idx`; this follows the
+existing indexed Resolver-order precedent above. `COLLATE "C"` is used only
+where collation changes semantics: generated `raw_name` comparisons and the
+name order key. Generated name equality, range, membership, and pattern operators
 compare the supplied text directly with the nullable served `Domain.name`; they
 do not perform ENSIP-15 normalization or convert equality to namehash lookup.
-All generated ID/name text comparisons use expression-local PostgreSQL
-`COLLATE "C"`. Case-sensitive pattern members use `LIKE`/`NOT LIKE`; nocase
+Case-sensitive pattern members use `LIKE`/`NOT LIKE`; nocase
 members use `ILIKE`/`NOT ILIKE`. Contains surrounds a value with `%` unless the
 value already starts or ends with `%`; starts-with appends `%`; ends-with
 prepends `%`. `%`, `_`, and backslash remain SQL pattern characters and are not
@@ -650,6 +654,23 @@ graph_node@aefe173) (upstream:
 graph_node@aefe173). The local
 `registrationDate` extension remains; every other upstream order value is
 assigned an exact upstream-only disposition and is absent from the local enum.
+The default and explicit `id` order use `name_current_lookup_idx` without a
+sort. ID equality, membership, and ranges are index-bounded; ID negations,
+every name operator, and the other served order values have cost linear in the
+eligible names table, although filtering and sorting still occur below `LIMIT`.
+Graph Node creates an attribute index for every eligible entity column and uses
+a B-tree for ordinary scalar attributes (upstream:
+.refs/graph_node/store/postgres/src/relational/ddl.rs:L251-L275 @
+graph_node@aefe173) (upstream:
+.refs/graph_node/store/postgres/src/relational/ddl.rs:L277-L342 @
+graph_node@aefe173). Bigname lacks equivalent indexes for raw-name
+equality/range/prefix and name ordering and for the date, owner, and Resolver
+sort expressions. Adding them is a separate schema-migration slice; substring,
+suffix, nocase, and negated patterns remain table-linear under the upstream
+operator/index combination as well.
+`createdAt` still serves epoch zero when no projected timestamp exists; its SQL
+`COALESCE(..., TO_TIMESTAMP(0))` only makes the sort key equal that existing
+served fallback.
 Omitted pagination starts at offset zero and returns the first 100 rows.
 Non-positive `first` returns an empty page, positive `first` is capped at
 `200`, negative `skip` becomes zero, and positive `skip` is capped at
