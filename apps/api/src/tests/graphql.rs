@@ -2443,7 +2443,7 @@ async fn graphql_name_order_uses_stored_normalized_name_bytes() -> Result<()> {
 }
 
 #[tokio::test]
-async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<()> {
+async fn graphql_name_order_sql_pins_semantic_collation_in_both_directions() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
 
@@ -2487,7 +2487,7 @@ async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<
     for direction in ["ASC", "DESC"] {
         let expected = format!(
             "ORDER BY canonical_display_name COLLATE \"C\" {direction}, \
-             namehash COLLATE \"C\" {direction}, namespace COLLATE \"C\" ASC"
+             namehash {direction}, namespace ASC"
         );
         assert!(
             prepared_statements

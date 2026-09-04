@@ -48,9 +48,8 @@ pub fn push_generated_domain_filters<'a>(
 ) {
     push_nullable_comparison(builder, "nc.namehash", filter.id.eq.as_ref(), false);
     push_nullable_comparison(builder, "nc.namehash", filter.id.not.as_ref(), true);
-    push_scalar_comparisons(
+    push_id_range_comparisons(
         builder,
-        "nc.namehash",
         [
             (filter.id.gt.as_ref(), " > "),
             (filter.id.gte.as_ref(), " >= "),
@@ -139,6 +138,30 @@ pub fn push_generated_domain_filters<'a>(
         filter.name.not_ends_with_nocase.as_deref(),
         |value| format!("%{value}"),
     );
+}
+
+fn push_id_range_comparisons<'a, const N: usize>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    values: [(Option<&'a String>, &'static str); N],
+) {
+    for (value, operator) in values {
+        if let Some(value) = value {
+            let canonical = value.len() == 66
+                && value.starts_with("0x")
+                && value[2..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+            builder
+                .push(" AND ")
+                .push(if canonical {
+                    "nc.namehash"
+                } else {
+                    "(nc.namehash COLLATE \"C\")"
+                })
+                .push(operator)
+                .push_bind(value);
+        }
+    }
 }
 
 fn push_nullable_comparison<'a>(
