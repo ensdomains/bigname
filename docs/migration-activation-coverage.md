@@ -33,13 +33,14 @@ imports that scenario shape or pins the production rule it exercises; `exact
 catalog result only` states plainly that the external artifact is not itself a
 checked-in test.
 
-U-01 has no passing checked-in end-to-end database path. Its faithful ten-log migration
+U-01 has no passing checked-in end-to-end database path. Its faithful ten-log ENSv1→ENSv2 migration
 transaction is retained by the ignored
 `faithful_unwrapped_migration_reaches_predecessor_refusal` test, which reaches
 Interpret's `0 active ENSv1 predecessors` refusal. The fixture is faithful for the
-migration block only: its predecessor comes from a wrapped name unwrapped to the
-controller, while a plain `BaseRegistrar.register` predecessor is a separate open
-question. The reduced
+ENSv1→ENSv2 migration block only: its predecessor comes from a wrapped name
+unwrapped to the eventual migration sender, while U-01's predecessor comes from
+plain `BaseRegistrar.register` and has resolver state. Plain-registration
+predecessor materialization is a separate open question. The reduced
 `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
 fixture omits the registry reclaim and cleanup logs and therefore tests only
 transition materialization. In every affected catalog transaction, the
@@ -105,7 +106,7 @@ for all affected rows remains deferred to `#822`
 | G-04 | non-boundary — wrapper cleanup history only | [validation/G-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/G-04.json) | `cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes` |
 | G-05 | non-boundary — prehashed cleanup has the same historical class | non-executed [catalog.md entry](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/catalog.md); pinned upstream unit evidence | `cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes` |
 | R-01 | non-boundary — complete synchronized-renewal effects activate | [validation/R-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-01.json) | `bulk_renewals_with_a_shared_expiry_correlate_per_name_envelopes` |
-| R-02 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/R-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-02.json) | `later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope`; authority matrix |
+| R-02 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); the pre-boundary renewal stays independently admitted | [validation/R-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-02.json) | `later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope`; authority matrix |
 | R-03 | refused — renewal transaction reverts | [validation/R-03.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-03.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
 | R-04 | refused — migrated-name renewal reverts | [validation/R-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-04.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
 | R-05 | non-boundary — historical synchronization effects only | [validation/R-05.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-05.json) | `aligned_v1_expiry_keeps_base_renewal_out_of_v2_evidence`; `later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope` |
@@ -117,7 +118,7 @@ for all affected rows remains deferred to `#822`
 | P-07 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/P-07.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-07.json) | `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` retains correlated token regeneration |
 | P-08 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/P-08.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-08.json) | authority matrix; ordinary transfer remains independently admitted |
 | P-09 | non-boundary — fresh ENSv2 registration after reservation lapse | [validation/P-09.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-09.json) | `reservation_without_claim_boundary`; reservation flood fixture |
-| P-11 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/P-11.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-11.json) | authority matrix; Project released-v2-authority tests |
+| P-11 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); the post-boundary unregister stays independently refused | [validation/P-11.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-11.json) | exact catalog result only; governance unregister reverted |
 
 The exact catalog outcomes above are pinned task evidence; the following
 checked-in upstream sources pin the contract mechanisms behind each family.
