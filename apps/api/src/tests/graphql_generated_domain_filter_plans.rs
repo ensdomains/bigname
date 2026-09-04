@@ -92,6 +92,17 @@ fn assert_id_index_bounded(explain: &Value, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn assert_flat_eligibility(explain: &Value, label: &str) -> Result<()> {
+    let surface = plan_nodes(explain)
+        .into_iter()
+        .find(|node| node["Relation Name"] == "name_surfaces" && node["Alias"] == "surface")
+        .with_context(|| format!("name_surfaces plan: {label}"))?;
+    assert_eq!(surface["Actual Loops"], 1, "flat eligibility join: {label}: {surface}");
+    assert!(explain[0].get("JIT").is_none(), "linear page must not trigger JIT: {label}: {explain}");
+    assert!(explain[0]["Plan"]["Total Cost"].as_f64().unwrap_or(f64::MAX) < 100_000.0, "linear page cost must stay below jit_above_cost: {label}: {explain}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn graphql_generated_domain_operator_plans_are_index_bounded_or_linear() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -99,13 +110,35 @@ async fn graphql_generated_domain_operator_plans_are_index_bounded_or_linear() -
     pad_generated_domain_plans(&database).await?;
     let chains = vec!["ethereum-mainnet".to_owned()];
     let late_id = format!("0x{:064x}", 5_999);
+    let locale = sqlx::query("SELECT VERSION() AS version, datlocprovider::TEXT AS provider, datcollate AS locale FROM pg_database WHERE datname = CURRENT_DATABASE()")
+        .fetch_one(&database.lookup_pool).await?;
+    let version: String = locale.try_get("version")?;
+    let provider: String = locale.try_get("provider")?;
+    let locale: String = locale.try_get("locale")?;
+    if !version.starts_with("PostgreSQL 16.") {
+        eprintln!("skipping PostgreSQL 16 image identity check on {version}; byte-order assertions remain applicable");
+    }
+    assert!(!provider.is_empty() && !locale.is_empty(), "collation authority: {provider}/{locale}");
     let database_range = sqlx::query_scalar::<_, String>("SELECT namehash FROM bigname_phase.name_current WHERE namespace = 'ens' AND namehash >= $1 ORDER BY namehash").bind("0x").fetch_all(&database.lookup_pool).await?;
-    let c_range = sqlx::query_scalar::<_, String>("SELECT namehash FROM bigname_phase.name_current WHERE namespace = 'ens' AND (namehash COLLATE \"C\") >= ($1 COLLATE \"C\") ORDER BY namehash COLLATE \"C\"").bind("0x").fetch_all(&database.lookup_pool).await?;
-    assert_eq!(database_range, c_range, "fixed-width hexadecimal range order");
+    let byte_range = sqlx::query_scalar::<_, String>("SELECT namehash FROM bigname_phase.name_current WHERE namespace = 'ens' AND convert_to(namehash, 'UTF8') >= convert_to($1, 'UTF8') ORDER BY convert_to(namehash, 'UTF8')").bind("0x").fetch_all(&database.lookup_pool).await?;
+    assert_eq!(database_range, byte_range, "fixed-width hexadecimal order must match UTF-8 byte order under {provider}/{locale} on {version}");
     let pair = vec![format!("0x2a{}", "0".repeat(62)), format!("0x10a{}", "0".repeat(61))];
     let database_pair = sqlx::query_scalar::<_, String>("SELECT value FROM UNNEST($1::text[]) sample(value) ORDER BY value").bind(&pair).fetch_all(&database.lookup_pool).await?;
-    let c_pair = sqlx::query_scalar::<_, String>("SELECT value FROM UNNEST($1::text[]) sample(value) ORDER BY value COLLATE \"C\"").bind(&pair).fetch_all(&database.lookup_pool).await?;
-    assert_eq!(database_pair, c_pair, "deployed collation must order hexadecimal text as C");
+    let byte_pair = sqlx::query_scalar::<_, String>("SELECT value FROM UNNEST($1::text[]) sample(value) ORDER BY convert_to(value, 'UTF8')").bind(&pair).fetch_all(&database.lookup_pool).await?;
+    assert_eq!(database_pair, byte_pair, "deployed collation must order hexadecimal text bytewise under {provider}/{locale} on {version}");
+    let adversarial = vec!["B", "a", "0xA", "0xa"];
+    let byte_adversarial = sqlx::query_scalar::<_, String>("SELECT value FROM UNNEST($1::text[]) sample(value) ORDER BY convert_to(value, 'UTF8')").bind(&adversarial).fetch_all(&database.lookup_pool).await?;
+    let has_icu = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_collation WHERE collname = 'en-US-x-icu')",
+    )
+    .fetch_one(&database.lookup_pool)
+    .await?;
+    if has_icu {
+        let icu_adversarial = sqlx::query_scalar::<_, String>("SELECT value FROM UNNEST($1::text[]) sample(value) ORDER BY value COLLATE \"en-US-x-icu\"").bind(&adversarial).fetch_all(&database.lookup_pool).await?;
+        assert_ne!(byte_adversarial, icu_adversarial, "negative control must distinguish locale ordering from byte ordering");
+    } else {
+        eprintln!("skipping ICU negative control: server does not provide en-US-x-icu");
+    }
     crate::graphql::explain_phase_graphql_name_list_page(
         &database.lookup_pool, &chains, &Default::default(),
         crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Desc,
@@ -190,9 +223,56 @@ async fn graphql_generated_domain_order_plans_are_index_bounded_or_linear() -> R
             assert!(!plan_nodes(&explain).iter().any(|node| node["Node Type"] == "Sort"), "id order must not sort");
         } else {
             assert_domain_plan_shape(&explain, &format!("{sort:?}"))?;
+            assert_flat_eligibility(&explain, &format!("{sort:?}"))?;
             assert!(plan_nodes(&explain).iter().any(|node| node["Node Type"] == "Sort"), "sort must occur below Limit: {sort:?}");
         }
     }
+    let id_lt = plan_domain_filter("id_lt", "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    let unselective_range = crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool, &chains, &id_lt,
+        crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::Name),
+        bigname_storage::NameCurrentListOrder::Asc, 200, 0,
+    ).await?;
+    assert_flat_eligibility(&unselective_range, "unselective id_lt with name order")?;
+
+    let id_gt = plan_domain_filter("id_gt", "0x000000000000000000000000000000000000000000000000000000000000176e");
+    let selective_range = crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool, &chains, &id_gt,
+        crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::Name),
+        bigname_storage::NameCurrentListOrder::Asc, 200, 0,
+    ).await?;
+    assert_flat_eligibility(&selective_range, "selective id_gt with name order")?;
+
+    let id = plan_domain_filter("id", "0x000000000000000000000000000000000000000000000000000000000000176f");
+    let bounded_equality = crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool, &chains, &id,
+        crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::Name),
+        bigname_storage::NameCurrentListOrder::Asc, 200, 0,
+    ).await?;
+    assert_id_index_bounded(&bounded_equality, "id equality with name order")?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+#[ignore = "run on glibc: docker rm -f bigname-test-postgres-glibc; BIGNAME_TEST_POSTGRES_IMAGE=postgres:16-bookworm BIGNAME_TEST_POSTGRES_CONTAINER=bigname-test-postgres-glibc BIGNAME_TEST_POSTGRES_PORT=59555 ./scripts/test-db -- cargo test -p bigname-api tests::graphql_glibc_en_us_hexadecimal_order_matches_bytes -- --ignored --exact"]
+async fn graphql_glibc_en_us_hexadecimal_order_matches_bytes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let locale = sqlx::query("SELECT VERSION() AS version, datlocprovider::TEXT AS provider, datcollate AS locale FROM pg_database WHERE datname = CURRENT_DATABASE()")
+        .fetch_one(&database.lookup_pool).await?;
+    let version: String = locale.try_get("version")?;
+    let provider: String = locale.try_get("provider")?;
+    let locale: String = locale.try_get("locale")?;
+    assert!(
+        !version.contains("musl"),
+        "glibc probe cannot run on {version}; rerun with: BIGNAME_TEST_POSTGRES_IMAGE=postgres:16-bookworm BIGNAME_TEST_POSTGRES_CONTAINER=bigname-test-postgres-glibc BIGNAME_TEST_POSTGRES_PORT=59555 ./scripts/test-db -- cargo test -p bigname-api tests::graphql_glibc_en_us_hexadecimal_order_matches_bytes -- --ignored --exact"
+    );
+    assert_eq!(provider, "c", "glibc probe requires libc provider: {provider}");
+    assert!(locale.to_ascii_lowercase().starts_with("en_us"), "glibc probe requires en_US locale: {locale}");
+    let database_order = sqlx::query_scalar::<_, String>("SELECT '0x' || LPAD(TO_HEX(value), 64, '0') AS namehash FROM GENERATE_SERIES(0, 24999) value ORDER BY namehash")
+        .fetch_all(&database.lookup_pool).await?;
+    let byte_order = sqlx::query_scalar::<_, String>("SELECT '0x' || LPAD(TO_HEX(value), 64, '0') AS namehash FROM GENERATE_SERIES(0, 24999) value ORDER BY convert_to('0x' || LPAD(TO_HEX(value), 64, '0'), 'UTF8')")
+        .fetch_all(&database.lookup_pool).await?;
+    assert_eq!(database_order, byte_order, "25,000 lowercase hexadecimal strings under {locale}");
     database.cleanup().await
 }
 

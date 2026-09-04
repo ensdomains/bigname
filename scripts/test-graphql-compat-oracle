@@ -30,7 +30,7 @@ domain_filter_types={
     "id":S("ID"), "id_not":S("ID"), "id_gt":S("ID"), "id_gte":S("ID"),
     "id_lt":S("ID"), "id_lte":S("ID"),
     "id_in":lst(nn(S("ID"))), "id_not_in":lst(nn(S("ID"))),
-    "owner":S("String"), "owner_in":lst(nn(S("String"))),
+    "owner":S("String"), "owner_in":lst(nn(S("String"))), "name_in":lst(nn(S("String"))), "name_not_in":lst(nn(S("String"))),
     "name":S("String"), "name_contains":S("String")}
 account_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID")))}
 resolver_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID"))),"address":S("Bytes"),"address_in":lst(nn(S("Bytes"))),"domain":S("String"),"domain_in":lst(nn(S("String")))}
@@ -183,6 +183,8 @@ with tempfile.TemporaryDirectory() as temporary:
  invalid_claims=temp/"invalid-claims"; shutil.copytree(first,invalid_claims); coverage=json.loads((invalid_claims/"coverage.json").read_text()); coverage["claimed_paths"].append(None); (invalid_claims/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(invalid_claims,"coverage.json"); verify(invalid_claims,False)
  duplicate_claims=temp/"duplicate-claims"; shutil.copytree(first,duplicate_claims); coverage=json.loads((duplicate_claims/"coverage.json").read_text()); coverage["claimed_paths"].append(coverage["claimed_paths"][0]); (duplicate_claims/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(duplicate_claims,"coverage.json"); verify(duplicate_claims,False)
  stale_scope=temp/"stale-scope"; shutil.copytree(first,stale_scope); coverage=json.loads((stale_scope/"coverage.json").read_text()); coverage["upstream_only"].append({"scope":"field:Domain.missing","status":"deferred","owner":"#1","docs":"x"}); (stale_scope/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(stale_scope,"coverage.json"); verify(stale_scope,False)
+ partial_enum_scope=temp/"partial-enum-scope"; shutil.copytree(first,partial_enum_scope); coverage=json.loads((partial_enum_scope/"coverage.json").read_text()); coverage["upstream_only"].append({"scope":"type:Domain_orderBy","status":"deferred","owner":"#1","docs":"x"}); (partial_enum_scope/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(partial_enum_scope,"coverage.json"); verify(partial_enum_scope,False)
+ enum_value_claims_only=temp/"enum-value-claims-only"; shutil.copytree(first,enum_value_claims_only); coverage=json.loads((enum_value_claims_only/"coverage.json").read_text()); coverage["claimed_paths"].remove("type:Domain_orderBy"); coverage["upstream_only"]=[entry for entry in coverage["upstream_only"] if not entry["scope"].startswith("enum:Domain_orderBy.")]; (enum_value_claims_only/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(enum_value_claims_only,"coverage.json"); verify(enum_value_claims_only,False)
  wrong_signature=temp/"wrong-signature"; shutil.copytree(first,wrong_signature); coverage=json.loads((wrong_signature/"coverage.json").read_text()); coverage["schema_signature_differences"][0]["upstream"]={"wrong":True}; (wrong_signature/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(wrong_signature,"coverage.json"); verify(wrong_signature,False)
  present_extension=temp/"present-extension"; shutil.copytree(first,present_extension); coverage=json.loads((present_extension/"coverage.json").read_text()); coverage["local_extensions"].append({"path":"field:Domain.name","status":"intentional-extension","owner":"#1","docs":"x"}); (present_extension/"coverage.json").write_text(json.dumps(coverage,sort_keys=True,separators=(",",":"))+"\n"); resign(present_extension,"coverage.json"); verify(present_extension,False)
  missing=temp/"missing"; shutil.copytree(first,missing); prov=json.loads((missing/"upstream/provenance.json").read_text()); del prov["pin_kind"]; (missing/"upstream/provenance.json").write_text(json.dumps(prov,sort_keys=True,separators=(",",":"))+"\n"); resign(missing,"upstream/provenance.json"); verify(missing,False)
@@ -211,6 +213,6 @@ with tempfile.TemporaryDirectory() as temporary:
   os.environ["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"; module.verify(first)
  finally:
   os.environ.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None); socket.socket=original
- print("graphql compatibility oracle tool tests: 55 passed (oracle request headers; null-repeatability capture; 113-type coverage census; captured-upstream coverage validation; coverage digest validation; claimed-path validation; logging surface disposition)")
+ print("graphql compatibility oracle tool tests: 56 passed (oracle request headers; null-repeatability capture; 113-type coverage census; captured-upstream coverage validation; coverage digest validation; claimed-path validation; logging surface disposition)")
 server.shutdown()
 PY

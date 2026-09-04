@@ -479,6 +479,14 @@ async fn graphql_generated_domain_name_fallback_cannot_shadow_namehash() -> Resu
     )
     .await?;
     assert_eq!(payload["data"]["domain"]["name"], json!(TARGET_NAME));
+    let uppercase_prefix = target_namehash.replacen("0x", "0X", 1);
+    let payload = post_graphql(
+        database.app_state(),
+        "query Domain($id: ID!) { domain(id: $id) { name } }",
+        json!({"id": uppercase_prefix}),
+    )
+    .await?;
+    assert_eq!(payload["data"]["domain"]["name"], json!(target_namehash));
     database.cleanup().await
 }
 
@@ -711,6 +719,19 @@ async fn graphql_generated_domain_all_id_and_name_operators_agree_with_served_fi
     let ids = corpus.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();
     let names = corpus.iter().map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>();
     let mixed_id = ids[0].to_uppercase().replacen("0X", "0x", 1);
+    for member in ["id_gt", "id_gte", "id_lt", "id_lte"] {
+        let mut filter = crate::graphql::GeneratedDomainFilter::default();
+        match member {
+            "id_gt" => filter.id.gt = Some(mixed_id.clone()),
+            "id_gte" => filter.id.gte = Some(mixed_id.clone()),
+            "id_lt" => filter.id.lt = Some(mixed_id.clone()),
+            "id_lte" => filter.id.lte = Some(mixed_id.clone()),
+            _ => unreachable!(),
+        }
+        let mut statement = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+        crate::graphql::push_generated_domain_filters(&mut statement, &filter);
+        assert!(statement.sql().contains("nc.namehash COLLATE \"C\""), "mixed-case {member} must use the noncanonical C fallback: {}", statement.sql());
+    }
     let cases = [
         ("id", json!(ids[0])), ("id_not", json!(ids[0])), ("id_gt", json!(ids[0])),
         ("id_gte", json!(ids[1])), ("id_lt", json!(ids[1])), ("id_lte", json!(ids[0])),
