@@ -69,7 +69,14 @@ async fn candidates(
         ), parent_migrations AS (
             SELECT boundary.*,
                    address.contract_instance_id::text
-                       AS migration_registry_contract_instance_id
+                       AS migration_registry_contract_instance_id,
+                   jsonb_build_object(
+                       'event_identity', subregistry.event_identity,
+                       'raw_fact_ref', subregistry.raw_fact_ref,
+                       'source_manifest_id', subregistry.source_manifest_id,
+                       'source_family', subregistry.source_family,
+                       'manifest_version', subregistry.manifest_version
+                   ) AS migration_registry_evidence
             FROM parent_boundaries boundary
             LEFT JOIN current_v2_subregistries subregistry
               ON subregistry.logical_name_id = boundary.logical_name_id
@@ -217,6 +224,7 @@ async fn candidates(
                    END AS authority_arm,
                    migration.event_identity AS parent_migration_event_identity,
                    migration.raw_fact_ref AS parent_migration_raw_fact_ref,
+                   migration.migration_registry_evidence,
                    wrapper.modifier_event_identity, wrapper.modifier_raw_fact_ref,
                    wrapper.expiry_event_identity, wrapper.expiry_raw_fact_ref,
                    CASE WHEN migration.migration_path IN ('locked_wrapped', 'locked_child')
@@ -350,6 +358,7 @@ async fn candidates(
                    'ens_v2' AS authority_arm,
                    NULL::text AS parent_migration_event_identity,
                    NULL::jsonb AS parent_migration_raw_fact_ref,
+                   NULL::jsonb AS migration_registry_evidence,
                    NULL::text AS modifier_event_identity,
                    NULL::jsonb AS modifier_raw_fact_ref,
                    NULL::text AS expiry_event_identity,
@@ -501,6 +510,9 @@ async fn publish(
                    'raw_fact_refs', jsonb_build_array(child.raw_fact_ref)
                        || CASE WHEN child.parent_migration_raw_fact_ref IS NULL THEN '[]'::jsonb
                            ELSE jsonb_build_array(child.parent_migration_raw_fact_ref) END
+                       || CASE WHEN child.migration_registry_evidence IS NULL THEN '[]'::jsonb
+                           ELSE jsonb_build_array(
+                               child.migration_registry_evidence -> 'raw_fact_ref') END
                        || CASE WHEN child.modifier_raw_fact_ref IS NULL THEN '[]'::jsonb
                            ELSE jsonb_build_array(child.modifier_raw_fact_ref) END
                        || CASE WHEN child.expiry_raw_fact_ref IS NULL THEN '[]'::jsonb
@@ -509,7 +521,9 @@ async fn publish(
                        'source_manifest_id', child.source_manifest_id,
                        'source_family', child.source_family,
                        'manifest_version', child.manifest_version
-                   )),
+                   )) || CASE WHEN child.migration_registry_evidence IS NULL THEN '[]'::jsonb
+                       ELSE jsonb_build_array(child.migration_registry_evidence -
+                           ARRAY['event_identity', 'raw_fact_ref']) END,
                    'derivation_kind', 'children_current_rebuild',
                    'chain_id', $1,
                    'coverage', jsonb_build_object(
@@ -520,6 +534,7 @@ async fn publish(
                    ELSE jsonb_build_object(
                        'event_identities', to_jsonb(array_remove(ARRAY[
                            child.event_identity, child.parent_migration_event_identity,
+                           child.migration_registry_evidence ->> 'event_identity',
                            child.modifier_event_identity, child.expiry_event_identity
                        ]::text[], NULL)),
                        'parent_reachability', child.parent_reachability
@@ -535,7 +550,10 @@ async fn publish(
                    'target_block_number', $2,
                    'target_block_hash', $3
                ),
-               child.manifest_version
+               GREATEST(child.manifest_version, COALESCE(
+                   (child.migration_registry_evidence ->> 'manifest_version')::bigint,
+                   child.manifest_version
+               ))
         FROM selected child
         WHERE child.pair_rank = 1
         ORDER BY child.parent_logical_name_id, child.child_logical_name_id

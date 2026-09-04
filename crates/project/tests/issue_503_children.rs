@@ -93,7 +93,7 @@ async fn event(
     log: i64,
     after: Value,
 ) -> Result<i64> {
-    Ok(sqlx::query_scalar("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state, migration_correlation_ids) VALUES ($1, 'ens', $2, $3::uuid, $4, $5, 1, $6, $7, $8, $9, 0, $10, CASE WHEN $4 = 'MigrationApplied' THEN 'ens_v2_migration' ELSE 'ens_v2_registry_resource_surface' END, 'canonical', $11, CASE WHEN $4 = 'MigrationApplied' THEN ARRAY[$1] ELSE ARRAY[]::text[] END) RETURNING normalized_event_id")
+    Ok(sqlx::query_scalar("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state, raw_fact_ref, migration_correlation_ids) VALUES ($1, 'ens', $2, $3::uuid, $4, $5, 1, $6, $7, $8, $9, 0, $10, CASE WHEN $4 = 'MigrationApplied' THEN 'ens_v2_migration' ELSE 'ens_v2_registry_resource_surface' END, 'canonical', $11, jsonb_build_object('event_identity', $1::text), CASE WHEN $4 = 'MigrationApplied' THEN ARRAY[$1] ELSE ARRAY[]::text[] END) RETURNING normalized_event_id")
         .bind(identity).bind(logical).bind(resource).bind(kind).bind(family).bind(CHAIN).bind(block).bind(hash(block)).bind(format!("0x{block:064x}")).bind(log).bind(after).fetch_one(pool).await?)
 }
 
@@ -172,6 +172,8 @@ async fn seed_parent_migration_registry(pool: &PgPool, block: i64) -> Result<()>
         json!({"subregistry":REGISTRY_ADDRESS}),
     )
     .await?;
+    sqlx::query("UPDATE normalized_events SET manifest_version = 7 WHERE event_identity = 'v2-parent-registry'")
+        .execute(pool).await?;
     Ok(())
 }
 
@@ -406,6 +408,22 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     seed_migration(&incremental, "locked_wrapped", 10, "parent-migration").await?;
     run(&incremental, 10, None, RunMode::Normal).await?;
     assert!(visible(&incremental).await?);
+    let (provenance, manifest_version): (Value, i64) = sqlx::query_as(
+        "SELECT provenance, manifest_version FROM children_current WHERE child_logical_name_id = $1",
+    ).bind(CHILD).fetch_one(&incremental).await?;
+    assert_eq!(manifest_version, 7);
+    let identities = provenance["event_identities"]
+        .as_array()
+        .expect("event identities");
+    assert_eq!(identities.len(), 5);
+    assert!(identities.iter().any(|value| value == "v2-parent-registry"));
+    assert_eq!(
+        provenance["raw_fact_refs"]
+            .as_array()
+            .expect("raw refs")
+            .len(),
+        5
+    );
     run(&incremental, 11, Some(10), RunMode::Normal).await?;
 
     let (_fresh_db, fresh) = database("issue503_wrapper_expiry_fresh").await?;

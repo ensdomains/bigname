@@ -799,12 +799,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
   from the relation its own selected authority names. ENSv1 relations that are
-  unreachable through the parent's ENSv1→ENSv2 migration path are omitted. An
+  unreachable through the parent's ENSv1→ENSv2 migration path are omitted. A
   parent on the `unwrapped`, `unlocked_wrapped`, or `emancipated_child` path
   retains no ENSv1 children. A parent on the `locked_wrapped` or `locked_child`
   path retains only a [migratable child](glossary.md#migratable-child): one
   whose label has never had a reserved, registered, or renewed entry in that
-  parent's migration `WrapperRegistry`, whose current
+  parent's [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), whose current
   expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set and `IS_DOT_ETH`
   clear, and whose current ENSv1 registry owner is nonzero. The wrapper fuse
   and expiry evidence remains effective across an ENSv1 binding rotation.
@@ -820,8 +820,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   though a positive ENSv2 registration in a locked parent's migration registry
   is itself entry history and therefore filters the ENSv1 relation before this
   assertion. The reachable fatal shape is a child's own activated migration
-  boundary below an otherwise eligible parent.
-  so this route never chooses one by recency, emits two rows for one logical
+  boundary below an otherwise eligible parent, so this route never chooses one
+  by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
   A V1 child with getter-visible owner zero is omitted unless a current
   event-linked nonzero resolver independently establishes read reachability.

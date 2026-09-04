@@ -300,7 +300,7 @@ ENSv1→ENSv2 migration path. The parent rule is:
 | No activated `MigrationApplied` | Eligible under the existing live-owner rule. |
 | `migration_path = unwrapped` | Ineligible. |
 | `migration_path = unlocked_wrapped` | Ineligible. |
-| `migration_path = locked_wrapped` | Eligible only for a [migratable child](glossary.md#migratable-child): the label has never had a reserved, registered, or renewed entry in the parent's migration `WrapperRegistry`, its current expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set while `IS_DOT_ETH` is clear, and its current ENSv1 registry owner is nonzero. NameWrapper preserves fuse and expiry data when a child unwraps, so Project uses the latest wrapper resource evidence even when the active ENSv1 binding has rotated. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f) |
+| `migration_path = locked_wrapped` | Eligible only for a [migratable child](glossary.md#migratable-child): the label has never had a reserved, registered, or renewed entry in the parent's [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), its current expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set while `IS_DOT_ETH` is clear, and its current ENSv1 registry owner is nonzero. NameWrapper preserves fuse and expiry data when a child unwraps, so Project uses the latest wrapper resource evidence even when the active ENSv1 binding has rotated. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f) |
 | `migration_path = locked_child` | Eligible under the same migratable-child predicate. A locked child receives its own proxy-backed `WrapperRegistry`, so that nested registry becomes the parent migration registry for its descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L26-L32 @ ens_v2@a971bd64) |
 | `migration_path = emancipated_child` | Ineligible. The child is unwrapped into the Graveyard and injected into its parent's existing registry without receiving a registry for descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178-L188 @ ens_v2@a971bd64) |
 
@@ -331,6 +331,8 @@ An entry in that migration registry is historical, not merely current:
 `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each
 show that `getExpiry(labelId)` has been positive, which makes the child
 non-migratable even after the entry lapses.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
 An activated `MigrationApplied` path outside the five values above is a data
 integrity failure rather than a silently hidden child relation.

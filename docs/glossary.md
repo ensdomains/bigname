@@ -1025,7 +1025,10 @@ and failing each one means something different:
    and only an expired ENSv2 entry can be registered again
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L431 @ ens_v2@a971bd64).
    Project therefore treats `RegistrationReserved`, `RegistrationGranted`, and
-   `RegistrationRenewed` as permanent entry history. For a name migrated by the
+   `RegistrationRenewed` as permanent entry history.
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64)
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
+   For a name migrated by the
    `locked_child` path, the nested proxy deployed from the
    `WRAPPER_REGISTRY_IMPL` is that name's migration registry, so the same rule
    governs its descendants.
