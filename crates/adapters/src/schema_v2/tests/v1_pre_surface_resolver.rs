@@ -1175,6 +1175,97 @@ fn wrapper_first_surface_links_the_retained_registry_read_resource() -> anyhow::
 }
 
 #[test]
+fn same_transaction_registration_keeps_wrapper_surface_pointer_on_registry_resource()
+-> anyhow::Result<()> {
+    let (manifests, admissions, node) = fixture();
+    let mut wrapper_surface = wrapped(3)?;
+    wrapper_surface.log_index = 0;
+    let mut registered = registration(3, 9_999)?;
+    registered.log_index = 1;
+    let history = vec![
+        current_transfer(node, OWNER, 1)?,
+        resolver_selection(REGISTRY, node, RESOLVER_A, 2)?,
+        wrapper_surface,
+        registered,
+        current_transfer(node, ZERO_ADDRESS, 4)?,
+        unwrapped(5)?,
+    ];
+    let single = run_batches(&manifests, &admissions, vec![history.clone()])?;
+    let per_block = run_batches(
+        &manifests,
+        &admissions,
+        vec![
+            history[..1].to_vec(),
+            history[1..2].to_vec(),
+            history[2..4].to_vec(),
+            history[4..5].to_vec(),
+            history[5..].to_vec(),
+        ],
+    )?;
+    let split = run_batches(
+        &manifests,
+        &admissions,
+        vec![
+            history[..2].to_vec(),
+            history[2..4].to_vec(),
+            history[4..].to_vec(),
+        ],
+    )?;
+    assert_eq!(single, per_block, "physical-block replay drift");
+    assert_eq!(single, split, "split replay drift");
+
+    let (prefix_output, session) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            history[..4].to_vec(),
+        ),
+        None,
+    )?;
+    let suffix = history[4..].to_vec();
+    let (live, _) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            suffix.clone(),
+        ),
+        Some(session),
+    )?;
+    for prior in [
+        prefix_output
+            .normalized_events
+            .iter()
+            .map(prior_event)
+            .collect(),
+        compact_prior(&prefix_output.normalized_events),
+    ] {
+        let (restored, _) = interpret_test_batch_incremental(
+            input(manifests.clone(), admissions.clone(), prior, suffix.clone()),
+            None,
+        )?;
+        assert_eq!(live, restored, "cold restore drift");
+    }
+
+    let registry_resource =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{node:#x}"));
+    assert!(
+        single.iter().any(|event| {
+            event.block_number == Some(3)
+                && event.event_kind == "ResolverChanged"
+                && event.source_family == "ens_v1_registry_l1"
+                && event.resource_id == Some(registry_resource)
+                && event.after_state["resolver"] == RESOLVER_A
+                && event.after_state["surface_materialization"] == true
+                && event.after_state["source_event"] == "NameWrapped"
+        }),
+        "same-transaction registration moved the wrapper surface pointer off the registry resource"
+    );
+    Ok(())
+}
+
+#[test]
 fn current_registry_ownership_preserves_the_old_registry_root_resolver() -> anyhow::Result<()> {
     const ROOT_NODE: B256 = B256::ZERO;
     let history = vec![

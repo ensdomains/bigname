@@ -462,12 +462,15 @@ immutable; the linked pointer is an additive
 [state-derived normalized event](glossary.md#state-derived-normalized-event) at
 the raw event that first materializes the active surface. A wrapper-provided
 surface links the retained registry read resource without binding that dormant
-registry resource while wrapper control remains current. Record attribution
-remains node-keyed and provider-free. If a registrar registration makes the registrar resource current
-before the retained registry-only authority can be materialized, the same
-observation still marks that retained authority's surface known. A later
-registrar release can therefore restore the existing registry resource and its
-direct-registry owner instead of losing the known name.
+registry resource while wrapper control remains current. Same-transaction
+registration reconciliation leaves that registry-read pointer on the dormant
+registry resource rather than retargeting it to registrar control. Record
+attribution remains node-keyed and provider-free. If a registrar registration
+makes the registrar resource current before the retained registry-only
+authority can be materialized, the same observation still marks that retained
+authority's surface known. A later registrar release can therefore restore the
+existing registry resource and its direct-registry owner instead of losing the
+known name.
 An old-registry resolver selection stops being eligible when either a
 current-registry `NewOwner` or `Transfer` creates that node's current-registry
 record. The ownership observation persists the
