@@ -529,9 +529,10 @@ async fn v2_permissions_account_reason_names_registrar_resolver_and_wrapper_gaps
 
 #[tokio::test]
 async fn v2_permissions_empty_account_result_remains_request_relative_partial() -> Result<()> {
-    let (database, payload) = v2_permissions_payload(&format!(
-        "/v2/permissions?address=0x0000000000000000000000000000000000000eee"
-    )).await?;
+    let (database, payload) = v2_permissions_payload(
+        "/v2/permissions?address=0x0000000000000000000000000000000000000eee",
+    )
+    .await?;
     assert_eq!(payload["data"], json!([]));
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(payload["meta"]["unsupported_reason"], json!(V2_ACCOUNT_PERMISSION_REASON));
