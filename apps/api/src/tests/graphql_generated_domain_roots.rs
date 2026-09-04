@@ -547,10 +547,11 @@ async fn graphql_generated_domain_ordinary_name_uses_one_projection_query() -> R
 #[tokio::test]
 async fn graphql_generated_domains_reject_t3_filter_members() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    for (query, variables, member) in [
-        ("query { domains(where: { id_not: \"0x00\" }) { id } }", json!({}), "id_not"),
-        ("query Domains($where: Domain_filter!) { domains(where: $where) { id } }", json!({"where": {"owner_contains": "0x"}}), "owner_contains"),
-    ] {
+    for (query, variables, member) in [(
+        "query Domains($where: Domain_filter!) { domains(where: $where) { id } }",
+        json!({"where": {"owner_contains": "0x"}}),
+        "owner_contains",
+    )] {
         let payload = post_graphql_allow_errors(database.app_state(), query, variables).await?;
         let error = payload["errors"][0]["message"].as_str().context("validation error")?;
         assert!(error.contains("Domain_filter") && error.contains(member), "{error}");
@@ -750,11 +751,22 @@ async fn graphql_generated_domain_members_conjoin_before_pagination() -> Result<
     seed_graphql_compat_fixture(&database).await?;
     let corpus = generated_domain_values(&database, json!({})).await?;
     let first = corpus[0]["id"].clone();
-    let expected = corpus.iter().filter(|row| operator_matches(row, "id_gte", &first) && operator_matches(row, "name_ends_with", &json!(".eth")))
+    for (left, left_value, right, right_value) in [
+        ("id_gte", first.clone(), "name_ends_with", json!(".eth")),
+        ("id", first.clone(), "id_in", json!([first.clone()])),
+        ("name", json!("alice.eth"), "name_contains", json!("lic")),
+        ("name_not", json!("bob.eth"), "name_starts_with", json!("ali")),
+        ("id_gt", json!("0x00"), "id_lte", first.clone()),
+        ("name_contains", json!("li"), "name_ends_with", json!("eth")),
+    ] {
+        let expected = corpus.iter().filter(|row| operator_matches(row, left, &left_value) && operator_matches(row, right, &right_value))
+            .map(|row| row["id"].clone()).collect::<Vec<_>>();
+        let actual = generated_domain_values(&database, json!({(left): left_value, (right): right_value})).await?
+            .into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{left} AND {right}");
+    }
+    let expected = corpus.iter().filter(|row| operator_matches(row, "name_ends_with", &json!(".eth")))
         .map(|row| row["id"].clone()).collect::<Vec<_>>();
-    let actual = generated_domain_values(&database, json!({"id_gte": first, "name_ends_with": ".eth"})).await?
-        .into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
-    assert_eq!(actual, expected);
     let payload = post_graphql(database.app_state(), "query($where: Domain_filter!) { domains(first: 1, skip: 1, orderBy: id, where: $where) { id } }", json!({"where":{"name_ends_with":".eth"}})).await?;
     assert_eq!(payload["data"]["domains"][0]["id"], expected[1]);
     database.cleanup().await
@@ -790,11 +802,15 @@ async fn graphql_generated_domain_order_values_match_served_fields() -> Result<(
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     let introspection = post_graphql(database.app_state(), "query { __type(name: \"Domain_orderBy\") { enumValues { name } } }", json!({})).await?;
-    let actual_values = introspection["data"]["__type"]["enumValues"].as_array().context("order values")?
+    let mut actual_values = introspection["data"]["__type"]["enumValues"].as_array().context("order values")?
         .iter().map(|value| value["name"].as_str().unwrap()).collect::<Vec<_>>();
+    actual_values.sort_unstable();
     assert_eq!(actual_values, ["createdAt", "expiryDate", "id", "name", "owner", "owner__id", "registrationDate", "resolver"]);
 
     let corpus = generated_domain_values(&database, json!({})).await?;
+    assert!(corpus.iter().any(|row| row["expiryDate"].is_null()));
+    assert!(corpus.iter().any(|row| row["resolver"].is_null()));
+    assert!(corpus.iter().enumerate().any(|(index, row)| corpus[index + 1..].iter().any(|other| row["owner"] == other["owner"])), "owner tie fixture");
     for (order_by, pointer) in [
         ("id", "/id"), ("name", "/name"), ("createdAt", "/createdAt"),
         ("expiryDate", "/expiryDate"), ("owner", "/owner/id"),
@@ -809,9 +825,18 @@ async fn graphql_generated_domain_order_values_match_served_fields() -> Result<(
                     (None, None) => std::cmp::Ordering::Equal,
                     (None, Some(_)) => if direction == "asc" { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less },
                     (Some(_), None) => if direction == "asc" { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater },
-                    (Some(left), Some(right)) => if direction == "asc" { left.cmp(right) } else { right.cmp(left) },
+                    (Some(left), Some(right)) => {
+                        let order = if matches!(order_by, "createdAt" | "expiryDate") {
+                            left.parse::<i128>().unwrap().cmp(&right.parse::<i128>().unwrap())
+                        } else {
+                            left.cmp(right)
+                        };
+                        if direction == "asc" { order } else { order.reverse() }
+                    },
                 };
-                primary.then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+                primary
+                    .then_with(|| left["name"].as_str().cmp(&right["name"].as_str()))
+                    .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
             });
             let payload = post_graphql(database.app_state(), &format!("query {{ domains(first: 200, orderBy: {order_by}, orderDirection: {direction}) {{ id }} }}"), json!({})).await?;
             let actual = payload["data"]["domains"].as_array().context("ordered domains")?
@@ -820,6 +845,10 @@ async fn graphql_generated_domain_order_values_match_served_fields() -> Result<(
             assert_eq!(actual, expected, "{order_by} {direction}");
         }
     }
+    let mut local_expected = corpus.clone();
+    local_expected.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()).then_with(|| left["id"].as_str().cmp(&right["id"].as_str())));
+    let payload = post_graphql(database.app_state(), "query { domains(first: 200, orderBy: registrationDate, orderDirection: asc) { id } }", json!({})).await?;
+    assert_eq!(payload["data"]["domains"].as_array().context("registration order")?.iter().map(|row| row["id"].clone()).collect::<Vec<_>>(), local_expected.into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>());
     database.cleanup().await
 }
 
@@ -827,20 +856,17 @@ async fn graphql_generated_domain_order_values_match_served_fields() -> Result<(
 async fn graphql_generated_and_legacy_name_filters_remain_separate() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
-    let namehash = bigname_lookup::ens_namehash_hex("mixed.eth")?;
-    seed_identity_name(
-        &database, "ens:mixed.eth", "MiXeD.eth", "mixed.eth", &namehash,
-        Uuid::from_u128(0x670_4001), Uuid::from_u128(0x670_4002),
-        Uuid::from_u128(0x670_4003), GRAPHQL_OWNER,
-        bigname_storage::AddressNameRelation::TokenHolder, 720,
-    ).await?;
+    sqlx::query("UPDATE bigname_phase.name_current SET raw_name = 'MiXeD.eth' WHERE namehash = $1")
+        .bind(GRAPHQL_ALICE_NAMEHASH)
+        .execute(&database.lookup_pool)
+        .await?;
     let generated_raw = generated_domain_values(&database, json!({"name":"MiXeD.eth"})).await?;
     let generated_normalized = generated_domain_values(&database, json!({"name":"mixed.eth"})).await?;
     assert_eq!(generated_raw.len(), 1);
     assert!(generated_normalized.is_empty());
-    for where_value in [json!({"name":"mixed.eth"}), json!({"name_contains":"mix%"})] {
-        let payload = post_graphql(database.app_state(), "query($where: DomainFilter!) { domainConnection(first: 10, where: $where) { domains { name } } }", json!({"where":where_value})).await?;
-        assert_eq!(payload["data"]["domainConnection"]["domains"].as_array().context("legacy domains")?.len(), if where_value.get("name").is_some() { 1 } else { 0 });
+    for where_value in [json!({"name":"alice.eth"}), json!({"name_contains":"BO"})] {
+        let payload = post_graphql(database.app_state(), "query($where: DomainFilter!) { domainConnection(first: 0, where: $where) { totalCount } }", json!({"where":where_value})).await?;
+        assert_eq!(payload["data"]["domainConnection"]["totalCount"], json!(1));
     }
     database.cleanup().await
 }

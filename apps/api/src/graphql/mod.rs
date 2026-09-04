@@ -10,6 +10,7 @@ mod account_queries;
 mod convert;
 mod enums;
 mod error;
+mod generated_filter_ops;
 mod http;
 mod inputs;
 mod loader;
@@ -26,7 +27,12 @@ mod snapshot;
 #[cfg(test)]
 pub(crate) use account_queries::{GeneratedAccountFilter, explain_phase_graphql_account_page};
 #[cfg(test)]
-pub(crate) use name_queries::count_phase_graphql_name_list;
+pub(crate) use generated_filter_ops::GeneratedDomainFilter;
+#[cfg(test)]
+pub(crate) use name_queries::{
+    GeneratedDomainSort, count_phase_graphql_name_list, explain_phase_graphql_name_list_page,
+    load_phase_graphql_name_list_page_offset,
+};
 #[cfg(test)]
 pub(crate) use resolver_queries::{
     GeneratedResolverFilter, explain_phase_graphql_resolver_page,

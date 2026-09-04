@@ -16,6 +16,12 @@ pub(crate) enum DomainOrderBy {
     Id,
     #[graphql(name = "name")]
     Name,
+    #[graphql(name = "owner")]
+    Owner,
+    #[graphql(name = "owner__id")]
+    OwnerId,
+    #[graphql(name = "resolver")]
+    Resolver,
     /// Degenerate on Sepolia v2 — no producer writes `registration_date`, so the column is NULL.
     #[graphql(name = "registrationDate")]
     RegistrationDate,

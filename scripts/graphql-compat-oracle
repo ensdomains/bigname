@@ -85,6 +85,9 @@ def schema_surface(schema):
 def coverage_scope_matches(scope, path):
     if scope.startswith(("field:", "input:")):
         return path == scope
+    if scope.startswith("enum:"):
+        member = scope.removeprefix("enum:")
+        return member.count(".") == 1 and all(member.split(".")) and path == scope
     if scope.startswith("type:"):
         name = scope.removeprefix("type:")
         return path == scope or any(path.startswith(f"{prefix}{name}.") for prefix in ("field:", "arg:", "input:", "enum:", "implements:", "member:"))
@@ -92,6 +95,26 @@ def coverage_scope_matches(scope, path):
         root = scope.removeprefix("root:")
         return path == f"field:{root}" or path.startswith(f"arg:{root}(")
     return False
+
+
+def classify_enum_coverage(upstream, local, coverage):
+    dispositions = {entry.get("scope"): entry for entry in coverage.get("upstream_only", [])}
+    known = coverage.get("known_upstream_types", {})
+    results = []
+    for path in sorted(key for key in upstream if key.startswith("enum:")):
+        enum_type = path.removeprefix("enum:").split(".", 1)[0]
+        exact = dispositions.get(path)
+        if path in local:
+            if exact:
+                results.append({"path": path, "status": "stale", "owner": exact["owner"], "reason": "exact enum value is now local"})
+            continue
+        if exact:
+            results.append({"path": path, "status": exact["status"], "owner": exact["owner"], "reason": "exact enum value disposition"})
+        elif f"type:{enum_type}" not in local and enum_type in known:
+            results.append({"path": path, "status": "deferred", "owner": known[enum_type]["owner"], "reason": "wholly absent enum type census"})
+        else:
+            results.append({"path": path, "status": "unowned", "owner": None, "reason": "partially local enum requires an exact value disposition"})
+    return results
 
 
 def render_sdl(schema):
@@ -365,6 +388,12 @@ def verify(root):
     unknown_upstream_types = sorted(path.removeprefix("type:") for path in surface if path.startswith("type:") and path.removeprefix("type:") not in known_upstream_types)
     if unknown_upstream_types:
         raise ValueError("unknown upstream types: " + ", ".join(unknown_upstream_types))
+    local_paths = set(claimed_paths)
+    local_paths.update(entry.get("path", "") for entry in coverage.get("local_extensions", []))
+    local_paths.update(entry.get("path", "") for entry in coverage.get("schema_signature_differences", []))
+    enum_failures = [entry for entry in classify_enum_coverage(surface, {path: {} for path in local_paths}, coverage) if entry["status"] in ("stale", "unowned")]
+    if enum_failures:
+        raise ValueError("enum coverage mismatch: " + json.dumps(enum_failures, sort_keys=True, separators=(",", ":")))
     case_ids = set()
     for case in manifest.get("cases", []):
         case_id = case.get("id")

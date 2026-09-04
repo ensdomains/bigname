@@ -255,6 +255,9 @@ fn scope_matches(scope: &str, path: &str) -> bool {
     if scope.starts_with("field:") || scope.starts_with("input:") {
         return path == scope;
     }
+    if exact_enum_scope(scope).is_some() {
+        return path == scope;
+    }
     if let Some(name) = scope.strip_prefix("type:") {
         return path == scope
             || ["field:", "arg:", "input:", "enum:", "implements:", "member:"]
@@ -264,6 +267,12 @@ fn scope_matches(scope: &str, path: &str) -> bool {
     scope.strip_prefix("root:").is_some_and(|root| {
         path == format!("field:{root}") || path.starts_with(&format!("arg:{root}("))
     })
+}
+
+fn exact_enum_scope(scope: &str) -> Option<(&str, &str)> {
+    let (enum_type, value) = scope.strip_prefix("enum:")?.split_once('.')?;
+    (!enum_type.is_empty() && !value.is_empty() && !value.contains('.'))
+        .then_some((enum_type, value))
 }
 
 fn oracle_named_type(type_ref: &str) -> &str {
@@ -337,13 +346,6 @@ fn oracle_upstream_path_is_deferred(
             known,
             claimed,
         );
-    }
-    if let Some(enum_type) = path
-        .strip_prefix("enum:")
-        .and_then(|path| path.split_once('.'))
-        .map(|(name, _)| name)
-    {
-        return known.contains_key(enum_type);
     }
     deferred.iter().any(|entry| {
         entry["scope"]
@@ -432,10 +434,12 @@ fn apply_oracle_coverage(
             failures.push(format!("duplicate conflicting disposition: {scope}"));
         }
         if scope.contains('*')
+            || scope.starts_with("enum:") && exact_enum_scope(scope).is_none()
             || !scope.starts_with("type:")
                 && !scope.starts_with("root:")
                 && !scope.starts_with("field:")
                 && !scope.starts_with("input:")
+                && !scope.starts_with("enum:")
         {
             failures.push(format!("overbroad disposition: {scope}"));
             continue;
@@ -955,14 +959,11 @@ fn assert_oracle_enum_value_ownership_rules() {
         "local_extensions": [],
         "known_upstream_types": {"Domain_orderBy": {"owner":"#670/T3", "docs":"x"}}
     });
-    assert!(
-        apply_oracle_coverage(
-            &OracleMap::from([enum_type.clone(), new_value]),
-            &OracleMap::from([enum_type]),
-            &coverage,
-        )
-        .is_ok()
-    );
+    assert!(apply_oracle_coverage(
+        &OracleMap::from([enum_type.clone(), new_value]),
+        &OracleMap::from([enum_type]),
+        &coverage,
+    ).is_err());
 
     let uncensused = apply_oracle_coverage(
         &OracleMap::from([

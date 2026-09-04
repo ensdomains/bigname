@@ -14,15 +14,15 @@ use super::enums::{
     generated_order,
 };
 use super::error::internal_error;
+use super::generated_filter_ops::{GeneratedDomainFilter, IdFilter, StringFilter};
 use super::inputs::{
     AccountEntityFilter, BlockHeight, DomainEntityFilter, DomainFilter, RegistrationFilter,
     ResolverEntityFilter,
 };
 use super::meta::{SubgraphMeta, resolve_meta};
 use super::name_queries::{
-    GeneratedDomainIdFilter, GeneratedDomainSort, count_phase_graphql_name_list,
-    load_phase_graphql_name_list_page_offset, load_phase_graphql_name_row_by_name,
-    load_phase_graphql_name_row_by_namehash,
+    GeneratedDomainSort, count_phase_graphql_name_list, load_phase_graphql_name_list_page_offset,
+    load_phase_graphql_name_row_by_name, load_phase_graphql_name_row_by_namehash,
 };
 use super::objects::{Account, Domain, DomainConnection, RegistrationConnection, Resolver};
 use super::resolver_queries::{
@@ -133,7 +133,7 @@ impl Query {
         block: Option<BlockHeight>,
         #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
     ) -> Result<Vec<Domain>> {
-        let (storage_filter, id_filter) = domain_entity_filter_to_storage(filter)?;
+        let (storage_filter, generated_filter) = domain_entity_filter_to_storage(filter);
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "domains").await?;
         let limit = match first {
@@ -151,7 +151,7 @@ impl Query {
             &state.pool,
             &storage_filter,
             &snapshot_chain_ids,
-            &id_filter,
+            &generated_filter,
             sort,
             order,
             limit,
@@ -359,6 +359,9 @@ fn generated_domain_sort(
             GeneratedDomainSort::Storage(NameCurrentListSort::RegistrationDate)
         }
         DomainOrderBy::Name => GeneratedDomainSort::Storage(NameCurrentListSort::Name),
+        DomainOrderBy::Owner => GeneratedDomainSort::Owner,
+        DomainOrderBy::OwnerId => GeneratedDomainSort::OwnerId,
+        DomainOrderBy::Resolver => GeneratedDomainSort::Resolver,
     };
     let order = match order_direction.unwrap_or(OrderDirection::Asc) {
         OrderDirection::Asc => NameCurrentListOrder::Asc,
@@ -369,24 +372,10 @@ fn generated_domain_sort(
 
 fn domain_entity_filter_to_storage(
     filter: Option<DomainEntityFilter>,
-) -> Result<(NameCurrentListFilter, GeneratedDomainIdFilter)> {
+) -> (NameCurrentListFilter, GeneratedDomainFilter) {
     let filter = filter.unwrap_or_default();
-    let contains = filter
-        .name_contains
-        .as_deref()
-        .map(crate::name_filter::normalize_name_contains)
-        .transpose()
-        .map_err(|error| {
-            async_graphql::Error::new(format!(
-                "name_contains must be a valid ENSIP-15 name substring: {}",
-                error.message()
-            ))
-        })?;
-    let id_filter = generated_domain_id_filter(filter.id, filter.id_in);
     let storage_filter = NameCurrentListFilter {
         namespace: Some(NAMESPACE.to_owned()),
-        name: filter.name,
-        contains,
         address: generated_address_membership(
             filter.owner,
             filter.owner_in,
@@ -394,18 +383,45 @@ fn domain_entity_filter_to_storage(
         ),
         ..Default::default()
     };
-    Ok((storage_filter, id_filter))
-}
-
-fn generated_domain_id_filter(id: Option<ID>, id_in: Option<Vec<ID>>) -> GeneratedDomainIdFilter {
-    GeneratedDomainIdFilter {
-        id: id.map(|id| bigname_storage::normalize_evm_b256(id.as_str())),
-        id_in: id_in.map(|ids| {
-            ids.into_iter()
-                .map(|id| bigname_storage::normalize_evm_b256(id.as_str()))
-                .collect()
-        }),
-    }
+    let generated_filter = GeneratedDomainFilter {
+        id: IdFilter {
+            eq: filter.id.map(|id| id.0),
+            not: filter.id_not.map(|id| id.0),
+            gt: filter.id_gt.map(|id| id.0),
+            gte: filter.id_gte.map(|id| id.0),
+            lt: filter.id_lt.map(|id| id.0),
+            lte: filter.id_lte.map(|id| id.0),
+            in_values: filter
+                .id_in
+                .map(|ids| ids.into_iter().map(|id| id.0).collect()),
+            not_in_values: filter
+                .id_not_in
+                .map(|ids| ids.into_iter().map(|id| id.0).collect()),
+        },
+        name: StringFilter {
+            eq: filter.name,
+            not: filter.name_not,
+            gt: filter.name_gt,
+            gte: filter.name_gte,
+            lt: filter.name_lt,
+            lte: filter.name_lte,
+            in_values: filter.name_in,
+            not_in_values: filter.name_not_in,
+            contains: filter.name_contains,
+            contains_nocase: filter.name_contains_nocase,
+            not_contains: filter.name_not_contains,
+            not_contains_nocase: filter.name_not_contains_nocase,
+            starts_with: filter.name_starts_with,
+            starts_with_nocase: filter.name_starts_with_nocase,
+            not_starts_with: filter.name_not_starts_with,
+            not_starts_with_nocase: filter.name_not_starts_with_nocase,
+            ends_with: filter.name_ends_with,
+            ends_with_nocase: filter.name_ends_with_nocase,
+            not_ends_with: filter.name_not_ends_with,
+            not_ends_with_nocase: filter.name_not_ends_with_nocase,
+        },
+    };
+    (storage_filter, generated_filter)
 }
 
 fn generated_address_membership(

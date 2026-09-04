@@ -141,15 +141,18 @@ pub fn parse_resolver_id(value: &str) -> Option<ParsedResolverId> {
         return None;
     }
     Some(ParsedResolverId {
-        address: address.to_ascii_lowercase(),
-        namehash: namehash.to_ascii_lowercase(),
+        address: address.to_owned(),
+        namehash: namehash.to_owned(),
     })
 }
 
 fn canonical_hex(value: &str, digits: usize) -> bool {
-    value
-        .strip_prefix("0x")
-        .is_some_and(|hex| hex.len() == digits && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    value.strip_prefix("0x").is_some_and(|hex| {
+        hex.len() == digits
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 pub async fn load_phase_graphql_resolver_by_id(

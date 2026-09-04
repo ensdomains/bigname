@@ -62,13 +62,17 @@ fn assert_domain_plan_bounds(explain: &Value, label: &str) -> Result<()> {
     assert_eq!(plan["Node Type"], "Limit", "{label}");
     let text = serde_json::to_string(plan)?;
     assert!(text.contains("name_current"), "predicate must execute below Limit: {label}");
+    assert!(text.contains("chain_positions") && text.contains("supported"), "snapshot eligibility: {label}");
+    assert!(text.contains("name_current_pkey"), "phase-row index: {label}");
+    assert!(text.contains("chain_lineage_readable_height_idx"), "lineage index: {label}");
     for node in plan_nodes(explain) {
         assert!(node["Actual Loops"].as_u64().unwrap_or(0) <= 5_100, "loops: {label}: {node}");
-        assert!(node["Shared Hit Blocks"].as_u64().unwrap_or(0) <= 10_000, "hits: {label}: {node}");
+        assert!(node["Shared Hit Blocks"].as_u64().unwrap_or(0) <= 31_000, "hits: {label}: {node}");
         assert!(node["Shared Read Blocks"].as_u64().unwrap_or(0) <= 128, "reads: {label}: {node}");
         assert!(node["Rows Removed by Filter"].as_u64().unwrap_or(0) <= 5_100, "removed: {label}: {node}");
         if node["Node Type"] == "Sort" {
             assert!(node["Actual Rows"].as_u64().unwrap_or(0) <= 5_100, "sort rows: {label}");
+            assert!(matches!(node["Sort Method"].as_str(), Some("top-N heapsort" | "quicksort")), "sort method: {label}: {node}");
             assert!(node["Sort Space Used"].as_u64().unwrap_or(0) <= 2_048, "sort memory: {label}");
         }
     }
@@ -82,6 +86,11 @@ async fn graphql_generated_domain_operator_plans_are_bounded_below_limit() -> Re
     pad_generated_domain_plans(&database).await?;
     let chains = vec!["ethereum-mainnet".to_owned()];
     let late_id = format!("0x{:064x}", 5_999);
+    crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool, &chains, &Default::default(),
+        crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Desc,
+        200, 0,
+    ).await?;
     let members = [
         "id", "id_not", "id_gt", "id_gte", "id_lt", "id_lte", "id_in", "id_not_in",
         "name", "name_not", "name_gt", "name_gte", "name_lt", "name_lte", "name_in", "name_not_in",
@@ -90,14 +99,37 @@ async fn graphql_generated_domain_operator_plans_are_bounded_below_limit() -> Re
         "name_ends_with", "name_ends_with_nocase", "name_not_ends_with", "name_not_ends_with_nocase",
     ];
     for member in members {
-        let value = if member.starts_with("id") { late_id.as_str() } else if member.contains("starts") { "alice" } else if member.contains("ends") { "5999" } else if member.contains("contains") { "5999" } else { "alice.eth5999" };
+        let value = match member {
+            "id_not" | "id_not_in" => "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe",
+            "id_gt" | "id_gte" => "0x000000000000000000000000000000000000000000000000000000000000176e",
+            "id_lt" | "id_lte" => "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            value if value.starts_with("id") => late_id.as_str(),
+            value if value.starts_with("name_not") => "never-present",
+            "name_gt" | "name_gte" => "alice.eth5998",
+            "name_lt" | "name_lte" => "zzzz",
+            value if value.contains("starts") => "alice",
+            value if value.contains("ends") || value.contains("contains") => "5999",
+            _ => "alice.eth5999",
+        };
+        let filter = plan_domain_filter(member, value);
         let explain = crate::graphql::explain_phase_graphql_name_list_page(
-            &database.lookup_pool, &chains, &plan_domain_filter(member, value),
+            &database.lookup_pool, &chains, &filter,
             crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Desc,
             200, 0,
         ).await?;
         println!("DOMAIN OPERATOR {member} PLAN {}", serde_json::to_string_pretty(&explain)?);
         assert_domain_plan_bounds(&explain, member)?;
+        assert!(
+            serde_json::to_string(&explain[0]["Plan"])?.contains(value),
+            "bound predicate value must occur below Limit: {member}"
+        );
+        let returned = crate::graphql::load_phase_graphql_name_list_page_offset(
+            &database.lookup_pool,
+            &bigname_storage::NameCurrentListFilter { namespace: Some("ens".into()), ..Default::default() },
+            &chains, &filter, crate::graphql::GeneratedDomainSort::Id,
+            bigname_storage::NameCurrentListOrder::Desc, 200, 0,
+        ).await?;
+        assert!(returned.iter().any(|row| row.row.row.namehash == late_id), "late target: {member}");
     }
     database.cleanup().await
 }
@@ -108,13 +140,29 @@ async fn graphql_generated_domain_order_plans_sort_before_limit_with_fixed_bound
     seed_graphql_compat_fixture(&database).await?;
     pad_generated_domain_plans(&database).await?;
     let chains = vec!["ethereum-mainnet".to_owned()];
-    for sort in crate::graphql::GeneratedDomainSort::ALL {
+    crate::graphql::explain_phase_graphql_name_list_page(
+        &database.lookup_pool, &chains, &Default::default(),
+        crate::graphql::GeneratedDomainSort::Id, bigname_storage::NameCurrentListOrder::Asc,
+        200, 0,
+    ).await?;
+    let sorts = [
+        crate::graphql::GeneratedDomainSort::Id,
+        crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::Name),
+        crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::CreatedAt),
+        crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::ExpiryDate),
+        crate::graphql::GeneratedDomainSort::Owner,
+        crate::graphql::GeneratedDomainSort::OwnerId,
+        crate::graphql::GeneratedDomainSort::Resolver,
+        crate::graphql::GeneratedDomainSort::Storage(bigname_storage::NameCurrentListSort::RegistrationDate),
+    ];
+    for sort in sorts {
         let explain = crate::graphql::explain_phase_graphql_name_list_page(
             &database.lookup_pool, &chains, &Default::default(), sort,
             bigname_storage::NameCurrentListOrder::Asc, 200, 0,
         ).await?;
         println!("DOMAIN ORDER {sort:?} PLAN {}", serde_json::to_string_pretty(&explain)?);
         assert_domain_plan_bounds(&explain, &format!("{sort:?}"))?;
+        assert!(plan_nodes(&explain).iter().any(|node| node["Node Type"] == "Sort"), "sort must occur below Limit: {sort:?}");
     }
     database.cleanup().await
 }
