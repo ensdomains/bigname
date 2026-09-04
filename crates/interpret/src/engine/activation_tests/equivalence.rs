@@ -82,7 +82,8 @@ async fn fresh_activation_and_candidate_state_redo_retain_identical_interpret_en
     // The reduced corpus omits the registry reclaim, Graveyard transfer, and
     // resolver clear from the production unwrapped sequence. This test proves
     // fresh-versus-redo Interpret equivalence only; publication is blocked on
-    // the faithful path by #822.
+    // the faithful path by #822. Working-path Project fresh/redo parity is
+    // covered by the issue_503_children reclassification tests.
 
     let fresh_state = semantic_end_state(fresh.pool()).await?;
     let redo_state = semantic_end_state(redo.pool()).await?;
@@ -287,9 +288,6 @@ pub(super) async fn semantic_end_state(
         ("token_lineages", ""),
         ("resources", ""),
         ("surface_bindings", ""),
-        ("activation_project_stage_capture", ""),
-        ("name_current", ""),
-        ("children_current", ""),
     ];
     let mut snapshot = Vec::new();
     for (table, generated_id) in tables {

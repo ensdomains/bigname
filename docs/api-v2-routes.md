@@ -228,9 +228,8 @@ Field ownership:
   [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names—root,
   `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
   current and ENSv1 evidence, current or historical, exists without proof.
-  Root selection is internal authority state only: public name routes reject
-  root input; each other member with a current ENSv2 binding returns identity-only
-  `status=unsupported` with `exact_name_profile_not_supported`.
+  This is internal authority classification; it does not by itself contract a
+  public route result for those names.
   Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
   do not inherit the exception. These values replace the
   blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
