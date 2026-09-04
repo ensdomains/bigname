@@ -784,9 +784,11 @@ the existing `ens_v1_unwrapped_authority` derivation kind and is distinguished
 by `after_state.state_derived=true`. The earlier [pre-surface](glossary.md#pre-surface)
 `ResolverChanged` keeps null `logical_name_id` and `resource_id` and remains immutable. This behavior requires no
 `normalized_events` check change or schema-migration.
-When a resolver is copied onto another resource, `after_state.resolver_source_role`
-preserves whether that pointer came from the old or current registry so compacted
-restoration can rebuild the same resource-specific fallback state.
+State-derived resolver rows emitted while materializing a surface or copying a
+pointer during a per-log authority transition carry
+`after_state.resolver_source_role`. The field preserves whether that pointer came
+from the old or current registry so compacted restoration can rebuild the same
+resource-specific fallback state after a later global resolver selection.
 
 Only active manifests participate in raw-log selection and watch authority.
 Interpret separately retains metadata for stored deprecated manifest versions
