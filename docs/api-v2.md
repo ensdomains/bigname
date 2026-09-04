@@ -664,21 +664,40 @@ multicoin records, that string contains the resolver-returned native binary
 address bytes without chain-specific textual re-encoding.
 
 ENSv1 and Basenames store the supplied contenthash and address byte payloads
-verbatim and emit the same bytes. Contenthash reads, and address reads when no
-default-address fallback applies, return the stored bytes. An empty payload is
-therefore the stored value after a clear, and those reads return the same empty
-bytes.
+verbatim and emit the same bytes. Their address setters encode
+`setAddr(node,address)` as a 20-byte coin-type-60 value; the coin-type setter
+emits the byte payload and stores it. The Basenames legacy getter's conversion
+back to an EVM address accepts exactly 20 bytes.
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L43-L66 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L106-L110 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L116-L121 @ basenames@1809bbc)
+Contenthash reads, and address reads when no default-address fallback applies,
+return the stored bytes. An empty payload is therefore the stored value after a
+clear, and those reads return the same empty bytes.
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L28 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85 @ ens_v1@91c966f)
 (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99 @ basenames@1809bbc)
 Bigname represents that zero-length exact stored contenthash or address answer
-as `{"status":"not_found"}` and omits `value`. A records route may then apply a
-documented derived-record rule, such as the ENSIP-19 default-address rule; when
-it does, the final keyed answer and convenience field follow that derived
-answer and carry its metadata. A clear is distinct from any non-empty all-zero
-byte payload; this contract does not define a new meaning for a non-empty
-20-byte all-zero `addr:60` value.
+as `{"status":"not_found"}` and omits `value`. It also represents an exact
+ENSv1 or Basenames `addr:60` value of exactly 20 zero bytes as `not_found` and
+omits `value`. This includes both `AddressChanged(node,60,zero20)` and a
+retained legacy-only normalized `AddrChanged(node,address(0))` observation. The
+rule requires an ENSv1 registry, registrar, or wrapper resolver pointer, or a
+Basenames registry resolver pointer. ENSv2-origin attribution, other coin
+types, other nonempty byte lengths, and nonzero addresses retain their stored
+values.
+Raw facts and normalized events remain unchanged; Project applies this status
+classification while building the record inventory.
+
+A records route may then apply a documented derived-record rule, such as the
+ENSIP-19 default-address rule; when it does, the final keyed answer and
+convenience field follow that derived answer and carry its metadata. The
+`addr:2147483648` source record and the existing getter-specific handling of a
+derived zero address are unchanged and are evaluated after the exact-record
+classification.
 
 The `addresses` convenience map uses the same scalar hex string for each
 decimal coin type, and `content_hash` uses the same contenthash scalar string.
