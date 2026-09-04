@@ -560,6 +560,8 @@ ID family: `id`, `id_not`, `id_gt`, `id_gte`, `id_lt`, `id_lte`, `id_in`, and
 `id_not_in`. It also serves `name`, `name_not`, `name_gt`, `name_gte`, `name_lt`,
 `name_lte`, `name_in`, `name_not_in`, and the `contains`, `starts_with`, and
 `ends_with` positive and negative forms, each with a distinct `_nocase` sibling.
+Graph Node generates these ID and String operator families (upstream:
+.refs/graph_node/graph/src/schema/api.rs:L506-L545 @ graph_node@aefe173).
 These members match the upstream `Domain.id: ID!` and nullable `Domain.name:
 String` fields (upstream: .refs/ens_subgraph/schema.graphql:L1-L7 @
 ens_subgraph@723f1b6). Every supplied member contributes an AND predicate.
@@ -580,6 +582,13 @@ prepends `%`. `%`, `_`, and backslash remain SQL pattern characters and are not
 escaped. Graph Node uses that contains construction and does not escape those
 characters (upstream:
 .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @
+graph_node@aefe173).
+Explicit `null` on `id`, `id_not`, `name`, or `name_not` emits `IS NULL` or `IS
+NOT NULL`; explicit `null` on a range, list, or pattern member is rejected
+instead of becoming an omitted predicate. This follows Graph Node's distinct
+null equality path (upstream: .refs/graph_node/graphql/src/store/query.rs:L270-L334 @
+graph_node@aefe173) (upstream:
+.refs/graph_node/store/postgres/src/relational_queries.rs:L1603-L1617 @
 graph_node@aefe173).
 
 `owner` and `owner_in` match the projected effective controller.
@@ -628,11 +637,17 @@ ordering. `Domain_orderBy.id` uses that same namehash ordering. The served
 upstream order values are `id`, `name`, `createdAt`, `expiryDate`,
 `owner`, `owner__id`, and `resolver`, corresponding to the upstream Domain
 fields and Account/Resolver relations (upstream:
-.refs/ens_subgraph/schema.graphql:L1-L40 @ ens_subgraph@723f1b6).
+.refs/ens_subgraph/schema.graphql:L1-L40 @ ens_subgraph@723f1b6). Graph Node's
+generator defines the upstream ordering vocabulary (upstream:
+.refs/graph_node/graph/src/schema/api.rs:L876-L912 @ graph_node@aefe173).
 `owner` and `owner__id` order by the exact non-null effective owner served by
 `Domain.owner`; `resolver` orders by the nullable composite Resolver ID served
 by `Domain.resolver`, not by address alone. All textual primary expressions and
-deterministic textual tie-breakers use `COLLATE "C"`. The local
+deterministic entity-ID tie-breaker uses the requested direction and `COLLATE
+"C"` (upstream: .refs/graph_node/graph/src/components/store/mod.rs:L253-L263 @
+graph_node@aefe173) (upstream:
+.refs/graph_node/store/postgres/src/relational_queries.rs:L4147-L4153 @
+graph_node@aefe173). The local
 `registrationDate` extension remains; every other upstream order value is
 exact-owned and absent from the local enum.
 Omitted pagination starts at offset zero and returns the first 100 rows.

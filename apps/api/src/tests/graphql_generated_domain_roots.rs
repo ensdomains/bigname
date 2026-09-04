@@ -786,6 +786,40 @@ async fn graphql_generated_domain_0x_ids_are_exact_no_matches() -> Result<()> {
 }
 
 #[tokio::test]
+async fn graphql_generated_domain_explicit_nulls_are_not_omitted() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let corpus = generated_domain_values(&database, json!({})).await?;
+    let all_ids = corpus.iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+    for (member, expected) in [
+        ("id", Vec::new()),
+        ("id_not", all_ids.clone()),
+        ("name", Vec::new()),
+        ("name_not", all_ids),
+    ] {
+        let actual = generated_domain_values(&database, json!({(member): Value::Null})).await?
+            .into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+        assert_eq!(actual, expected, "explicit null: {member}");
+    }
+    for member in [
+        "id_gt", "id_gte", "id_lt", "id_lte", "id_in", "id_not_in",
+        "name_gt", "name_gte", "name_lt", "name_lte", "name_in", "name_not_in",
+        "name_contains", "name_contains_nocase", "name_not_contains", "name_not_contains_nocase",
+        "name_starts_with", "name_starts_with_nocase", "name_not_starts_with", "name_not_starts_with_nocase",
+        "name_ends_with", "name_ends_with_nocase", "name_not_ends_with", "name_not_ends_with_nocase",
+    ] {
+        let payload = post_graphql_allow_errors(
+            database.app_state(),
+            "query($where: Domain_filter!) { domains(where: $where) { id } }",
+            json!({"where": {(member): Value::Null}}),
+        ).await?;
+        assert!(payload["errors"][0]["message"].as_str().is_some_and(|error| error.contains(&format!("Domain_filter.{member} must not be null"))), "{payload}");
+        assert_eq!(payload["data"]["domains"], Value::Null);
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn graphql_change_block_remains_exact_upstream_only() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let introspection = post_graphql(database.app_state(), "query { __type(name: \"BlockChangedFilter\") { name } }", json!({})).await?;
@@ -835,8 +869,10 @@ async fn graphql_generated_domain_order_values_match_served_fields() -> Result<(
                     },
                 };
                 primary
-                    .then_with(|| left["name"].as_str().cmp(&right["name"].as_str()))
-                    .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+                    .then_with(|| {
+                        let order = left["id"].as_str().cmp(&right["id"].as_str());
+                        if direction == "asc" { order } else { order.reverse() }
+                    })
             });
             let payload = post_graphql(database.app_state(), &format!("query {{ domains(first: 200, orderBy: {order_by}, orderDirection: {direction}) {{ id }} }}"), json!({})).await?;
             let actual = payload["data"]["domains"].as_array().context("ordered domains")?
@@ -846,7 +882,7 @@ async fn graphql_generated_domain_order_values_match_served_fields() -> Result<(
         }
     }
     let mut local_expected = corpus.clone();
-    local_expected.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()).then_with(|| left["id"].as_str().cmp(&right["id"].as_str())));
+    local_expected.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     let payload = post_graphql(database.app_state(), "query { domains(first: 200, orderBy: registrationDate, orderDirection: asc) { id } }", json!({})).await?;
     assert_eq!(payload["data"]["domains"].as_array().context("registration order")?.iter().map(|row| row["id"].clone()).collect::<Vec<_>>(), local_expected.into_iter().map(|row| row["id"].clone()).collect::<Vec<_>>());
     database.cleanup().await

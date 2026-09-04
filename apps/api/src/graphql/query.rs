@@ -1,4 +1,4 @@
-use async_graphql::{Context, ID, Object, Result};
+use async_graphql::{Context, ID, MaybeUndefined, Object, Result};
 use bigname_storage::{
     AddressNameRelation, NameCurrentAddressFilter, NameCurrentAddressRelationFilter,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort,
@@ -133,7 +133,7 @@ impl Query {
         block: Option<BlockHeight>,
         #[graphql(name = "subgraphError", default)] subgraph_error: SubgraphErrorPolicy,
     ) -> Result<Vec<Domain>> {
-        let (storage_filter, generated_filter) = domain_entity_filter_to_storage(filter);
+        let (storage_filter, generated_filter) = domain_entity_filter_to_storage(filter)?;
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_entity_head(ctx, block.as_ref(), subgraph_error, "domains").await?;
         let limit = match first {
@@ -372,7 +372,7 @@ fn generated_domain_sort(
 
 fn domain_entity_filter_to_storage(
     filter: Option<DomainEntityFilter>,
-) -> (NameCurrentListFilter, GeneratedDomainFilter) {
+) -> Result<(NameCurrentListFilter, GeneratedDomainFilter)> {
     let filter = filter.unwrap_or_default();
     let storage_filter = NameCurrentListFilter {
         namespace: Some(NAMESPACE.to_owned()),
@@ -385,43 +385,120 @@ fn domain_entity_filter_to_storage(
     };
     let generated_filter = GeneratedDomainFilter {
         id: IdFilter {
-            eq: filter.id.map(|id| id.0),
-            not: filter.id_not.map(|id| id.0),
-            gt: filter.id_gt.map(|id| id.0),
-            gte: filter.id_gte.map(|id| id.0),
-            lt: filter.id_lt.map(|id| id.0),
-            lte: filter.id_lte.map(|id| id.0),
-            in_values: filter
-                .id_in
-                .map(|ids| ids.into_iter().map(|id| id.0).collect()),
-            not_in_values: filter
-                .id_not_in
-                .map(|ids| ids.into_iter().map(|id| id.0).collect()),
+            eq: nullable_filter_value(filter.id, |id| id.0),
+            not: nullable_filter_value(filter.id_not, |id| id.0),
+            gt: required_filter_value(filter.id_gt, "id_gt", |id| id.0)?,
+            gte: required_filter_value(filter.id_gte, "id_gte", |id| id.0)?,
+            lt: required_filter_value(filter.id_lt, "id_lt", |id| id.0)?,
+            lte: required_filter_value(filter.id_lte, "id_lte", |id| id.0)?,
+            in_values: required_filter_value(filter.id_in, "id_in", |ids| {
+                ids.into_iter().map(|id| id.0).collect()
+            })?,
+            not_in_values: required_filter_value(filter.id_not_in, "id_not_in", |ids| {
+                ids.into_iter().map(|id| id.0).collect()
+            })?,
         },
         name: StringFilter {
-            eq: filter.name,
-            not: filter.name_not,
-            gt: filter.name_gt,
-            gte: filter.name_gte,
-            lt: filter.name_lt,
-            lte: filter.name_lte,
-            in_values: filter.name_in,
-            not_in_values: filter.name_not_in,
-            contains: filter.name_contains,
-            contains_nocase: filter.name_contains_nocase,
-            not_contains: filter.name_not_contains,
-            not_contains_nocase: filter.name_not_contains_nocase,
-            starts_with: filter.name_starts_with,
-            starts_with_nocase: filter.name_starts_with_nocase,
-            not_starts_with: filter.name_not_starts_with,
-            not_starts_with_nocase: filter.name_not_starts_with_nocase,
-            ends_with: filter.name_ends_with,
-            ends_with_nocase: filter.name_ends_with_nocase,
-            not_ends_with: filter.name_not_ends_with,
-            not_ends_with_nocase: filter.name_not_ends_with_nocase,
+            eq: nullable_filter_value(filter.name, std::convert::identity),
+            not: nullable_filter_value(filter.name_not, std::convert::identity),
+            gt: required_filter_value(filter.name_gt, "name_gt", std::convert::identity)?,
+            gte: required_filter_value(filter.name_gte, "name_gte", std::convert::identity)?,
+            lt: required_filter_value(filter.name_lt, "name_lt", std::convert::identity)?,
+            lte: required_filter_value(filter.name_lte, "name_lte", std::convert::identity)?,
+            in_values: required_filter_value(filter.name_in, "name_in", std::convert::identity)?,
+            not_in_values: required_filter_value(
+                filter.name_not_in,
+                "name_not_in",
+                std::convert::identity,
+            )?,
+            contains: required_filter_value(
+                filter.name_contains,
+                "name_contains",
+                std::convert::identity,
+            )?,
+            contains_nocase: required_filter_value(
+                filter.name_contains_nocase,
+                "name_contains_nocase",
+                std::convert::identity,
+            )?,
+            not_contains: required_filter_value(
+                filter.name_not_contains,
+                "name_not_contains",
+                std::convert::identity,
+            )?,
+            not_contains_nocase: required_filter_value(
+                filter.name_not_contains_nocase,
+                "name_not_contains_nocase",
+                std::convert::identity,
+            )?,
+            starts_with: required_filter_value(
+                filter.name_starts_with,
+                "name_starts_with",
+                std::convert::identity,
+            )?,
+            starts_with_nocase: required_filter_value(
+                filter.name_starts_with_nocase,
+                "name_starts_with_nocase",
+                std::convert::identity,
+            )?,
+            not_starts_with: required_filter_value(
+                filter.name_not_starts_with,
+                "name_not_starts_with",
+                std::convert::identity,
+            )?,
+            not_starts_with_nocase: required_filter_value(
+                filter.name_not_starts_with_nocase,
+                "name_not_starts_with_nocase",
+                std::convert::identity,
+            )?,
+            ends_with: required_filter_value(
+                filter.name_ends_with,
+                "name_ends_with",
+                std::convert::identity,
+            )?,
+            ends_with_nocase: required_filter_value(
+                filter.name_ends_with_nocase,
+                "name_ends_with_nocase",
+                std::convert::identity,
+            )?,
+            not_ends_with: required_filter_value(
+                filter.name_not_ends_with,
+                "name_not_ends_with",
+                std::convert::identity,
+            )?,
+            not_ends_with_nocase: required_filter_value(
+                filter.name_not_ends_with_nocase,
+                "name_not_ends_with_nocase",
+                std::convert::identity,
+            )?,
         },
     };
-    (storage_filter, generated_filter)
+    Ok((storage_filter, generated_filter))
+}
+
+fn nullable_filter_value<T, U>(
+    value: MaybeUndefined<T>,
+    map: impl FnOnce(T) -> U,
+) -> Option<Option<U>> {
+    match value {
+        MaybeUndefined::Undefined => None,
+        MaybeUndefined::Null => Some(None),
+        MaybeUndefined::Value(value) => Some(Some(map(value))),
+    }
+}
+
+fn required_filter_value<T, U>(
+    value: MaybeUndefined<T>,
+    member: &str,
+    map: impl FnOnce(T) -> U,
+) -> Result<Option<U>> {
+    match value {
+        MaybeUndefined::Undefined => Ok(None),
+        MaybeUndefined::Null => Err(async_graphql::Error::new(format!(
+            "Domain_filter.{member} must not be null"
+        ))),
+        MaybeUndefined::Value(value) => Ok(Some(map(value))),
+    }
 }
 
 fn generated_address_membership(

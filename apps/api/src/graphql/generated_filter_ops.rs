@@ -2,8 +2,8 @@ use sqlx::{Postgres, QueryBuilder};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct IdFilter {
-    pub eq: Option<String>,
-    pub not: Option<String>,
+    pub eq: Option<Option<String>>,
+    pub not: Option<Option<String>>,
     pub gt: Option<String>,
     pub gte: Option<String>,
     pub lt: Option<String>,
@@ -14,8 +14,8 @@ pub struct IdFilter {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StringFilter {
-    pub eq: Option<String>,
-    pub not: Option<String>,
+    pub eq: Option<Option<String>>,
+    pub not: Option<Option<String>>,
     pub gt: Option<String>,
     pub gte: Option<String>,
     pub lt: Option<String>,
@@ -46,12 +46,22 @@ pub fn push_generated_domain_filters<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a GeneratedDomainFilter,
 ) {
+    push_nullable_comparison(
+        builder,
+        "(nc.namehash COLLATE \"C\")",
+        filter.id.eq.as_ref(),
+        false,
+    );
+    push_nullable_comparison(
+        builder,
+        "(nc.namehash COLLATE \"C\")",
+        filter.id.not.as_ref(),
+        true,
+    );
     push_scalar_comparisons(
         builder,
         "(nc.namehash COLLATE \"C\")",
         [
-            (filter.id.eq.as_ref(), " = "),
-            (filter.id.not.as_ref(), " <> "),
             (filter.id.gt.as_ref(), " > "),
             (filter.id.gte.as_ref(), " >= "),
             (filter.id.lt.as_ref(), " < "),
@@ -70,12 +80,22 @@ pub fn push_generated_domain_filters<'a>(
         filter.id.not_in_values.as_deref(),
         true,
     );
+    push_nullable_comparison(
+        builder,
+        "(nc.raw_name COLLATE \"C\")",
+        filter.name.eq.as_ref(),
+        false,
+    );
+    push_nullable_comparison(
+        builder,
+        "(nc.raw_name COLLATE \"C\")",
+        filter.name.not.as_ref(),
+        true,
+    );
     push_scalar_comparisons(
         builder,
         "(nc.raw_name COLLATE \"C\")",
         [
-            (filter.name.eq.as_ref(), " = "),
-            (filter.name.not.as_ref(), " <> "),
             (filter.name.gt.as_ref(), " > "),
             (filter.name.gte.as_ref(), " >= "),
             (filter.name.lt.as_ref(), " < "),
@@ -129,6 +149,26 @@ pub fn push_generated_domain_filters<'a>(
         filter.name.not_ends_with_nocase.as_deref(),
         |value| format!("%{value}"),
     );
+}
+
+fn push_nullable_comparison<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    column: &str,
+    value: Option<&'a Option<String>>,
+    negated: bool,
+) {
+    let Some(value) = value else { return };
+    builder.push(" AND ").push(column);
+    match value {
+        Some(value) => {
+            builder
+                .push(if negated { " <> " } else { " = " })
+                .push_bind(value);
+        }
+        None => {
+            builder.push(if negated { " IS NOT NULL" } else { " IS NULL" });
+        }
+    }
 }
 
 fn push_scalar_comparisons<'a, const N: usize>(

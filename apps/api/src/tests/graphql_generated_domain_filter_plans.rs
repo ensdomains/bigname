@@ -2,16 +2,16 @@ fn plan_domain_filter(member: &str, value: &str) -> crate::graphql::GeneratedDom
     let mut filter = crate::graphql::GeneratedDomainFilter::default();
     let list = || Some(vec![value.to_owned()]);
     match member {
-        "id" => filter.id.eq = Some(value.into()),
-        "id_not" => filter.id.not = Some(value.into()),
+        "id" => filter.id.eq = Some(Some(value.into())),
+        "id_not" => filter.id.not = Some(Some(value.into())),
         "id_gt" => filter.id.gt = Some(value.into()),
         "id_gte" => filter.id.gte = Some(value.into()),
         "id_lt" => filter.id.lt = Some(value.into()),
         "id_lte" => filter.id.lte = Some(value.into()),
         "id_in" => filter.id.in_values = list(),
         "id_not_in" => filter.id.not_in_values = list(),
-        "name" => filter.name.eq = Some(value.into()),
-        "name_not" => filter.name.not = Some(value.into()),
+        "name" => filter.name.eq = Some(Some(value.into())),
+        "name_not" => filter.name.not = Some(Some(value.into())),
         "name_gt" => filter.name.gt = Some(value.into()),
         "name_gte" => filter.name.gte = Some(value.into()),
         "name_lt" => filter.name.lt = Some(value.into()),

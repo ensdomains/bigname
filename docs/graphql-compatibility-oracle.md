@@ -46,7 +46,7 @@ ownership rules above; the command-line capture and verification tool does not d
 Broader entity/event fixtures, the remaining filter matrix, historical reads,
 errors, and reports are deferred. The Domain point and name-equality responses
 remain the claimed response cases; schema coverage additionally claims the
-generated-style Domain roots and the six-member partial `Domain_filter`.
+generated-style Domain roots and the 30-member partial `Domain_filter`.
 
 Coverage also claims the generated `account`, `accounts`, `resolver`, and
 `resolvers` roots and every argument in their captured signatures. It claims
@@ -57,8 +57,8 @@ signature differences. The exact partial inputs are `Account_filter.id`,
 
 The captured inputs contain 14 Account-filter members and 84 Resolver-filter
 members. Exact `#670/T3` dispositions retain the 12 and 81 unimplemented
-members respectively; non-`id` order values continue to inherit the existing
-type-level `#670/T3` owner. Account reverse fields stay with `#670/T4`, Resolver
+members respectively; each unserved order value on these partially local enums
+has an exact `#670/T3` disposition. Account reverse fields stay with `#670/T4`, Resolver
 serving fields stay with `#670/T6`, and the `Resolver.contentHash` signature
 difference remains with its existing `#670/T2` disposition. The resulting upstream census is 113 types with zero
 unowned upstream-only paths. `Domain_orderBy` therefore claims only its served

@@ -512,7 +512,11 @@ fn push_order(
     builder.push(column);
     builder.push(" ");
     builder.push(direction);
-    builder.push(", namespace COLLATE \"C\" ASC, normalized_name COLLATE \"C\" ASC, namehash COLLATE \"C\" ASC");
+    if !matches!(sort, GeneratedDomainSort::Id) {
+        builder.push(", namehash COLLATE \"C\" ");
+        builder.push(direction);
+    }
+    builder.push(", namespace COLLATE \"C\" ASC");
 }
 
 fn decode_row(row: PgRow) -> Result<PhaseGraphqlNameListRow> {
