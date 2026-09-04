@@ -302,9 +302,10 @@ from the surviving wrapper history.
 A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 registry
 `AuthorityTransferred` event hides a hash-only child, later retracting that
 event does not restore the child incrementally because no current child or
-exact-name row cites it. A fresh Project rebuild or the next boundary re-walk
-restores the child; [#835](https://github.com/ensdomains/bigname/issues/835)
-tracks the missing bounded replay seed.
+exact-name row cites it. A fresh Project rebuild or the next full source re-walk
+at a [re-derivation boundary](glossary.md#re-derivation-boundary) restores the
+child; [#835](https://github.com/ensdomains/bigname/issues/835) tracks the
+missing bounded replay seed.
 
 For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
 come from the admitted registry and registrar families. Out-of-profile resolver,

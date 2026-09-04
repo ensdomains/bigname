@@ -320,7 +320,7 @@ async fn candidates(
                             lower(event.after_state ->> 'child_node')
                   )
               )
-              -- Unlocked ENSv1→ENSv2 migration has no child subregistry. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64)
+              -- Unlocked ENSv1→ENSv2 migration deploys no child subregistry. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64)
               -- (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L201 @ ens_v2@a971bd64)
               -- The locked registry retains exactly its [migratable children](../../../../docs/glossary.md#migratable-child).
               -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
