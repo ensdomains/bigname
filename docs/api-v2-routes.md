@@ -810,7 +810,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   and expiry evidence remains effective across an ENSv1 binding rotation.
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f)
   The child's own
-  authority arm still chooses between the remaining ENSv1 and ENSv2 candidates.
+  [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
   An unknown activated migration-path value blocks the Project generation as a
   data-integrity failure instead of silently hiding relations. A child whose
   arms disagree with no authority proof is omitted entirely. On the Mainnet

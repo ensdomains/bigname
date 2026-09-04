@@ -25,7 +25,8 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
   consumes during replay, logical names or permission resources from
   state-derived ENSv2 path-expiry releases that Project consumes as bounded
   descendant-replay [expiry roots](docs/glossary.md#expiry-root) or resource
-  rebuild seeds, and finitely retired
+  rebuild seeds, child names from entry-creating events in an ENSv1→ENSv2
+  migration registry that Project consumes as child rebuild seeds, and finitely retired
   manifest-declared address ranges that keep older observations from reopening
   retired authority. Those resolver references, expiry-root names or permission
   resources, retired address ranges, and decode-failure diagnostics are

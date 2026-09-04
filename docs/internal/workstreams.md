@@ -11,7 +11,9 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
   and may install required Ingest work
   through the shared phase-state installer. That snapshot is coordination
   state, not a work queue; `chain_phase_state` remains the sole work/redo
-  authority. Adapters provide interpretation behavior and do not write
+  authority. Before deleting a redo range, Interpret also preserves the bounded
+  resolver, path-expiry, and migration-registry child identifiers that Project
+  consumes to rebuild rows whose source events disappear. Adapters provide interpretation behavior and do not write
   database rows or projections.
 - Schema-v2 Project owns projection tables and rebuild behavior. Publication may
   retire stale direct-resolution observations through the guarded projection
