@@ -74,3 +74,33 @@ fn permission_scope_chain_id(storage_chain_id: &str) -> V2Result<u64> {
         ))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bigname_storage::EffectivePermissionScope;
+
+    #[test]
+    fn permission_powers_value_preserves_registry_control() {
+        assert_eq!(
+            permission_powers_value(&json!(["registry_control"])).unwrap(),
+            json!(["registry_control"])
+        );
+    }
+
+    #[test]
+    fn effective_permission_scope_value_maps_account_detail() {
+        let scope = EffectivePermissionScope::Account {
+            chain_id: "ethereum-mainnet".to_owned(),
+            authority_kind: "registry".to_owned(),
+            authority_contract: "0x0000000000000000000000000000000000000c33".to_owned(),
+            owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        };
+        assert_eq!(
+            effective_permission_scope_value(&scope).unwrap(),
+            json!({"kind":"account","detail":{"chain_id":1,"authority_kind":"registry",
+                "authority_contract":"0x0000000000000000000000000000000000000c33",
+                "owner":"0x0000000000000000000000000000000000000a11"}})
+        );
+    }
+}

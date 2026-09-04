@@ -162,6 +162,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     let expected = BTreeSet::from([
         "function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)",
         "function: bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)",
+        "relation: bigname_phase.account_permission_state_current",
         "relation: bigname_phase.address_names_current",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
@@ -189,7 +190,53 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 25);
+    assert_eq!(actual.len(), 26);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn api_preflight_reports_missing_account_permission_state_current() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query("DROP TABLE bigname_phase.account_permission_state_current")
+        .execute(&database.lookup_pool).await?;
+    let missing = bigname_storage::load_missing_api_lookup_ddl(&database.lookup_pool).await?;
+    assert!(missing.iter().any(|object| {
+        object.kind == bigname_storage::ApiLookupDdlKind::Relation
+            && object.identity == "bigname_phase.account_permission_state_current"
+    }));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn api_preflight_reports_unreadable_account_permission_state_current() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let role = format!("permission_preflight_{}", std::process::id());
+    sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {role}"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("REVOKE SELECT ON bigname_phase.account_permission_state_current FROM {role}"))
+        .execute(&database.lookup_pool).await?;
+    let mut connection = database.lookup_pool.acquire().await?;
+    sqlx::query(&format!("SET ROLE {role}")).execute(&mut *connection).await?;
+    let unreadable: bool = sqlx::query_scalar(
+        "SELECT NOT has_table_privilege(current_user,
+            'bigname_phase.account_permission_state_current', 'SELECT')",
+    ).fetch_one(&mut *connection).await?;
+    assert!(unreadable);
+    let missing: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_phase.account_permission_state_current') IS NULL
+            OR NOT has_table_privilege(current_user,
+                'bigname_phase.account_permission_state_current', 'SELECT')",
+    ).fetch_one(&mut *connection).await?;
+    assert!(missing, "preflight predicate must reject an unreadable serving table");
+    drop(connection);
+    sqlx::query(&format!("DROP OWNED BY {role}"))
+        .execute(&database.lookup_pool).await?;
+    sqlx::query(&format!("DROP ROLE {role}"))
+        .execute(&database.lookup_pool).await?;
     database.cleanup().await
 }
 

@@ -13,6 +13,7 @@ mod register_eth_name;
 mod registration_burst;
 mod registry_driven_reads;
 mod registry_migration;
+mod registry_operator_permissions;
 mod registry_preimages;
 mod resolver_authorization;
 mod resolver_records;

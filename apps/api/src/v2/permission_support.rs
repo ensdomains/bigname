@@ -157,24 +157,24 @@ mod tests {
         apply_permissions_collection_support_meta(
             &mut resource_meta,
             PermissionSupport::WrapperUnsupported,
-            true,
+            PermissionRequestScope::ResourceBound,
         );
-        assert_eq!(resource_meta.completeness, Some(Completeness::Unsupported));
+        assert_eq!(resource_meta.completeness, Some(Completeness::Partial));
         assert_eq!(
             resource_meta.unsupported_reason.as_deref(),
-            Some(WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON)
+            Some(REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON)
         );
 
         let mut account_meta = Meta::default();
         apply_permissions_collection_support_meta(
             &mut account_meta,
             PermissionSupport::Full,
-            false,
+            PermissionRequestScope::AccountWide,
         );
         assert_eq!(account_meta.completeness, Some(Completeness::Partial));
         assert_eq!(
             account_meta.unsupported_reason.as_deref(),
-            Some(APPROVAL_AND_DELEGATION_PERMISSIONS_NOT_SUPPORTED_REASON)
+            Some(REGISTRAR_RESOLVER_WRAPPER_PARTIAL_REASON)
         );
     }
 
@@ -214,11 +214,11 @@ mod tests {
         );
         assert_eq!(
             permission_support_for_resources(&[full_id, wrapper_id], &summaries),
-            PermissionSupport::WrapperUnsupported
+            PermissionSupport::RegistrarResolverWrapperPartial
         );
         assert_eq!(
             permission_support_for_resources(&[wrapper_id, partial_id], &summaries),
-            PermissionSupport::ApprovalDelegationPartial
+            PermissionSupport::RegistrarResolverWrapperPartial
         );
         assert_eq!(
             permission_support_for_resources(&[partial_id, missing_id], &summaries),
