@@ -36,9 +36,11 @@ behavior. This document does not define a second GraphQL contract.
 The generated `Domain_filter` serves the complete upstream ID and name operator
 families with conjunctive semantics, direct comparison against the served
 `Domain.id` and `Domain.name` values, and separate case-sensitive and nocase
-pattern operators. Generated text comparisons and orders use expression-local
-PostgreSQL `COLLATE "C"`; pattern input retains SQL `%`, `_`, and backslash
-semantics. For the generated ID/name families, explicit null equality is
+pattern operators. Raw-name comparisons and name ordering use expression-local
+PostgreSQL `COLLATE "C"`; canonical fixed-width namehash operands use the
+database-collation index, while noncanonical ID ranges retain C semantics on a
+linear path. Pattern input retains SQL `%`, `_`, and backslash semantics. For
+the generated ID/name families, explicit null equality is
 distinct from omission, while explicit null on the other operators is rejected.
 Generated order ties use the Domain ID in the requested direction. The generated
 `Domain_orderBy` exposes only the exact values listed

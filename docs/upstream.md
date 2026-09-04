@@ -251,7 +251,7 @@ to the applicable entries below.
 
 > **Generated GraphQL text uses C collation only when it changes semantics** — Graph Node rejects a store database whose collation or
 > character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
-> graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons and name ordering, but deliberately
+> graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, and noncanonical ID ranges, but deliberately
 > leaves fixed-width lowercase hexadecimal namehash predicates and order/tie-break expressions unwrapped so
 > `name_current_lookup_idx` remains usable. It does not add a database-locale startup gate in this API-only slice.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
@@ -260,7 +260,7 @@ to the applicable entries below.
 > **Since**: `2026-09-03`
 
 > **Most generated Domain name filters and non-ID orders are table-linear** — the default and explicit ID order and
-> selective positive ID predicates use `name_current_lookup_idx`. ID negations, every name operator, and the name, date,
+> selective positive ID predicates with canonical operands use `name_current_lookup_idx`. Noncanonical ID ranges, ID negations, every name operator, and the name, date,
 > owner, Resolver, and local registration-date orders have cost linear in bigname's eligible names table. Graph Node
 > creates indexes for eligible entity attributes and uses B-trees for ordinary scalar attributes (upstream:
 > .refs/graph_node/store/postgres/src/relational/ddl.rs:L251-L275 @ graph_node@aefe173) (upstream:
@@ -272,7 +272,7 @@ to the applicable entries below.
 > **Since**: `2026-09-04`
 
 > **Uppercase `0X` is never canonicalized** — Account point IDs and generated Domain-filter IDs remain valid GraphQL text
-> but compare exactly, a non-lowercase Resolver composite ID is a no-match, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
+> but compare exactly, a non-lowercase Resolver point ID is a no-match, the pre-existing `Resolver_filter.id` remains case-canonicalizing, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
 > digits after lowercase `0x` remain valid Bytes input and serialize canonically.
 > **Upstream**: Graph Node's Bytes parser strips only lowercase `0x`
 > (upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).

@@ -574,11 +574,12 @@ graph_node@aefe173).
 
 Generated ID operators compare the supplied text directly with the served
 namehash text. Because namehashes are fixed-width lowercase hexadecimal text,
-those predicates and their order/tie-break expressions deliberately omit
+canonical predicates and their order/tie-break expressions deliberately omit
 `COLLATE "C"` so PostgreSQL can use `name_current_lookup_idx`; this follows the
-existing indexed Resolver-order precedent above. `COLLATE "C"` is used only
-where collation changes semantics: generated `raw_name` comparisons and the
-name order key. Generated name equality, range, membership, and pattern operators
+existing indexed Resolver-order precedent above. A noncanonical ID range keeps
+expression-local C comparison and is table-linear. Otherwise, `COLLATE "C"` is
+used only where collation changes semantics: generated `raw_name` comparisons
+and the name order key. Generated name equality, range, membership, and pattern operators
 compare the supplied text directly with the nullable served `Domain.name`; they
 do not perform ENSIP-15 normalization or convert equality to namehash lookup.
 Case-sensitive pattern members use `LIKE`/`NOT LIKE`; nocase
@@ -660,7 +661,8 @@ graph_node@aefe173). The local
 `registrationDate` extension remains; every other upstream order value is
 assigned an exact upstream-only disposition and is absent from the local enum.
 The default and explicit `id` order use `name_current_lookup_idx` without a
-sort. ID equality, membership, and ranges are index-bounded; ID negations,
+sort. ID equality, membership, and canonical ranges are index-bounded; ID
+negations and noncanonical ranges,
 every name operator, and the other served order values have cost linear in the
 eligible names table, although filtering and sorting still occur below `LIMIT`.
 Graph Node creates an attribute index for every eligible entity column and uses
@@ -695,9 +697,11 @@ current snapshot and does not execute a historical read.
 Generated Domain filtering and ordering execute in PostgreSQL inside the
 filtered CTE before `ORDER BY`, `LIMIT`, and `OFFSET`. Acceptance requires at
 least 5,000 eligible rows spanning at least two effective owners and two
-resolver addresses, with fixed reviewed EXPLAIN bounds for every claimed
-operator family and order value. This API-only slice adds no index or database
-locale startup gate.
+resolver addresses, with fixed reviewed EXPLAIN bounds for ID equality,
+membership, canonical ranges, and the ID order. Table-linear operators and orders instead require
+their predicate below `LIMIT`, a returned late target, and bounded sort memory;
+pad-sized row, loop, and buffer ceilings are not treated as scalability proof.
+This API-only slice adds no index or database locale startup gate.
 
 The affected Manager operation set therefore requires two declaration edits:
 `$id: String!` becomes `$id: ID!`, and the `Domains.graphql` declaration
