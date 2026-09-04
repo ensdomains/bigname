@@ -299,6 +299,13 @@ not the resource on its active binding: retracting the latest disqualifying
 `PermissionScopeChanged` or `ExpiryChanged` event must still rebuild the child
 from the surviving wrapper history.
 
+A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 registry
+`AuthorityTransferred` event hides a hash-only child, later retracting that
+event does not restore the child incrementally because no current child or
+exact-name row cites it. A fresh Project rebuild or the next boundary re-walk
+restores the child; [#835](https://github.com/ensdomains/bigname/issues/835)
+tracks the missing bounded replay seed.
+
 For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
 come from the admitted registry and registrar families. Out-of-profile resolver,
 reverse, primary-name, mainnet, and execution behavior does not become exact-name
