@@ -435,6 +435,10 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
             .len(),
         6
     );
+    let valid_rows = rows(&incremental).await?;
+    sqlx::query("UPDATE children_current SET provenance = jsonb_set(provenance, '{normalized_event_ids}', '[999999]')")
+        .execute(&incremental).await?;
+    assert_ne!(valid_rows, rows(&incremental).await?);
     run(&incremental, 11, Some(10), RunMode::Normal).await?;
 
     let (_fresh_db, fresh) = database("issue503_wrapper_expiry_fresh").await?;
@@ -701,7 +705,7 @@ visibility_test!(unreachable_v1_arm_does_not_suppress_reachable_v2_arm, true,
     path = Some("unlocked_wrapped"), v2 = true, child_arms = &["ens_v2"]);
 
 async fn rows(pool: &PgPool) -> Result<Value> {
-    Ok(sqlx::query_scalar("SELECT COALESCE(jsonb_agg((to_jsonb(row) - 'last_recomputed_at' - 'inserted_at') #- '{provenance,normalized_event_ids}' ORDER BY child_logical_name_id), '[]'::jsonb) FROM children_current row WHERE provenance ->> 'chain_id' = $1").bind(CHAIN).fetch_one(pool).await?)
+    Ok(sqlx::query_scalar("SELECT COALESCE(jsonb_agg(jsonb_set(to_jsonb(row) - 'last_recomputed_at' - 'inserted_at', '{provenance,normalized_event_ids}', COALESCE((SELECT jsonb_agg(COALESCE(event.event_identity, 'missing:' || reference.id) ORDER BY reference.ordinality) FROM jsonb_array_elements_text(row.provenance -> 'normalized_event_ids') WITH ORDINALITY reference(id, ordinality) LEFT JOIN normalized_events event ON event.normalized_event_id = reference.id::bigint), '[]'::jsonb)) ORDER BY child_logical_name_id), '[]'::jsonb) FROM children_current row WHERE provenance ->> 'chain_id' = $1").bind(CHAIN).fetch_one(pool).await?)
 }
 
 async fn convergence(
