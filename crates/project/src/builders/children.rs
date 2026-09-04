@@ -54,15 +54,13 @@ async fn candidates(
               )
         ), parent_boundaries AS (
             SELECT DISTINCT ON (event.logical_name_id)
-                   event.logical_name_id,
+                   event.logical_name_id, event.chain_id,
                    event.after_state ->> 'migration_path' AS migration_path,
+                   event.after_state -> 'evidence' AS migration_evidence,
                    jsonb_build_object(
-                       'event_identity', event.event_identity,
-                       'raw_fact_ref', event.raw_fact_ref,
+                       'event_identity', event.event_identity, 'raw_fact_ref', event.raw_fact_ref,
                        'manifest', jsonb_build_object(
-                           'source_manifest_id', event.source_manifest_id,
-                           'source_family', event.source_family,
-                           'manifest_version', event.manifest_version
+                           'source_manifest_id', event.source_manifest_id, 'source_family', event.source_family, 'manifest_version', event.manifest_version
                        )
                    ) AS evidence
             FROM project_events event
@@ -76,16 +74,12 @@ async fn candidates(
                      event.event_identity DESC
         ), parent_migrations AS (
             SELECT boundary.*,
-                   address.contract_instance_id::text
+                   migration_registry.registry_contract_instance_id::text
                        AS migration_registry_contract_instance_id,
                    jsonb_build_object(
-                       'normalized_event_id', subregistry.normalized_event_id,
-                       'event_identity', subregistry.event_identity,
-                       'raw_fact_ref', subregistry.raw_fact_ref,
+                       'normalized_event_id', subregistry.normalized_event_id, 'event_identity', subregistry.event_identity, 'raw_fact_ref', subregistry.raw_fact_ref,
                        'manifest', jsonb_build_object(
-                           'source_manifest_id', subregistry.source_manifest_id,
-                           'source_family', subregistry.source_family,
-                           'manifest_version', subregistry.manifest_version
+                           'source_manifest_id', subregistry.source_manifest_id, 'source_family', subregistry.source_family, 'manifest_version', subregistry.manifest_version
                        )
                    ) AS migration_registry_evidence
             FROM parent_boundaries boundary
@@ -99,6 +93,34 @@ async fn candidates(
              AND (address.active_to_block_number IS NULL
                   OR address.active_to_block_number > $2)
              AND address.deactivated_at IS NULL
+            -- A locked migration binds this pointer to a WrapperRegistry, not a later replacement. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L41-L44 @ ens_v2@a971bd64)
+            LEFT JOIN migration_discovery_associations migration_registry
+              ON migration_registry.chain_id = boundary.chain_id
+             AND migration_registry.registry_contract_instance_id = address.contract_instance_id
+             AND lower(migration_registry.registry_address) = subregistry.subregistry_address
+             AND migration_registry.correlation_kind = 'migration_registry_creation'
+             AND migration_registry.canonicality_state IN ('canonical', 'safe', 'finalized')
+             AND boundary.migration_evidence @> migration_registry.evidence_refs
+             AND EXISTS (
+                 SELECT 1 FROM chain_lineage lineage
+                 WHERE lineage.chain_id = migration_registry.chain_id AND lineage.block_hash = migration_registry.block_hash
+                   AND lineage.block_number = migration_registry.block_number
+                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+             )
+             AND EXISTS (
+                 SELECT 1 FROM discovery_edges edge
+                 WHERE edge.chain_id = migration_registry.chain_id AND edge.edge_kind = 'registry_announcement'
+                   AND edge.to_contract_instance_id = migration_registry.registry_contract_instance_id
+                   AND edge.source_manifest_id = migration_registry.source_manifest_id
+                   AND edge.active_from_block_number = migration_registry.block_number
+                   AND edge.active_from_block_hash = migration_registry.block_hash
+                   AND (edge.provenance ->> 'transaction_index')::bigint = migration_registry.transaction_index
+                   AND (edge.provenance ->> 'log_index')::bigint = migration_registry.log_index
+                   AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
+                   AND edge.active_from_block_number <= $2
+                   AND (edge.active_to_block_number IS NULL OR edge.active_to_block_number > $2)
+                   AND edge.deactivated_at IS NULL
+             )
         ), latest_wrapper_modifiers AS (
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id, event.resource_id,
@@ -111,13 +133,9 @@ async fn candidates(
                          AND (event.after_state ->> 'fuses')::numeric BETWEEN 0 AND 4294967295
                        THEN (event.after_state ->> 'fuses')::bigint END AS fuses,
                    jsonb_build_object(
-                       'normalized_event_id', event.normalized_event_id,
-                       'event_identity', event.event_identity,
-                       'raw_fact_ref', event.raw_fact_ref,
+                       'normalized_event_id', event.normalized_event_id, 'event_identity', event.event_identity, 'raw_fact_ref', event.raw_fact_ref,
                        'manifest', jsonb_build_object(
-                           'source_manifest_id', event.source_manifest_id,
-                           'source_family', event.source_family,
-                           'manifest_version', event.manifest_version
+                           'source_manifest_id', event.source_manifest_id, 'source_family', event.source_family, 'manifest_version', event.manifest_version
                        )
                    ) AS evidence
             FROM project_events event
@@ -137,13 +155,9 @@ async fn candidates(
                              0 AND 18446744073709551615
                        THEN (event.after_state ->> 'expiry')::numeric END AS expiry_seconds,
                    jsonb_build_object(
-                       'normalized_event_id', event.normalized_event_id,
-                       'event_identity', event.event_identity,
-                       'raw_fact_ref', event.raw_fact_ref,
+                       'normalized_event_id', event.normalized_event_id, 'event_identity', event.event_identity, 'raw_fact_ref', event.raw_fact_ref,
                        'manifest', jsonb_build_object(
-                           'source_manifest_id', event.source_manifest_id,
-                           'source_family', event.source_family,
-                           'manifest_version', event.manifest_version
+                           'source_manifest_id', event.source_manifest_id, 'source_family', event.source_family, 'manifest_version', event.manifest_version
                        )
                    ) AS evidence
             FROM project_events event

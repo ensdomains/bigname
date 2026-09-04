@@ -16,6 +16,7 @@ const REGISTRY: &str = "55555555-5555-5555-5555-555555555555";
 const OTHER_REGISTRY: &str = "66666666-6666-6666-6666-666666666666";
 const PARENT_REGISTRY: &str = "88888888-8888-8888-8888-888888888888";
 const REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000503";
+const REPLACEMENT_REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000504";
 const OWNER: &str = "0x0000000000000000000000000000000000000001";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 
@@ -151,15 +152,21 @@ async fn seed_wrapper(pool: &PgPool, fuses: i64, expiry: i64) -> Result<()> {
 }
 
 async fn seed_migration(pool: &PgPool, path: &str, block: i64, identity: &str) -> Result<i64> {
-    event(pool, identity, PARENT, None, "ens_v2_migration_l1", "MigrationApplied", block, 1, json!({"migration_path":path,"successor_registry_contract_instance_id":PARENT_REGISTRY,"successor_binding":{"binding_id":V2_BINDING,"resource_id":V2_RESOURCE}})).await
+    event(pool, identity, PARENT, None, "ens_v2_migration_l1", "MigrationApplied", block, 1, json!({"migration_path":path,"successor_registry_contract_instance_id":PARENT_REGISTRY,"successor_binding":{"binding_id":V2_BINDING,"resource_id":V2_RESOURCE},"evidence":[{"event_identity":"migration-registry-proof"}]})).await
 }
 
 async fn seed_parent_migration_registry(pool: &PgPool, block: i64) -> Result<()> {
     for registry in [REGISTRY, OTHER_REGISTRY] {
         sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1::uuid, $2, 'contract') ON CONFLICT DO NOTHING").bind(registry).bind(CHAIN).execute(pool).await?;
     }
-    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number) VALUES ($1::uuid, $2, $3, 10) ON CONFLICT DO NOTHING")
-        .bind(REGISTRY).bind(CHAIN).bind(REGISTRY_ADDRESS).execute(pool).await?;
+    let manifest_id: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload) VALUES (1, 'ens', 'ens_v2_registry_l1', $1, 'fixture', 'active', 'fixture', $2, '{}') RETURNING manifest_id")
+        .bind(CHAIN).bind(format!("fixture-{block}.toml")).fetch_one(pool).await?;
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number) VALUES ($1::uuid, $2, $3, $4) ON CONFLICT DO NOTHING")
+        .bind(REGISTRY).bind(CHAIN).bind(REGISTRY_ADDRESS).bind(block).execute(pool).await?;
+    sqlx::query("INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state, provenance) VALUES ($1, 'registry_announcement', $2::uuid, $2::uuid, 'fixture', 'fixture', $3, $4, $5, 'canonical', '{\"transaction_index\":0,\"log_index\":0}')")
+        .bind(CHAIN).bind(REGISTRY).bind(manifest_id).bind(block).bind(hash(block)).execute(pool).await?;
+    sqlx::query("INSERT INTO migration_discovery_associations (logical_edge_identity, migration_correlation_id, correlation_kind, registry_contract_instance_id, registry_address, source_manifest_id, evidence_refs, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, canonicality_state, consumer_visibility, interpreter_content_hash) VALUES ($1, $2, 'migration_registry_creation', $3::uuid, $4, $5, '[{\"event_identity\":\"migration-registry-proof\"}]', $6, $7, $8, $9, 0, 0, 'canonical', 'candidate', 'fixture')")
+        .bind(format!("edge-{block}")).bind(format!("registry-{block}")).bind(REGISTRY).bind(REGISTRY_ADDRESS).bind(manifest_id).bind(CHAIN).bind(block).bind(hash(block)).bind(format!("0x{block:064x}")).execute(pool).await?;
     event(
         pool,
         "v2-parent-registry",
@@ -258,6 +265,18 @@ struct Case<'a> {
     history: Option<(&'a str, &'a str, bool)>,
     v2: bool,
     child_arms: &'a [&'a str],
+}
+
+fn locked_case() -> Case<'static> {
+    Case {
+        path: Some("locked_wrapped"),
+        fuses: 65_536,
+        expiry: 2_000_000_000,
+        owner: OWNER,
+        history: None,
+        v2: false,
+        child_arms: &["ens_v1"],
+    }
 }
 
 async fn project_case(prefix: &str, case: Case<'_>) -> Result<bool> {
@@ -359,11 +378,7 @@ visibility_test!(
     Case {
         path: None,
         fuses: 0,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     true
 );
@@ -372,12 +387,7 @@ visibility_test!(
     "issue503_unwrapped",
     Case {
         path: Some("unwrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -386,12 +396,7 @@ visibility_test!(
     "issue503_unlocked",
     Case {
         path: Some("unlocked_wrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -459,6 +464,34 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn replacement_subregistry_is_not_treated_as_the_migration_registry() -> Result<()> {
+    let (_db, pool) = database("issue503_replacement_registry").await?;
+    seed_identity(&pool, &["ens_v1"]).await?;
+    seed_v1_relation(&pool, OWNER, 10).await?;
+    seed_wrapper(&pool, 65_536, 2_000_000_000).await?;
+    seed_parent_migration_registry(&pool, 10).await?;
+    seed_migration(&pool, "locked_wrapped", 10, "parent-migration").await?;
+    run(&pool, 10, None, RunMode::Normal).await?;
+    assert!(visible(&pool).await?);
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number) VALUES ($1::uuid, $2, $3, 11)").bind(OTHER_REGISTRY).bind(CHAIN).bind(REPLACEMENT_REGISTRY_ADDRESS).execute(&pool).await?;
+    event(
+        &pool,
+        "replacement-registry",
+        PARENT,
+        None,
+        "ens_v2_registry_l1",
+        "SubregistryChanged",
+        11,
+        2,
+        json!({"subregistry":REPLACEMENT_REGISTRY_ADDRESS}),
+    )
+    .await?;
+    run(&pool, 11, Some(10), RunMode::Normal).await?;
+    assert!(!visible(&pool).await?);
+    Ok(())
+}
+
 async fn wrapper_retraction_converges(bound: bool, named: bool) -> Result<()> {
     let suffix = format!(
         "{}-{}",
@@ -514,13 +547,8 @@ visibility_test!(
     locked_parent_hides_child_without_parent_cannot_control,
     "issue503_no_pcc",
     Case {
-        path: Some("locked_wrapped"),
         fuses: 0,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -528,13 +556,8 @@ visibility_test!(
     locked_parent_hides_dot_eth_child_even_with_parent_cannot_control,
     "issue503_dot_eth",
     Case {
-        path: Some("locked_wrapped"),
         fuses: 196_608,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -542,13 +565,8 @@ visibility_test!(
     locked_parent_hides_ownerless_v1_child,
     "issue503_ownerless",
     Case {
-        path: Some("locked_wrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
         owner: ZERO,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -556,13 +574,8 @@ visibility_test!(
     locked_parent_hides_child_ever_registered_in_successor_v2_registry,
     "issue503_ever_v2",
     Case {
-        path: Some("locked_wrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
         history: Some((REGISTRY, "RegistrationGranted", true)),
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -570,13 +583,8 @@ visibility_test!(
     locked_parent_hides_child_with_lapsed_reservation,
     "issue503_reserved_v2",
     Case {
-        path: Some("locked_wrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
         history: Some((REGISTRY, "RegistrationReserved", true)),
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -584,13 +592,8 @@ visibility_test!(
     locked_parent_hides_child_with_renewal_history,
     "issue503_renewed_v2",
     Case {
-        path: Some("locked_wrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
         history: Some((REGISTRY, "RegistrationRenewed", true)),
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -598,13 +601,8 @@ visibility_test!(
     locked_parent_ignores_registration_in_unrelated_v2_registry,
     "issue503_other_v2",
     Case {
-        path: Some("locked_wrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
         history: Some((OTHER_REGISTRY, "RegistrationRenewed", false)),
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     true
 );
@@ -613,12 +611,7 @@ visibility_test!(
     "issue503_locked_child",
     Case {
         path: Some("locked_child"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     true
 );
@@ -628,11 +621,7 @@ visibility_test!(
     Case {
         path: Some("locked_child"),
         fuses: 0,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -641,12 +630,7 @@ visibility_test!(
     "issue503_emancipated_child",
     Case {
         path: Some("emancipated_child"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
-        v2: false,
-        child_arms: &["ens_v1"]
+        ..locked_case()
     },
     false
 );
@@ -670,13 +654,9 @@ async fn child_authority_selects_arm_after_parent_reachability_filter() -> Resul
         project_case(
             "issue503_child_authority",
             Case {
-                path: Some("locked_wrapped"),
-                fuses: 65_536,
-                expiry: 2_000_000_000,
-                owner: OWNER,
-                history: None,
                 v2: true,
-                child_arms: &["ens_v2"]
+                child_arms: &["ens_v2"],
+                ..locked_case()
             }
         )
         .await?
@@ -690,11 +670,9 @@ visibility_test!(
     Case {
         path: None,
         fuses: 0,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
         v2: true,
-        child_arms: &["ens_v1", "ens_v2"]
+        child_arms: &["ens_v1", "ens_v2"],
+        ..locked_case()
     },
     false
 );
@@ -703,12 +681,9 @@ visibility_test!(
     "issue503_v2_survives",
     Case {
         path: Some("unlocked_wrapped"),
-        fuses: 65_536,
-        expiry: 2_000_000_000,
-        owner: OWNER,
-        history: None,
         v2: true,
-        child_arms: &["ens_v2"]
+        child_arms: &["ens_v2"],
+        ..locked_case()
     },
     true
 );
