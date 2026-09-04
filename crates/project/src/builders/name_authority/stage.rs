@@ -165,7 +165,8 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                            authority.selected_authority_arm = 'ens_v1'
                            AND event.event_kind IN (
                                'RegistrationGranted', 'RegistrationRenewed',
-                               'ExpiryChanged', 'TokenControlTransferred'
+                               'RegistrationReleased', 'ExpiryChanged',
+                               'TokenControlTransferred'
                            )
                            AND event.source_family = 'ens_v1_registrar_l1'
                            AND COALESCE(
@@ -317,19 +318,48 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                                ) predecessor ON TRUE
                                WHERE selected_binding.logical_name_id =
                                      authority.logical_name_id
-                                 AND predecessor.resource_id = event.resource_id
                                  AND (
-                                     event.block_number,
-                                     COALESCE(event.transaction_index, -1),
-                                     COALESCE(event.log_index, -1)
-                                 ) >= (
-                                     predecessor.block_number,
-                                     COALESCE(
-                                         (predecessor.provenance ->> 'transaction_index')::bigint,
-                                         -1
-                                     ),
-                                     COALESCE(
-                                         (predecessor.provenance ->> 'log_index')::bigint, -1
+                                     predecessor.resource_id = event.resource_id
+                                     OR (
+                                         event.event_kind = 'RegistrationReleased'
+                                         AND event.source_family =
+                                             'ens_v1_registrar_l1'
+                                         AND EXISTS (
+                                             SELECT 1
+                                             FROM project_events wrapper
+                                             WHERE wrapper.logical_name_id =
+                                                   authority.logical_name_id
+                                               AND wrapper.resource_id =
+                                                   predecessor.resource_id
+                                               AND wrapper.source_family =
+                                                   'ens_v1_wrapper_l1'
+                                               AND wrapper.event_kind = 'SurfaceBound'
+                                               AND wrapper.after_state ->>
+                                                   'wrapped_registrar_resource_id' =
+                                                   event.resource_id::text
+                                               AND lower(wrapper.after_state ->> 'node') =
+                                                   lower(event.after_state ->> 'namehash')
+                                         )
+                                     )
+                                 )
+                                 AND (
+                                     (
+                                         event.source_family = 'ens_v1_registrar_l1'
+                                         AND predecessor.resource_id = event.resource_id
+                                     )
+                                     OR (
+                                         event.block_number,
+                                         COALESCE(event.transaction_index, -1),
+                                         COALESCE(event.log_index, -1)
+                                     ) >= (
+                                         predecessor.block_number,
+                                         COALESCE(
+                                             (predecessor.provenance ->> 'transaction_index')::bigint,
+                                             -1
+                                         ),
+                                         COALESCE(
+                                             (predecessor.provenance ->> 'log_index')::bigint, -1
+                                         )
                                      )
                                  )
                                  AND (

@@ -355,6 +355,11 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
         active_resource.to_string()
     );
     assert_eq!(
+        pointer(&body, "/declared_state/registration/resource_id"),
+        active_resource.to_string(),
+        "born-wrapped registration identity must remain the wrapper resource"
+    );
+    assert_eq!(
         pointer(&body, "/data/token_lineage_id").as_str(),
         active_lineage_string.as_deref()
     );

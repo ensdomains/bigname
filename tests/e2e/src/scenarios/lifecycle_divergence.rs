@@ -176,10 +176,10 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
     }
     for relation in ["registrant", "token_holder"] {
         let bob_names = address_names(&run, &format!("{bob:#x}"), relation).await?;
+        #[rustfmt::skip]
         assert!(
-            bob_names.is_empty(),
-            "current registry-only binding omits the new token holder from relation={relation}: \
-             {bob_names:?}"
+            (relation == "registrant" && bob_names.len() == 1 && bob_names[0].get("normalized_name") == Some(&json!("divergent.eth")) && bob_names[0].get("relation_facets") == Some(&json!(["registrant"]))) || (relation == "token_holder" && bob_names.is_empty()),
+            "current registrar holder membership mismatch for relation={relation}: {bob_names:?}"
         );
     }
     let bob_controller = address_names(&run, &format!("{bob:#x}"), "effective_controller").await?;

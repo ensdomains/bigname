@@ -39,7 +39,7 @@
                        END,
                        'authority_kind', authority_context.authority_kind,
                        'authority_key', authority_context.authority_key,
-                       'resource_id', selected_registration.resource_id,
+                       'resource_id', product_registration.resource_id,
                        'registrant', registrant.registrant,
                        'expiry', CASE
                            WHEN selected_registration.is_v2_lifecycle
@@ -280,6 +280,21 @@
                    CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.lifecycle_key END END AS lifecycle_key, arm.is_v2 AS is_v2_lifecycle
             FROM (SELECT COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AS is_v2, NOT (registration_current.event_kind = 'RegistrationReleased' AND binding.resource_id IS NOT NULL AND registration_current.resource_id IS DISTINCT FROM binding.resource_id) AS use_event) arm
         ) selected_registration CROSS JOIN LATERAL (
+            SELECT COALESCE((
+                SELECT wrapper.resource_id FROM project_events wrapper
+                JOIN project_events registrar_grant
+                  ON registrar_grant.chain_id = wrapper.chain_id
+                 AND registrar_grant.resource_id::text = wrapper.after_state ->> 'wrapped_registrar_resource_id'
+                 AND registrar_grant.event_kind = 'RegistrationGranted'
+                 AND registrar_grant.source_family = 'ens_v1_registrar_l1'
+                 AND registrar_grant.transaction_hash = wrapper.transaction_hash
+                WHERE wrapper.logical_name_id = surface.logical_name_id
+                  AND (wrapper.resource_id = selected_registration.resource_id OR registrar_grant.resource_id = selected_registration.resource_id)
+                  AND wrapper.event_kind = 'SurfaceBound'
+                  AND wrapper.source_family = 'ens_v1_wrapper_l1'
+                ORDER BY wrapper.block_number DESC NULLS LAST, wrapper.normalized_event_id DESC LIMIT 1
+            ), selected_registration.resource_id) AS resource_id
+        ) product_registration CROSS JOIN LATERAL (
             SELECT CASE WHEN identity.mismatch THEN NULL ELSE binding.surface_binding_id END AS surface_binding_id,
                    CASE WHEN identity.mismatch THEN NULL ELSE binding.resource_id END AS resource_id, CASE WHEN identity.mismatch THEN NULL ELSE binding.binding_kind END AS binding_kind,
                    CASE WHEN identity.has_lifecycle THEN selected_registration.resource_id ELSE binding.resource_id END AS event_resource_id FROM (SELECT selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AS has_lifecycle,
@@ -329,6 +344,19 @@
             WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationReleased', 'TokenControlTransferred'
+              )
+              AND NOT (
+                  event.event_kind = 'RegistrationReleased'
+                  AND event.source_family = 'ens_v1_registrar_l1'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM project_events wrapper_binding
+                      WHERE wrapper_binding.logical_name_id = event.logical_name_id
+                        AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
+                        AND wrapper_binding.event_kind = 'SurfaceBound'
+                        AND wrapper_binding.after_state ->>
+                            'wrapped_registrar_resource_id' = event.resource_id::text
+                  )
               )
               AND CASE event.event_kind
                       WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'

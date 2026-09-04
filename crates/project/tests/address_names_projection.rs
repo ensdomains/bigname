@@ -35,6 +35,8 @@ const OWNERLESS_PARENT_LOGICAL: &str =
 const OWNERLESS_RESOURCE: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 const OLD_REGISTRAR_RESOURCE: &str = "abababab-abab-abab-abab-abababababab";
 const OWNERLESS_BINDING: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+const RELEASE_REGISTRY_RESOURCE: &str = "edededed-eded-eded-eded-edededededed";
+const RELEASE_REGISTRY_BINDING: &str = "efefefef-efef-efef-efef-efefefefefef";
 const WRAPPER_LINEAGE: &str = "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd";
 const REGISTRY_ADDRESS: &str = "0x9999999999999999999999999999999999999999";
 const RESOLVER_ADDRESS: &str = "0x8888888888888888888888888888888888888888";
@@ -457,6 +459,8 @@ enum LaterWrapperDelta {
 
 #[derive(Debug, PartialEq)]
 struct LaterWrapperProjection {
+    registration_status: Option<String>,
+    selected_registration_kind: Option<String>,
     expiry: Option<i64>,
     registrant: Option<String>,
     registration_resource_id: Option<String>,
@@ -464,6 +468,14 @@ struct LaterWrapperProjection {
     registrant_event_identity: Option<String>,
     serving: Vec<(String, serde_json::Value)>,
 }
+
+type LaterWrapperRegistrationRow = (
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
 
 async fn later_wrapper_serving_snapshot(pool: &PgPool) -> Result<Vec<(String, serde_json::Value)>> {
     let mut snapshot = serving_projection_snapshot(pool).await?;
@@ -483,6 +495,7 @@ async fn project_later_wrapper_delta(
     delta: LaterWrapperDelta,
     incremental: bool,
     retract_delta: bool,
+    born_wrapped: bool,
 ) -> Result<LaterWrapperProjection> {
     const LATEST_WRAPPER_OWNER: &str = "0x7777777777777777777777777777777777777777";
     const WRAPPER_CONTRACT: &str = "0x9999999999999999999999999999999999999999";
@@ -506,10 +519,20 @@ async fn project_later_wrapper_delta(
         &pool,
         OWNERLESS_NAMEHASH,
         "wrapped-incremental.eth",
-        CONTROL_RESOURCE,
-        CONTROL_BINDING,
+        OWNERLESS_RESOURCE,
+        OWNERLESS_BINDING,
     )
     .await?;
+    seed_next_binding(
+        &pool,
+        OWNERLESS_NAMEHASH,
+        CONTROL_RESOURCE,
+        CONTROL_BINDING,
+        9,
+        "2026-08-01T00:00:09Z",
+    )
+    .await?;
+    seed_binding_provenance(&pool, CONTROL_BINDING, 0, 3).await?;
     sqlx::query(
         "INSERT INTO token_lineages (
              token_lineage_id, chain_id, block_hash, block_number, canonicality_state
@@ -633,8 +656,10 @@ async fn project_later_wrapper_delta(
              SELECT transaction_hash FROM normalized_events
              WHERE event_identity = 'fixture:incremental-wrapper-binding'
          )
-         WHERE event_identity = 'fixture:incremental-wrap-transfer'",
+         WHERE event_identity = 'fixture:incremental-wrap-transfer'
+            OR ($1 AND event_identity = 'fixture:incremental-registration')",
     )
+    .bind(born_wrapped)
     .execute(&pool)
     .await?;
 
@@ -702,6 +727,25 @@ async fn project_later_wrapper_delta(
                 1,
                 json!({"source_event":"TransferSingle","from":PRIOR_CONTROLLER,"to":LATEST_WRAPPER_OWNER}),
                 json!({}),
+            )
+            .await?;
+            seed_next_binding(
+                &pool,
+                OWNERLESS_NAMEHASH,
+                RELEASE_REGISTRY_RESOURCE,
+                RELEASE_REGISTRY_BINDING,
+                11,
+                "2026-08-01T00:00:11Z",
+            )
+            .await?;
+            seed_binding_provenance(&pool, RELEASE_REGISTRY_BINDING, 0, 1).await?;
+            seed_authority_epoch_changed(
+                &pool,
+                "fixture:release-registry-only-epoch",
+                OWNERLESS_NAMEHASH,
+                RELEASE_REGISTRY_RESOURCE,
+                11,
+                "registry_only",
             )
             .await?;
             seed_normalized_event(
@@ -772,12 +816,16 @@ async fn project_later_wrapper_delta(
         )
         .await?;
     }
-    let (expiry, registrant, registration_resource_id): (
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT (declared_summary #>> '{registration,expiry}')::bigint,
+    let (
+        registration_status,
+        selected_registration_kind,
+        expiry,
+        registrant,
+        registration_resource_id,
+    ): LaterWrapperRegistrationRow = sqlx::query_as(
+        "SELECT declared_summary #>> '{registration,status}',
+                declared_summary #>> '{registration,latest_event_kind}',
+                (declared_summary #>> '{registration,expiry}')::bigint,
                 declared_summary #>> '{registration,registrant}',
                 declared_summary #>> '{registration,resource_id}'
          FROM name_current WHERE logical_name_id = $1",
@@ -807,6 +855,8 @@ async fn project_later_wrapper_delta(
     let serving = later_wrapper_serving_snapshot(&pool).await?;
     database.cleanup().await?;
     Ok(LaterWrapperProjection {
+        registration_status,
+        selected_registration_kind,
         expiry,
         registrant,
         registration_resource_id,
@@ -819,13 +869,13 @@ async fn project_later_wrapper_delta(
 #[tokio::test]
 async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() -> Result<()> {
     for delta in [
+        LaterWrapperDelta::RegistrarRelease,
         LaterWrapperDelta::HolderTransfer,
         LaterWrapperDelta::ResolverUpdate,
         LaterWrapperDelta::RegistrarRenewal,
-        LaterWrapperDelta::RegistrarRelease,
     ] {
-        let incremental = project_later_wrapper_delta(delta, true, false).await?;
-        let from_zero = project_later_wrapper_delta(delta, false, false).await?;
+        let incremental = project_later_wrapper_delta(delta, true, false, false).await?;
+        let from_zero = project_later_wrapper_delta(delta, false, false, false).await?;
         assert_eq!(
             incremental.expiry, from_zero.expiry,
             "{delta:?} produced a different registrar expiry incrementally"
@@ -835,13 +885,31 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
             "{delta:?} selected a different registrant incrementally"
         );
         assert_eq!(
-            incremental.registrant, incremental.address_registrant,
-            "{delta:?} made name_current disagree with the address-name registrant fold"
-        );
-        assert_eq!(
             incremental.registrant_event_identity, from_zero.registrant_event_identity,
             "{delta:?} selected different registration-event input incrementally"
         );
+        if matches!(delta, LaterWrapperDelta::RegistrarRelease) {
+            assert_eq!(
+                incremental.registration_status.as_deref(),
+                Some("released"),
+                "the registrar release left the wrapped lease active"
+            );
+            assert_eq!(
+                incremental.selected_registration_kind.as_deref(),
+                Some("RegistrationReleased"),
+                "the registrar release did not become the selected registration lifecycle row"
+            );
+            assert_eq!(incremental.expiry, Some(4242));
+            assert_eq!(
+                incremental.registrant.as_deref(),
+                Some("0x7777777777777777777777777777777777777777"),
+                "the registrar release replaced the last wrapper holder with NameWrapper custody"
+            );
+            assert_eq!(
+                incremental.registrant_event_identity.as_deref(),
+                Some("fixture:release-wrapper-holder-transfer")
+            );
+        }
         assert_eq!(
             incremental.registration_resource_id.as_deref(),
             Some(OWNERLESS_RESOURCE),
@@ -866,17 +934,10 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
             Some(initial_wrapper_holder.as_str()),
             "the initial NameWrapped holder replaced the wrapped registrar's registrant"
         );
-        if matches!(delta, LaterWrapperDelta::RegistrarRelease) {
-            assert_eq!(
-                incremental.registrant.as_deref(),
-                Some("0x7777777777777777777777777777777777777777"),
-                "the registrar release replaced the last wrapper holder with NameWrapper custody"
-            );
-            assert_eq!(
-                incremental.registrant_event_identity.as_deref(),
-                Some("fixture:release-wrapper-holder-transfer")
-            );
-        }
+        assert_eq!(
+            incremental.registrant, incremental.address_registrant,
+            "{delta:?} made name_current disagree with the address-name registrant fold"
+        );
         assert_ne!(
             incremental.registrant_event_identity.as_deref(),
             Some("fixture:incremental-old-registration"),
@@ -886,12 +947,20 @@ async fn later_wrapper_deltas_project_identically_incrementally_and_from_zero() 
     Ok(())
 }
 
+#[tokio::test] #[rustfmt::skip]
+async fn born_wrapped_release_keeps_the_wrapper_registration_identity() -> Result<()> {
+    let incremental = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, true, false, true).await?;
+    let from_zero = project_later_wrapper_delta(LaterWrapperDelta::RegistrarRelease, false, false, true).await?;
+    assert_eq!(incremental, from_zero); assert_eq!(incremental.registration_status.as_deref(), Some("released"));
+    assert_eq!(incremental.registration_resource_id.as_deref(), Some(CONTROL_RESOURCE)); assert_eq!(incremental.registrant, incremental.address_registrant); Ok(())
+}
+
 #[tokio::test]
 async fn later_wrapper_retraction_projects_identically_incrementally_and_from_zero() -> Result<()> {
     let incremental =
-        project_later_wrapper_delta(LaterWrapperDelta::HolderTransfer, true, true).await?;
+        project_later_wrapper_delta(LaterWrapperDelta::HolderTransfer, true, true, false).await?;
     let from_zero =
-        project_later_wrapper_delta(LaterWrapperDelta::HolderTransfer, false, true).await?;
+        project_later_wrapper_delta(LaterWrapperDelta::HolderTransfer, false, true, false).await?;
     assert_eq!(incremental, from_zero);
     assert_eq!(incremental.expiry, Some(4242));
     assert_eq!(
@@ -899,6 +968,51 @@ async fn later_wrapper_retraction_projects_identically_incrementally_and_from_ze
         Some(CONTROL_OWNER.to_lowercase().as_str())
     );
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+struct EnrichedRegistryOnlyProjection {
+    expiry: Option<i64>,
+    registration_resource_id: Option<String>,
+    registrant: Option<String>,
+    address_registrant: Option<String>,
+}
+
+#[rustfmt::skip]
+async fn project_enriched_registry_only(controller_registered: bool, incremental: bool) -> Result<EnrichedRegistryOnlyProjection> {
+    const ALICE: &str = "0x5555555555555555555555555555555555555555"; const BOB: &str = "0x6666666666666666666666666666666666666666";
+    const REGISTRY_RESOURCE: &str = "edededed-eded-eded-eded-edededededed"; const REGISTRY_BINDING: &str = "efefefef-efef-efef-efef-efefefefefef"; const EXPIRY: i64 = 1_700_001_100;
+    let (database, pool) = migrated_pool().await?; seed_chain(&pool).await?;
+    seed_surface(&pool, OWNERLESS_NAMEHASH, "enriched-later.eth", OWNERLESS_RESOURCE, OWNERLESS_BINDING).await?;
+    if !controller_registered {
+        sqlx::query("UPDATE surface_bindings SET block_number = 9, block_hash = $2, active_from = '2026-08-01T00:00:09Z' WHERE surface_binding_id = $1::uuid").bind(OWNERLESS_BINDING).bind(block_hash(9)).execute(&pool).await?;
+        seed_binding_provenance(&pool, OWNERLESS_BINDING, 0, 1).await?;
+    }
+    for (identity, kind, block, log, expiry) in [
+        ("fixture:enriched-grant", "RegistrationGranted", 8, 1, 1_700_000_100),
+        ("fixture:enriched-initial-expiry", "ExpiryChanged", 8, 2, 1_700_000_100),
+        ("fixture:enriched-renewal", "RegistrationRenewed", 9, 0, EXPIRY),
+        ("fixture:enriched-renewal-expiry", "ExpiryChanged", 9, 0, EXPIRY),
+    ] { seed_normalized_event(&pool, identity, controller_registered.then_some(OWNERLESS_LOGICAL), Some(OWNERLESS_RESOURCE), kind, "ens_v1_registrar_l1", block, log, json!({"source_event":if block == 8 { "NameRegistered" } else { "NameRenewed" },"authority_kind":"registrar","registrant":ALICE,"expiry":expiry,"namehash":OWNERLESS_NAMEHASH}), json!({})).await?; }
+    if incremental { run_project(&pool, 9, 8, None).await?; }
+    seed_next_binding(&pool, OWNERLESS_NAMEHASH, REGISTRY_RESOURCE, REGISTRY_BINDING, 10, "2026-08-01T00:00:10Z").await?;
+    seed_binding_provenance(&pool, REGISTRY_BINDING, 0, 0).await?;
+    seed_authority_epoch_changed(&pool, "fixture:enriched-registry-only-epoch", OWNERLESS_NAMEHASH, REGISTRY_RESOURCE, 10, "registry_only").await?;
+    seed_normalized_event(&pool, "fixture:enriched-unreclaimed-transfer", Some(OWNERLESS_LOGICAL), Some(OWNERLESS_RESOURCE), "TokenControlTransferred", "ens_v1_registrar_l1", 10, 0, json!({"source_event":"Transfer","authority_kind":"registrar","from":ALICE,"to":BOB,"namehash":OWNERLESS_NAMEHASH}), json!({})).await?;
+    run_project(&pool, 10, if incremental { 10 } else { 8 }, incremental.then_some(9)).await?;
+    let (expiry, registration_resource_id, registrant) = sqlx::query_as("SELECT (declared_summary #>> '{registration,expiry}')::bigint, declared_summary #>> '{registration,resource_id}', declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
+    let address_registrant = sqlx::query_scalar("SELECT address FROM address_names_current WHERE logical_name_id = $1 AND relation = 'registrant'").bind(OWNERLESS_LOGICAL).fetch_optional(&pool).await?;
+    database.cleanup().await?; Ok(EnrichedRegistryOnlyProjection { expiry, registration_resource_id, registrant, address_registrant })
+}
+
+#[tokio::test]
+#[rustfmt::skip]
+async fn enrich_later_registration_keeps_lease_through_registry_only_fallback() -> Result<()> {
+    let incremental = project_enriched_registry_only(false, true).await?; let from_zero = project_enriched_registry_only(false, false).await?;
+    assert_eq!(incremental, from_zero); assert_eq!(incremental.expiry, Some(1_700_001_100), "plaintext enrichment left the live registrar expiry behind its binding");
+    assert_eq!(incremental.registration_resource_id.as_deref(), Some(OWNERLESS_RESOURCE)); assert_eq!(incremental.registrant.as_deref(), Some("0x6666666666666666666666666666666666666666")); assert_eq!(incremental.registrant, incremental.address_registrant);
+    let controller_control = project_enriched_registry_only(true, false).await?;
+    assert_eq!(controller_control.expiry, incremental.expiry); assert_eq!(controller_control.registration_resource_id, incremental.registration_resource_id); assert_eq!(controller_control.registrant, incremental.registrant); assert_eq!(controller_control.address_registrant, incremental.address_registrant); Ok(())
 }
 
 async fn ownerless_serving_projection_snapshot(

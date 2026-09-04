@@ -404,7 +404,7 @@ pub(super) async fn build(
                    state.registration_block_hash AS block_hash,
                    state.registration_manifest_version AS manifest_version
             FROM binding_state state
-            WHERE state.token_lineage_id IS NOT NULL
+            WHERE state.token_lineage_id IS NOT NULL OR (state.declared_summary #>> '{registration,authority_kind}' = 'registry_only' AND state.declared_summary #>> '{registration,resource_id}' IS NOT NULL AND state.declared_summary #>> '{registration,resource_id}' <> state.resource_id::text)
             UNION ALL
             SELECT lower(COALESCE(state.token_holder, state.registrant)),
                    state.logical_name_id,
