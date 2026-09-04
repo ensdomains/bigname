@@ -561,7 +561,7 @@ ID family: `id`, `id_not`, `id_gt`, `id_gte`, `id_lt`, `id_lte`, `id_in`, and
 `name_lte`, `name_in`, `name_not_in`, and the `contains`, `starts_with`, and
 `ends_with` positive and negative forms, each with a distinct `_nocase` sibling.
 Graph Node generates these ID and String operator families (upstream:
-.refs/graph_node/graph/src/schema/api.rs:L506-L545 @ graph_node@aefe173).
+.refs/graph_node/graph/src/schema/api.rs:L872-L912 @ graph_node@aefe173).
 These members match the upstream `Domain.id: ID!` and nullable `Domain.name:
 String` fields (upstream: .refs/ens_subgraph/schema.graphql:L1-L7 @
 ens_subgraph@723f1b6). Every supplied member contributes an AND predicate.
@@ -639,7 +639,7 @@ upstream order values are `id`, `name`, `createdAt`, `expiryDate`,
 fields and Account/Resolver relations (upstream:
 .refs/ens_subgraph/schema.graphql:L1-L40 @ ens_subgraph@723f1b6). Graph Node's
 generator defines the upstream ordering vocabulary (upstream:
-.refs/graph_node/graph/src/schema/api.rs:L876-L912 @ graph_node@aefe173).
+.refs/graph_node/graph/src/schema/api.rs:L506-L545 @ graph_node@aefe173).
 `owner` and `owner__id` order by the exact non-null effective owner served by
 `Domain.owner`; `resolver` orders by the nullable composite Resolver ID served
 by `Domain.resolver`, not by address alone. All textual primary expressions and
@@ -649,7 +649,7 @@ graph_node@aefe173) (upstream:
 .refs/graph_node/store/postgres/src/relational_queries.rs:L4147-L4153 @
 graph_node@aefe173). The local
 `registrationDate` extension remains; every other upstream order value is
-exact-owned and absent from the local enum.
+assigned an exact upstream-only disposition and is absent from the local enum.
 Omitted pagination starts at offset zero and returns the first 100 rows.
 Non-positive `first` returns an empty page, positive `first` is capped at
 `200`, negative `skip` becomes zero, and positive `skip` is capped at

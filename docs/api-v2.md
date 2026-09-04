@@ -38,9 +38,10 @@ families with conjunctive semantics, direct comparison against the served
 `Domain.id` and `Domain.name` values, and separate case-sensitive and nocase
 pattern operators. Generated text comparisons and orders use expression-local
 PostgreSQL `COLLATE "C"`; pattern input retains SQL `%`, `_`, and backslash
-semantics. Explicit null equality is distinct from omission, while other
-explicit-null generated operators are rejected. Generated order ties use the
-Domain ID in the requested direction. The generated `Domain_orderBy` exposes only the exact values listed
+semantics. For the generated ID/name families, explicit null equality is
+distinct from omission, while explicit null on the other operators is rejected.
+Generated order ties use the Domain ID in the requested direction. The generated
+`Domain_orderBy` exposes only the exact values listed
 in the capability contract. The legacy `DomainFilter` behavior and local
 `registrationDate` ordering remain separate extensions.
 
