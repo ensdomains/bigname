@@ -573,44 +573,36 @@ async fn registry_binding_tracks_generation_rotation_release_and_zero_clear() ->
     let (database, pool) = migrated_pool().await?;
     seed_chain(&pool).await?;
     seed_blocks(&pool, [11]).await?;
+    seed_surface(&pool, CONTROL_NAMEHASH, "x.eth", RESOURCE, CONTROL_BINDING).await?;
     sqlx::query(
-        "INSERT INTO resources (
-             resource_id, chain_id, block_hash, block_number, canonicality_state
-         ) VALUES ($1::uuid, $3, $4, 8, 'canonical'),
-                  ($2::uuid, $3, $4, 8, 'canonical')",
+        "INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1::uuid, $2, $3, 8, 'canonical')",
     )
-    .bind(RESOURCE)
     .bind(RESTORED_RESOURCE)
     .bind(CHAIN)
     .bind(block_hash(8))
     .execute(&pool)
     .await?;
-    for (identity, kind, block, owner, registry) in [
+    for (identity, logical_name_id, kind, block, registry) in [
+        ("old", None, "AuthorityTransferred", 8, OLD_REGISTRY),
         (
-            "fixture:old-registry",
-            "AuthorityTransferred",
-            8,
-            OWNER,
-            OLD_REGISTRY,
-        ),
-        (
-            "fixture:current-registry",
+            "current",
+            Some(CONTROL_LOGICAL),
             "SubregistryChanged",
             9,
-            OWNER,
             CURRENT_REGISTRY,
         ),
     ] {
         seed_normalized_event(
             &pool,
             identity,
-            None,
+            logical_name_id,
             Some(RESOURCE),
             kind,
             "ens_v1_registry_l1",
             block,
             1,
-            json!({"owner": owner, "owner_getter": owner, "authority_kind": "registrar", "source_event": "NewOwner"}),
+            json!({"owner": OWNER, "owner_getter": OWNER, "authority_kind": "registrar", "source_event": "NewOwner"}),
             json!({"emitting_address": registry}),
         )
         .await?;

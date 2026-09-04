@@ -51,6 +51,12 @@ pub(super) async fn build_registry_binding(
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
+        ), latest_registry_resource AS (
+            SELECT DISTINCT ON (resource_id) * FROM latest_registry_observation
+            ORDER BY resource_id, (chain_positions ->> 'block_number')::bigint DESC NULLS LAST,
+                     (chain_positions ->> 'transaction_index')::bigint DESC NULLS LAST,
+                     (chain_positions ->> 'log_index')::bigint DESC NULLS LAST,
+                     normalized_event_id DESC
         ), classified AS (
             SELECT observation.*,
                    observation.registry_owner ~ '^0x[0-9a-f]{40}$'
@@ -58,7 +64,7 @@ pub(super) async fn build_registry_binding(
                        '0x0000000000000000000000000000000000000000'
                    AND observation.registry_contract ~ '^0x[0-9a-f]{40}$'
                        AS applicable
-            FROM latest_registry_observation observation
+            FROM latest_registry_resource observation
         )
         UPDATE project_stage_permissions_current_resource_summary summary
         SET registry_owner = CASE WHEN binding.applicable THEN binding.registry_owner END,
