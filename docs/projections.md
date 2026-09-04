@@ -290,6 +290,15 @@ wrapper fuses are projected as zero, matching NameWrapper `getData`; an expired
 emancipated or locked position also contributes no lifecycle value or effective
 holder powers because that read clears its owner.[^v1-wrapper-expired]
 
+Incremental Project redo maps wrapper resources to affected children after it
+has retained resources from projection rows whose cited events disappeared.
+That second mapping reads only the resource IDs already selected for the batch;
+it does not scan all wrapper resources. The ordering is required when a child
+has no current child or exact-name row and its historical wrapper resource is
+not the resource on its active binding: retracting the latest disqualifying
+`PermissionScopeChanged` or `ExpiryChanged` event must still rebuild the child
+from the surviving wrapper history.
+
 For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
 come from the admitted registry and registrar families. Out-of-profile resolver,
 reverse, primary-name, mainnet, and execution behavior does not become exact-name
