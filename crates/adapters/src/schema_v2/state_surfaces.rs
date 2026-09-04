@@ -31,17 +31,6 @@ impl State {
         let key = v1_key(namespace, namehash);
         let previous = self.v1_resolver_links.remove(&key);
         self.v1_resolvers.remove(&key);
-        let selection_changed = match (&previous, resolver.as_deref(), source_role.as_deref()) {
-            (Some(previous), Some(resolver), source_role) => {
-                !previous.resolver_address.eq_ignore_ascii_case(resolver)
-                    || previous.source_role.as_deref() != source_role
-            }
-            (None, Some(_), _) => false,
-            (_, None, _) => true,
-        };
-        if selection_changed {
-            self.v1_resolver_linked_resources.remove(&key);
-        }
         if let Some(resolver_address) = resolver {
             self.v1_resolvers
                 .insert(key.clone(), resolver_address.clone());
@@ -59,6 +48,8 @@ impl State {
                     .or_default()
                     .insert(resource_id, link);
             }
+        } else if let Some(resource_id) = resource_id {
+            self.remove_v1_resolver_linked_resource(&key, resource_id);
         }
         previous
     }
@@ -72,6 +63,10 @@ impl State {
         logical_name_id: Option<String>,
     ) {
         let key = v1_key(namespace, namehash);
+        if resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
+            self.remove_v1_resolver_linked_resource(&key, resource_id);
+            return;
+        }
         let Some(selected) = self.v1_resolver_links.get(&key) else {
             return;
         };
@@ -94,6 +89,19 @@ impl State {
             );
     }
 
+    fn remove_v1_resolver_linked_resource(&mut self, key: &str, resource_id: Uuid) {
+        let remove_name = self
+            .v1_resolver_linked_resources
+            .get_mut(key)
+            .is_some_and(|resources| {
+                resources.remove(&resource_id);
+                resources.is_empty()
+            });
+        if remove_name {
+            self.v1_resolver_linked_resources.remove(key);
+        }
+    }
+
     pub(in crate::schema_v2) fn v1_resolver_link(
         &self,
         namespace: &str,
@@ -110,6 +118,18 @@ impl State {
         namehash: &str,
     ) -> Option<String> {
         self.v1_resolvers.get(&v1_key(namespace, namehash)).cloned()
+    }
+
+    #[cfg(test)]
+    pub(in crate::schema_v2) fn v1_resolver_linked_resources(
+        &self,
+        namespace: &str,
+        namehash: &str,
+    ) -> imbl::OrdMap<Uuid, V1ResolverLink> {
+        self.v1_resolver_linked_resources
+            .get(&v1_key(namespace, namehash))
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(in crate::schema_v2) fn replace_known_source_manifest_ids(
@@ -173,21 +193,22 @@ impl State {
         } else {
             None
         };
-        let mut retired_links = Vec::new();
+        let mut retired_links: Vec<V1ResolverLink> = self
+            .v1_resolver_linked_resources
+            .remove(&key)
+            .map(|resources| resources.into_iter().map(|(_, link)| link).collect())
+            .unwrap_or_default();
         if let Some(retired) = retired_resolver {
             let mut remember = |link: V1ResolverLink| {
-                if !retired_links
-                    .iter()
-                    .any(|known: &V1ResolverLink| known.resource_id == link.resource_id)
+                if let Some(existing) = retired_links
+                    .iter_mut()
+                    .find(|known| known.resource_id == link.resource_id)
                 {
+                    *existing = link;
+                } else {
                     retired_links.push(link);
                 }
             };
-            if let Some(linked_resources) = self.v1_resolver_linked_resources.remove(&key) {
-                for (_, link) in linked_resources {
-                    remember(link);
-                }
-            }
             remember(retired.clone());
             for authority in [
                 self.v1_names.get(&key),
@@ -208,10 +229,10 @@ impl State {
             }
             if let Some(anchor) = self.v1_registry_read_anchors.get(&key) {
                 remember(V1ResolverLink {
-                    resolver_address: retired.resolver_address,
+                    resolver_address: retired.resolver_address.clone(),
                     resource_id: Some(anchor.resource_id),
                     logical_name_id: anchor.surface_known.then(|| anchor.logical_name_id.clone()),
-                    source_role: retired.source_role,
+                    source_role: retired.source_role.clone(),
                 });
             }
         }

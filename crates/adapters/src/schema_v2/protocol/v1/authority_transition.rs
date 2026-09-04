@@ -138,7 +138,11 @@ pub(super) fn append_registry_fallback_handoff(
     ) else {
         return;
     };
-    let resolver = &retired_links[0].resolver_address;
+    let resolver = &retired_links
+        .iter()
+        .find(|retired| retired.resource_id == Some(authority.resource_id))
+        .expect("matched authority has a retired resolver link")
+        .resolver_address;
     let (before, after) = v1_revoke_states(
         subject,
         json!({
@@ -182,13 +186,14 @@ pub(super) fn append_surface_materialization(
     authority_arm: &str,
     materialization: &V1SurfaceMaterialization,
     raw: &RawLogInput,
+    source_event: &str,
 ) {
     append_surface_materialization_for_trigger(
         output,
         authority_arm,
         materialization,
         raw,
-        "NameRenewed",
+        source_event,
     );
 }
 

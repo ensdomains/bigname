@@ -467,6 +467,7 @@ fn name_event(
             super::authority_arm(&selected.source.namespace),
             materialization,
             raw,
+            &selected.event.name,
         );
     }
     if registration || synthetic_grant {

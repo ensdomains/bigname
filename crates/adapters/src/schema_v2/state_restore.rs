@@ -305,7 +305,6 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             event.after_state.get("resolver").and_then(Value::as_str),
             event.resource_id,
         )
-        && !resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
     {
         state.remember_v1_resolver_linked_resource(
             &event.namespace,

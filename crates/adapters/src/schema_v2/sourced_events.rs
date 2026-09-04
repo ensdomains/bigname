@@ -34,9 +34,6 @@ pub(super) fn prepare_v1_state_derived_events(
         else {
             continue;
         };
-        if resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
-            continue;
-        }
         state.remember_v1_resolver_linked_resource(
             &selected.source.namespace,
             node,
