@@ -309,15 +309,15 @@ fn classify_oracle_enum_coverage(
                     "status": entry["status"]
                 }));
             }
-            if !local.contains_key(&format!("type:{enum_type}")) {
-                if let Some(entry) = known.and_then(|known| known.get(enum_type)) {
-                    return Some(json!({
-                        "owner": entry["owner"],
-                        "path": path,
-                        "reason": "wholly absent enum type census",
-                        "status": "deferred"
-                    }));
-                }
+            if !local.contains_key(&format!("type:{enum_type}"))
+                && let Some(entry) = known.and_then(|known| known.get(enum_type))
+            {
+                return Some(json!({
+                    "owner": entry["owner"],
+                    "path": path,
+                    "reason": "wholly absent enum type census",
+                    "status": "deferred"
+                }));
             }
             Some(json!({
                 "owner": Value::Null,
