@@ -154,12 +154,13 @@ to the applicable entries below.
 
 > **Generated hexadecimal input handling is entry-point specific** — Account and composite Resolver point IDs compare
 > exact lowercase served identities, so case-different point IDs are no-matches. The pre-existing Account list-filter
-> and Resolver domain-namehash filter canonicalization remains outside this slice. Graph Node passes point IDs into an exact equality filter and preserves
+> plus Resolver ID/domain-namehash filter canonicalization remains outside this slice. Graph Node passes point IDs into an exact equality filter and preserves
 > ordinary string filter values (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L729 @
 > graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L357-L379 @ graph_node@aefe1737)
 > (upstream: .refs/graph_node/graphql/src/store/query.rs:L332-L334 @ graph_node@aefe1737). Resolver address filters are
-> `Bytes` in both systems and accept uppercase digits, but Graph Node's byte parser permits an omitted `0x` prefix while
-> bigname requires it (upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).
+> `Bytes` in both systems and accept uppercase digits, but Graph Node's byte parser permits an omitted or repeated `0x`
+> prefix while bigname requires exactly one (upstream:
+> .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Why**: point-root IDs follow exact entity-ID semantics; Bytes retains byte canonicalization.
 > **Since**: `2026-09-03`

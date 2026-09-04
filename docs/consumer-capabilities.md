@@ -510,7 +510,9 @@ Account point IDs and generated Domain-filter IDs are compared exactly as
 supplied. Uppercase `0X`, or uppercase hexadecimal digits after lowercase `0x`,
 are valid GraphQL `ID` text but do not alias the lowercase served value. A
 Resolver point ID must use the exact lowercase `<address>-<namehash>` composite
-form; a case-different form is a no-match. `Resolver_filter.address` uses
+form; a case-different form is a no-match. The pre-existing
+`Resolver_filter.id` path remains case-canonicalizing in this slice, so that
+filter can match a case-different composite ID. `Resolver_filter.address` uses
 `Bytes`: lowercase `0x` followed by
 uppercase or lowercase hexadecimal digits is accepted and byte-canonicalized,
 while uppercase `0X` is a scalar-coercion error. Graph Node's Bytes parser strips
@@ -635,8 +637,8 @@ Resolver-ID filters, relation filters, `and`, `or`, and every other unclaimed
 upstream member remain absent and produce the existing unknown-input-field
 validation error.
 
-When `orderBy` is omitted, `domains()` now orders by namehash ascending using
-PostgreSQL `COLLATE "C"`; this is a behavior change from the previous name
+When `orderBy` is omitted, `domains()` now orders by namehash ascending without
+an explicit collation; this is a behavior change from the previous name
 ordering. `Domain_orderBy.id` uses that same namehash ordering. The served
 upstream order values are `id`, `name`, `createdAt`, `expiryDate`,
 `owner`, `owner__id`, and `resolver`, corresponding to the upstream Domain
@@ -646,11 +648,14 @@ generator defines the upstream ordering vocabulary (upstream:
 .refs/graph_node/graph/src/schema/api.rs:L506-L545 @ graph_node@aefe173).
 `owner` and `owner__id` order by the exact non-null effective owner served by
 `Domain.owner`; `resolver` orders by the nullable composite Resolver ID served
-by `Domain.resolver`, not by address alone. All textual primary expressions and
-deterministic entity-ID tie-breaker uses the requested direction and `COLLATE
-"C"` (upstream: .refs/graph_node/graph/src/components/store/mod.rs:L253-L263 @
+by `Domain.resolver`, not by address alone. Raw-name and other semantic text
+keys use `COLLATE "C"`; the fixed-width namehash tie-breaker does not. That
+same-direction namehash tie-break is a local deterministic refinement,
+including for `owner__id`: Graph Node's child-ID path orders by the child ID
+without a parent-ID tie-break (upstream:
+.refs/graph_node/store/postgres/src/relational_queries.rs:L3650-L3665 @
 graph_node@aefe173) (upstream:
-.refs/graph_node/store/postgres/src/relational_queries.rs:L4147-L4153 @
+.refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4055 @
 graph_node@aefe173). The local
 `registrationDate` extension remains; every other upstream order value is
 assigned an exact upstream-only disposition and is absent from the local enum.
@@ -669,8 +674,8 @@ sort expressions. Adding them is a separate schema-migration slice; substring,
 suffix, nocase, and negated patterns remain table-linear under the upstream
 operator/index combination as well.
 `createdAt` still serves epoch zero when no projected timestamp exists; its SQL
-`COALESCE(..., TO_TIMESTAMP(0))` only makes the sort key equal that existing
-served fallback.
+`COALESCE(..., TO_TIMESTAMP(0))` makes those rows sort as numeric value `0`,
+agreeing with that existing served fallback.
 Omitted pagination starts at offset zero and returns the first 100 rows.
 Non-positive `first` returns an empty page, positive `first` is capped at
 `200`, negative `skip` becomes zero, and positive `skip` is capped at
