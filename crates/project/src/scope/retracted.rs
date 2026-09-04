@@ -532,45 +532,14 @@ async fn seed_parent_migration_children(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        r#"
-        WITH retracted_parents AS (
-            SELECT row.logical_name_id FROM name_current row
-            WHERE row.provenance ->> 'chain_id' = $1
-              AND row.provenance #>> '{authority_selection,proof_kind}' = 'migration_authority_transition'
-              AND row.provenance #>> '{authority_selection,proof_event_id}' NOT IN ('', 'null')
-              AND NOT EXISTS (
-                  SELECT 1 FROM normalized_events event
-                  LEFT JOIN chain_lineage lineage
-                    ON lineage.chain_id = event.chain_id
-                   AND lineage.block_hash = event.block_hash
-                   AND lineage.block_number = event.block_number
-                  WHERE event.normalized_event_id =
-                        (row.provenance #>> '{authority_selection,proof_event_id}')::bigint
-                    AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-                    AND ((event.block_number IS NULL AND event.block_hash IS NULL)
-                         OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
-              )
-        ), candidates AS (
-            SELECT parent.logical_name_id FROM retracted_parents parent
-            UNION
-            SELECT child.child_logical_name_id FROM retracted_parents parent
-            JOIN children_current child
-              ON child.parent_logical_name_id = parent.logical_name_id
-             AND child.provenance ->> 'chain_id' = $1
-        )
-        INSERT INTO project_scope_children
-        SELECT logical_name_id FROM candidates
-        ON CONFLICT DO NOTHING
-        "#,
+        r#"WITH retracted_parents AS (
+            SELECT row.logical_name_id FROM name_current row WHERE row.provenance ->> 'chain_id' = $1 AND row.provenance #>> '{authority_selection,proof_kind}' = 'migration_authority_transition' AND row.provenance #>> '{authority_selection,proof_event_id}' NOT IN ('', 'null') AND NOT EXISTS (SELECT 1 FROM normalized_events event LEFT JOIN chain_lineage lineage ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash AND lineage.block_number = event.block_number WHERE event.normalized_event_id = (row.provenance #>> '{authority_selection,proof_event_id}')::bigint AND event.canonicality_state IN ('canonical', 'safe', 'finalized') AND ((event.block_number IS NULL AND event.block_hash IS NULL) OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized')))
+        ), candidates AS (SELECT parent.logical_name_id FROM retracted_parents parent UNION SELECT child.child_logical_name_id FROM retracted_parents parent JOIN children_current child ON child.parent_logical_name_id = parent.logical_name_id AND child.provenance ->> 'chain_id' = $1)
+        INSERT INTO project_scope_children SELECT logical_name_id FROM candidates ON CONFLICT DO NOTHING"#,
     )
     .bind(chain_id)
     .execute(&mut **transaction)
     .await
-    .map_err(|error| {
-        ProjectError::database(
-            "failed to retain retracted parent migration children",
-            error,
-        )
-    })?;
+    .map_err(|error| ProjectError::database("failed to retain retracted parent migration children", error))?;
     Ok(())
 }

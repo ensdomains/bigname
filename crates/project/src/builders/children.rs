@@ -56,7 +56,15 @@ async fn candidates(
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id,
                    event.after_state ->> 'migration_path' AS migration_path,
-                   event.event_identity, event.raw_fact_ref
+                   jsonb_build_object(
+                       'event_identity', event.event_identity,
+                       'raw_fact_ref', event.raw_fact_ref,
+                       'manifest', jsonb_build_object(
+                           'source_manifest_id', event.source_manifest_id,
+                           'source_family', event.source_family,
+                           'manifest_version', event.manifest_version
+                       )
+                   ) AS evidence
             FROM project_events event
             WHERE event.source_family = 'ens_v2_migration_l1'
               AND event.event_kind = 'MigrationApplied'
@@ -71,11 +79,14 @@ async fn candidates(
                    address.contract_instance_id::text
                        AS migration_registry_contract_instance_id,
                    jsonb_build_object(
+                       'normalized_event_id', subregistry.normalized_event_id,
                        'event_identity', subregistry.event_identity,
                        'raw_fact_ref', subregistry.raw_fact_ref,
-                       'source_manifest_id', subregistry.source_manifest_id,
-                       'source_family', subregistry.source_family,
-                       'manifest_version', subregistry.manifest_version
+                       'manifest', jsonb_build_object(
+                           'source_manifest_id', subregistry.source_manifest_id,
+                           'source_family', subregistry.source_family,
+                           'manifest_version', subregistry.manifest_version
+                       )
                    ) AS migration_registry_evidence
             FROM parent_boundaries boundary
             LEFT JOIN current_v2_subregistries subregistry
@@ -99,7 +110,16 @@ async fn candidates(
                    CASE WHEN jsonb_typeof(event.after_state -> 'fuses') = 'number'
                          AND (event.after_state ->> 'fuses')::numeric BETWEEN 0 AND 4294967295
                        THEN (event.after_state ->> 'fuses')::bigint END AS fuses,
-                   event.event_identity, event.raw_fact_ref
+                   jsonb_build_object(
+                       'normalized_event_id', event.normalized_event_id,
+                       'event_identity', event.event_identity,
+                       'raw_fact_ref', event.raw_fact_ref,
+                       'manifest', jsonb_build_object(
+                           'source_manifest_id', event.source_manifest_id,
+                           'source_family', event.source_family,
+                           'manifest_version', event.manifest_version
+                       )
+                   ) AS evidence
             FROM project_events event
             WHERE event.source_family = 'ens_v1_wrapper_l1'
               AND event.event_kind = 'PermissionScopeChanged'
@@ -116,7 +136,16 @@ async fn candidates(
                          AND (event.after_state ->> 'expiry')::numeric BETWEEN
                              0 AND 18446744073709551615
                        THEN (event.after_state ->> 'expiry')::numeric END AS expiry_seconds,
-                   event.event_identity, event.raw_fact_ref
+                   jsonb_build_object(
+                       'normalized_event_id', event.normalized_event_id,
+                       'event_identity', event.event_identity,
+                       'raw_fact_ref', event.raw_fact_ref,
+                       'manifest', jsonb_build_object(
+                           'source_manifest_id', event.source_manifest_id,
+                           'source_family', event.source_family,
+                           'manifest_version', event.manifest_version
+                       )
+                   ) AS evidence
             FROM project_events event
             WHERE event.event_kind = 'ExpiryChanged'
               AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
@@ -135,10 +164,8 @@ async fn candidates(
                          OR expiry.expiry_seconds IS NULL OR target_time.epoch_seconds IS NULL
                          OR expiry.expiry_seconds < target_time.epoch_seconds THEN 0
                        ELSE modifier.fuses END AS fuses,
-                   modifier.event_identity AS modifier_event_identity,
-                   modifier.raw_fact_ref AS modifier_raw_fact_ref,
-                   expiry.event_identity AS expiry_event_identity,
-                   expiry.raw_fact_ref AS expiry_raw_fact_ref
+                   modifier.evidence AS modifier_evidence,
+                   expiry.evidence AS expiry_evidence
             FROM latest_wrapper_modifiers modifier
             CROSS JOIN target_time
             LEFT JOIN latest_wrapper_expiries expiry
@@ -222,11 +249,10 @@ async fn candidates(
                    CASE WHEN event.source_family = 'basenames_base_registry'
                        THEN 'basenames' ELSE 'ens_v1'
                    END AS authority_arm,
-                   migration.event_identity AS parent_migration_event_identity,
-                   migration.raw_fact_ref AS parent_migration_raw_fact_ref,
-                   migration.migration_registry_evidence,
-                   wrapper.modifier_event_identity, wrapper.modifier_raw_fact_ref,
-                   wrapper.expiry_event_identity, wrapper.expiry_raw_fact_ref,
+                   jsonb_path_query_array(jsonb_build_array(
+                       migration.evidence, migration.migration_registry_evidence,
+                       wrapper.modifier_evidence, wrapper.expiry_evidence
+                   ), '$[*] ? (@ != null)') AS reachability_evidence,
                    CASE WHEN migration.migration_path IN ('locked_wrapped', 'locked_child')
                        THEN jsonb_build_object(
                            'derivation_kind', 'locked_parent_migratable_child',
@@ -356,13 +382,7 @@ async fn candidates(
                    ) AS raw_fact_ref,
                    registration.canonicality_state::text AS canonicality_state,
                    'ens_v2' AS authority_arm,
-                   NULL::text AS parent_migration_event_identity,
-                   NULL::jsonb AS parent_migration_raw_fact_ref,
-                   NULL::jsonb AS migration_registry_evidence,
-                   NULL::text AS modifier_event_identity,
-                   NULL::jsonb AS modifier_raw_fact_ref,
-                   NULL::text AS expiry_event_identity,
-                   NULL::jsonb AS expiry_raw_fact_ref,
+                   '[]'::jsonb AS reachability_evidence,
                    NULL::jsonb AS parent_reachability
             FROM current_v2_subregistries subregistry
             JOIN project_surfaces parent
@@ -506,24 +526,18 @@ async fn publish(
                child.owner,
                child.registrant,
                jsonb_build_object(
-                   'normalized_event_ids', jsonb_build_array(child.normalized_event_id),
+                   'normalized_event_ids', jsonb_build_array(child.normalized_event_id)
+                       || jsonb_path_query_array(
+                           child.reachability_evidence, '$[*].normalized_event_id'),
                    'raw_fact_refs', jsonb_build_array(child.raw_fact_ref)
-                       || CASE WHEN child.parent_migration_raw_fact_ref IS NULL THEN '[]'::jsonb
-                           ELSE jsonb_build_array(child.parent_migration_raw_fact_ref) END
-                       || CASE WHEN child.migration_registry_evidence IS NULL THEN '[]'::jsonb
-                           ELSE jsonb_build_array(
-                               child.migration_registry_evidence -> 'raw_fact_ref') END
-                       || CASE WHEN child.modifier_raw_fact_ref IS NULL THEN '[]'::jsonb
-                           ELSE jsonb_build_array(child.modifier_raw_fact_ref) END
-                       || CASE WHEN child.expiry_raw_fact_ref IS NULL THEN '[]'::jsonb
-                           ELSE jsonb_build_array(child.expiry_raw_fact_ref) END,
+                       || jsonb_path_query_array(
+                           child.reachability_evidence, '$[*].raw_fact_ref'),
                    'manifest_versions', jsonb_build_array(jsonb_build_object(
                        'source_manifest_id', child.source_manifest_id,
                        'source_family', child.source_family,
                        'manifest_version', child.manifest_version
-                   )) || CASE WHEN child.migration_registry_evidence IS NULL THEN '[]'::jsonb
-                       ELSE jsonb_build_array(child.migration_registry_evidence -
-                           ARRAY['event_identity', 'raw_fact_ref']) END,
+                   )) || jsonb_path_query_array(
+                       child.reachability_evidence, '$[*].manifest'),
                    'derivation_kind', 'children_current_rebuild',
                    'chain_id', $1,
                    'coverage', jsonb_build_object(
@@ -532,11 +546,9 @@ async fn publish(
                    )
                ) || CASE WHEN child.parent_reachability IS NULL THEN '{}'::jsonb
                    ELSE jsonb_build_object(
-                       'event_identities', to_jsonb(array_remove(ARRAY[
-                           child.event_identity, child.parent_migration_event_identity,
-                           child.migration_registry_evidence ->> 'event_identity',
-                           child.modifier_event_identity, child.expiry_event_identity
-                       ]::text[], NULL)),
+                       'event_identities', jsonb_build_array(child.event_identity)
+                           || jsonb_path_query_array(
+                               child.reachability_evidence, '$[*].event_identity'),
                        'parent_reachability', child.parent_reachability
                    ) END,
                jsonb_build_object(
@@ -551,7 +563,8 @@ async fn publish(
                    'target_block_hash', $3
                ),
                GREATEST(child.manifest_version, COALESCE(
-                   (child.migration_registry_evidence ->> 'manifest_version')::bigint,
+                   (SELECT max((evidence -> 'manifest' ->> 'manifest_version')::bigint)
+                    FROM jsonb_array_elements(child.reachability_evidence) evidence),
                    child.manifest_version
                ))
         FROM selected child

@@ -406,21 +406,37 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     seed_wrapper(&incremental, 65_536, 1_800_000_010).await?;
     seed_parent_migration_registry(&incremental, 10).await?;
     seed_migration(&incremental, "locked_wrapped", 10, "parent-migration").await?;
+    sqlx::query("UPDATE normalized_events SET manifest_version = CASE event_identity WHEN 'parent-migration' THEN 6 WHEN 'wrapper-fuses' THEN 8 ELSE 9 END WHERE event_identity IN ('parent-migration', 'wrapper-fuses', 'wrapper-expiry')")
+        .execute(&incremental).await?;
     run(&incremental, 10, None, RunMode::Normal).await?;
     assert!(visible(&incremental).await?);
     let (provenance, manifest_version): (Value, i64) = sqlx::query_as(
         "SELECT provenance, manifest_version FROM children_current WHERE child_logical_name_id = $1",
     ).bind(CHILD).fetch_one(&incremental).await?;
-    assert_eq!(manifest_version, 7);
+    assert_eq!(manifest_version, 9);
     let identities = provenance["event_identities"]
         .as_array()
         .expect("event identities");
     assert_eq!(identities.len(), 5);
     assert!(identities.iter().any(|value| value == "v2-parent-registry"));
     assert_eq!(
+        provenance["normalized_event_ids"]
+            .as_array()
+            .expect("event ids")
+            .len(),
+        4
+    );
+    assert_eq!(
         provenance["raw_fact_refs"]
             .as_array()
             .expect("raw refs")
+            .len(),
+        5
+    );
+    assert_eq!(
+        provenance["manifest_versions"]
+            .as_array()
+            .expect("manifests")
             .len(),
         5
     );
@@ -437,16 +453,26 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     assert_eq!(rows(&incremental).await?, rows(&fresh).await?);
     assert!(!visible(&incremental).await?);
 
-    for bound in [false, true] {
-        wrapper_retraction_converges(bound).await?;
+    for (bound, named) in [(false, true), (true, true), (false, false)] {
+        wrapper_retraction_converges(bound, named).await?;
     }
     Ok(())
 }
 
-async fn wrapper_retraction_converges(bound: bool) -> Result<()> {
-    let suffix = if bound { "bound" } else { "rotated" };
+async fn wrapper_retraction_converges(bound: bool, named: bool) -> Result<()> {
+    let suffix = format!(
+        "{}-{}",
+        if bound { "bound" } else { "rotated" },
+        if named { "named" } else { "hash" }
+    );
     let (_redo_db, redo) = database(&format!("issue503_wrapper_retract_{suffix}_inc")).await?;
     seed_identity(&redo, &["ens_v1"]).await?;
+    if !named {
+        sqlx::query("UPDATE name_surfaces SET visibility_state = 'shadow', deactivation_reason = 'hash-only replay fixture', deactivated_at = now() WHERE logical_name_id = $1")
+        .bind(CHILD)
+        .execute(&redo)
+        .await?;
+    }
     if bound {
         sqlx::query("UPDATE surface_bindings SET resource_id = $1::uuid WHERE surface_binding_id = $2::uuid")
             .bind(V1_WRAPPER_RESOURCE).bind(V1_BINDING).execute(&redo).await?;
@@ -466,6 +492,12 @@ async fn wrapper_retraction_converges(bound: bool) -> Result<()> {
 
     let (_fresh_db, fresh) = database(&format!("issue503_wrapper_retract_{suffix}_fresh")).await?;
     seed_identity(&fresh, &["ens_v1"]).await?;
+    if !named {
+        sqlx::query("UPDATE name_surfaces SET visibility_state = 'shadow', deactivation_reason = 'hash-only replay fixture', deactivated_at = now() WHERE logical_name_id = $1")
+        .bind(CHILD)
+        .execute(&fresh)
+        .await?;
+    }
     if bound {
         sqlx::query("UPDATE surface_bindings SET resource_id = $1::uuid WHERE surface_binding_id = $2::uuid")
             .bind(V1_WRAPPER_RESOURCE).bind(V1_BINDING).execute(&fresh).await?;
@@ -543,6 +575,20 @@ visibility_test!(
         expiry: 2_000_000_000,
         owner: OWNER,
         history: Some((REGISTRY, "RegistrationReserved", true)),
+        v2: false,
+        child_arms: &["ens_v1"]
+    },
+    false
+);
+visibility_test!(
+    locked_parent_hides_child_with_renewal_history,
+    "issue503_renewed_v2",
+    Case {
+        path: Some("locked_wrapped"),
+        fuses: 65_536,
+        expiry: 2_000_000_000,
+        owner: OWNER,
+        history: Some((REGISTRY, "RegistrationRenewed", true)),
         v2: false,
         child_arms: &["ens_v1"]
     },
