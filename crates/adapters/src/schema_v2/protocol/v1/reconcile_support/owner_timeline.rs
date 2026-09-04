@@ -103,9 +103,10 @@ impl OwnerTimeline {
         &self.reconciled_transfer_positions
     }
 }
-// The current controller registers to itself, writes the requested registry owner, transfers the
-// token to that owner, and then emits NameRegistered.
-// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L294-L317 @ ens_v1@91c966f)
+// In its resolver-bearing path, the current controller registers to itself, writes the requested
+// registry owner, transfers the token to that owner, and then emits NameRegistered; its zero-resolver
+// path registers directly to that owner.
+// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287-L317 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f)
 #[rustfmt::skip]
 fn confirmed_registry_positions(events: &EventIndex, targets: &[usize], transfers: &[(Position, String)], owners: &[(Position, String)]) -> BTreeSet<Position> {

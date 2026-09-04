@@ -184,7 +184,7 @@ registration transaction. `registration_registry_setup` records that the whole t
 a registry ownership setup matching the registrar owner, so restore can make that registrar current.
 `registry_migrated` records that a current-registry `NewOwner` proved the node moved to the 2020
 ENSv1 registry replacement, so restore continues to suppress later observations from the retired
-registry. `surface_known` records that an
+registry (upstream: .refs/ens_v1/README.md:L73 @ ens_v1@91c966f). `surface_known` records that an
 active plaintext surface was known when the authority observation was emitted, so restore can
 reattach the logical name and reproduce the same binding decision.
 Another same-namespace preimage can create the surface without binding the registrar until the next

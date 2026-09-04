@@ -100,7 +100,7 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
-> **Born-wrapped registration identity follows its first wrapper resource** —
+> **Born-wrapped registration identity follows its first wrapper [resource](glossary.md#resource-backing-resource-resource_id)** —
 > bigname uses the first wrapper resource created in the registrar registration
 > transaction as the registration identity for that lifecycle. Registrar rows
 > and rows from later unwrap and re-wrap operations keep that one followable
