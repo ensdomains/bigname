@@ -154,10 +154,10 @@ fn reconcile_registration(
 
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
     for index in retarget_candidates {
-        // A wrapper can supply the first active name surface before a controller registration in
-        // the same transaction. That state-derived pointer deliberately belongs to the dormant
-        // registry serving resource; registrar reconciliation must not turn it into a control
-        // resource pointer.
+        // A wrapper can identify the name before a controller registration in the same
+        // transaction. The generated resolver pointer belongs to the dormant registry resource
+        // used for reads; registrar reconciliation must not turn it into a pointer attached to
+        // registrar control.
         let preserves_registry_read_pointer = output.normalized_events[index].event_kind
             == "ResolverChanged"
             && output.normalized_events[index].after_state["state_derived"] == true
