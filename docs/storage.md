@@ -10,6 +10,16 @@ byte-lexically as C does; the API relies on that property to retain the existing
 B-tree service for identity keys. Other comparisons that need C ordering apply
 it locally. Numeric or otherwise hex-incompatible collations are unsupported
 until a schema-migration index or startup locale gate explicitly admits them.
+The repository's CI/test database and default Docker deployment use
+`postgres:16-alpine`: musl-backed libc collations are bytewise, so those images
+satisfy this contract by construction but cannot validate its glibc behavior.
+An external glibc 2.39 deployment probe confirmed that 25,000 fixed-width lowercase
+hexadecimal strings sort identically under `en_US.UTF-8` and C. This remains a
+deployment property rather than a suite-enforced gate. The ignored integration
+test runs the same probe on the available glibc PostgreSQL image; issue `#833`
+tracks glibc 2.39 CI. Expression-local `COLLATE "C"` remains load-bearing on a
+glibc server for noncanonical operands, where lowercase and uppercase
+hexadecimal text can sort differently.
 
 ## Invariants
 

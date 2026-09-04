@@ -152,10 +152,13 @@ to the applicable entries below.
 > **Why**: the authorized source for this slice is the current address-name projection, not event-history synthesis.
 > **Since**: `2026-09-02`
 
-> **Generated hexadecimal input handling is entry-point specific** — Account and composite Resolver point IDs compare
-> exact lowercase served identities, so case-different point IDs are no-matches. The pre-existing Account list-filter
-> plus Resolver ID/domain-namehash filter canonicalization remains outside this slice. Graph Node passes point IDs into an exact equality filter and preserves
-> ordinary string filter values (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L729 @
+> **Generated hexadecimal input handling is entry-point specific** — Account and composite Resolver point IDs and
+> generated Domain-filter IDs compare exact lowercase served identities, so case-different IDs are no-matches. Bigname's
+> `domain(id:)` point path instead accepts uppercase hexadecimal digits after lowercase `0x`, normalizes the namehash, and
+> can match the lowercase served ID. Uppercase `0X` does not alias a namehash ID, but can match a literal ENS name through
+> bigname's point-path name extension. The pre-existing Account list-filter plus Resolver
+> ID/domain-namehash filter canonicalization remains outside this slice. Graph Node passes point IDs into an exact equality filter and preserves
+> ordinary string filter values (upstream: .refs/graph_node/graphql/src/store/prefetch.rs:L726-L730 @
 > graph_node@aefe1737) (upstream: .refs/graph_node/graph/src/data/store/mod.rs:L357-L379 @ graph_node@aefe1737)
 > (upstream: .refs/graph_node/graphql/src/store/query.rs:L332-L334 @ graph_node@aefe1737). Resolver address filters are
 > `Bytes` in both systems and accept uppercase digits, but Graph Node's byte parser permits an omitted or repeated `0x`
@@ -254,25 +257,34 @@ to the applicable entries below.
 > graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, and noncanonical ID ranges, but deliberately
 > leaves fixed-width lowercase hexadecimal namehash predicates and order/tie-break expressions unwrapped so
 > `name_current_lookup_idx` remains usable. The deployment contract requires a collation that orders those canonical
-> hexadecimal keys byte-lexically like C; this API-only slice does not add a database-locale startup gate.
+> hexadecimal keys byte-lexically like C. Alpine/musl CI and default deployment images satisfy that rule by construction;
+> glibc deployments rely on the separately verified lowercase-hexadecimal property, while local C collation remains
+> necessary for noncanonical range operands. This API-only slice does not add a database-locale startup gate; issue `#833`
+> tracks glibc CI coverage.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Divergence**: Graph Node enforces the locale for the database; bigname enforces it only where collation can change the
 > generated expression's semantics.
 > **Since**: `2026-09-03`
 
 > **Most generated Domain name filters and non-ID orders require linear scans** — the default and explicit ID order and
-> selective positive ID predicates with canonical operands use `name_current_lookup_idx`. Noncanonical ID ranges, ID negations, every name operator, and the name, date,
+> ID equality or membership predicates use `name_current_lookup_idx`. Canonical ranges use that index with ID order, but
+> use the flat eligibility joins with a non-ID order because the range operand does not bound the matching row count.
+> Noncanonical ID ranges, ID negations, every name operator, and the name, date,
 > owner, Resolver, and local registration-date orders have cost linear in bigname's eligible names table. Graph Node
 > creates indexes for eligible entity attributes and uses B-trees for ordinary scalar attributes (upstream:
 > .refs/graph_node/store/postgres/src/relational/ddl.rs:L251-L275 @ graph_node@aefe173) (upstream:
 > .refs/graph_node/store/postgres/src/relational/ddl.rs:L277-L342 @ graph_node@aefe173); its substring, suffix, nocase, and
 > negated patterns are nevertheless scan-shaped under that ordinary-index design.
+> Bigname also adds a same-direction namehash tie-break to `owner__id`; Graph Node's child-ID path orders only by the
+> child ID (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L3650-L3665 @ graph_node@aefe173)
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4055 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Divergence**: bigname lacks equivalent raw-name and expression indexes for name equality/range/prefix and the non-ID
-> order keys. Those indexes require a separate schema-migration slice; they are not hidden in this API-only change.
+> order keys. Issue `#831` owns those names-projection indexes. They require a separate schema-migration slice and are not
+> hidden in this API-only change.
 > **Since**: `2026-09-04`
 
-> **Uppercase `0X` is never canonicalized** — Account point IDs and generated Domain-filter IDs remain valid GraphQL text
+> **Uppercase `0X` handling is entry-point specific** — Account point IDs and generated Domain-filter IDs remain valid GraphQL text
 > but compare exactly, a non-lowercase Resolver point ID is a no-match, the pre-existing `Resolver_filter.id` remains case-canonicalizing, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
 > digits after lowercase `0x` remain valid Bytes input and serialize canonically.
 > **Upstream**: Graph Node's Bytes parser strips only lowercase `0x`

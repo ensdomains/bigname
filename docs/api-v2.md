@@ -46,6 +46,10 @@ Generated order ties use the Domain ID in the requested direction. The generated
 `Domain_orderBy` exposes only the exact values listed
 in the capability contract. The legacy `DomainFilter` behavior and local
 `registrationDate` ordering remain separate extensions.
+Graph Node generates these ID and String operator families (upstream:
+.refs/graph_node/graph/src/schema/api.rs:L872-L912 @ graph_node@aefe173), and the
+pinned ENS subgraph declares `Domain.id` as `ID!` and `Domain.name` as `String`
+(upstream: .refs/ens_subgraph/schema.graphql:L1-L7 @ ens_subgraph@723f1b6).
 
 ## Naming Dictionary
 
