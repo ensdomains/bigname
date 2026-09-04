@@ -214,10 +214,6 @@ impl State {
                 .insert(logical_name_id.clone(), resource_id);
         }
         let key = v1_key(namespace, namehash);
-        let registry_contract = self
-            .v1_registry_authorities
-            .get(&key)
-            .and_then(|state| state.registry_contract.clone());
         let value = V1NameState {
             logical_name_id,
             surface_known,
@@ -228,7 +224,7 @@ impl State {
             labelhash,
             expiry,
             owner,
-            registry_contract,
+            registry_contract: None,
             authority_key,
             wrapper_fallback,
         };

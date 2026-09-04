@@ -13411,13 +13411,26 @@ async fn registrar_transfer_authority_flip_matches_full_rebuild() -> Result<()> 
 #[tokio::test]
 async fn registrar_reregistration_moves_registry_binding_per_block() -> Result<()> {
     let scratch = ScratchDatabase::create("project-registrar-reregistration-binding").await?;
-    let incremental = ScratchDatabase::create("project-registrar-binding-incremental").await?;
+    let splits = vec![
+        (
+            11,
+            ScratchDatabase::create("project-registrar-binding-split-11").await?,
+        ),
+        (
+            13,
+            ScratchDatabase::create("project-registrar-binding-split-13").await?,
+        ),
+        (
+            14,
+            ScratchDatabase::create("project-registrar-binding-split-14").await?,
+        ),
+    ];
     let chain = "project-registrar-reregistration-binding";
     let fixture: Value = serde_json::from_str(include_str!(
         "fixtures/registry-binding-reregistration.json"
     ))?;
     let blocks = serde_json::from_value::<Vec<i64>>(fixture["blocks"].clone())?;
-    for pool in [scratch.pool(), incremental.pool()] {
+    for pool in std::iter::once(scratch.pool()).chain(splits.iter().map(|(_, db)| db.pool())) {
         seed_raw_registrar_transfer_fixture(pool, chain, true).await?;
         for table in ["raw_logs", "raw_transactions"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE chain_id = $1"))
@@ -13469,26 +13482,35 @@ async fn registrar_reregistration_moves_registry_binding_per_block() -> Result<(
             mode: InterpretRunMode::Normal,
         })
         .await?;
-    let mut resume_current = None;
-    for (from_block, to_block) in [(0, 14), (15, 23), (24, 24)] {
-        let outcome = InterpretEngine::new(incremental.pool().clone())
-            .run_batch(InterpretRequest {
-                chain_id: chain.into(),
-                from_block,
-                to_block,
-                resume_current,
-                mode: InterpretRunMode::Normal,
-            })
-            .await?;
-        resume_current = Some(outcome.current);
-    }
     let full_payload = registry_transition_payload(scratch.pool(), chain).await?;
     assert_eq!(full_payload["owner_getter"], TRANSFER_OWNER);
     assert_eq!(full_payload["registry_contract"], REGISTRY);
-    assert_eq!(
-        registry_transition_payload(incremental.pool(), chain).await?,
-        full_payload
-    );
+    for (split, database) in &splits {
+        let first = InterpretEngine::new(database.pool().clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: 0,
+                to_block: *split,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+        InterpretEngine::new(database.pool().clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: split + 1,
+                to_block: 24,
+                resume_current: Some(first.current),
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+        assert_eq!(
+            registry_transition_payload(database.pool(), chain).await?,
+            full_payload,
+            "split after block {split}"
+        );
+    }
+    let incremental = &splits[2].1;
     let logical_name_id: String = sqlx::query_scalar(
         "SELECT logical_name_id FROM normalized_events
          WHERE chain_id = $1 AND event_kind = 'RegistrationGranted' LIMIT 1",
@@ -13559,7 +13581,9 @@ async fn registrar_reregistration_moves_registry_binding_per_block() -> Result<(
         registry_binding_rows(incremental.pool(), &logical_name_id).await?,
         registry_binding_rows(scratch.pool(), &logical_name_id).await?
     );
-    incremental.cleanup().await?;
+    for (_, database) in splits {
+        database.cleanup().await?;
+    }
     scratch.cleanup().await
 }
 async fn registry_transition_payload(pool: &PgPool, chain: &str) -> Result<Value> {

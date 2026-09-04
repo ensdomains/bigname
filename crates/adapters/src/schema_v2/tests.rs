@@ -12894,6 +12894,7 @@ fn ens_v1_unwrap_prior_state_reactivates_the_live_registrar_anchor() -> anyhow::
 
 #[test]
 fn released_registration_restores_registry_authority_across_batches() -> anyhow::Result<()> {
+    const OLD_REGISTRY: &str = "0x0000000000000000000000000000000000000065";
     const REGISTRY: &str = "0x0000000000000000000000000000000000000066";
     const RESOLVER: &str = "0x0000000000000000000000000000000000000067";
     let parent_labels = vec!["eth".to_owned()];
@@ -12918,7 +12919,9 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         &["RegistrationGranted"],
     );
     let mut registry_admission = admission(61, "registry");
-    registry_admission.address = REGISTRY.to_owned();
+    registry_admission.address = OLD_REGISTRY.to_owned();
+    let mut current_registry_admission = registry_admission.clone();
+    current_registry_admission.address = REGISTRY.to_owned();
     let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest.clone(), registrar_manifest.clone()],
@@ -12936,7 +12939,7 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
                 .encode_log_data(),
                 1,
                 0,
-                REGISTRY,
+                OLD_REGISTRY,
             ),
             raw_at(
                 NameRegistered {
@@ -12961,31 +12964,47 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         .and_then(|event| event.resource_id)
         .expect("registrar authority");
     assert_ne!(registry_resource, registrar_resource);
+    let transfer_manifest = manifest(
+        63,
+        "ens_v1_registrar_l1",
+        "Transfer",
+        "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+        &["registrar"],
+        &["TokenControlTransferred"],
+    );
+    let current_owner = raw_at(
+        v1_registry::NewOwner {
+            node: parent,
+            label: labelhash,
+            owner: CONTRACT.parse()?,
+        }
+        .encode_log_data(),
+        2,
+        0,
+        REGISTRY,
+    );
+    let transfer = raw_at(
+        v1_registrar::Transfer {
+            from: CONTRACT.parse()?,
+            to: "0x0000000000000000000000000000000000000068".parse()?,
+            tokenId: U256::from_be_bytes(*labelhash),
+        }
+        .encode_log_data(),
+        2,
+        1,
+        CONTRACT,
+    );
     let transferred = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
-        manifests: vec![manifest(
-            63,
-            "ens_v1_registrar_l1",
-            "Transfer",
-            "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-            &["registrar"],
-            &["TokenControlTransferred"],
-        )],
+        manifests: vec![registry_manifest.clone(), transfer_manifest.clone()],
         discovery_rules: Vec::new(),
-        admissions: vec![admission(63, "registrar")],
+        admissions: vec![
+            current_registry_admission.clone(),
+            admission(63, "registrar"),
+        ],
         prior_events: first.normalized_events.iter().map(prior_event).collect(),
         blocks: Vec::new(),
-        raw_logs: vec![raw_at(
-            v1_registrar::Transfer {
-                from: CONTRACT.parse()?,
-                to: "0x0000000000000000000000000000000000000068".parse()?,
-                tokenId: U256::from_be_bytes(*labelhash),
-            }
-            .encode_log_data(),
-            2,
-            0,
-            CONTRACT,
-        )],
+        raw_logs: vec![current_owner.clone(), transfer.clone()],
     })?;
     let transition = |kind, resource| {
         transferred
@@ -13001,6 +13020,45 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
     assert_eq!(rebound.source_family, "ens_v1_registrar_l1");
     assert_eq!(rebound.after_state["owner_getter"], CONTRACT);
     assert_eq!(rebound.after_state["registry_contract"], REGISTRY);
+    let refreshed = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![registry_manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![current_registry_admission],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![current_owner],
+    })?;
+    let mut split_prior = first
+        .normalized_events
+        .iter()
+        .chain(&refreshed.normalized_events)
+        .map(prior_event)
+        .collect::<Vec<_>>();
+    split_prior.sort_by_key(|event| event.block_timestamp);
+    let split = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![transfer_manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(63, "registrar")],
+        prior_events: split_prior,
+        blocks: Vec::new(),
+        raw_logs: vec![RawLogInput {
+            block_number: 3,
+            block_hash: "block-3".to_owned(),
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(3),
+            transaction_hash: "transaction-3".to_owned(),
+            ..transfer
+        }],
+    })?;
+    let split_rebound = split
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SurfaceBound" && event.resource_id == Some(registry_resource)
+        })
+        .expect("split registry authority");
+    assert_eq!(split_rebound.after_state["registry_contract"], REGISTRY);
     let released = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest, registrar_manifest],
@@ -13025,7 +13083,7 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         })
         .expect("restored registry authority");
     assert_eq!(restored.after_state["owner_getter"], CONTRACT);
-    assert_eq!(restored.after_state["registry_contract"], REGISTRY);
+    assert_eq!(restored.after_state["registry_contract"], OLD_REGISTRY);
     let persisted_resources = first
         .resources
         .iter()

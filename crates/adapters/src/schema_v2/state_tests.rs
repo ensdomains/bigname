@@ -31,6 +31,30 @@ fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
 }
 
 #[test]
+fn registrar_state_does_not_snapshot_registry_contract() {
+    let mut state = State::new(Vec::new(), Vec::new());
+    state.observe_v1_registry(
+        NAMESPACE,
+        "node",
+        "test:node".to_owned(),
+        true,
+        Uuid::from_u128(3),
+        "ens_v1_registry_l1".to_owned(),
+        Some("0x0000000000000000000000000000000000000001".to_owned()),
+        Some("0x0000000000000000000000000000000000000066".to_owned()),
+        None,
+    );
+    observe_registrar(&mut state, "node", Some(100));
+    assert_eq!(
+        state
+            .v1_registrar(NAMESPACE, "node")
+            .unwrap()
+            .registry_contract,
+        None
+    );
+}
+
+#[test]
 fn zero_getter_blocks_stale_registry_authority_fallback_during_registrar_transfer() {
     const NODE: &str = "node";
     const OWNER: &str = "0x0000000000000000000000000000000000000001";
