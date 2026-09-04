@@ -39,6 +39,7 @@ const RELEASE_REGISTRY_RESOURCE: &str = "edededed-eded-eded-eded-edededededed";
 const RELEASE_REGISTRY_BINDING: &str = "efefefef-efef-efef-efef-efefefefefef";
 const REWRAPPED_RESOURCE: &str = "acacacac-acac-acac-acac-acacacacacac";
 const REWRAPPED_BINDING: &str = "adadadad-adad-adad-adad-adadadadadad";
+const UNWRAPPED_BINDING: &str = "afafafaf-afaf-afaf-afaf-afafafafafaf";
 const REWRAPPED_LINEAGE: &str = "aeaeaeae-aeae-aeae-aeae-aeaeaeaeaeae";
 const WRAPPER_LINEAGE: &str = "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd";
 const REGISTRY_ADDRESS: &str = "0x9999999999999999999999999999999999999999";
@@ -442,7 +443,7 @@ async fn later_wrapper_projection_joins_only_the_wrapped_registrar_lineage() -> 
     let registrants: Vec<String> = sqlx::query_scalar("SELECT address FROM address_names_current WHERE logical_name_id = $1 AND relation = 'registrant' ORDER BY address").bind(OWNERLESS_LOGICAL).fetch_all(&pool).await?;
     assert_eq!(summary, ("active".to_owned(), 5252));
     assert_eq!(registrants, vec![CONTROL_OWNER.to_lowercase()], "the wrapper selected a registrant from a different registrar lineage");
-    seed_blocks(&pool, [11]).await?;
+    seed_blocks(&pool, [10, 11]).await?;
     seed_normalized_event(&pool, "fixture:later-wrapper-holder-transfer", Some(OWNERLESS_LOGICAL), Some(CONTROL_RESOURCE), "TokenControlTransferred", "ens_v1_wrapper_l1", 11, 1, json!({"source_event":"TransferSingle","from":PRIOR_CONTROLLER,"to":LATEST_WRAPPER_OWNER}), json!({})).await?;
     run_project(&pool, 11, 8, None).await?;
     let current_registrant: String = sqlx::query_scalar("SELECT declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id = $1").bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
@@ -688,6 +689,72 @@ async fn project_later_wrapper_delta(
             .await?;
         }
         LaterWrapperDelta::Rewrap => {
+            sqlx::query(
+                "UPDATE surface_bindings SET active_to = '2026-08-01T00:00:10Z'
+                 WHERE logical_name_id = $1 AND active_to IS NULL",
+            )
+            .bind(OWNERLESS_LOGICAL)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO surface_bindings (
+                     surface_binding_id, logical_name_id, resource_id, binding_kind,
+                     authority_arm, active_from, chain_id, block_hash, block_number,
+                     canonicality_state
+                 ) VALUES (
+                     $1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v1',
+                     '2026-08-01T00:00:10Z', $4, $5, 10, 'canonical'
+                 )",
+            )
+            .bind(UNWRAPPED_BINDING)
+            .bind(OWNERLESS_LOGICAL)
+            .bind(OWNERLESS_RESOURCE)
+            .bind(CHAIN)
+            .bind(block_hash(10))
+            .execute(&pool)
+            .await?;
+            seed_binding_provenance(&pool, UNWRAPPED_BINDING, 0, 2).await?;
+            seed_normalized_event(
+                &pool,
+                "fixture:incremental-unwrap",
+                Some(OWNERLESS_LOGICAL),
+                Some(CONTROL_RESOURCE),
+                "SurfaceUnbound",
+                "ens_v1_wrapper_l1",
+                10,
+                1,
+                json!({"source_event":"NameUnwrapped","node":OWNERLESS_NAMEHASH}),
+                json!({}),
+            )
+            .await?;
+            seed_normalized_event(
+                &pool,
+                "fixture:incremental-unwrapped-holder",
+                Some(OWNERLESS_LOGICAL),
+                Some(OWNERLESS_RESOURCE),
+                "TokenControlTransferred",
+                "ens_v1_registrar_l1",
+                10,
+                2,
+                json!({"source_event":"Transfer","from":WRAPPER_CONTRACT,"to":CONTROL_OWNER,"namehash":OWNERLESS_NAMEHASH}),
+                json!({}),
+            )
+            .await?;
+            if incremental {
+                run_project(&pool, 10, 10, Some(9)).await?;
+                let unwrapped_registration: Option<String> = sqlx::query_scalar(
+                    "SELECT declared_summary #>> '{registration,resource_id}'
+                     FROM name_current WHERE logical_name_id = $1",
+                )
+                .bind(OWNERLESS_LOGICAL)
+                .fetch_one(&pool)
+                .await?;
+                assert_eq!(
+                    unwrapped_registration.as_deref(),
+                    Some(CONTROL_RESOURCE),
+                    "the first wrapper handle changed while the lifecycle was unwrapped"
+                );
+            }
             seed_next_binding(
                 &pool,
                 OWNERLESS_NAMEHASH,
@@ -899,7 +966,11 @@ async fn project_later_wrapper_delta(
             } else {
                 8
             },
-            incremental.then_some(9),
+            incremental.then_some(if matches!(delta, LaterWrapperDelta::Rewrap) {
+                10
+            } else {
+                9
+            }),
         )
         .await?;
     }
