@@ -960,9 +960,10 @@ fn current_registry_handoff_retracts_old_resolver_from_every_linked_resource() -
     let history = vec![
         old_new_owner(OWNER, 1)?,
         resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
-        renewal(3),
-        registrar_transfer(OWNER, OWNER, 4)?,
-        current_new_owner(OWNER, 5)?,
+        registration(3, 100)?,
+        current_transfer(B256::ZERO, OWNER_2, 7_776_101)?,
+        registration(7_776_102, 9_999)?,
+        current_new_owner(OWNER, 7_776_103)?,
     ];
     let (single, _) = assert_four_way_and_restore_parity(&history, 4)?;
     let linked_nonzero = single
@@ -974,15 +975,11 @@ fn current_registry_handoff_retracts_old_resolver_from_every_linked_resource() -
         })
         .filter_map(|event| event.resource_id)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        linked_nonzero.len(),
-        2,
-        "fixture must create dual-resource pointers"
-    );
+    assert_eq!(linked_nonzero.len(), 3);
     for resource_id in linked_nonzero {
         assert!(
             single.iter().any(|event| {
-                event.block_number == Some(5)
+                event.block_number == Some(7_776_103)
                     && event.event_kind == "ResolverChanged"
                     && event.resource_id == Some(resource_id)
                     && event.after_state["resolver"] == ZERO_ADDRESS
