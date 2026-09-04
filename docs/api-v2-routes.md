@@ -658,12 +658,6 @@ Field ownership:
   state is unregistered. Indexed reads use the [serving resource](glossary.md#serving-resource)'s inventory, verified reads select
   the surviving resolver, and `source=auto` follows the ordinary indexed/verified blend. Owner zero
   or registry-self alone therefore does not produce `inventory_not_available`.
-  When current authority is projected but inventory is missing because resolver
-  selection predates the [name surface](glossary.md#surface-name-surface) and
-  was never repeated, `source=indexed` reports requested keys as
-  `status=unsupported` with `inventory_not_available`. `source=auto` follows
-  its ordinary verified-lookup fallback rules when that execution path is
-  available.
   Direct verified lookup compares against the same exact-or-derived indexed
   evaluator before the guarded resolution-divergence-ledger write. Agreement
   can therefore clear an older exact-key false miss; provider output remains

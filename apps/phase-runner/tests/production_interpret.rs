@@ -6479,13 +6479,34 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
             NewOwner {
                 node: raw_namehash(&[b"eth"]),
                 label: keccak256(b"pointer"),
-                owner: REGISTRANT.parse()?,
+                owner: CONTROLLER.parse()?,
             }
             .encode_log_data(),
         ),
         (
             4,
             1,
+            REGISTRY_ADDRESS,
+            NewResolver {
+                node,
+                resolver: Address::ZERO,
+            }
+            .encode_log_data(),
+        ),
+        (
+            4,
+            2,
+            REGISTRY_ADDRESS,
+            NewOwner {
+                node: raw_namehash(&[b"eth"]),
+                label: keccak256(b"pointer"),
+                owner: REGISTRANT.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            4,
+            3,
             CONTROLLER,
             legacy_registrar_controller_events::NameRegistered {
                 name: "pointer".into(),

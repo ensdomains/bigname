@@ -3,11 +3,13 @@ use super::*;
 const REGISTRY: &str = "0x00000000000000000000000000000000000000a1";
 const OLD_REGISTRY: &str = "0x00000000000000000000000000000000000000a0";
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000a2";
+const WRAPPER: &str = "0x00000000000000000000000000000000000000a6";
 const OWNER: &str = "0x00000000000000000000000000000000000000a3";
 const OWNER_2: &str = "0x00000000000000000000000000000000000000a5";
 const RESOLVER_A: &str = "0x00000000000000000000000000000000000000a4";
 const REGISTRY_MANIFEST_ID: i64 = 6131;
 const REGISTRAR_MANIFEST_ID: i64 = 6132;
+const WRAPPER_MANIFEST_ID: i64 = 6133;
 
 fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
     let registry_manifest = manifest_with_events(
@@ -81,6 +83,27 @@ fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
             ),
         ],
     );
+    let wrapper_manifest = manifest_with_events(
+        WRAPPER_MANIFEST_ID,
+        "ens",
+        "ens_v1_wrapper_l1",
+        &[(
+            "NameWrapped",
+            "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+            &["name_wrapper"],
+            &[
+                "TokenControlTransferred",
+                "ExpiryChanged",
+                "PermissionScopeChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged",
+                "PermissionChanged",
+                "PreimageObserved",
+            ],
+        )],
+    );
     let mut registry = admission(REGISTRY_MANIFEST_ID, "registry");
     registry.address = REGISTRY.to_owned();
     let mut old_registry = admission(REGISTRY_MANIFEST_ID, "registry_old");
@@ -88,12 +111,15 @@ fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
     old_registry.contract_instance_id = Uuid::from_u128(6_130);
     let mut registrar = admission(REGISTRAR_MANIFEST_ID, "registrar");
     registrar.address = REGISTRAR.to_owned();
+    let mut wrapper = admission(WRAPPER_MANIFEST_ID, "name_wrapper");
+    wrapper.address = WRAPPER.to_owned();
+    wrapper.contract_instance_id = Uuid::from_u128(6_133);
     let node = super::common::namehash(&["pointer".to_owned(), "eth".to_owned()])
         .parse()
         .expect("fixture node");
     (
-        vec![registry_manifest, registrar_manifest],
-        vec![registry, old_registry, registrar],
+        vec![registry_manifest, registrar_manifest, wrapper_manifest],
+        vec![registry, old_registry, registrar, wrapper],
         node,
     )
 }
@@ -164,6 +190,23 @@ fn registration(block: i64, expiry: u64) -> anyhow::Result<RawLogInput> {
         block,
         0,
         REGISTRAR,
+    ))
+}
+
+fn wrapped(block: i64) -> anyhow::Result<RawLogInput> {
+    let node = super::common::namehash(&["pointer".to_owned(), "eth".to_owned()]).parse()?;
+    Ok(raw_at(
+        NameWrapped {
+            node,
+            name: b"\x07pointer\x03eth\0".to_vec().into(),
+            owner: OWNER_2.parse()?,
+            fuses: 1,
+            expiry: 9_999,
+        }
+        .encode_log_data(),
+        block,
+        0,
+        WRAPPER,
     ))
 }
 
@@ -927,15 +970,24 @@ fn current_registry_handoff_retracts_old_resolver_from_every_linked_resource() -
 #[test]
 fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
-    let mut ownership = current_new_owner(OWNER_2, 4)?;
-    ownership.log_index = 0;
+    let mut wrapped = wrapped(3)?;
+    wrapped.log_index = 1;
+    let mut controller_ownership = current_new_owner(REGISTRAR, 4)?;
+    controller_ownership.log_index = 0;
+    let mut resolver_clear = resolver_selection(REGISTRY, node, ZERO_ADDRESS, 4)?;
+    resolver_clear.log_index = 1;
+    let mut final_ownership = current_new_owner(OWNER_2, 4)?;
+    final_ownership.log_index = 2;
     let mut registered = registration(4, 9_999)?;
-    registered.log_index = 1;
+    registered.log_index = 3;
     let history = vec![
         old_new_owner(OWNER, 1)?,
         resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
         renewal(3),
-        ownership,
+        wrapped,
+        controller_ownership,
+        resolver_clear,
+        final_ownership,
         registered,
     ];
     let output = interpret_test_batch(input(fixture().0, fixture().1, Vec::new(), history))?;
@@ -950,6 +1002,16 @@ fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> 
         })
         .and_then(|event| event.resource_id)
         .expect("materialization must link the old-registry resolver to the registry resource");
+    let wrapper_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.block_number == Some(3)
+                && event.source_family == "ens_v1_wrapper_l1"
+                && event.event_kind == "TokenControlTransferred"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("wrapper authority resource");
     assert!(
         output.normalized_events.iter().any(|event| {
             event.block_number == Some(4)
@@ -960,42 +1022,52 @@ fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> 
         }),
         "same-transaction reconciliation moved the fallback clear off the registry resource"
     );
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.block_number == Some(4)
+                && event.event_kind == "ResolverChanged"
+                && event.resource_id == Some(wrapper_resource)
+                && event.after_state["resolver"] == ZERO_ADDRESS
+                && event.after_state["registry_fallback_handoff"] == true
+        }),
+        "same-transaction reconciliation dropped the wrapper fallback clear"
+    );
     Ok(())
 }
 
 #[test]
-fn current_registry_handoff_retracts_old_resolver_from_wrapper_resource() {
-    let mut state = super::super::state::State::new(Vec::new(), Vec::new());
-    let namehash = format!("{:#x}", B256::ZERO);
-    let logical_name_id = format!("ens:{namehash}");
-    let wrapper_resource = Uuid::from_u128(6_133);
-    state.observe_v1_name(
-        "ens",
-        &namehash,
-        logical_name_id.clone(),
-        true,
-        wrapper_resource,
-        Some(Uuid::from_u128(6_134)),
-        "ens_v1_wrapper_l1".to_owned(),
-        None,
-        Some(OWNER.to_owned()),
-        Some("wrapper-authority".to_owned()),
-    );
-    state.set_v1_resolver_link(
-        "ens",
-        &namehash,
-        Some(RESOLVER_A.to_owned()),
-        Some(wrapper_resource),
-        Some(logical_name_id.clone()),
-        Some("registry_old".to_owned()),
-    );
-
-    let (_, retired) = state.mark_v1_migrated("ens", &namehash);
-    assert!(retired.iter().any(|link| {
-        link.resource_id == Some(wrapper_resource)
-            && link.logical_name_id.as_deref() == Some(logical_name_id.as_str())
-            && link.resolver_address == RESOLVER_A
+fn current_registry_handoff_retracts_old_resolver_from_wrapper_resource() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
+        renewal(3),
+        wrapped(4)?,
+        current_new_owner(OWNER_2, 5)?,
+    ];
+    let (single, live) = assert_four_way_and_restore_parity(&history, 4)?;
+    let wrapper_resource = single
+        .iter()
+        .find(|event| {
+            event.block_number == Some(4)
+                && event.source_family == "ens_v1_wrapper_l1"
+                && event.event_kind == "TokenControlTransferred"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("wrapper authority resource");
+    assert!(single.iter().any(|event| {
+        event.block_number == Some(4)
+            && event.event_kind == "ResolverChanged"
+            && event.resource_id == Some(wrapper_resource)
+            && event.after_state["resolver"] == RESOLVER_A
     }));
+    assert!(live.normalized_events.iter().any(|event| {
+        event.event_kind == "ResolverChanged"
+            && event.resource_id == Some(wrapper_resource)
+            && event.after_state["resolver"] == ZERO_ADDRESS
+            && event.after_state["registry_fallback_handoff"] == true
+    }));
+    Ok(())
 }
 
 #[test]
