@@ -67,3 +67,31 @@ fn graphql_oracle_rejects_malformed_wildcard_and_stale_enum_scopes() {
         assert!(error.contains(expected), "{scope}: {error}");
     }
 }
+
+#[test]
+fn graphql_oracle_rust_and_python_enum_classifications_are_byte_identical() {
+    let (upstream, local) = partial_domain_order_surfaces();
+    let coverage = exact_enum_coverage(&["enum:Domain_orderBy.labelName"]);
+    let rust = serde_json::to_string(&classify_oracle_enum_coverage(
+        &upstream, &local, &coverage,
+    ))
+    .unwrap();
+    let tool = OraclePath::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/graphql-compat-oracle");
+    let code = r#"import importlib.machinery,json,sys
+loader=importlib.machinery.SourceFileLoader('oracle',sys.argv[1])
+module=loader.load_module()
+value=module.classify_enum_coverage(json.loads(sys.argv[2]),json.loads(sys.argv[3]),json.loads(sys.argv[4]))
+print(json.dumps(value,sort_keys=True,separators=(',',':')))"#;
+    let output = OracleCommand::new("python3")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .args(["-c", code])
+        .arg(tool)
+        .arg(serde_json::to_string(&upstream).unwrap())
+        .arg(serde_json::to_string(&local).unwrap())
+        .arg(serde_json::to_string(&coverage).unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), rust);
+}

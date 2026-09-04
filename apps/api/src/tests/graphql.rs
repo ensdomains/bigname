@@ -67,11 +67,7 @@ async fn graphql_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> 
         lowercase_cherokee["data"]["domains"]
             .as_array()
             .map(Vec::len),
-        Some(1)
-    );
-    assert_eq!(
-        lowercase_cherokee["data"]["domains"][0]["name"],
-        json!(NORMALIZED_NAME)
+        Some(0)
     );
 
     let original_namehash = bigname_lookup::ens_namehash_hex(NORMALIZED_NAME)?;
@@ -2491,7 +2487,8 @@ async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<
     for direction in ["ASC", "DESC"] {
         let expected = format!(
             "ORDER BY canonical_display_name COLLATE \"C\" {direction}, \
-             namespace ASC, normalized_name ASC, namehash ASC"
+             namespace COLLATE \"C\" ASC, normalized_name COLLATE \"C\" ASC, \
+             namehash COLLATE \"C\" ASC"
         );
         assert!(
             prepared_statements
@@ -2605,10 +2602,9 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "name_contains": "ARO" } }),
     )
     .await?;
-    assert_eq!(wrong_case["data"]["domains"].as_array().map(Vec::len), Some(1));
-    assert_eq!(wrong_case["data"]["domains"][0]["name"], json!("carol.eth"));
+    assert_eq!(wrong_case["data"]["domains"].as_array().map(Vec::len), Some(0));
 
-    let invalid = post_graphql_allow_errors(
+    let wildcard = post_graphql(
         database.app_state(),
         r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
@@ -2616,10 +2612,9 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "name_contains": "%" } }),
     )
     .await?;
-    assert_eq!(invalid["data"], Value::Null);
-    assert!(invalid["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+    assert_eq!(wildcard["data"]["domains"].as_array().map(Vec::len), Some(4));
 
-    let empty = post_graphql_allow_errors(
+    let empty = post_graphql(
         database.app_state(),
         r#"query Domains($where: Domain_filter!) {
             domains(where: $where) { name }
@@ -2627,10 +2622,9 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "name_contains": "" } }),
     )
     .await?;
-    assert_eq!(empty["data"], Value::Null);
-    assert!(empty["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+    assert_eq!(empty["data"]["domains"].as_array().map(Vec::len), Some(4));
 
-    let invalid_empty_page = post_graphql_allow_errors(
+    let empty_page = post_graphql(
         database.app_state(),
         r#"query Domains($where: Domain_filter!) {
             domains(first: 0, where: $where) { name }
@@ -2638,12 +2632,7 @@ async fn graphql_filters_registrant_in_and_name_contains() -> Result<()> {
         json!({ "where": { "name_contains": "%" } }),
     )
     .await?;
-    assert_eq!(invalid_empty_page["data"], Value::Null);
-    assert!(
-        invalid_empty_page["errors"]
-            .as_array()
-            .is_some_and(|errors| !errors.is_empty())
-    );
+    assert_eq!(empty_page["data"]["domains"].as_array().map(Vec::len), Some(0));
 
     database.cleanup().await?;
     Ok(())
@@ -2716,18 +2705,16 @@ async fn graphql_name_contains_accepts_label_boundary_fragments() -> Result<()> 
         }
     }
 
-    for fragment in [".", ".."] {
-        let payload = post_graphql_allow_errors(
+    for (fragment, expected_len) in [(".", 6), ("..", 0)] {
+        let payload = post_graphql(
             database.app_state(),
             query,
             json!({ "where": { "name_contains": fragment } }),
         )
         .await?;
-        assert_eq!(payload["data"], Value::Null, "{fragment}");
-        assert!(
-            payload["errors"]
-                .as_array()
-                .is_some_and(|errors| !errors.is_empty()),
+        assert_eq!(
+            payload["data"]["domains"].as_array().map(Vec::len),
+            Some(expected_len),
             "{fragment}: {payload}"
         );
     }

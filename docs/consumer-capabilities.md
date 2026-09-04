@@ -506,11 +506,12 @@ remain deferred to `#670/T6`. `Resolver.contentHash` remains the existing local
 `String` divergence under its existing `#670/T2` disposition rather than
 changing to upstream `Bytes` in this slice.
 
-Account and Domain IDs are compared exactly as supplied. Uppercase `0X`, or
-uppercase hexadecimal digits after lowercase `0x`, are valid GraphQL `ID` text
-but do not alias the lowercase served value. A Resolver point ID must use the
-exact lowercase `<address>-<namehash>` composite form; a case-different form is
-a no-match. `Resolver_filter.address` uses `Bytes`: lowercase `0x` followed by
+Account point IDs and generated Domain-filter IDs are compared exactly as
+supplied. Uppercase `0X`, or uppercase hexadecimal digits after lowercase `0x`,
+are valid GraphQL `ID` text but do not alias the lowercase served value. A
+Resolver point ID must use the exact lowercase `<address>-<namehash>` composite
+form; a case-different form is a no-match. `Resolver_filter.address` uses
+`Bytes`: lowercase `0x` followed by
 uppercase or lowercase hexadecimal digits is accepted and byte-canonicalized,
 while uppercase `0X` is a scalar-coercion error. Graph Node's Bytes parser strips
 only lowercase `0x` (upstream:

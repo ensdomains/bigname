@@ -255,8 +255,8 @@ to the applicable entries below.
 > **Divergence**: Graph Node enforces the locale for the database; bigname enforces it only on the generated expressions.
 > **Since**: `2026-09-03`
 
-> **Uppercase `0X` is never canonicalized** — Account and Domain IDs remain valid GraphQL text but compare exactly, a
-> non-lowercase Resolver composite ID is a no-match, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
+> **Uppercase `0X` is never canonicalized** — Account point IDs and generated Domain-filter IDs remain valid GraphQL text
+> but compare exactly, a non-lowercase Resolver composite ID is a no-match, and `Resolver_filter.address` rejects uppercase `0X`. Hexadecimal
 > digits after lowercase `0x` remain valid Bytes input and serialize canonically.
 > **Upstream**: Graph Node's Bytes parser strips only lowercase `0x`
 > (upstream: .refs/graph_node/graph/src/data/store/scalar/bytes.rs:L47-L53 @ graph_node@aefe173).

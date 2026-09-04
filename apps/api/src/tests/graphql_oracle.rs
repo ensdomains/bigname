@@ -275,6 +275,60 @@ fn exact_enum_scope(scope: &str) -> Option<(&str, &str)> {
         .then_some((enum_type, value))
 }
 
+fn classify_oracle_enum_coverage(
+    upstream: &OracleMap<String, Value>,
+    local: &OracleMap<String, Value>,
+    coverage: &Value,
+) -> Vec<Value> {
+    let dispositions = coverage["upstream_only"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some((entry["scope"].as_str()?, entry)))
+        .collect::<OracleMap<_, _>>();
+    let known = coverage["known_upstream_types"].as_object();
+    upstream
+        .keys()
+        .filter(|path| path.starts_with("enum:"))
+        .filter_map(|path| {
+            let enum_type = path.strip_prefix("enum:")?.split_once('.')?.0;
+            let exact = dispositions.get(path.as_str());
+            if local.contains_key(path) {
+                return exact.map(|entry| json!({
+                    "owner": entry["owner"],
+                    "path": path,
+                    "reason": "exact enum value is now local",
+                    "status": "stale"
+                }));
+            }
+            if let Some(entry) = exact {
+                return Some(json!({
+                    "owner": entry["owner"],
+                    "path": path,
+                    "reason": "exact enum value disposition",
+                    "status": entry["status"]
+                }));
+            }
+            if !local.contains_key(&format!("type:{enum_type}")) {
+                if let Some(entry) = known.and_then(|known| known.get(enum_type)) {
+                    return Some(json!({
+                        "owner": entry["owner"],
+                        "path": path,
+                        "reason": "wholly absent enum type census",
+                        "status": "deferred"
+                    }));
+                }
+            }
+            Some(json!({
+                "owner": Value::Null,
+                "path": path,
+                "reason": "partially local enum requires an exact value disposition",
+                "status": "unowned"
+            }))
+        })
+        .collect()
+}
+
 fn oracle_named_type(type_ref: &str) -> &str {
     type_ref.trim_matches(['[', ']', '!'])
 }
@@ -453,7 +507,20 @@ fn apply_oracle_coverage(
         }
     }
     let mut unowned = 0;
+    for classification in classify_oracle_enum_coverage(upstream, local, coverage) {
+        if matches!(classification["status"].as_str(), Some("stale" | "unowned")) {
+            unowned += 1;
+            let path = classification["path"].as_str().unwrap_or("invalid");
+            failures.push(match classification["status"].as_str() {
+                Some("unowned") => format!("unowned upstream-only path: {path}"),
+                _ => format!("stale upstream disposition: {path}"),
+            });
+        }
+    }
     for path in &upstream_only {
+        if path.starts_with("enum:") {
+            continue;
+        }
         if !oracle_upstream_path_is_deferred(
             path,
             upstream,
