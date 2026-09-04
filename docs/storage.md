@@ -784,6 +784,9 @@ the existing `ens_v1_unwrapped_authority` derivation kind and is distinguished
 by `after_state.state_derived=true`. The earlier [pre-surface](glossary.md#pre-surface)
 `ResolverChanged` keeps null `logical_name_id` and `resource_id` and remains immutable. This behavior requires no
 `normalized_events` check change or schema-migration.
+When a resolver is copied onto another resource, `after_state.resolver_source_role`
+preserves whether that pointer came from the old or current registry so compacted
+restoration can rebuild the same resource-specific fallback state.
 
 Only active manifests participate in raw-log selection and watch authority.
 Interpret separately retains metadata for stored deprecated manifest versions
@@ -822,10 +825,10 @@ database reads, but it has no interpretation meaning and is not part of the
 [interpreter content hash](glossary.md#interpreter-content-hash).
 
 ENSv1 [registry fallback handoff](glossary.md#registry-fallback-handoff)
-tracking retains per-resource resolver links only while the selected resolver
-comes from the old registry. Its per-name fan-out is therefore bounded by
-resources carrying a currently selected old-registry fallback pointer rather
-than by all names with resolver selections.
+tracking is populated only by pointers selected through the old registry. Its
+per-name fan-out is bounded by resources that still carry an unreplaced
+old-registry fallback pointer: a replacement or clear removes that resource,
+and the current-registry handoff drains the remaining name entry.
 
 Every cached value is the `after_state` of the latest readable normalized event
 for the exact interpreter state key before the current batch. A cache miss uses
