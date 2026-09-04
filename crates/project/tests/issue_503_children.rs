@@ -75,7 +75,7 @@ async fn database(prefix: &str) -> Result<(TestDatabase, PgPool)> {
             .await?;
     }
     drop(connections);
-    for block in [10, 11] {
+    for block in [10, 11, 12] {
         sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) VALUES ($1, $2, $3, to_timestamp(1800000000 + $3), 'canonical')")
             .bind(CHAIN).bind(hash(block)).bind(block).execute(&pool).await?;
     }
@@ -159,7 +159,7 @@ async fn seed_parent_migration_registry(pool: &PgPool, block: i64) -> Result<()>
     for registry in [REGISTRY, OTHER_REGISTRY] {
         sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1::uuid, $2, 'contract') ON CONFLICT DO NOTHING").bind(registry).bind(CHAIN).execute(pool).await?;
     }
-    let manifest_id: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload) VALUES (1, 'ens', 'ens_v2_registry_l1', $1, 'fixture', 'active', 'fixture', $2, '{}') RETURNING manifest_id")
+    let manifest_id: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload) VALUES (12, 'ens', 'ens_v2_registry_l1', $1, 'fixture', 'active', 'fixture', $2, '{}') RETURNING manifest_id")
         .bind(CHAIN).bind(format!("fixture-{block}.toml")).fetch_one(pool).await?;
     sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number) VALUES ($1::uuid, $2, $3, $4) ON CONFLICT DO NOTHING")
         .bind(REGISTRY).bind(CHAIN).bind(REGISTRY_ADDRESS).bind(block).execute(pool).await?;
@@ -418,7 +418,11 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     let (provenance, manifest_version): (Value, i64) = sqlx::query_as(
         "SELECT provenance, manifest_version FROM children_current WHERE child_logical_name_id = $1",
     ).bind(CHILD).fetch_one(&incremental).await?;
-    assert_eq!(manifest_version, 9);
+    assert_eq!(manifest_version, 12);
+    let association = &provenance["parent_reachability"]["migration_registry_association"];
+    assert_eq!(association["logical_edge_identity"], "edge-10");
+    assert_eq!(association["migration_correlation_id"], "registry-10");
+    assert!(association["source_manifest_id"].is_number());
     let identities = provenance["event_identities"]
         .as_array()
         .expect("event identities");
@@ -443,7 +447,7 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
             .as_array()
             .expect("manifests")
             .len(),
-        5
+        6
     );
     run(&incremental, 11, Some(10), RunMode::Normal).await?;
 
@@ -461,6 +465,41 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     for (bound, named) in [(false, true), (true, true), (false, false)] {
         wrapper_retraction_converges(bound, named).await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_migration_association_evidence_fails_closed() -> Result<()> {
+    let (_db, pool) = database("issue503_empty_association_evidence").await?;
+    seed_identity(&pool, &["ens_v1"]).await?;
+    seed_v1_relation(&pool, OWNER, 10).await?;
+    seed_wrapper(&pool, 65_536, 2_000_000_000).await?;
+    seed_parent_migration_registry(&pool, 10).await?;
+    seed_migration(&pool, "locked_wrapped", 10, "parent-migration").await?;
+    sqlx::query("UPDATE migration_discovery_associations SET evidence_refs = '[]'")
+        .execute(&pool)
+        .await?;
+    run(&pool, 10, None, RunMode::Normal).await?;
+    assert!(!visible(&pool).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unmigrated_parent_ignores_wrapper_evidence() -> Result<()> {
+    let (_db, pool) = database("issue503_unmigrated_provenance").await?;
+    seed_identity(&pool, &["ens_v1"]).await?;
+    seed_v1_relation(&pool, OWNER, 10).await?;
+    seed_wrapper(&pool, 65_536, 2_000_000_000).await?;
+    sqlx::query("UPDATE normalized_events SET manifest_version = 9 WHERE source_family = 'ens_v1_wrapper_l1'").execute(&pool).await?;
+    run(&pool, 10, None, RunMode::Normal).await?;
+    let (provenance, version): (Value, i64) = sqlx::query_as("SELECT provenance, manifest_version FROM children_current WHERE child_logical_name_id = $1").bind(CHILD).fetch_one(&pool).await?;
+    assert_eq!(
+        provenance["normalized_event_ids"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(provenance["raw_fact_refs"].as_array().unwrap().len(), 1);
+    assert_eq!(provenance["manifest_versions"].as_array().unwrap().len(), 1);
+    assert_eq!(version, 1);
     Ok(())
 }
 
@@ -543,6 +582,76 @@ async fn wrapper_retraction_converges(bound: bool, named: bool) -> Result<()> {
     assert!(!visible(&redo).await?);
     Ok(())
 }
+
+async fn seed_hash_only_locked(pool: &PgPool, history: Option<&str>) -> Result<()> {
+    seed_identity(pool, &["ens_v1"]).await?;
+    sqlx::query("UPDATE name_surfaces SET visibility_state = 'shadow', deactivation_reason = 'hash-only replay fixture', deactivated_at = now() WHERE logical_name_id = $1").bind(CHILD).execute(pool).await?;
+    seed_v1_relation(pool, OWNER, 10).await?;
+    seed_wrapper(pool, 65_536, 2_000_000_000).await?;
+    seed_parent_migration_registry(pool, 10).await?;
+    seed_migration(pool, "locked_wrapped", 10, "parent-migration").await?;
+    if let Some(kind) = history {
+        event(pool, &format!("history-{REGISTRY}"), CHILD, None, "ens_v2_registry_l1", kind, 11, 6,
+            json!({"registry_contract_instance_id":REGISTRY,"status":"registered","registrant":OWNER})).await?;
+    }
+    Ok(())
+}
+
+async fn registration_history_retraction_converges(kind: &str) -> Result<()> {
+    let suffix = kind.trim_start_matches("Registration").to_lowercase();
+    let (_redo_db, redo) = database(&format!("issue503_history_{suffix}_redo")).await?;
+    seed_hash_only_locked(&redo, Some(kind)).await?;
+    run(&redo, 11, None, RunMode::Normal).await?;
+    assert!(!visible(&redo).await?);
+    raw_sql("CREATE TABLE IF NOT EXISTS project_redo_child_registration_history (chain_id text NOT NULL, event_identity text NOT NULL, block_number bigint NOT NULL, event_kind text NOT NULL, logical_name_id text NOT NULL, registry_contract_instance_id uuid NOT NULL, recorded_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (chain_id, event_identity))").execute(&redo).await?;
+    sqlx::query("INSERT INTO project_redo_child_registration_history (chain_id, event_identity, block_number, event_kind, logical_name_id, registry_contract_instance_id) SELECT chain_id, event_identity, block_number, event_kind, logical_name_id, (after_state ->> 'registry_contract_instance_id')::uuid FROM normalized_events WHERE event_identity = $1")
+        .bind(format!("history-{REGISTRY}")).execute(&redo).await?;
+    sqlx::query("DELETE FROM normalized_events WHERE event_identity = $1")
+        .bind(format!("history-{REGISTRY}"))
+        .execute(&redo)
+        .await?;
+    Engine::new(redo.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.into(),
+            target_block: 12,
+            affected_from_block: 11,
+            affected_to_block: 12,
+            resume_current: Some(Marker {
+                number: 11,
+                hash: hash(11),
+            }),
+            mode: RunMode::Redo,
+        })
+        .await?;
+
+    let (_fresh_db, fresh) = database(&format!("issue503_history_{suffix}_fresh")).await?;
+    seed_hash_only_locked(&fresh, None).await?;
+    run(&fresh, 12, None, RunMode::Normal).await?;
+    assert_eq!(rows(&redo).await?, rows(&fresh).await?);
+    assert!(visible(&redo).await?);
+    Ok(())
+}
+
+macro_rules! history_retraction_test {
+    ($name:ident, $kind:literal) => {
+        #[tokio::test]
+        async fn $name() -> Result<()> {
+            registration_history_retraction_converges($kind).await
+        }
+    };
+}
+history_retraction_test!(
+    retracted_reservation_history_restores_hash_only_child,
+    "RegistrationReserved"
+);
+history_retraction_test!(
+    retracted_grant_history_restores_hash_only_child,
+    "RegistrationGranted"
+);
+history_retraction_test!(
+    retracted_renewal_history_restores_hash_only_child,
+    "RegistrationRenewed"
+);
 visibility_test!(
     locked_parent_hides_child_without_parent_cannot_control,
     "issue503_no_pcc",

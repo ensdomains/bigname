@@ -3183,7 +3183,8 @@ async fn seed_positive_child_authority_fixture(
              transaction_index, log_index, canonicality_state, consumer_visibility,
              interpreter_content_hash
          ) VALUES (
-             $1, $2, 'migration_registry_creation', $3, lower($4), $5, '[]'::jsonb,
+             $1, $2, 'migration_registry_creation', $3, lower($4), $5,
+             '[{\"event_identity\":\"positive-child-registry-proof\"}]'::jsonb,
              $6, 1, $7, $8, 0, 0, 'canonical', 'candidate', $9
          )",
     )
@@ -3227,7 +3228,8 @@ async fn seed_positive_child_authority_fixture(
         json!({
             "successor_binding":{"authority_epoch":"ens_v2"},
             "migration_path":parent_path,
-            "successor_registry_contract_instance_id":subregistry_instance
+            "successor_registry_contract_instance_id":subregistry_instance,
+            "evidence":[{"event_identity":"positive-child-registry-proof"}]
         }),
         json!({}),
     )
@@ -3258,6 +3260,30 @@ async fn seed_positive_child_authority_fixture(
             "label":"alice",
             "registrant":OWNER
         }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":65536,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_wrapper_l1",
+        json!({"expiry":2_000_000_000_i64}),
         json!({}),
     )
     .await?;
@@ -3554,6 +3580,17 @@ async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Res
         );
         scratch.cleanup().await?;
     }
+    let control = ScratchDatabase::create("production_project_positive_child_control").await?;
+    seed_project_fixture(control.pool()).await?;
+    seed_positive_child_authority_fixture(control.pool(), 5, "locked_wrapped").await?;
+    sqlx::query("DELETE FROM normalized_events WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistrationGranted' AND logical_name_id = 'ens:0xalice' AND after_state ->> 'registry_contract_instance_id' = '00000000-0000-0000-0000-0000000000e4'")
+        .execute(control.pool()).await?;
+    run_project(control.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+    assert_eq!(
+        child_relation(control.pool()).await?,
+        Some((Some(OWNER.to_owned()), None))
+    );
+    control.cleanup().await?;
     Ok(())
 }
 
@@ -10757,7 +10794,8 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         json!({
             "successor_registry_contract_instance_id":Uuid::new_v4(),
             "migration_path":"locked_wrapped",
-            "fixture_child_registry_contract_instance_id":registry_instance
+            "fixture_child_registry_contract_instance_id":registry_instance,
+            "evidence":[{"event_identity":"fixture-migration-registry-proof"}]
         }),
         json!({}),
     )
@@ -10783,7 +10821,8 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
              transaction_index, log_index, canonicality_state, consumer_visibility,
              interpreter_content_hash
          ) VALUES (
-             $1, $2, 'migration_registry_creation', $3, lower($4), $5, '[]'::jsonb,
+             $1, $2, 'migration_registry_creation', $3, lower($4), $5,
+             '[{\"event_identity\":\"fixture-migration-registry-proof\"}]'::jsonb,
              $6, $7, $8, $9, $10, $11, 'canonical', 'candidate', $12
          )",
     )
