@@ -813,7 +813,10 @@ carrying the prior pointer. Whenever that resource becomes active again through 
 registry, registrar, or wrapper authority transition, reactivation emits a zero
 `ResolverChanged` before handoff. A current-registry resolver selection replaces the
 old-registry source and discards the retained old-registry resource set, so a later
-ownership event cannot clear the current-registry pointer.
+ownership event cannot clear the current-registry pointer. A current-registry zero
+selection retains one per-name zero-selection marker, not a per-resource fan-out set,
+so a known registrar resource reactivated after the clear cannot expose its earlier
+pointer.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
@@ -847,6 +850,9 @@ Repeated authority epochs and wrap/unwrap cycles can therefore grow this set wit
 a fixed per-name ceiling until handoff. Replacing or clearing the pointer on an exact
 resource removes that resource; a current-registry selection discards the old-source
 set, and the current-registry handoff drains any remaining name entry.
+Separately, the single selected-link slot may retain a current-registry zero marker
+until a later selection replaces it; this does not add entries to the per-resource
+fan-out map.
 
 Every cached value is the `after_state` of the latest readable normalized event
 for the exact interpreter state key before the current batch. A cache miss uses
