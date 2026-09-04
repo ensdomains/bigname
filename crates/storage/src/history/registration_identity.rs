@@ -22,47 +22,65 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
                 (
                     SELECT born_wrapper.resource_id
                     FROM bigname_phase.normalized_events registrar_grant
-                    JOIN bigname_phase.normalized_events born_wrapper
-                      ON born_wrapper.chain_id = registrar_grant.chain_id
-                     AND born_wrapper.logical_name_id = COALESCE(
-                            ne.logical_name_id,
-                            (
-                                SELECT surface.logical_name_id
-                                FROM bigname_phase.name_surfaces surface
-                                LEFT JOIN bigname_phase.chain_lineage surface_lineage
-                                  ON surface_lineage.chain_id = surface.chain_id
-                                 AND surface_lineage.block_hash = surface.block_hash
-                                WHERE surface.chain_id = ne.chain_id
-                                  AND surface.namespace = ne.namespace
-                                  AND surface.namehash = COALESCE(
-                                      ne.after_state ->> 'namehash',
-                                      ne.after_state ->> 'child_node',
-                                      ne.after_state ->> 'node'
-                                  )
-                                  AND surface.canonicality_state IN (
-                                      'canonical', 'safe', 'finalized'
-                                  )
-                                  AND (
-                                      surface.block_hash IS NULL
-                                      OR surface_lineage.canonicality_state IN (
-                                          'canonical', 'safe', 'finalized'
-                                      )
-                                  )
-                                ORDER BY surface.logical_name_id
-                                LIMIT 1
-                            )
-                         )
-                     AND born_wrapper.transaction_hash = registrar_grant.transaction_hash
-                     AND (
-                         born_wrapper.after_state ->>
-                             'wrapped_registrar_resource_id'
-                     )::uuid = registrar_grant.resource_id
-                    LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
-                      ON wrapper_lineage.chain_id = born_wrapper.chain_id
-                     AND wrapper_lineage.block_hash = born_wrapper.block_hash
                     LEFT JOIN bigname_phase.chain_lineage grant_lineage
                       ON grant_lineage.chain_id = registrar_grant.chain_id
                      AND grant_lineage.block_hash = registrar_grant.block_hash
+                    JOIN LATERAL (
+                        SELECT candidate.resource_id, candidate.normalized_event_id
+                        FROM bigname_phase.normalized_events candidate
+                        LEFT JOIN bigname_phase.chain_lineage wrapper_lineage
+                          ON wrapper_lineage.chain_id = candidate.chain_id
+                         AND wrapper_lineage.block_hash = candidate.block_hash
+                        WHERE candidate.chain_id = registrar_grant.chain_id
+                          AND candidate.logical_name_id = COALESCE(
+                              ne.logical_name_id,
+                              registrar_grant.logical_name_id,
+                              (
+                                  SELECT surface.logical_name_id
+                                  FROM bigname_phase.name_surfaces surface
+                                  LEFT JOIN bigname_phase.chain_lineage surface_lineage
+                                    ON surface_lineage.chain_id = surface.chain_id
+                                   AND surface_lineage.block_hash = surface.block_hash
+                                  WHERE surface.namespace = registrar_grant.namespace
+                                    AND surface.namehash = COALESCE(
+                                        registrar_grant.after_state ->> 'namehash',
+                                        registrar_grant.after_state ->> 'child_node',
+                                        registrar_grant.after_state ->> 'node'
+                                    )
+                                    AND surface.canonicality_state IN (
+                                        'canonical', 'safe', 'finalized'
+                                    )
+                                    AND (
+                                        surface.block_hash IS NULL
+                                        OR surface_lineage.canonicality_state IN (
+                                            'canonical', 'safe', 'finalized'
+                                        )
+                                    )
+                                  ORDER BY surface.logical_name_id
+                                  LIMIT 1
+                              )
+                          )
+                          AND candidate.transaction_hash =
+                              registrar_grant.transaction_hash
+                          AND (
+                              candidate.after_state ->>
+                                  'wrapped_registrar_resource_id'
+                          )::uuid = registrar_grant.resource_id
+                          AND candidate.event_kind = 'SurfaceBound'
+                          AND candidate.source_family = 'ens_v1_wrapper_l1'
+                          AND candidate.consumer_visibility = 'activated'
+                          AND candidate.canonicality_state IN (
+                              'canonical', 'safe', 'finalized'
+                          )
+                          AND (
+                              candidate.block_hash IS NULL
+                              OR wrapper_lineage.canonicality_state IN (
+                                  'canonical', 'safe', 'finalized'
+                              )
+                          )
+                        ORDER BY candidate.normalized_event_id
+                        LIMIT 1
+                    ) born_wrapper ON TRUE
                     WHERE registrar_grant.resource_id = COALESCE(
                               (
                                   SELECT (
@@ -98,18 +116,6 @@ pub(super) fn push_product_registration_id(builder: &mut QueryBuilder<'_, Postgr
                       AND registrar_grant.consumer_visibility = 'activated'
                       AND registrar_grant.canonicality_state IN (
                           'canonical', 'safe', 'finalized'
-                      )
-                      AND born_wrapper.event_kind = 'SurfaceBound'
-                      AND born_wrapper.source_family = 'ens_v1_wrapper_l1'
-                      AND born_wrapper.consumer_visibility = 'activated'
-                      AND born_wrapper.canonicality_state IN (
-                          'canonical', 'safe', 'finalized'
-                      )
-                      AND (
-                          born_wrapper.block_hash IS NULL
-                          OR wrapper_lineage.canonicality_state IN (
-                              'canonical', 'safe', 'finalized'
-                          )
                       )
                       AND (
                           registrar_grant.block_hash IS NULL
