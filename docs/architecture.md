@@ -307,7 +307,7 @@ ENSv1→ENSv2 migration path. The parent rule is:
 Unlocked ENSv1→ENSv2 migration registers the parent in ENSv2 without deploying a child subregistry, while the Graveyard clears the unreachable ENSv1 descendants. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L29-L31 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L153-L166 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L96-L102 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170-L201 @ ens_v2@a971bd64) The two locked paths deploy a `WrapperRegistry` for the migrated name; it routes only migratable children to the ENSv1 resolver and blocks new ENSv2 registration while that condition holds. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L158-L186 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64) The fuse predicate is exact: `PARENT_CANNOT_CONTROL` must be set and `IS_DOT_ETH` clear. (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L84-L89 @ ens_v2@a971bd64) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f)
 
 Project accepts the current ENSv2 `SubregistryChanged` pointer only when its exact instance and address match a readable canonical `migration_registry_creation` association whose non-empty evidence references are contained in the activated boundary, and its active ordinary announcement. A replacement or empty-evidence association fails closed. `successor_registry_contract_instance_id` instead identifies the registry that received the parent; the locked controller registers the parent there with its new `WrapperRegistry` as subregistry. (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L103-L109 @ ens_v2@a971bd64)
-An entry in that migration registry is historical, not merely current: `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each show that `getExpiry(labelId)` has been positive, which makes the child non-migratable even after the entry lapses. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64) An activated `MigrationApplied` path outside the five values above is a data integrity failure rather than a silently hidden child relation.
+An entry in that migration registry is historical, not merely current: `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each show that `getExpiry(labelId)` has been positive, which makes the child non-migratable even after the entry lapses. Unregistering an entry records the current timestamp as its expiry rather than clearing it. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64) An activated `MigrationApplied` path outside the five values above is a data integrity failure rather than a silently hidden child relation.
 
 Parent reachability filters only the ENSv1 candidate arm. Project then unions it with the ENSv2 candidate, applies the child's selected [authority epoch](glossary.md#authority-epoch), and ranks only within that arm. A released ENSv2 child does not fall back; reachable arms that disagree without proof are omitted. Recency orders only within one arm by block, transaction, log, then stable `event_identity`; generated IDs and cross-era recency never choose the arm.
 
@@ -1381,11 +1381,13 @@ affected by disappearing events, the available logical-name and
 permission-resource identifiers from state-derived ENSv2 path-expiry releases,
 child identifiers from entry-creating events in ENSv1→ENSv2 migration registries,
 and finitely retired manifest-declared address ranges that prevent replay of
-older observations from reopening retired authority. Project consumes the
-resolver references, release identifiers, and child identifiers in the covering
-redo or later normal catch-up publication: logical names seed bounded descendant
-replay as [expiry roots](glossary.md#expiry-root), permission resources force a
-resource rebuild, and migration-registry entry history seeds the affected child.
+older observations from reopening retired authority. Project seeds from the
+resolver references, release identifiers, and child identifiers only during the
+covering Redo-mode publication: logical names seed bounded descendant replay as
+[expiry roots](glossary.md#expiry-root), permission resources force a resource
+rebuild, and migration-registry entry history seeds the affected child. A later
+Normal-mode catch-up consumes those rows without seeding from them; #828 tracks
+whether that asymmetry should change.
 Interpret uses the retired address boundary while rewriting discovery output.
 
 The live phase uses the same head-publication transaction as ingest. That

@@ -371,7 +371,8 @@ emitter or prove the current parent subregistry is the migration-created
 `WrapperRegistry`. Candidate or activated, the association establishes neither
 result by itself and activates no correlation-dependent effect. Parent
 reachability additionally requires the association's evidence-reference array
-to be non-empty and contained in the activated boundary; an empty diagnostic
+to be non-empty, every reference to be a non-empty object, and the whole array
+to be contained in the activated boundary; an empty or vacuous diagnostic
 association cannot authorize an ENSv1 child relation under a locked parent.
 Correlation-dependent parent, topology, identity,
 role, registration, renewal, and normalized-event rows from the watched registry

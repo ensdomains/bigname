@@ -662,8 +662,10 @@ new truth family.
 
 - Interpret and adapters emit identity, discovery, and normalized events.
   Interpret also preserves pre-delete resolver references, ENSv2 path-expiry
-  names or resources, and migration-registry child names needed for a covering
-  Project redo or normal catch-up; these are replay coordination, not projection writes.
+  names or resources, and migration-registry child names that seed the covering
+  Redo-mode Project publication. Normal-mode catch-up currently consumes these
+  rows without seeding from them; #828 tracks that asymmetry. These rows are
+  replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not

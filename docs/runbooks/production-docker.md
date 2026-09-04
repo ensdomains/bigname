@@ -171,6 +171,17 @@ in step 4 before deploying the new binary. Before starting any Project process,
 confirm the handoff table, nullable identifier columns, and range index exist and
 that the index is ready and valid with the query below.
 
+The release containing
+`20260904120000_project_redo_child_registration_history.sql` adds the bounded
+Interpret-to-Project handoff for child and registry identifiers from deleted
+ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
+entry history. A fresh namespace receives the table and range index from
+`schema-v2/baseline`; an initialized namespace needs the schema-migration
+because its already-installed baseline is unchanged. Apply the schema-migration
+in step 4 before deploying the new binary. Before starting any Project process,
+confirm the handoff table and range index exist and that the index is ready and
+valid with the query below.
+
 ```sql
 SELECT
     to_regclass('bigname_phase.project_redo_resolver_evidence') IS NOT NULL
@@ -214,6 +225,21 @@ SELECT
           AND index_state.indisvalid
           AND index_state.indisready
     ) AS expiry_redo_handoff_range_index_ready;
+
+SELECT
+    to_regclass(
+        'bigname_phase.project_redo_child_registration_history'
+    ) IS NOT NULL AS child_registration_history_handoff_exists,
+    EXISTS (
+        SELECT 1
+        FROM pg_class index_relation
+        JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+        WHERE index_relation.oid = to_regclass(
+                  'bigname_phase.project_redo_child_registration_history_range_idx'
+              )
+          AND index_state.indisvalid
+          AND index_state.indisready
+    ) AS child_registration_history_range_index_ready;
 
 SELECT EXISTS (
     SELECT 1
