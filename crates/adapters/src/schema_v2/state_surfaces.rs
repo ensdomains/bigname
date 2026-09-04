@@ -53,8 +53,25 @@ impl State {
                     .or_default()
                     .insert(resource_id, link);
             }
-        } else if let Some(resource_id) = resource_id {
-            self.remove_v1_resolver_linked_resource(&key, resource_id);
+        } else {
+            if source_role.as_deref() == Some("registry")
+                && let Some(registrar) = self.v1_registrars.get(&key)
+            {
+                self.v1_resolver_links.insert(
+                    key.clone(),
+                    V1ResolverLink {
+                        resolver_address: "0x0000000000000000000000000000000000000000".to_owned(),
+                        resource_id: Some(registrar.resource_id),
+                        logical_name_id: registrar
+                            .surface_known
+                            .then(|| registrar.logical_name_id.clone()),
+                        source_role,
+                    },
+                );
+            }
+            if let Some(resource_id) = resource_id {
+                self.remove_v1_resolver_linked_resource(&key, resource_id);
+            }
         }
         previous
     }
@@ -145,6 +162,11 @@ impl State {
     ) -> Option<V1ResolverLink> {
         self.v1_resolver_links
             .get(&v1_key(namespace, namehash))
+            .filter(|link| {
+                !link
+                    .resolver_address
+                    .eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
+            })
             .cloned()
     }
 
@@ -154,18 +176,35 @@ impl State {
         namehash: &str,
         resource_id: Uuid,
     ) -> Option<V1ResolverLink> {
+        let key = v1_key(namespace, namehash);
         let retained = self
             .v1_resolver_linked_resources
-            .get(&v1_key(namespace, namehash))
+            .get(&key)
             .and_then(|resources| resources.get(&resource_id));
-        self.v1_resolver_link(namespace, namehash).or_else(|| {
-            retained.map(|link| V1ResolverLink {
-                resolver_address: "0x0000000000000000000000000000000000000000".to_owned(),
-                resource_id: Some(resource_id),
-                logical_name_id: link.logical_name_id.clone(),
-                source_role: link.source_role.clone(),
+        self.v1_resolver_link(namespace, namehash)
+            .or_else(|| {
+                retained.map(|link| V1ResolverLink {
+                    resolver_address: "0x0000000000000000000000000000000000000000".to_owned(),
+                    resource_id: Some(resource_id),
+                    logical_name_id: link.logical_name_id.clone(),
+                    source_role: link.source_role.clone(),
+                })
             })
-        })
+            .or_else(|| {
+                self.v1_resolver_links.get(&key).and_then(|link| {
+                    (link.source_role.as_deref() == Some("registry")
+                        && link.resource_id == Some(resource_id)
+                        && link
+                            .resolver_address
+                            .eq_ignore_ascii_case("0x0000000000000000000000000000000000000000"))
+                    .then(|| V1ResolverLink {
+                        resolver_address: link.resolver_address.clone(),
+                        resource_id: Some(resource_id),
+                        logical_name_id: link.logical_name_id.clone(),
+                        source_role: link.source_role.clone(),
+                    })
+                })
+            })
     }
 
     pub(in crate::schema_v2) fn v1_resolver_for_activation(

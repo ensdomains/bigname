@@ -204,12 +204,10 @@ fn transfer(
         resource_id: linked.resource_id,
         token_lineage_id: linked.token_lineage_id,
     });
-    let explicit_ownerless_registry = selected.source.source_family == "ens_v1_registrar_l1"
-        && state.v1_explicit_ownerless_registry_evidence(&selected.source.namespace, &raw_namehash);
-    let registrar_was_current = previous_active
+    let registrar_remains_current = active_after
         .as_ref()
         .is_some_and(|authority| authority.resource_id == linked.resource_id);
-    let permission_resolver = (!explicit_ownerless_registry || registrar_was_current)
+    let permission_resolver = registrar_remains_current
         .then(|| state.v1_resolver(&selected.source.namespace, &raw_namehash))
         .flatten();
     append_transfer_permissions(

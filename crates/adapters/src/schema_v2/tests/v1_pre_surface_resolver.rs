@@ -1331,6 +1331,39 @@ fn registry_reactivation_after_old_registry_zero_clears_the_registrar_resource()
 }
 
 #[test]
+fn unwrap_after_current_registry_zero_keeps_the_registrar_resource_clear() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        current_new_owner(OWNER_2, 1)?,
+        registration(2, 9_999)?,
+        resolver_selection(REGISTRY, node, RESOLVER_A, 3)?,
+        wrapped(4)?,
+        resolver_selection(REGISTRY, node, ZERO_ADDRESS, 5)?,
+        unwrapped(6)?,
+    ];
+    let (single, _) = assert_four_way_and_restore_parity(&history, 5)?;
+    let registrar_resource = single
+        .iter()
+        .find_map(|event| {
+            (event.block_number == Some(2) && event.event_kind == "RegistrationGranted")
+                .then_some(event.resource_id)
+                .flatten()
+        })
+        .expect("registrar resource");
+    let latest = single
+        .iter()
+        .rfind(|event| {
+            event.event_kind == "ResolverChanged" && event.resource_id == Some(registrar_resource)
+        })
+        .expect("registrar resolver history");
+    assert_eq!(
+        latest.after_state["resolver"], ZERO_ADDRESS,
+        "unwrap reactivated the registrar resource's stale current-registry pointer"
+    );
+    Ok(())
+}
+
+#[test]
 fn registrar_transfer_preserves_explicit_ownerless_registry_state() -> anyhow::Result<()> {
     let (manifests, admissions, node) = fixture();
     let history = vec![
