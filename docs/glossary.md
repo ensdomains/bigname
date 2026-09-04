@@ -1367,7 +1367,7 @@ discovered emitters and all-emitter watches do not inherit it.
 
 ## Account permission state
 
-the latest normalized approval state keyed by chain, authority contract, owner,
+the latest normalized approval state keyed by chain, authority kind, authority contract, owner,
 subject, and relation, independent of any currently known name. A revoked
 state remains stored with `approved=false` so projection replay and reorg repair
 can recover either a losing-fork grant or a losing-fork revocation without
