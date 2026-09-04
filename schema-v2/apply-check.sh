@@ -164,6 +164,7 @@ for migration_file in \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
     "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
     "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
@@ -308,6 +309,8 @@ for migration_file in \
     "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
@@ -1222,6 +1225,7 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_generation_failures'),
+            ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
             ('project_redo_resolver_evidence'),
             ('permissions_current'),
@@ -1279,6 +1283,7 @@ BEGIN
             ('name_surfaces'),
             ('normalized_events'),
             ('project_generation_failures'),
+            ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
             ('project_redo_resolver_evidence'),
             ('permissions_current'),

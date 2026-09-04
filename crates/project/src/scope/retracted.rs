@@ -17,7 +17,8 @@ pub(super) async fn seed(
         target_block,
     )
     .await?;
-    seed_parent_migration_children(transaction, chain_id).await?;
+    seed_child_registration_history(transaction, chain_id, window.from_block, window.to_block)
+        .await?;
     seed_children(transaction, chain_id).await?;
     seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
     seed_resolvers(transaction, chain_id, window.from_block, window.to_block).await?;
@@ -481,6 +482,21 @@ pub(super) async fn consume(
             error,
         )
     })?;
+    sqlx::query(
+        "DELETE FROM project_redo_child_registration_history
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3",
+    )
+    .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to consume child registration history during Project publication",
+            error,
+        )
+    })?;
     Ok(())
 }
 
@@ -527,19 +543,29 @@ async fn seed_primary(transaction: &mut Transaction<'_, Postgres>, chain_id: &st
     Ok(())
 }
 
-async fn seed_parent_migration_children(
+async fn seed_child_registration_history(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
+    from_block: i64,
+    to_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        r#"WITH retracted_parents AS (
-            SELECT row.logical_name_id FROM name_current row WHERE row.provenance ->> 'chain_id' = $1 AND row.provenance #>> '{authority_selection,proof_kind}' = 'migration_authority_transition' AND row.provenance #>> '{authority_selection,proof_event_id}' NOT IN ('', 'null') AND NOT EXISTS (SELECT 1 FROM normalized_events event LEFT JOIN chain_lineage lineage ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash AND lineage.block_number = event.block_number WHERE event.normalized_event_id = (row.provenance #>> '{authority_selection,proof_event_id}')::bigint AND event.canonicality_state IN ('canonical', 'safe', 'finalized') AND ((event.block_number IS NULL AND event.block_hash IS NULL) OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized')))
-        ), candidates AS (SELECT parent.logical_name_id FROM retracted_parents parent UNION SELECT child.child_logical_name_id FROM retracted_parents parent JOIN children_current child ON child.parent_logical_name_id = parent.logical_name_id AND child.provenance ->> 'chain_id' = $1)
-        INSERT INTO project_scope_children SELECT logical_name_id FROM candidates ON CONFLICT DO NOTHING"#,
+        "INSERT INTO project_scope_children
+         SELECT DISTINCT logical_name_id
+         FROM project_redo_child_registration_history
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+         ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
+    .bind(from_block)
+    .bind(to_block)
     .execute(&mut **transaction)
     .await
-    .map_err(|error| ProjectError::database("failed to retain retracted parent migration children", error))?;
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to scope retracted child registration history",
+            error,
+        )
+    })?;
     Ok(())
 }

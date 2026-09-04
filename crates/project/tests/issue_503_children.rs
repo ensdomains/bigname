@@ -363,48 +363,26 @@ async fn same_position_wrapper_case(prefix: &str, reverse: bool) -> Result<bool>
 }
 
 macro_rules! visibility_test {
-    ($name:ident, $prefix:literal, $case:expr, $expected:expr) => {
+    ($name:ident, $expected:expr $(, $field:ident = $value:expr)*) => {
         #[tokio::test]
         async fn $name() -> Result<()> {
-            assert_eq!(project_case($prefix, $case).await?, $expected);
+            let case = Case { $($field: $value,)* ..locked_case() };
+            assert_eq!(project_case(stringify!($name), case).await?, $expected);
             Ok(())
         }
     };
 }
 
-visibility_test!(
-    unmigrated_parent_publishes_live_v1_child,
-    "issue503_unmigrated",
-    Case {
-        path: None,
-        fuses: 0,
-        ..locked_case()
-    },
-    true
-);
-visibility_test!(
-    unwrapped_parent_hides_v1_children,
-    "issue503_unwrapped",
-    Case {
-        path: Some("unwrapped"),
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    unlocked_wrapped_parent_hides_v1_children,
-    "issue503_unlocked",
-    Case {
-        path: Some("unlocked_wrapped"),
-        ..locked_case()
-    },
-    false
-);
+#[rustfmt::skip]
+visibility_test!(unmigrated_parent_publishes_live_v1_child, true, path = None, fuses = 0);
+#[rustfmt::skip]
+visibility_test!(unwrapped_parent_hides_v1_children, false, path = Some("unwrapped"));
+#[rustfmt::skip]
+visibility_test!(unlocked_wrapped_parent_hides_v1_children, false, path = Some("unlocked_wrapped"));
 #[tokio::test]
 async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
     assert!(same_position_wrapper_case("issue503_wrapper_tie_forward", false).await?);
     assert!(same_position_wrapper_case("issue503_wrapper_tie_reverse", true).await?);
-
     let (_incremental_db, incremental) = database("issue503_wrapper_expiry_incremental").await?;
     seed_identity(&incremental, &["ens_v1"]).await?;
     seed_v1_relation(&incremental, OWNER, 10).await?;
@@ -640,109 +618,39 @@ macro_rules! history_retraction_test {
         }
     };
 }
-history_retraction_test!(
-    retracted_reservation_history_restores_hash_only_child,
-    "RegistrationReserved"
-);
-history_retraction_test!(
-    retracted_grant_history_restores_hash_only_child,
-    "RegistrationGranted"
-);
-history_retraction_test!(
-    retracted_renewal_history_restores_hash_only_child,
-    "RegistrationRenewed"
-);
-visibility_test!(
-    locked_parent_hides_child_without_parent_cannot_control,
-    "issue503_no_pcc",
-    Case {
-        fuses: 0,
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    locked_parent_hides_dot_eth_child_even_with_parent_cannot_control,
-    "issue503_dot_eth",
-    Case {
-        fuses: 196_608,
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    locked_parent_hides_ownerless_v1_child,
-    "issue503_ownerless",
-    Case {
-        owner: ZERO,
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    locked_parent_hides_child_ever_registered_in_successor_v2_registry,
-    "issue503_ever_v2",
-    Case {
-        history: Some((REGISTRY, "RegistrationGranted", true)),
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    locked_parent_hides_child_with_lapsed_reservation,
-    "issue503_reserved_v2",
-    Case {
-        history: Some((REGISTRY, "RegistrationReserved", true)),
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    locked_parent_hides_child_with_renewal_history,
-    "issue503_renewed_v2",
-    Case {
-        history: Some((REGISTRY, "RegistrationRenewed", true)),
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    locked_parent_ignores_registration_in_unrelated_v2_registry,
-    "issue503_other_v2",
-    Case {
-        history: Some((OTHER_REGISTRY, "RegistrationRenewed", false)),
-        ..locked_case()
-    },
-    true
-);
-visibility_test!(
-    locked_child_parent_publishes_only_migratable_grandchild,
-    "issue503_locked_child",
-    Case {
-        path: Some("locked_child"),
-        ..locked_case()
-    },
-    true
-);
-visibility_test!(
-    locked_child_parent_hides_non_migratable_grandchild,
-    "issue503_locked_child_no_pcc",
-    Case {
-        path: Some("locked_child"),
-        fuses: 0,
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    emancipated_child_parent_hides_v1_descendants,
-    "issue503_emancipated_child",
-    Case {
-        path: Some("emancipated_child"),
-        ..locked_case()
-    },
-    false
-);
+#[rustfmt::skip]
+history_retraction_test!(retracted_reservation_history_restores_hash_only_child, "RegistrationReserved");
+#[rustfmt::skip]
+history_retraction_test!(retracted_grant_history_restores_hash_only_child, "RegistrationGranted");
+#[rustfmt::skip]
+history_retraction_test!(retracted_renewal_history_restores_hash_only_child, "RegistrationRenewed");
+#[rustfmt::skip]
+visibility_test!(locked_parent_hides_child_without_parent_cannot_control, false, fuses = 0);
+#[rustfmt::skip]
+visibility_test!(locked_parent_hides_dot_eth_child_even_with_parent_cannot_control, false, fuses = 196_608);
+#[rustfmt::skip]
+visibility_test!(locked_parent_hides_ownerless_v1_child, false, owner = ZERO);
+#[rustfmt::skip]
+visibility_test!(locked_parent_hides_child_ever_registered_in_successor_v2_registry, false,
+    history = Some((REGISTRY, "RegistrationGranted", true)));
+#[rustfmt::skip]
+visibility_test!(locked_parent_hides_child_with_lapsed_reservation, false,
+    history = Some((REGISTRY, "RegistrationReserved", true)));
+#[rustfmt::skip]
+visibility_test!(locked_parent_hides_child_with_renewal_history, false,
+    history = Some((REGISTRY, "RegistrationRenewed", true)));
+#[rustfmt::skip]
+visibility_test!(locked_parent_ignores_registration_in_unrelated_v2_registry, true,
+    history = Some((OTHER_REGISTRY, "RegistrationRenewed", false)));
+#[rustfmt::skip]
+visibility_test!(locked_child_parent_publishes_only_migratable_grandchild, true,
+    path = Some("locked_child"));
+#[rustfmt::skip]
+visibility_test!(locked_child_parent_hides_non_migratable_grandchild, false,
+    path = Some("locked_child"), fuses = 0);
+#[rustfmt::skip]
+visibility_test!(emancipated_child_parent_hides_v1_descendants, false,
+    path = Some("emancipated_child"));
 
 #[tokio::test]
 async fn unknown_parent_migration_path_is_a_generation_failure() -> Result<()> {
@@ -773,29 +681,12 @@ async fn child_authority_selects_arm_after_parent_reachability_filter() -> Resul
     Ok(())
 }
 
-visibility_test!(
-    unsupported_both_arm_child_is_omitted_after_reachability,
-    "issue503_unsupported_pair",
-    Case {
-        path: None,
-        fuses: 0,
-        v2: true,
-        child_arms: &["ens_v1", "ens_v2"],
-        ..locked_case()
-    },
-    false
-);
-visibility_test!(
-    unreachable_v1_arm_does_not_suppress_reachable_v2_arm,
-    "issue503_v2_survives",
-    Case {
-        path: Some("unlocked_wrapped"),
-        v2: true,
-        child_arms: &["ens_v2"],
-        ..locked_case()
-    },
-    true
-);
+#[rustfmt::skip]
+visibility_test!(unsupported_both_arm_child_is_omitted_after_reachability, false,
+    path = None, fuses = 0, v2 = true, child_arms = &["ens_v1", "ens_v2"]);
+#[rustfmt::skip]
+visibility_test!(unreachable_v1_arm_does_not_suppress_reachable_v2_arm, true,
+    path = Some("unlocked_wrapped"), v2 = true, child_arms = &["ens_v2"]);
 
 async fn rows(pool: &PgPool) -> Result<Value> {
     Ok(sqlx::query_scalar("SELECT COALESCE(jsonb_agg(to_jsonb(row) - 'last_recomputed_at' - 'inserted_at' ORDER BY child_logical_name_id), '[]'::jsonb) FROM children_current row WHERE provenance ->> 'chain_id' = $1").bind(CHAIN).fetch_one(pool).await?)

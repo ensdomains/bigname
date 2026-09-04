@@ -59,42 +59,6 @@ pub(super) async fn include_changed_child_proofs(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope changed child proofs", error))?;
-    include_changed_parent_migration_children(transaction, chain_id).await?;
-    Ok(())
-}
-
-async fn include_changed_parent_migration_children(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        WITH changed_parents AS (
-            SELECT DISTINCT event.logical_name_id
-            FROM project_changed_events event
-            WHERE event.source_family = 'ens_v2_migration_l1'
-              AND event.event_kind = 'MigrationApplied'
-              AND event.logical_name_id IS NOT NULL
-        ), candidates AS (
-            SELECT parent.logical_name_id FROM changed_parents parent
-            UNION
-            SELECT child.child_logical_name_id
-            FROM changed_parents parent
-            JOIN children_current child
-              ON child.parent_logical_name_id = parent.logical_name_id
-             AND child.provenance ->> 'chain_id' = $1
-        )
-        INSERT INTO project_scope_children
-        SELECT logical_name_id FROM candidates
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(chain_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        ProjectError::database("failed to scope changed parent migration children", error)
-    })?;
     Ok(())
 }
 
