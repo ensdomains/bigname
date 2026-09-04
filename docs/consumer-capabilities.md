@@ -163,7 +163,7 @@ side rather than restoring the retained ENSv1 relation. A Mainnet pair whose two
 arms disagree with no authority proof to separate them is omitted as unsupported
 rather than resolved by event recency; it is neither an ambiguous product row nor
 a publication failure. A proven Sepolia boundary, or a current
-child registration in the admitted migration registry below a proven migrated
+child registration in the admitted [migration registry](glossary.md#migration-registry-wrapperregistry) below a proven migrated
 parent, follows the same per-name or per-child selection rule. Sepolia overlap
 without either proof is instead an expected property of independent test
 deployments and remains unsupported under its own reason until a caller or

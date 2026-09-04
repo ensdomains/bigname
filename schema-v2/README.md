@@ -67,7 +67,7 @@ logical-name or permission-resource identifiers from state-derived ENSv2
 path-expiry releases into
 `project_redo_expiry_roots`, because an earlier expiry publication may already
 have deleted every descendant projection that cited the ancestor. It also copies
-entry-creating child events from an ENSv1→ENSv2 migration registry into
+entry-creating child events from an ENSv1→ENSv2 [migration registry](../docs/glossary.md#migration-registry-wrapperregistry) into
 `project_redo_child_registration_history`. Project uses these small handoffs to
 select resolver rows, affected permission resources, and bounded child or
 descendant scope, then deletes the handoff rows inside its publication

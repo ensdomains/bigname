@@ -320,8 +320,7 @@ migration registry. Its `normalized_event_ids`, `event_identities`,
 `raw_fact_refs`, and `manifest_versions` arrays are independent evidence sets,
 not positionally aligned tuples; an input contributes only the identifiers it
 actually owns.
-Reachability is evaluated per parent relation rather than transitively: hiding
-a parent-to-child relation does not by itself hide that child's own children.
+Reachability is per parent relation, not transitive: hiding a parent-to-child relation does not itself hide that child's children.
 For registry
 events that expose only a labelhash, Project composes the child name from a
 verified label preimage when one exists and its normalization verdict is true,
@@ -662,10 +661,9 @@ new truth family.
 ## Ownership
 
 - Interpret and adapters emit identity, discovery, and normalized events.
-  Interpret also preserves the pre-delete resolver references and state-derived
-  ENSv2 path-expiry logical names or permission resources needed for a covering
-  Project redo or normal catch-up; these are replay coordination, not projection
-  writes.
+  Interpret also preserves pre-delete resolver references, ENSv2 path-expiry
+  names or resources, and migration-registry child names needed for a covering
+  Project redo or normal catch-up; these are replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not
