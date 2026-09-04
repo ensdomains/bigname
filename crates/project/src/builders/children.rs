@@ -90,7 +90,7 @@ async fn candidates(
              AND (address.active_to_block_number IS NULL
                   OR address.active_to_block_number > $2)
              AND address.deactivated_at IS NULL
-            -- A locked migration binds this pointer to a WrapperRegistry, not a later replacement. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L41-L44 @ ens_v2@a971bd64)
+            -- A locked ENSv1→ENSv2 migration binds this pointer to a WrapperRegistry, not a later replacement. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L41-L44 @ ens_v2@a971bd64)
             LEFT JOIN migration_discovery_associations migration_registry
               ON migration_registry.chain_id = boundary.chain_id
              AND migration_registry.registry_contract_instance_id = address.contract_instance_id
