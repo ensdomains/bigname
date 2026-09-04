@@ -179,6 +179,13 @@ the surface to the wrapper resource; its `SurfaceBound.after_state.wrapped_regis
 records the exact registrar resource whose token was wrapped, so Project can join that lineage even
 when registration and wrapping occurred in different transactions.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+`registration_window` records whether cold restore must reconcile only earlier logs or the complete
+registration transaction. `registration_registry_setup` records that the whole transaction proved
+a registry ownership setup matching the registrar owner, so restore can make that registrar current.
+`registry_migrated` records that a current-registry `NewOwner` proved the node migrated, so restore
+continues to suppress later observations from the retired registry. `surface_known` records that an
+active plaintext surface was known when the authority observation was emitted, so restore can
+reattach the logical name and reproduce the same binding decision.
 Another same-namespace preimage can create the surface without binding the registrar until the next
 numeric BaseRegistrar event,
 provided the registrar remains the current authority. The numeric event then emits the durable

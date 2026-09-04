@@ -128,7 +128,7 @@ summaries. A superseded ENSv1 registration is therefore never selected, while a
 current registration queried by resource can still contribute in a separate
 name-scoped view.
 For a name wrapped in a later transaction, name detail and lifecycle history keep
-the registrar lifecycle handle, but a permissions `name` filter selects the
+the registrar resource that carries its registration history, but a permissions `name` filter selects the
 current wrapper authority resource. Permission rows do not merge those resources.
 
 The final activation re-derives a [complete

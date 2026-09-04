@@ -127,13 +127,18 @@ exact name. The response keeps that registrar resource as `registration_id` whil
 `registration_status = "wrapped"` reports the active wrapper. The wrapper is the currently selected
 name authority; it does not replace the registrar's
 [token lineage](glossary.md#token-lineage) or make wrapper expiry authoritative for the lease.
-Exact-name detail, batch lookup, and registration-scoped history expose the same registrar lifecycle
-handle. Registration-scoped name history follows every retained wrapper-to-registrar identity link,
+Exact-name detail, batch lookup, and registration-scoped history expose the same registrar resource.
+Registration-scoped name history follows every retained wrapper-to-registrar identity link,
 so a later re-registration does not hide an older controller-free registrar lifecycle that had been
 made name-addressable by wrapping. Wrapper holder and permission-scope history for that registration
-uses the registrar lifecycle handle as well, and name-filtered event reads follow the same identity
+uses that registrar resource as well, and name-filtered event reads follow the same identity
 link back to the registrar rows. Name-filtered permissions remain keyed to the current wrapper authority resource because
 permission rows do not merge predecessor and successor authority resources.
+For every name registered through the ENSv1 registrar and wrapped in a later transaction,
+`registration_id` now identifies the registrar lifecycle resource; it previously identified the
+wrapper resource. A name born wrapped in the registration transaction keeps the wrapper resource
+across exact-name detail, batch lookup, and registration-scoped history, and consumers keyed by the
+previous later-wrapped value must re-read the name.
 Upstream mints the wrapped token to the requested wrapper owner during `wrapETH2LD` and emits both
 `TransferSingle` and `NameWrapped`. For a name wrapped in a later transaction, bigname deliberately
 keeps the pre-wrap registrar holder as the served registration registrant until a subsequent

@@ -306,10 +306,23 @@ wrapper fuses are projected as zero, matching NameWrapper `getData`; an expired
 emancipated or locked position also contributes no lifecycle value or effective
 holder powers because that read clears its owner.[^v1-wrapper-expired]
 When an ENSv1 registrar lease expires while wrapped, the registrar release does
-not replace the last wrapper holder in the served registrant fold: the registrar
-token is held in NameWrapper custody, while the wrapper token records the
-user-facing holder.
+select the released lifecycle state and retained lease expiry even after release
+closes the wrapper binding and selects the retained registry-only authority. The
+exact `wrapped_registrar_resource_id` on the immediately preceding wrapper binding
+admits that registrar release to the lifecycle fold, but the release does not
+replace the last wrapper holder in the served registrant fold: the registrar token
+is held in NameWrapper custody, while the wrapper token records the user-facing
+holder. A selected registry-only binding still publishes that non-null registrant
+in `address_names_current`; a token-holder relation continues to require a token
+lineage.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+
+When plaintext enrichment creates a registrar binding after earlier resource-keyed
+registration or renewal events, a later registry-only fallback admits lifecycle
+events on that immediately preceding registrar resource even when their positions
+predate the enrichment binding. The exact resource match keeps the fold within one
+registrar lifecycle, while the selected registry-only binding remains its upper
+position bound.
 
 For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
 come from the admitted registry and registrar families. Out-of-profile resolver,
