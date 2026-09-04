@@ -68,20 +68,7 @@ async fn exercise(ownerless: bool) -> Result<()> {
         records["data"]["resolver_address"],
         format!("{resolver:#x}")
     );
-    let projected_entries: Value = if ownerless {
-        sqlx::query_scalar(
-            "SELECT inventory.entries
-             FROM name_current AS name
-             JOIN record_inventory_current AS inventory
-               ON inventory.resource_id = name.serving_resource_id
-             WHERE name.logical_name_id = $1",
-        )
-        .bind(&logical_name_id)
-        .fetch_one(&run.db.pool)
-        .await?
-    } else {
-        records["declared_state"]["record_inventory"]["entries"].clone()
-    };
+    let projected_entries = records["declared_state"]["record_inventory"]["entries"].clone();
     let inventory_keys = projected_entries
         .as_array()
         .into_iter()
@@ -103,13 +90,11 @@ async fn exercise(ownerless: bool) -> Result<()> {
     let expected_address = format!("{address_value:#x}");
     assert_eq!(record_value("text:description"), Some(TEXT_VALUE));
     assert_eq!(record_value("addr:60"), Some(expected_address.as_str()));
-    if !ownerless {
-        assert_eq!(
-            records["data"]["text_records"][TEXT_KEY]["status"],
-            "success"
-        );
-        assert_eq!(records["data"]["coin_addresses"]["60"]["status"], "success");
-    }
+    assert_eq!(
+        records["data"]["text_records"][TEXT_KEY]["status"],
+        "success"
+    );
+    assert_eq!(records["data"]["coin_addresses"]["60"]["status"], "success");
 
     let control_bindings: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM surface_bindings \
