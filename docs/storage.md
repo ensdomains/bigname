@@ -782,7 +782,7 @@ state used for serving, while its block, transaction, log, canonicality, and
 `raw_fact_ref` come from the renewal that materializes the surface. It retains
 the existing `ens_v1_unwrapped_authority` derivation kind and is distinguished
 by `after_state.state_derived=true`. The earlier pre-surface
-`ResolverChanged` remains null-linked and immutable. This behavior requires no
+`ResolverChanged` keeps null `logical_name_id` and `resource_id` and remains immutable. This behavior requires no
 `normalized_events` check change or schema-migration.
 
 Only active manifests participate in raw-log selection and watch authority.
