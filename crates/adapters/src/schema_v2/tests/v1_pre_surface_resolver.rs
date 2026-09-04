@@ -925,6 +925,80 @@ fn current_registry_handoff_retracts_old_resolver_from_every_linked_resource() -
 }
 
 #[test]
+fn same_transaction_registration_keeps_fallback_clear_on_registry_resource() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let mut ownership = current_new_owner(OWNER_2, 4)?;
+    ownership.log_index = 0;
+    let mut registered = registration(4, 9_999)?;
+    registered.log_index = 1;
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
+        renewal(3),
+        ownership,
+        registered,
+    ];
+    let output = interpret_test_batch(input(fixture().0, fixture().1, Vec::new(), history))?;
+    let registry_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.block_number == Some(3)
+                && event.event_kind == "ResolverChanged"
+                && event.after_state["resolver"] == RESOLVER_A
+                && event.after_state["state_derived"] == true
+        })
+        .and_then(|event| event.resource_id)
+        .expect("materialization must link the old-registry resolver to the registry resource");
+    assert!(
+        output.normalized_events.iter().any(|event| {
+            event.block_number == Some(4)
+                && event.event_kind == "ResolverChanged"
+                && event.resource_id == Some(registry_resource)
+                && event.after_state["resolver"] == ZERO_ADDRESS
+                && event.after_state["registry_fallback_handoff"] == true
+        }),
+        "same-transaction reconciliation moved the fallback clear off the registry resource"
+    );
+    Ok(())
+}
+
+#[test]
+fn current_registry_handoff_retracts_old_resolver_from_wrapper_resource() {
+    let mut state = super::super::state::State::new(Vec::new(), Vec::new());
+    let namehash = format!("{:#x}", B256::ZERO);
+    let logical_name_id = format!("ens:{namehash}");
+    let wrapper_resource = Uuid::from_u128(6_133);
+    state.observe_v1_name(
+        "ens",
+        &namehash,
+        logical_name_id.clone(),
+        true,
+        wrapper_resource,
+        Some(Uuid::from_u128(6_134)),
+        "ens_v1_wrapper_l1".to_owned(),
+        None,
+        Some(OWNER.to_owned()),
+        Some("wrapper-authority".to_owned()),
+    );
+    state.set_v1_resolver_link(
+        "ens",
+        &namehash,
+        Some(RESOLVER_A.to_owned()),
+        Some(wrapper_resource),
+        Some(logical_name_id.clone()),
+        Some("registry_old".to_owned()),
+    );
+
+    let (_, retired) = state.mark_v1_migrated("ens", &namehash);
+    assert!(retired.iter().any(|link| {
+        link.resource_id == Some(wrapper_resource)
+            && link.logical_name_id.as_deref() == Some(logical_name_id.as_str())
+            && link.resolver_address == RESOLVER_A
+    }));
+}
+
+#[test]
 fn latest_pre_surface_zero_resolver_clear_suppresses_materialization_pointer() -> anyhow::Result<()>
 {
     for owner in [OWNER, REGISTRY] {

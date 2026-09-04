@@ -50,7 +50,22 @@ pub(super) fn interpret(
 }
 
 pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
+    let fallback_handoffs = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.after_state["registry_fallback_handoff"] == true)
+        .cloned()
+        .collect::<Vec<_>>();
     reconcile_support::reconcile(output);
+    for handoff in fallback_handoffs {
+        if let Some(event) = output
+            .normalized_events
+            .iter_mut()
+            .find(|event| event.event_identity == handoff.event_identity)
+        {
+            *event = handoff;
+        }
+    }
 }
 
 fn authority_arm(namespace: &str) -> &'static str {

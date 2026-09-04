@@ -1637,11 +1637,11 @@ async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_
         scratch.pool(),
         "ethereum-mainnet",
         0,
-        4,
+        6,
         InterpretRunMode::Normal,
     )
     .await?;
-    complete_interpret_state(&scratch, 4).await?;
+    complete_interpret_state(&scratch, 6).await?;
     let raw_before = raw_log_digest(scratch.pool()).await?;
     let phases = PhaseSet::with_ingest_and_interpret(
         Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
@@ -1657,7 +1657,7 @@ async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_
     .redo(
         &chain_config("ethereum-mainnet")?,
         RedoPhase::Phase(PhaseName::Interpret),
-        BlockRange::new(4, 4)?,
+        BlockRange::new(4, 6)?,
         CancellationToken::new(),
     )
     .await?;
@@ -1681,17 +1681,21 @@ async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_
             && clear.2
     }));
     assert_ne!(clears[0].3, clears[1].3);
-    run_project(scratch.pool(), "ethereum-mainnet", 4, 0, 4).await?;
-    let resolver: Option<String> = sqlx::query_scalar(
-        "SELECT declared_summary #>> '{resolver,address}'
+    run_project(scratch.pool(), "ethereum-mainnet", 6, 0, 6).await?;
+    let projected: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT declared_summary #>> '{resolver,address}',
+                declared_summary #>> '{registration,status}',
+                declared_summary #>> '{control,status}'
          FROM name_current WHERE raw_name = 'pointer.eth'",
     )
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(
-        resolver, None,
+        projected.0, None,
         "Project must not serve the retired fallback"
     );
+    assert_eq!(projected.1.as_deref(), Some("unregistered"));
+    assert_eq!(projected.2.as_deref(), Some("unregistered"));
     scratch.cleanup().await
 }
 
@@ -6388,8 +6392,9 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
     sqlx::query(
-        "WITH blocks(block_number, emitter) AS (
-           VALUES (0::bigint, $2), (1, $2), (2, $3), (3, $4), (4, $5)
+        "WITH blocks(block_number, block_timestamp, emitter) AS (
+           VALUES (0::bigint, 0::bigint, $2), (1, 1, $2), (2, 2, $3),
+                  (3, 3, $4), (4, 4, $5), (5, 5, $5), (6, 7776101, $5)
          ), lineage AS (
            INSERT INTO chain_lineage (
              chain_id, block_hash, parent_hash, block_number, block_timestamp,
@@ -6399,7 +6404,7 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
                   CASE WHEN block_number > 0
                     THEN $1 || '-block-' || (block_number - 1)
                   END,
-                  block_number, to_timestamp(block_number),
+                  block_number, to_timestamp(block_timestamp),
                   'canonical'::canonicality_state
            FROM blocks RETURNING block_number
          )
@@ -6422,8 +6427,10 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
     let node = raw_namehash(&[b"pointer", b"eth"]);
-    let facts = [
+    let facts = vec![
         (
+            0,
+            0,
             OLD_REGISTRY_ADDRESS,
             NewOwner {
                 node: raw_namehash(&[b"eth"]),
@@ -6433,6 +6440,8 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
             .encode_log_data(),
         ),
         (
+            1,
+            0,
             OLD_REGISTRY_ADDRESS,
             NewResolver {
                 node,
@@ -6441,6 +6450,8 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
             .encode_log_data(),
         ),
         (
+            2,
+            0,
             CONTROLLER,
             NameRenewed {
                 name: "pointer".into(),
@@ -6451,6 +6462,8 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
             .encode_log_data(),
         ),
         (
+            3,
+            0,
             REGISTRAR,
             base_registrar_events::Transfer {
                 from: PRIOR_REGISTRY_OWNER.parse()?,
@@ -6460,22 +6473,57 @@ async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
             .encode_log_data(),
         ),
         (
+            4,
+            0,
+            REGISTRY_ADDRESS,
+            NewOwner {
+                node: raw_namehash(&[b"eth"]),
+                label: keccak256(b"pointer"),
+                owner: REGISTRANT.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            4,
+            1,
+            CONTROLLER,
+            legacy_registrar_controller_events::NameRegistered {
+                name: "pointer".into(),
+                label: keccak256(b"pointer"),
+                owner: REGISTRANT.parse()?,
+                cost: U256::from(1),
+                expires: U256::from(100),
+            }
+            .encode_log_data(),
+        ),
+        (
+            5,
+            0,
             REGISTRY_ADDRESS,
             Transfer {
                 node,
-                owner: PRIOR_REGISTRY_OWNER.parse()?,
+                owner: Address::ZERO,
+            }
+            .encode_log_data(),
+        ),
+        (
+            6,
+            0,
+            REGISTRY_ADDRESS,
+            Transfer {
+                node: B256::ZERO,
+                owner: REGISTRANT.parse()?,
             }
             .encode_log_data(),
         ),
     ];
-    for (block, (emitter, fact)) in facts.into_iter().enumerate() {
-        let block = i64::try_from(block)?;
+    for (block, log_index, emitter, fact) in facts {
         insert_log_at(
             pool,
             CHAIN,
             block,
             &format!("{CHAIN}-old-handoff-transaction-{block}"),
-            0,
+            log_index,
             emitter,
             fact.topics(),
             fact.data.as_ref(),

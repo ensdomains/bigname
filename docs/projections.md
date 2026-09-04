@@ -468,7 +468,8 @@ registrar release can therefore restore the existing registry resource and its
 direct-registry owner instead of losing the known name.
 An old-registry resolver selection stops being eligible when either a
 current-registry `NewOwner` or `Transfer` creates that node's current-registry
-record. The ownership observation persists the fallback handoff across replay;
+record. The ownership observation persists the
+[registry fallback handoff](glossary.md#registry-fallback-handoff) across replay;
 if the old pointer was already linked, later linked zero-resolver events
 retract it from every registry, registrar, or wrapper resource to which it was
 linked. An old-registry `Transfer` cannot clear a resolver

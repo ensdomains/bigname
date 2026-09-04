@@ -794,13 +794,19 @@ it is never attributed to the currently active triggering source.
 
 A current-registry `NewOwner` or `Transfer` that ends old-registry fallback
 resolution persists that handoff at the ownership log's raw position. When an
-old-registry pointer was already linked, the current registry source emits an
+old-registry pointer was already linked, the current registry source emits
 additive linked `ResolverChanged` rows with the zero address for every retained
 registry, registrar, or wrapper resource that could carry the old pointer, and
 `after_state.registry_fallback_handoff=true`; the earlier selection and surface
 materialization rows remain immutable. A same-owner `Transfer` still leaves a
 normalized handoff row when it would otherwise produce no state delta, so
-compacted restoration cannot reopen old-registry input.
+compacted restoration cannot reopen old-registry input. Same-transaction
+registration reconciliation leaves each resource-specific handoff row attached
+to its original resource.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
 
 ### Interpret process memory
 
