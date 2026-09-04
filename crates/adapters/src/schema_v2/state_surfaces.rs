@@ -45,6 +45,7 @@ impl State {
         if let Some(resolver_address) = resolver {
             self.v1_resolvers
                 .insert(key.clone(), resolver_address.clone());
+            let retain_linked_resource = source_role.as_deref() == Some("registry_old");
             let link = V1ResolverLink {
                 resolver_address,
                 resource_id,
@@ -52,7 +53,7 @@ impl State {
                 source_role,
             };
             self.v1_resolver_links.insert(key.clone(), link.clone());
-            if let Some(resource_id) = resource_id {
+            if retain_linked_resource && let Some(resource_id) = resource_id {
                 self.v1_resolver_linked_resources
                     .entry(key)
                     .or_default()

@@ -6,6 +6,44 @@ use super::{State, V1RegistryReadAnchor, V1Release, v1_registration_is_live};
 const NAMESPACE: &str = "test";
 
 #[test]
+fn resolver_linked_resources_only_tracks_old_registry_selection() {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000001";
+    let mut state = State::new(Vec::new(), Vec::new());
+
+    state.set_v1_resolver_link(
+        NAMESPACE,
+        "current-node",
+        Some(RESOLVER.to_owned()),
+        Some(Uuid::from_u128(1)),
+        Some("test:current-node".to_owned()),
+        Some("registry".to_owned()),
+    );
+    assert!(
+        !state
+            .v1_resolver_linked_resources
+            .contains_key("test:current-node"),
+        "current-registry selection must not allocate old-registry fan-out state"
+    );
+
+    state.set_v1_resolver_link(
+        NAMESPACE,
+        "old-node",
+        Some(RESOLVER.to_owned()),
+        Some(Uuid::from_u128(2)),
+        Some("test:old-node".to_owned()),
+        Some("registry_old".to_owned()),
+    );
+    assert_eq!(
+        state
+            .v1_resolver_linked_resources
+            .get("test:old-node")
+            .map(|links| links.len()),
+        Some(1),
+        "old-registry selection must retain its linked resource for fallback handoff"
+    );
+}
+
+#[test]
 fn observed_v1_active_surface_upgrades_an_existing_registry_read_anchor() {
     let mut state = State::new(Vec::new(), Vec::new());
     state.remember_v1_registry_read_anchor(
