@@ -162,6 +162,7 @@ mandatory full Interpret and Project redos.
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
 | `project_redo_resolver_evidence` | Interpret, then Project consumption | Pre-delete resolver and permission-resource references preserved across Interpret retries for one redo range; redo coordination only, never serving data. |
 | `project_redo_expiry_roots` | Interpret, then Project consumption | Logical names or permission resources from state-derived ENSv2 path-expiry releases preserved before Interpret deletes a redo range; bounded projection-redo coordination only, never serving data. |
+| `project_redo_child_registration_history` | Interpret, then Project consumption | Child and registry identifiers from entry-creating events in an ENSv1→ENSv2 migration `WrapperRegistry`, preserved before Interpret deletes a redo range; bounded child-scope coordination only, never serving data. |
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
@@ -368,7 +369,10 @@ activated parent transition, Project may use the readable canonical association
 and active ordinary announcement to classify a positive child-registration
 emitter or prove the current parent subregistry is the migration-created
 `WrapperRegistry`. Candidate or activated, the association establishes neither
-result by itself and activates no correlation-dependent effect. Correlation-dependent parent, topology, identity,
+result by itself and activates no correlation-dependent effect. Project requires
+its evidence-reference array to be non-empty and contained in the activated
+boundary; an empty diagnostic association cannot authorize publication.
+Correlation-dependent parent, topology, identity,
 role, registration, renewal, and normalized-event rows from the watched registry
 activate only when every group they reference is complete. Refused and incomplete
 rows remain candidate. Association with the migration group is not
@@ -997,12 +1001,14 @@ Project is the only projection writer. It derives the affected scope from
 canonical interpreted input, stages rows in connection-local tables, and
 publishes the affected projection set transactionally. It has no legacy claim
 queue, general-purpose durable replay stage tables, apply cursors, dead-letter
-queue, database session version stamp, or worker heartbeat. The two narrow replay
+queue, database session version stamp, or worker heartbeat. The three narrow replay
 handoffs contain pre-delete input rather than staged projection rows:
 `project_redo_resolver_evidence` retains resolver and permission-resource
 references, and `project_redo_expiry_roots` retains the available logical-name
 or permission-resource identifiers whose deleted path-expiry releases must seed
-a bounded rebuild.
+a bounded rebuild. `project_redo_child_registration_history` retains affected
+child and registry identifiers for entry-creating events in a correlated
+migration `WrapperRegistry`, so removing history can re-evaluate a hidden child.
 Project consumes a row when a publication covers its recorded block. The normal
 Interpret-to-Project pipeline does so immediately; if an operator runs an
 Interpret redo whose requested Project endpoint is below the already recorded

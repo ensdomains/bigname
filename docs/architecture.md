@@ -302,7 +302,7 @@ ENSv1→ENSv2 migration path. The parent rule is:
 | `migration_path = unlocked_wrapped` | Ineligible. |
 | `migration_path = locked_wrapped` | Eligible only for a [migratable child](glossary.md#migratable-child): the label has never had a reserved, registered, or renewed entry in the parent's [migration `WrapperRegistry`](glossary.md#migration-registry-wrapperregistry), its current expiry-effective fuse word has `PARENT_CANNOT_CONTROL` set while `IS_DOT_ETH` is clear, and its current ENSv1 registry owner is nonzero. NameWrapper preserves fuse and expiry data when a child unwraps, so Project uses the latest wrapper resource evidence even when the active ENSv1 binding has rotated. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276-L277 @ ens_v1@91c966f) |
 | `migration_path = locked_child` | Eligible under the same migratable-child predicate. A locked child receives its own proxy-backed `WrapperRegistry`, so that nested registry becomes the parent migration registry for its descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L26-L32 @ ens_v2@a971bd64) |
-| `migration_path = emancipated_child` | Ineligible. The child is unwrapped into the Graveyard and injected into its parent's existing registry without receiving a registry for descendants. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178-L188 @ ens_v2@a971bd64) |
+| `migration_path = emancipated_child` | Ineligible. The child is unwrapped into the Graveyard and no registry is deployed for it; the caller-supplied subregistry is injected with the child instead. (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178-L188 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L25-L27 @ ens_v2@a971bd64) |
 
 Unlocked ENSv1→ENSv2 migration registers the parent in ENSv2 without deploying a child
 subregistry, while the Graveyard clears the unreachable ENSv1 descendants.
@@ -322,8 +322,9 @@ The fuse predicate is exact: `PARENT_CANNOT_CONTROL` must be set and
 
 Project accepts the current ENSv2 `SubregistryChanged` pointer only when its exact
 instance and address match a readable canonical `migration_registry_creation`
-association contained in the activated boundary and its active ordinary
-announcement. A replacement fails closed. `successor_registry_contract_instance_id`
+association whose non-empty evidence references are contained in the activated
+boundary, and its active ordinary announcement. A replacement or empty-evidence
+association fails closed. `successor_registry_contract_instance_id`
 instead identifies the registry that received the parent; the locked controller
 registers the parent there with its new `WrapperRegistry` as subregistry.
 (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L103-L109 @ ens_v2@a971bd64)

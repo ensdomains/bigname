@@ -313,7 +313,15 @@ ENSv1→ENSv2 migration path: `unwrapped`, `unlocked_wrapped`, and
 through their [migration registry](glossary.md#migration-registry-wrapperregistry).
 An unknown activated path is a Project data-integrity failure. Child authority
 selection then chooses among the surviving arms; cross-era recency never chooses
-the arm.
+the arm. A surviving locked-path row cites the matched association's stable
+logical-edge and correlation identities plus its source manifest; its row-level
+manifest version therefore accounts for the association that authorized the
+migration registry. Its `normalized_event_ids`, `event_identities`,
+`raw_fact_refs`, and `manifest_versions` arrays are independent evidence sets,
+not positionally aligned tuples; an input contributes only the identifiers it
+actually owns.
+Reachability is evaluated per parent relation rather than transitively: hiding
+a parent-to-child relation does not by itself hide that child's own children.
 For registry
 events that expose only a labelhash, Project composes the child name from a
 verified label preimage when one exists and its normalization verdict is true,
@@ -620,12 +628,14 @@ Canonicality change, manifest change, or interpreted-content replacement stamps
 the affected Project range. Project rebuilds the affected scope in dependency
 order and publishes one coherent generation. There is no worker invalidation
 queue, apply cursor, replay-version fence, general-purpose durable staging,
-replay marker, dead-letter queue, or cache invalidation side effect. Two narrow
+replay marker, dead-letter queue, or cache invalidation side effect. Three narrow
 handoffs preserve input that would otherwise disappear before Project can
 select its redo scope: `project_redo_resolver_evidence` retains resolver and
 permission-resource references, while `project_redo_expiry_roots` retains
 logical names and permission resources from state-derived ENSv2 path-expiry
-releases. Neither table is serving data. Project consumes a row only when its
+releases. `project_redo_child_registration_history` retains affected child and
+registry identifiers for removed migration-registry entry history. None is
+serving data. Project consumes a row only when its
 publication range covers the recorded block; an operator redo ending below an
 already recorded Project head can therefore leave later rows for a covering
 redo or full rebuild.

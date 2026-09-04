@@ -819,8 +819,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   publication for that generation,
   though a positive ENSv2 registration in a locked parent's migration registry
   is itself entry history and therefore filters the ENSv1 relation before this
-  assertion. The reachable fatal shape is a child's own activated migration
-  boundary below an otherwise eligible parent, so this route never chooses one
+  assertion. The dual-current assertion remains a defensive generation check;
+  no ordinary parent-and-child shape reaches it after parent reachability and
+  migration-registry history are applied. This route therefore never chooses one
   by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.
   A V1 child with getter-visible owner zero is omitted unless a current
