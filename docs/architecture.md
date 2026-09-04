@@ -973,7 +973,7 @@ orders the selected source's ordinary events first, then state-derived sourced
 events, the block-boundary output, and finally identity and preimage output.
 When a registrar registration becomes current at the first active ENSv1 name
 surface, Interpret also copies that surface identity onto any retained
-registry-only authority and registry read anchor. This does not make the
+registry-only authority and registry resource. This does not make the
 registry resource current while the registration is live; it preserves the
 known direct-registry fallback so a later registrar release can bind that
 existing registry resource in fresh, restored, resumed, and redo execution.
