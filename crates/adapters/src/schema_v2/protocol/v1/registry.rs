@@ -395,7 +395,6 @@ pub(super) fn interpret(
         &after,
         &affected_node,
     );
-    let linked_resolver = state.v1_resolver_link(&selected.source.namespace, &affected_node);
     append_authority_transition(
         &mut output,
         super::authority_arm(&selected.source.namespace),
@@ -403,9 +402,9 @@ pub(super) fn interpret(
         linked.as_ref(),
         raw,
         &after,
-        // Keep the selected registry role with any published authority pointer.
-        // Unlinked selections have no authority resource on which to publish the pointer.
-        linked_resolver.filter(|link| link.resource_id.is_some()),
+        state
+            .v1_resolver_for_activation(&selected.source.namespace, &affected_node, linked.as_ref())
+            .filter(|link| link.resource_id.is_some()),
         None,
     );
     if selected.event.name == "NewResolver" {

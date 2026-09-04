@@ -37,12 +37,12 @@ justification = "Name-surface materialization distinguishes active from shadow V
 
 [[files]]
 path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
-loc = 632
+loc = 631
 justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."
 
 [[files]]
 path = "crates/adapters/src/schema_v2/state.rs"
-loc = 643
+loc = 610
 justification = "The V1 interpreter keeps control state, literal registry owner history, and the resource retained for resolver reads together because restore and incremental interpretation must update them atomically; the file remains below the review threshold."
 
 [[files]]

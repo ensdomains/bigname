@@ -1,6 +1,8 @@
 use uuid::Uuid;
 
-use super::{State, V1NameState, V1RegistryReadAnchor, V1ResolverLink, v1_key};
+use super::{
+    State, V1NameState, V1RegistryReadAnchor, V1ResolverLink, v1_key, v1_registration_is_live,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::schema_v2) enum V1SurfaceMaterialization {
@@ -31,10 +33,13 @@ impl State {
         let key = v1_key(namespace, namehash);
         let previous = self.v1_resolver_links.remove(&key);
         self.v1_resolvers.remove(&key);
+        let retain_linked_resource = source_role.as_deref() == Some("registry_old");
+        if !retain_linked_resource {
+            self.v1_resolver_linked_resources.remove(&key);
+        }
         if let Some(resolver_address) = resolver {
             self.v1_resolvers
                 .insert(key.clone(), resolver_address.clone());
-            let retain_linked_resource = source_role.as_deref() == Some("registry_old");
             let link = V1ResolverLink {
                 resolver_address,
                 resource_id,
@@ -161,6 +166,60 @@ impl State {
                 source_role: link.source_role.clone(),
             })
         })
+    }
+
+    pub(in crate::schema_v2) fn v1_resolver_for_activation(
+        &self,
+        namespace: &str,
+        namehash: &str,
+        authority: Option<&V1NameState>,
+    ) -> Option<V1ResolverLink> {
+        authority.and_then(|authority| {
+            self.v1_resolver_link_for_resource_activation(
+                namespace,
+                namehash,
+                authority.resource_id,
+            )
+        })
+    }
+
+    pub(in crate::schema_v2) fn converge_v1_registrar_transfer(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+        at_unix_timestamp: i64,
+    ) -> Option<V1NameState> {
+        let current = self.v1_name(namespace, namehash);
+        if current
+            .as_ref()
+            .is_some_and(|authority| authority.authority_source_family == "ens_v1_wrapper_l1")
+        {
+            return current;
+        }
+        let registrar = self.v1_registrar(namespace, namehash)?;
+        let registrar_was_current = current
+            .as_ref()
+            .is_some_and(|authority| authority.resource_id == registrar.resource_id);
+        let registry_owner = self.v1_registry_owner(namespace, namehash);
+        let registrar_matches_registry = registry_owner.as_deref().is_none_or(|owner| {
+            if owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
+                registrar_was_current
+            } else {
+                registrar
+                    .owner
+                    .as_deref()
+                    .is_some_and(|registrant| registrant.eq_ignore_ascii_case(owner))
+            }
+        });
+        let next = if registrar_matches_registry
+            && v1_registration_is_live(registrar.expiry, at_unix_timestamp)
+        {
+            Some(registrar)
+        } else {
+            self.v1_registry_authority_if_authentic(&v1_key(namespace, namehash))
+        };
+        self.activate_v1_authority(namespace, namehash, next.clone());
+        next
     }
 
     pub(in crate::schema_v2) fn v1_resolver(

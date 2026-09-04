@@ -154,10 +154,13 @@ fn reconcile_registration(
 
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
     for index in retarget_candidates {
-        // A wrapper can identify the name before a controller registration in the same
-        // transaction. The generated resolver pointer belongs to the dormant registry resource
-        // used for reads; registrar reconciliation must not turn it into a pointer attached to
-        // registrar control.
+        // `wrapETH2LD` emits `NameWrapped` before its resolver write; a later controller
+        // registration sets its registry record before the controller emits `NameRegistered`.
+        // When those calls share a transaction, the wrapper-materialized pointer remains on the
+        // dormant registry read resource instead of moving to registrar control.
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L996-L1019 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287-L341 @ ens_v1@91c966f)
         let preserves_registry_read_pointer = output.normalized_events[index].event_kind
             == "ResolverChanged"
             && output.normalized_events[index].after_state["state_derived"] == true

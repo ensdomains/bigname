@@ -21,7 +21,9 @@ mod identity;
 use identity::{new_registrar_identity, registrar_namehash};
 
 mod decode;
+mod transfer_permissions;
 mod wrapper_renewal;
+use transfer_permissions::append_transfer_permissions;
 
 mod transfer {
     use super::*;
@@ -202,12 +204,24 @@ fn transfer(
         resource_id: linked.resource_id,
         token_lineage_id: linked.token_lineage_id,
     });
-    append_transfer_permissions(
-        &mut output,
-        &before,
-        &linked,
-        state.v1_resolver(&selected.source.namespace, &raw_namehash),
-        &raw.chain_id,
+    let explicit_ownerless_registry = selected.source.source_family == "ens_v1_registrar_l1"
+        && state.v1_explicit_ownerless_registry_evidence(&selected.source.namespace, &raw_namehash);
+    let registrar_was_current = previous_active
+        .as_ref()
+        .is_some_and(|authority| authority.resource_id == linked.resource_id);
+    if !explicit_ownerless_registry || registrar_was_current {
+        append_transfer_permissions(
+            &mut output,
+            &before,
+            &linked,
+            state.v1_resolver(&selected.source.namespace, &raw_namehash),
+            &raw.chain_id,
+        );
+    }
+    let linked_resolver = state.v1_resolver_for_activation(
+        &selected.source.namespace,
+        &raw_namehash,
+        active_after.as_ref(),
     );
     append_authority_transition(
         &mut output,
@@ -216,68 +230,10 @@ fn transfer(
         active_after.as_ref(),
         raw,
         &json!({"source_event":"Transfer"}),
-        state.v1_resolver_link(&selected.source.namespace, &raw_namehash),
+        linked_resolver,
         fallback_active_from,
     );
     Ok(output)
-}
-
-fn append_transfer_permissions(
-    output: &mut Interpreted,
-    before: &crate::schema_v2::state::V1NameState,
-    after: &crate::schema_v2::state::V1NameState,
-    resolver: Option<String>,
-    chain_id: &str,
-) {
-    let (Some(from), Some(to), Some(authority_key)) = (
-        before.owner.as_deref(),
-        after.owner.as_deref(),
-        after.authority_key.as_deref(),
-    ) else {
-        return;
-    };
-    if from.eq_ignore_ascii_case(to) {
-        return;
-    }
-    let mut scopes = vec![(json!({"kind":"resource"}), "resource_control")];
-    if let Some(resolver) = resolver {
-        scopes.push((
-            json!({"kind":"resolver","chain_id":chain_id,"resolver_address":resolver}),
-            "resolver_control",
-        ));
-    }
-    for (index, (scope, power)) in scopes.into_iter().enumerate() {
-        for (grant, subject, action) in [(false, from, "revoke"), (true, to, "grant")] {
-            let (before_state, after_state) = if grant {
-                v1_grant_states(
-                    subject,
-                    scope.clone(),
-                    power,
-                    "registrar",
-                    authority_key,
-                    "TokenControlTransferred",
-                )
-            } else {
-                v1_revoke_states(
-                    subject,
-                    scope.clone(),
-                    power,
-                    "registrar",
-                    authority_key,
-                    "TokenControlTransferred",
-                )
-            };
-            output.events.push(EventDraft {
-                event_kind: "PermissionChanged".to_owned(),
-                logical_name_id: Some(after.logical_name_id.clone()),
-                resource_id: Some(after.resource_id),
-                identity_suffix: format!("PermissionChanged:transfer:{index}:{action}:{subject}"),
-                explicit_before: Some(before_state),
-                after_state,
-                state_scope: String::new(),
-            });
-        }
-    }
 }
 
 fn name_event(
@@ -554,6 +510,11 @@ fn name_event(
     }
     let active_after = state.v1_name(&selected.source.namespace, &raw_namehash);
     if registration || synthetic_grant {
+        let linked_resolver = state.v1_resolver_for_activation(
+            &selected.source.namespace,
+            &raw_namehash,
+            active_after.as_ref(),
+        );
         append_authority_transition(
             &mut output,
             super::authority_arm(&selected.source.namespace),
@@ -561,7 +522,7 @@ fn name_event(
             active_after.as_ref(),
             raw,
             &after,
-            state.v1_resolver_link(&selected.source.namespace, &raw_namehash),
+            linked_resolver,
             None,
         );
     }

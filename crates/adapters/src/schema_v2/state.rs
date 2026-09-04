@@ -429,39 +429,6 @@ impl State {
         Some((before, after))
     }
 
-    pub(super) fn converge_v1_registrar_transfer(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-        at_unix_timestamp: i64,
-    ) -> Option<V1NameState> {
-        let current = self.v1_name(namespace, namehash);
-        if current
-            .as_ref()
-            .is_some_and(|authority| authority.authority_source_family == "ens_v1_wrapper_l1")
-        {
-            return current;
-        }
-        let registrar = self.v1_registrar(namespace, namehash)?;
-        let registry_owner = self.v1_registry_owner(namespace, namehash);
-        let registrar_matches_registry = registry_owner.as_deref().is_none_or(|owner| {
-            owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
-                || registrar
-                    .owner
-                    .as_deref()
-                    .is_some_and(|registrant| registrant.eq_ignore_ascii_case(owner))
-        });
-        let next = if registrar_matches_registry
-            && v1_registration_is_live(registrar.expiry, at_unix_timestamp)
-        {
-            Some(registrar)
-        } else {
-            self.v1_registry_authority_if_authentic(&v1_key(namespace, namehash))
-        };
-        self.activate_v1_authority(namespace, namehash, next.clone());
-        next
-    }
-
     pub(super) fn transfer_v1_wrapper_owner(
         &mut self,
         namespace: &str,

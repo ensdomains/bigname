@@ -1307,6 +1307,114 @@ fn changed_old_registry_selection_clears_inactive_resources_on_handoff_or_reacti
 }
 
 #[test]
+fn current_registry_resolver_replacement_survives_the_ownership_handoff() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        registration(2, 9_999)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 3)?,
+        resolver_selection(REGISTRY, node, RESOLVER_B, 4)?,
+        current_new_owner(OWNER_2, 5)?,
+    ];
+    let (single, live) = assert_four_way_and_restore_parity(&history, 4)?;
+    let resources = single
+        .iter()
+        .filter_map(|event| {
+            (event.block_number == Some(4)
+                && event.event_kind == "ResolverChanged"
+                && event.after_state["resolver"] == RESOLVER_B)
+                .then_some(event.resource_id)
+                .flatten()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        resources.len(),
+        2,
+        "current selection must reach both resources"
+    );
+    for resource in resources {
+        let latest = single
+            .iter()
+            .filter(|event| {
+                event.event_kind == "ResolverChanged" && event.resource_id == Some(resource)
+            })
+            .next_back()
+            .expect("resource resolver history");
+        assert_eq!(
+            latest.after_state["resolver"], RESOLVER_B,
+            "ownership handoff cleared the current-registry resolver on {resource}"
+        );
+    }
+    assert!(live.normalized_events.iter().all(|event| {
+        !(event.block_number == Some(5)
+            && event.event_kind == "ResolverChanged"
+            && event.after_state["resolver"] == ZERO_ADDRESS)
+    }));
+    Ok(())
+}
+
+#[test]
+fn registry_reactivation_after_old_registry_zero_clears_the_registrar_resource()
+-> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        registration(2, 9_999)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 3)?,
+        old_new_owner(OWNER_2, 4)?,
+        resolver_selection(OLD_REGISTRY, node, ZERO_ADDRESS, 5)?,
+        old_new_owner(OWNER, 6)?,
+    ];
+    let (single, live) = assert_four_way_and_restore_parity(&history, 5)?;
+    let registrar_resource = single
+        .iter()
+        .find_map(|event| {
+            (event.block_number == Some(2) && event.event_kind == "RegistrationGranted")
+                .then_some(event.resource_id)
+                .flatten()
+        })
+        .expect("registrar resource");
+    assert!(
+        live.normalized_events.iter().any(|event| {
+            event.block_number == Some(6)
+                && event.event_kind == "ResolverChanged"
+                && event.resource_id == Some(registrar_resource)
+                && event.after_state["resolver"] == ZERO_ADDRESS
+        }),
+        "registry-path reactivation did not clear the registrar resource"
+    );
+    Ok(())
+}
+
+#[test]
+fn registrar_transfer_preserves_explicit_ownerless_registry_state() -> anyhow::Result<()> {
+    let (manifests, admissions, node) = fixture();
+    let history = vec![
+        old_new_owner(ZERO_ADDRESS, 1)?,
+        renewal(2),
+        registrar_transfer(OWNER, OWNER_2, 3)?,
+    ];
+    let (_, live) = assert_four_way_and_restore_parity(&history, 2)?;
+    assert!(live.surface_bindings.is_empty());
+    assert!(
+        live.normalized_events.iter().all(|event| {
+            !matches!(
+                event.event_kind.as_str(),
+                "SurfaceBound" | "AuthorityEpochChanged" | "PermissionChanged"
+            )
+        }),
+        "registrar transfer reopened ownerless registry control"
+    );
+    let (_, session) =
+        interpret_test_batch_incremental(input(manifests, admissions, Vec::new(), history), None)?;
+    assert!(
+        session.v1_name("ens", &format!("{node:#x}")).is_none(),
+        "registrar transfer made the retained registrar current"
+    );
+    Ok(())
+}
+
+#[test]
 fn wrapper_first_surface_links_the_retained_registry_read_resource() -> anyhow::Result<()> {
     let (_, _, node) = fixture();
     let history = vec![

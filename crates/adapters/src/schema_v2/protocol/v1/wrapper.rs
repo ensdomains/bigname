@@ -428,13 +428,11 @@ fn name_unwrapped(
         &namehash,
         raw.block_timestamp.unix_timestamp(),
     );
-    let resolver = reactivated.as_ref().and_then(|authority| {
-        state.v1_resolver_link_for_resource_activation(
-            &selected.source.namespace,
-            &namehash,
-            authority.resource_id,
-        )
-    });
+    let resolver = state.v1_resolver_for_activation(
+        &selected.source.namespace,
+        &namehash,
+        reactivated.as_ref(),
+    );
     let after = json!({
         "source_event":"NameUnwrapped",
         "node":namehash,
