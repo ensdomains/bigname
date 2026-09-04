@@ -1,13 +1,158 @@
+use alloy_primitives::{B256, keccak256};
 use serde_json::{Value, json};
 
 use super::super::{
     BindingClosureDraft, BindingDraft, EventDraft, Interpreted, ResourceDraft, SourcedEventBatch,
+    permissions::v1_revoke_states,
 };
 use crate::schema_v2::{
     common::{event_time, stable_uuid},
     model::RawLogInput,
-    state::{V1NameState, V1SurfaceMaterialization},
+    state::{V1NameState, V1ResolverLink, V1SurfaceMaterialization},
 };
+
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RegistryOwnerView {
+    Authentic { owner: String },
+    ZeroEquivalent { reason: RegistryOwnerZeroReason },
+    UnavailableUnmasked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RegistryOwnerZeroReason {
+    LiteralZero,
+    RegistrySelf,
+}
+
+impl RegistryOwnerZeroReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::LiteralZero => "literal_zero",
+            Self::RegistrySelf => "registry_self",
+        }
+    }
+}
+
+pub(super) fn classify_registry_owner(
+    owner_word: &str,
+    registry_address: &str,
+    body_has_unmasked_owner_word: bool,
+    registry_self_is_zero: bool,
+) -> RegistryOwnerView {
+    if body_has_unmasked_owner_word {
+        RegistryOwnerView::UnavailableUnmasked
+    } else if owner_word.eq_ignore_ascii_case(ZERO_ADDRESS) {
+        RegistryOwnerView::ZeroEquivalent {
+            reason: RegistryOwnerZeroReason::LiteralZero,
+        }
+    } else if registry_self_is_zero && owner_word.eq_ignore_ascii_case(registry_address) {
+        RegistryOwnerView::ZeroEquivalent {
+            reason: RegistryOwnerZeroReason::RegistrySelf,
+        }
+    } else {
+        RegistryOwnerView::Authentic {
+            owner: owner_word.to_owned(),
+        }
+    }
+}
+
+pub(super) fn registry_fallback_handoff_kind(
+    source_event: &str,
+    handoff: Option<&(bool, Option<V1ResolverLink>)>,
+) -> Option<&'static str> {
+    match handoff {
+        Some((_, Some(_))) => Some("ResolverChanged"),
+        Some((true, None)) if source_event == "Transfer" => Some("AuthorityTransferred"),
+        _ => None,
+    }
+}
+
+pub(super) fn append_registry_fallback_handoff(
+    output: &mut Interpreted,
+    handoff: Option<&(bool, Option<V1ResolverLink>)>,
+    previous: Option<&V1NameState>,
+    raw: &RawLogInput,
+    observation: &Value,
+    node: &str,
+) {
+    let Some((_, Some(retired))) = handoff else {
+        return;
+    };
+    let source_event = observation
+        .get("source_event")
+        .and_then(Value::as_str)
+        .unwrap_or("RegistryOwnershipChanged");
+    let event = output
+        .events
+        .iter_mut()
+        .find(|event| event.event_kind == "ResolverChanged")
+        .expect("fallback handoff kind was declared");
+    event.logical_name_id = retired.logical_name_id.clone();
+    event.resource_id = retired.resource_id;
+    event.identity_suffix = format!(
+        "ResolverChanged:registry-fallback-handoff:{node}:{}",
+        retired.resolver_address
+    );
+    event.explicit_before = Some(json!({"resolver":retired.resolver_address}));
+    event.after_state = merge_observation(
+        observation,
+        json!({
+            "state_derived":true,
+            "registry_fallback_handoff":true,
+            "source_event":source_event,
+            "node":node,
+            "resolver":ZERO_ADDRESS,
+            "previous_resolver":retired.resolver_address,
+            "pointer_reason":"current_registry_record_suppresses_old_fallback",
+        }),
+    );
+    event.state_scope = format!("registry-fallback-handoff:{node}:resolver");
+
+    let Some(authority) = previous else {
+        return;
+    };
+    let (Some(subject), Some(authority_key)) = (
+        authority.owner.as_deref(),
+        authority.authority_key.as_deref(),
+    ) else {
+        return;
+    };
+    let (before, after) = v1_revoke_states(
+        subject,
+        json!({
+            "kind":"resolver",
+            "chain_id":raw.chain_id,
+            "resolver_address":retired.resolver_address,
+        }),
+        "resolver_control",
+        authority_kind(authority),
+        authority_key,
+        source_event,
+    );
+    output.events.push(EventDraft {
+        event_kind: "PermissionChanged".to_owned(),
+        logical_name_id: authority
+            .surface_known
+            .then(|| authority.logical_name_id.clone()),
+        resource_id: Some(authority.resource_id),
+        identity_suffix: format!(
+            "PermissionChanged:registry-fallback-handoff:{node}:{}",
+            retired.resolver_address
+        ),
+        explicit_before: Some(before),
+        after_state: after,
+        state_scope: format!("registry-fallback-handoff:{node}:resolver-control"),
+    });
+}
+
+pub(super) fn child_node(parent: B256, labelhash: B256) -> String {
+    let mut input = [0u8; 64];
+    input[..32].copy_from_slice(parent.as_slice());
+    input[32..].copy_from_slice(labelhash.as_slice());
+    format!("{:#x}", keccak256(input))
+}
 
 pub(super) fn append_surface_materialization(
     output: &mut Interpreted,

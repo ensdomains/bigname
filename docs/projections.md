@@ -468,8 +468,10 @@ registrar release can therefore restore the existing registry resource and its
 direct-registry owner instead of losing the known name.
 An old-registry resolver selection stops being eligible when either a
 current-registry `NewOwner` or `Transfer` creates that node's current-registry
-record. An old-registry `Transfer` cannot clear a resolver selected from the
-current registry.
+record. The ownership observation persists the fallback handoff across replay;
+if the old pointer was already linked, a later linked zero-resolver event
+retracts it from serving. An old-registry `Transfer` cannot clear a resolver
+selected from the current registry.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)

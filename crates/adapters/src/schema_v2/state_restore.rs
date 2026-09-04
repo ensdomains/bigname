@@ -261,7 +261,7 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             == Some("registry")
             && let Some(node) = node
         {
-            state.mark_v1_migrated(&event.namespace, node);
+            let _ = state.mark_v1_migrated(&event.namespace, node);
         }
     }
     if source_event == Some("NewResolver")

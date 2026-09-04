@@ -103,17 +103,25 @@ impl State {
         Ok(())
     }
 
-    pub(in crate::schema_v2) fn mark_v1_migrated(&mut self, namespace: &str, namehash: &str) {
+    pub(in crate::schema_v2) fn mark_v1_migrated(
+        &mut self,
+        namespace: &str,
+        namehash: &str,
+    ) -> (bool, Option<V1ResolverLink>) {
         let key = v1_key(namespace, namehash);
-        self.v1_migrated_nodes.insert(key.clone());
-        if self
+        let newly_migrated = self.v1_migrated_nodes.insert(key.clone()).is_none();
+        let retired_resolver = if self
             .v1_resolver_links
             .get(&key)
             .is_some_and(|link| link.source_role.as_deref() == Some("registry_old"))
         {
-            self.v1_resolver_links.remove(&key);
+            let link = self.v1_resolver_links.remove(&key);
             self.v1_resolvers.remove(&key);
-        }
+            link
+        } else {
+            None
+        };
+        (newly_migrated, retired_resolver)
     }
 
     pub(in crate::schema_v2) fn sync_registry_surface_from_registrar(

@@ -19,13 +19,22 @@ fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
                 "NewOwner",
                 "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
                 &["registry", "registry_old"],
-                &["SubregistryChanged", "AuthorityTransferred"],
+                &[
+                    "SubregistryChanged",
+                    "AuthorityTransferred",
+                    "ResolverChanged",
+                    "PermissionChanged",
+                ],
             ),
             (
                 "Transfer",
                 "event Transfer(bytes32 indexed node, address owner)",
                 &["registry", "registry_old"],
-                &["AuthorityTransferred", "PermissionChanged"],
+                &[
+                    "AuthorityTransferred",
+                    "ResolverChanged",
+                    "PermissionChanged",
+                ],
             ),
             (
                 "NewResolver",
@@ -157,6 +166,12 @@ fn current_new_owner(owner: &str, block: i64) -> anyhow::Result<RawLogInput> {
         0,
         REGISTRY,
     ))
+}
+
+fn old_new_owner(owner: &str, block: i64) -> anyhow::Result<RawLogInput> {
+    let mut log = current_new_owner(owner, block)?;
+    log.emitting_address = OLD_REGISTRY.to_owned();
+    Ok(log)
 }
 
 fn current_transfer(node: B256, owner: &str, block: i64) -> anyhow::Result<RawLogInput> {
@@ -754,6 +769,90 @@ fn current_registry_transfer_invalidates_only_old_registry_resolver_links_in_eve
     let pointer = state_derived_pointer(&mirror_live)
         .expect("an old-registry Transfer must not clear a current-registry resolver pointer");
     assert_eq!(pointer.after_state["resolver"], RESOLVER_A);
+    Ok(())
+}
+
+#[test]
+fn same_owner_transfer_persists_old_registry_fallback_handoff_across_every_replay_shape()
+-> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
+        current_transfer(node, OWNER, 3)?,
+        renewal(4),
+    ];
+    let (single, live) = assert_four_way_and_restore_parity(&history, 3)?;
+    assert!(state_derived_pointer(&live).is_none());
+    assert!(single.iter().any(|event| {
+        event.block_number == Some(3)
+            && event.event_kind == "ResolverChanged"
+            && event.after_state["resolver"] == ZERO_ADDRESS
+            && event.after_state["registry_fallback_handoff"] == true
+    }));
+    Ok(())
+}
+
+#[test]
+fn same_owner_transfer_without_a_pointer_still_suppresses_later_old_registry_logs()
+-> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let history = vec![
+        old_new_owner(OWNER, 1)?,
+        current_transfer(node, OWNER, 2)?,
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 3)?,
+        renewal(4),
+    ];
+    let (single, live) = assert_four_way_and_restore_parity(&history, 2)?;
+    assert!(state_derived_pointer(&live).is_none());
+    assert!(single.iter().all(|event| {
+        !(event.block_number == Some(3)
+            && event.event_kind == "ResolverChanged"
+            && event.after_state["resolver"] == RESOLVER_A)
+    }));
+    assert!(single.iter().any(|event| {
+        event.block_number == Some(2)
+            && event.event_kind == "AuthorityTransferred"
+            && event.after_state["source_event"] == "Transfer"
+    }));
+    Ok(())
+}
+
+#[test]
+fn current_registry_record_retracts_a_surfaced_old_registry_resolver() -> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    for ownership in [
+        current_transfer(node, OWNER, 4)?,
+        current_new_owner(OWNER, 4)?,
+    ] {
+        let history = vec![
+            old_new_owner(OWNER, 1)?,
+            resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 2)?,
+            renewal(3),
+            ownership,
+            renewal(5),
+        ];
+        let (single, live) = assert_four_way_and_restore_parity(&history, 4)?;
+        assert!(state_derived_pointer(&live).is_none());
+        let clear = single
+            .iter()
+            .find(|event| {
+                event.block_number == Some(4)
+                    && event.event_kind == "ResolverChanged"
+                    && event.after_state["registry_fallback_handoff"] == true
+            })
+            .expect("current registry ownership must retract the surfaced old pointer");
+        assert_eq!(clear.after_state["resolver"], ZERO_ADDRESS);
+        assert_eq!(clear.after_state["previous_resolver"], RESOLVER_A);
+        assert!(clear.logical_name_id.is_some());
+        assert!(clear.resource_id.is_some());
+        assert!(single.iter().any(|event| {
+            event.block_number == Some(4)
+                && event.event_kind == "PermissionChanged"
+                && event.after_state["effective_powers"] == json!([])
+                && event.after_state["scope"]["resolver_address"] == RESOLVER_A
+        }));
+    }
     Ok(())
 }
 

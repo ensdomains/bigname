@@ -1621,6 +1621,74 @@ async fn pre_surface_registry_fallback_after_registrar_expiry_matches_fresh_resu
 }
 
 #[tokio::test]
+async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_project()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("old_registry_resolver_handoff").await?;
+    seed_old_registry_resolver_handoff(scratch.pool()).await?;
+    run_engine(
+        scratch.pool(),
+        "ethereum-mainnet",
+        0,
+        3,
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    complete_interpret_state(&scratch, 3).await?;
+    let raw_before = raw_log_digest(scratch.pool()).await?;
+    let phases = PhaseSet::with_ingest_and_interpret(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(scratch.pool().clone())),
+    )?;
+    PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "old-registry-resolver-handoff-redo",
+        test_timing(),
+    )?
+    .redo(
+        &chain_config("ethereum-mainnet")?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(3, 3)?,
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(raw_before, raw_log_digest(scratch.pool()).await?);
+    let clear: (String, String, bool, bool) = sqlx::query_as(
+        "SELECT after_state ->> 'resolver', after_state ->> 'previous_resolver',
+                logical_name_id IS NOT NULL, resource_id IS NOT NULL
+         FROM normalized_events
+         WHERE chain_id = 'ethereum-mainnet'
+           AND block_number = 3
+           AND event_kind = 'ResolverChanged'
+           AND after_state ->> 'registry_fallback_handoff' = 'true'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        clear,
+        (
+            "0x0000000000000000000000000000000000000000".into(),
+            "0xF29100983E058B709F3D539b0c765937B804AC15".to_ascii_lowercase(),
+            true,
+            true,
+        )
+    );
+    run_project(scratch.pool(), "ethereum-mainnet", 3, 0, 3).await?;
+    let resolver: Option<String> = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{resolver,address}'
+         FROM name_current WHERE raw_name = 'pointer.eth'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        resolver, None,
+        "Project must not serve the retired fallback"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn interpret_redo_rejects_a_range_without_ingest_cursor_coverage() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_redo_raw_presence").await?;
     let chain = "interpret-redo-raw-presence";
@@ -6274,6 +6342,120 @@ async fn seed_pre_surface_pointer(pool: &PgPool) -> Result<()> {
             CHAIN,
             block,
             &transaction,
+            0,
+            emitter,
+            fact.topics(),
+            fact.data.as_ref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn seed_old_registry_resolver_handoff(pool: &PgPool) -> Result<()> {
+    const CHAIN: &str = "ethereum-mainnet";
+    const REGISTRY_ADDRESS: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    const OLD_REGISTRY_ADDRESS: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
+    const CONTROLLER: &str = "0x283Af0B28c62C092C9727F1Ee09c02CA627EB7F5";
+    const OLD_RESOLVER: &str = "0xF29100983E058B709F3D539b0c765937B804AC15";
+    let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/mainnet");
+    sync_schema_v2_repository(pool, &load_repository(profile)?).await?;
+    sqlx::query(
+        "WITH declarations AS (
+           UPDATE manifest_contract_instances SET start_block_number = 0
+           WHERE chain_id = $1
+             AND lower(declared_address) IN (lower($2), lower($3), lower($4))
+           RETURNING contract_instance_id
+         )
+         UPDATE contract_instance_addresses SET active_from_block_number = 0
+         WHERE contract_instance_id IN (SELECT contract_instance_id FROM declarations)",
+    )
+    .bind(CHAIN)
+    .bind(REGISTRY_ADDRESS)
+    .bind(OLD_REGISTRY_ADDRESS)
+    .bind(CONTROLLER)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "WITH blocks(block_number, emitter) AS (
+           VALUES (0::bigint, $2), (1, $2), (2, $3), (3, $4)
+         ), lineage AS (
+           INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number, block_timestamp,
+             canonicality_state
+           )
+           SELECT $1, $1 || '-block-' || block_number,
+                  CASE WHEN block_number > 0
+                    THEN $1 || '-block-' || (block_number - 1)
+                  END,
+                  block_number, to_timestamp(block_number),
+                  'canonical'::canonicality_state
+           FROM blocks RETURNING block_number
+         )
+         INSERT INTO raw_transactions (
+           chain_id, block_hash, block_number, transaction_hash,
+           transaction_index, from_address, to_address
+         )
+         SELECT $1, $1 || '-block-' || blocks.block_number,
+                blocks.block_number,
+                $1 || '-old-handoff-transaction-' || blocks.block_number,
+                0, $5, emitter
+         FROM blocks JOIN lineage USING (block_number)",
+    )
+    .bind(CHAIN)
+    .bind(OLD_REGISTRY_ADDRESS)
+    .bind(CONTROLLER)
+    .bind(REGISTRY_ADDRESS)
+    .bind(SENDER)
+    .execute(pool)
+    .await?;
+    let node = raw_namehash(&[b"pointer", b"eth"]);
+    let facts = [
+        (
+            OLD_REGISTRY_ADDRESS,
+            NewOwner {
+                node: raw_namehash(&[b"eth"]),
+                label: keccak256(b"pointer"),
+                owner: PRIOR_REGISTRY_OWNER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            OLD_REGISTRY_ADDRESS,
+            NewResolver {
+                node,
+                resolver: OLD_RESOLVER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            CONTROLLER,
+            NameRenewed {
+                name: "pointer".into(),
+                label: keccak256(b"pointer"),
+                cost: U256::from(1),
+                expires: U256::from(1_000_000),
+            }
+            .encode_log_data(),
+        ),
+        (
+            REGISTRY_ADDRESS,
+            Transfer {
+                node,
+                owner: PRIOR_REGISTRY_OWNER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (block, (emitter, fact)) in facts.into_iter().enumerate() {
+        let block = i64::try_from(block)?;
+        insert_log_at(
+            pool,
+            CHAIN,
+            block,
+            &format!("{CHAIN}-old-handoff-transaction-{block}"),
             0,
             emitter,
             fact.topics(),

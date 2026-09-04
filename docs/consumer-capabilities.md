@@ -209,8 +209,10 @@ read path.
 
 For the fallback registry, a current-registry `NewOwner` or `Transfer` creates
 the current record and ends any resolver pointer inherited from the old
-registry. An old-registry `Transfer` does not affect a resolver selected from
-the current registry.
+registry. That handoff is retained across replay even for a same-owner
+`Transfer`; a linked zero-resolver event retracts an inherited pointer that had
+already become readable. An old-registry `Transfer` does not affect a resolver
+selected from the current registry.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)
