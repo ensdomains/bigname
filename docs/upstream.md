@@ -265,7 +265,7 @@ to the applicable entries below.
 
 > **Generated `_change_block` is absent** — bigname's current Domain projection has no entity last-change block, so
 > `BlockChangedFilter` and the Domain, Account, and Resolver `_change_block` inputs remain exact upstream-only instead of
-> substituting publication provenance or the selected served head.
+> substituting publication provenance or the selected [served head](glossary.md#served-head).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility. The existing `block: Block_height` argument only
 > validates an eligible current snapshot.
 > **Since**: `2026-09-03`

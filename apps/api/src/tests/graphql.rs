@@ -2487,8 +2487,7 @@ async fn graphql_name_order_sql_pins_c_collation_in_both_directions() -> Result<
     for direction in ["ASC", "DESC"] {
         let expected = format!(
             "ORDER BY canonical_display_name COLLATE \"C\" {direction}, \
-             namespace COLLATE \"C\" ASC, normalized_name COLLATE \"C\" ASC, \
-             namehash COLLATE \"C\" ASC"
+             namehash COLLATE \"C\" {direction}, namespace COLLATE \"C\" ASC"
         );
         assert!(
             prepared_statements
