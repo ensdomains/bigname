@@ -2,16 +2,13 @@ use super::*;
 
 pub(super) fn append_transfer_permissions(
     output: &mut Interpreted,
-    before: &V1NameState,
+    from: &str,
     after: &V1NameState,
     resolver: Option<String>,
     chain_id: &str,
 ) {
-    let (Some(from), Some(to), Some(authority_key)) = (
-        before.owner.as_deref(),
-        after.owner.as_deref(),
-        after.authority_key.as_deref(),
-    ) else {
+    let (Some(to), Some(authority_key)) = (after.owner.as_deref(), after.authority_key.as_deref())
+    else {
         return;
     };
     if from.eq_ignore_ascii_case(to) {

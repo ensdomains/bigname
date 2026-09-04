@@ -1344,11 +1344,32 @@ fn registrar_transfer_preserves_explicit_ownerless_registry_state() -> anyhow::R
         live.normalized_events.iter().all(|event| {
             !matches!(
                 event.event_kind.as_str(),
-                "SurfaceBound" | "AuthorityEpochChanged" | "PermissionChanged"
+                "SurfaceBound" | "AuthorityEpochChanged"
             )
         }),
         "registrar transfer reopened ownerless registry control"
     );
+    let transfer_permissions = live
+        .normalized_events
+        .iter()
+        .filter(|event| event.block_number == Some(3) && event.event_kind == "PermissionChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transfer_permissions.len(),
+        2,
+        "registrar token transfer lost its resource-scoped audit rows"
+    );
+    assert!(transfer_permissions.iter().all(|event| {
+        event.after_state["scope"]["kind"] == "resource"
+            && event.after_state["scope"].get("resolver_address").is_none()
+    }));
+    assert!(transfer_permissions.iter().any(|event| {
+        event.after_state["subject"] == OWNER && event.after_state["effective_powers"] == json!([])
+    }));
+    assert!(transfer_permissions.iter().any(|event| {
+        event.after_state["subject"] == OWNER_2
+            && event.after_state["effective_powers"] == json!(["resource_control"])
+    }));
     let (_, session) =
         interpret_test_batch_incremental(input(manifests, admissions, Vec::new(), history), None)?;
     assert!(

@@ -122,7 +122,7 @@ fn transfer(
         wrapper_fallback = true;
         fallback_active_from = Some(unwrapped_at);
     }
-    let Some((before, linked)) =
+    let Some((_, linked)) =
         state.transfer_v1_registrar_owner(&selected.source.namespace, &raw_namehash, to.clone())
     else {
         return Ok(Interpreted::new());
@@ -209,15 +209,16 @@ fn transfer(
     let registrar_was_current = previous_active
         .as_ref()
         .is_some_and(|authority| authority.resource_id == linked.resource_id);
-    if !explicit_ownerless_registry || registrar_was_current {
-        append_transfer_permissions(
-            &mut output,
-            &before,
-            &linked,
-            state.v1_resolver(&selected.source.namespace, &raw_namehash),
-            &raw.chain_id,
-        );
-    }
+    let permission_resolver = (!explicit_ownerless_registry || registrar_was_current)
+        .then(|| state.v1_resolver(&selected.source.namespace, &raw_namehash))
+        .flatten();
+    append_transfer_permissions(
+        &mut output,
+        &from,
+        &linked,
+        permission_resolver,
+        &raw.chain_id,
+    );
     let linked_resolver = state.v1_resolver_for_activation(
         &selected.source.namespace,
         &raw_namehash,
