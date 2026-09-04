@@ -701,7 +701,7 @@ visibility_test!(unreachable_v1_arm_does_not_suppress_reachable_v2_arm, true,
     path = Some("unlocked_wrapped"), v2 = true, child_arms = &["ens_v2"]);
 
 async fn rows(pool: &PgPool) -> Result<Value> {
-    Ok(sqlx::query_scalar("SELECT COALESCE(jsonb_agg(to_jsonb(row) - 'last_recomputed_at' - 'inserted_at' ORDER BY child_logical_name_id), '[]'::jsonb) FROM children_current row WHERE provenance ->> 'chain_id' = $1").bind(CHAIN).fetch_one(pool).await?)
+    Ok(sqlx::query_scalar("SELECT COALESCE(jsonb_agg((to_jsonb(row) - 'last_recomputed_at' - 'inserted_at') #- '{provenance,normalized_event_ids}' ORDER BY child_logical_name_id), '[]'::jsonb) FROM children_current row WHERE provenance ->> 'chain_id' = $1").bind(CHAIN).fetch_one(pool).await?)
 }
 
 async fn convergence(

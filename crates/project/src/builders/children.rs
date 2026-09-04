@@ -111,11 +111,8 @@ async fn candidates(
                   AND association.correlation_kind = 'migration_registry_creation'
                   AND association.canonicality_state IN ('canonical', 'safe', 'finalized')
                   AND jsonb_array_length(association.evidence_refs) > 0
-                  AND NOT EXISTS (SELECT 1
-                   FROM jsonb_array_elements(association.evidence_refs)
-                        AS evidence_ref(reference)
-                   WHERE jsonb_typeof(evidence_ref.reference) <> 'object'
-                      OR evidence_ref.reference = '{}'::jsonb)
+                  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(association.evidence_refs) AS evidence_ref(reference)
+                   WHERE jsonb_typeof(evidence_ref.reference) <> 'object' OR evidence_ref.reference = '{}'::jsonb)
                   AND boundary.migration_evidence @> association.evidence_refs
                   AND EXISTS (SELECT 1 FROM chain_lineage lineage
                    WHERE lineage.chain_id = association.chain_id

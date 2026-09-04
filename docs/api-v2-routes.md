@@ -821,7 +821,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   is itself entry history and therefore filters the ENSv1 relation before this
   assertion. The dual-current assertion remains a defensive generation check:
   an unmigrated parent can expose this contradiction, but no ordinary on-chain
-  parent-and-child migration shape reaches it after parent reachability and
+  parent-and-child ENSv1→ENSv2 shape reaches it after parent reachability and
   migration-registry history are applied. This route therefore never chooses one
   by recency, emits two rows for one logical
   child, or adds a row-local unsupported shape.

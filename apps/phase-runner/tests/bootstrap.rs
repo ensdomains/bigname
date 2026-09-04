@@ -963,7 +963,7 @@ async fn child_history_handoff_matches_baseline_migration() -> Result<()> {
     assert!(!installed_structure.is_empty());
     assert_eq!(
         migrated_structure, installed_structure,
-        "the child-registration-history handoff migration and baseline must stay identical"
+        "the child-registration-history schema-migration and baseline must stay identical"
     );
 
     installed.cleanup().await?;
