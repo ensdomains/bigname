@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::support;
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, ens_v2, manifests, repo_root};
 
 const DURATION_SECS: u64 = 365 * 24 * 60 * 60;
 
@@ -32,6 +32,26 @@ fn account(accounts: &[Address], index: usize) -> Result<Address> {
         .get(index)
         .copied()
         .with_context(|| format!("anvil account {index} is missing"))
+}
+
+#[tokio::test]
+async fn connected_ens_v1_v2_migration_paths_emit_expected_facts() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let deployment = ens_v2::deploy_ens_v2(&anvil.client(), &repo_root()).await?;
+    let scratch = support::TempDir::create()?;
+    let profile = manifests::generate_local_sepolia_profile(
+        scratch.path(),
+        &repo_root(),
+        &deployment.manifest_targets(),
+    )?;
+    assert!(
+        profile
+            .root
+            .join("ethereum/ens/ens_v2_migration_l1/v1.toml")
+            .is_file(),
+        "generated Sepolia profile is missing ens_v2_migration_l1/v1.toml"
+    );
+    Ok(())
 }
 
 #[tokio::test]
