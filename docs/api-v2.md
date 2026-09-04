@@ -806,7 +806,19 @@ evidence; issue #529 retains a surface observed only by resolver
 diagnostics and product history. A cursor issued before that change has no
 continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
-continue normally. This boundary does not claim fresh/resumed parity for the
+continue normally.
+
+The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
+keeps the original pre-surface ENSv1 registry `ResolverChanged` row unchanged,
+then adds a name- and resource-linked, state-derived `ResolverChanged` when the
+first active [name surface](glossary.md#surface-name-surface) is learned. Product
+events or name history may therefore gain one historical resolver row, while
+diagnostics may gain each linked resource copy. A cursor issued before this
+change has no continuation guarantee and may be rejected. Consumers must
+discard pre-#613 cursors and restart from the first page; fresh post-publication
+cursors continue normally.
+
+These boundaries do not claim fresh/resumed parity for the
 known pre-existing exception: when a resolver-emitted resource equals
 `namehash(N)`, named-resource and alias preimages can share one retained
 [interpreter state key](glossary.md#interpreter-state-key), so resumed
