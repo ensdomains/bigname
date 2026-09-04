@@ -16,6 +16,7 @@ mod resolver_dependents;
 mod retracted;
 mod topology;
 mod wrapper;
+mod wrapper_registrar;
 
 pub(crate) struct Window<'a> {
     pub(crate) previous: Option<&'a Marker>,
@@ -444,6 +445,8 @@ async fn close_binding_scope(
 ) -> Result<()> {
     authority::include_latest_arm_resources(transaction, chain_id, target.number).await?;
     resolver::include_registry_read_anchors(transaction, chain_id, target.number).await?;
+    wrapper_registrar::include_names_for_scoped_registrars(transaction, chain_id, target.number)
+        .await?;
     sqlx::query(
         "INSERT INTO project_scope_resources
          SELECT binding.resource_id
@@ -475,6 +478,9 @@ async fn close_binding_scope(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to close resource binding scope", error))?;
+
+    wrapper_registrar::include_registrars_for_scoped_wrappers(transaction, chain_id, target.number)
+        .await?;
 
     sqlx::query(
         "INSERT INTO project_scope_names
