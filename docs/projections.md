@@ -265,8 +265,9 @@ classification.
 When a retained direct-registry authority first becomes name-addressable, its
 [`state-derived normalized event`](glossary.md#state-derived-normalized-event)
 of kind `SurfaceBound` carries the observed registry owner. The exact-name
-control summary and effective-controller address relation expose that owner;
-`control.status` remains null unless another selected authority event supplies it.
+control summary exposes that owner, its registration authority context identifies
+the registry-only anchor, and the effective-controller address relation includes
+the owner; `control.status` remains null unless another selected authority event supplies it.
 
 ENSv1 wrapper lifecycle and fuse effects are projected from canonical wrapper
 facts. During registrar grace, the holder and lifecycle state remain visible,
