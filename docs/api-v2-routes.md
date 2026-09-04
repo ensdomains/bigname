@@ -869,7 +869,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registry resource that was ever bound to the name under `scope=both` or
   `scope=registration`, even when the row was stored before the
   [name surface](glossary.md#surface-name-surface) existed and carries no name
-  attribution. `scope=name` returns only rows carrying the name's
+  attribution. A controller-free registrar resource made name-addressable by a
+  later wrapper binding remains in registration-scoped history after that
+  registration is released or superseded. Wrapper lifecycle rows associated
+  through that binding report the registrar lifecycle's `registration_id`, and
+  name-filtered `GET /v2/events` reads follow the association back to the
+  registrar rows. `scope=name` returns only rows carrying the name's
   `logical_name_id`. A row on a resource that was never bound to the name is
   reachable through `GET /v2/diagnostics/events` via the registry resource
   recorded internally at
@@ -977,6 +982,12 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   enumeration while the partial marker is present. NameWrapper holder
   enumeration remains separately unsupported, and ENSv2 registry operator
   approval remains separately narrowed until indexed.
+  For a name registered first and wrapped in a later transaction, exact-name
+  detail and lifecycle history expose the registrar lifecycle's
+  `registration_id`, while a permissions `name` filter selects the current
+  wrapper authority resource. Combining that name with the registrar lifecycle
+  ID is therefore a proven-empty permission selection; the registrar resource
+  remains independently queryable by `registration_id` as an audit read.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a

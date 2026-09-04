@@ -177,8 +177,10 @@ resource; a later registry-owner divergence remains current and receives the sur
 reactivating the dormant registrar. A `NameWrapped` observation instead binds
 the surface to the wrapper resource; its `SurfaceBound.after_state.wrapped_registrar_resource_id`
 records the exact registrar resource whose token was wrapped, so Project can join that lineage even
-when registration and wrapping occurred in different transactions. Another same-namespace preimage
-can create the surface without binding the registrar until the next numeric BaseRegistrar event,
+when registration and wrapping occurred in different transactions.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L278 @ ens_v1@91c966f)
+Another same-namespace preimage can create the surface without binding the registrar until the next
+numeric BaseRegistrar event,
 provided the registrar remains the current authority. The numeric event then emits the durable
 binding without rewriting the earlier lifecycle rows. The earlier lifecycle rows
 remain resource-keyed and immutable while Project can then attribute the matching registrar lineage
