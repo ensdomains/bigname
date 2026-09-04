@@ -651,7 +651,7 @@ pub fn label_id(label: &str) -> U256 {
     U256::from_be_bytes(keccak256(label.as_bytes()).0)
 }
 
-pub fn role_bit(bit: usize) -> U256 {
+pub(crate) fn role_bit(bit: usize) -> U256 {
     U256::from(1_u8) << bit
 }
 
@@ -834,7 +834,7 @@ pub async fn batch_transfer_registry_tokens(
     .await
 }
 
-pub async fn grant_root_roles(
+pub(crate) async fn grant_root_roles(
     rpc: &RpcClient,
     registry: Address,
     from: Address,
@@ -999,17 +999,22 @@ pub async fn deploy_permissioned_resolver(
             "VerifiableFactory deployProxy",
         )
         .await?;
+    let proxy = proxy_deployed_address(rpc, &receipt.tx_hash).await?;
+    Ok(Deployed {
+        address: proxy,
+        block_number: receipt.block_number,
+    })
+}
+
+pub(crate) async fn proxy_deployed_address(rpc: &RpcClient, tx_hash: &str) -> Result<Address> {
     let raw_receipt = rpc
-        .call(
-            "eth_getTransactionReceipt",
-            serde_json::json!([receipt.tx_hash]),
-        )
+        .call("eth_getTransactionReceipt", serde_json::json!([tx_hash]))
         .await?;
     let proxy_topic = format!(
         "{:#x}",
         keccak256("ProxyDeployed(address,address,uint256,address)".as_bytes())
     );
-    let proxy = raw_receipt
+    raw_receipt
         .get("logs")
         .and_then(serde_json::Value::as_array)
         .into_iter()
@@ -1024,11 +1029,7 @@ pub async fn deploy_permissioned_resolver(
                 .ok()
                 .or_else(|| format!("0x{}", &padded[padded.len() - 40..]).parse().ok())
         })
-        .context("ProxyDeployed log missing from deployProxy receipt")?;
-    Ok(Deployed {
-        address: proxy,
-        block_number: receipt.block_number,
-    })
+        .context("ProxyDeployed log missing from transaction receipt")
 }
 
 pub async fn set_resolver_text(
