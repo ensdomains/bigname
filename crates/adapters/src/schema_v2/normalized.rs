@@ -136,23 +136,6 @@ pub(super) fn materialize_boundary(
         let identity_prefix = format!("{derivation}:{}:{}:{}:{}:", source.manifest_id, block.chain_id, block.block_hash, draft.identity_suffix);
         let ordinal = ordinal + output.normalized_events.iter().filter(|event| event.event_identity.starts_with(&identity_prefix)).count();
         let before_state_explicit = draft.explicit_before.is_some();
-        if draft.event_kind == "ResolverChanged"
-            && let (Some(namehash), Some(resolver), Some(resource_id)) = (
-                draft.after_state["node"]
-                    .as_str()
-                    .or_else(|| draft.after_state["namehash"].as_str()),
-                draft.after_state.get("resolver").and_then(serde_json::Value::as_str),
-                draft.resource_id,
-            )
-        {
-            state.remember_v1_resolver_linked_resource(
-                &source.namespace,
-                namehash,
-                resolver,
-                resource_id,
-                draft.logical_name_id.clone(),
-            );
-        }
         let state_key = interpreter_state_key(
             &source.namespace,
             draft.logical_name_id.as_deref(),

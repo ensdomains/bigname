@@ -230,18 +230,6 @@ impl State {
         self.v1_resolvers.get(&v1_key(namespace, namehash)).cloned()
     }
 
-    #[cfg(test)]
-    pub(in crate::schema_v2) fn v1_resolver_linked_resources(
-        &self,
-        namespace: &str,
-        namehash: &str,
-    ) -> imbl::OrdMap<Uuid, V1ResolverLink> {
-        self.v1_resolver_linked_resources
-            .get(&v1_key(namespace, namehash))
-            .cloned()
-            .unwrap_or_default()
-    }
-
     pub(in crate::schema_v2) fn replace_known_source_manifest_ids(
         &mut self,
         manifest_ids: imbl::OrdSet<i64>,

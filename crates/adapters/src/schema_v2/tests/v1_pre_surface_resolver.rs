@@ -713,61 +713,6 @@ fn registered_pre_surface_registry_authority_reactivates_after_expiry_in_every_r
     Ok(())
 }
 
-#[test]
-fn release_boundary_tracks_linked_resource_in_live_and_restored_state() -> anyhow::Result<()> {
-    let (manifests, admissions, node) = fixture();
-    let catalog = super::super::catalog::Catalog::new(manifests, Vec::new(), admissions)?;
-    let source = catalog
-        .source(REGISTRY_MANIFEST_ID)
-        .expect("registry manifest")
-        .clone();
-    let namehash = format!("{node:#x}");
-    let selected = interpret_test_batch(input(
-        fixture().0,
-        fixture().1,
-        Vec::new(),
-        vec![resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 1)?],
-    ))?
-    .normalized_events
-    .iter()
-    .find(|event| event.event_kind == "ResolverChanged")
-    .map(prior_event)
-    .expect("old-registry resolver selection");
-    let mut live_state = super::super::state::State::new(vec![selected.clone()], Vec::new());
-    let mut live = BatchOutput::default();
-    super::super::normalized::materialize_boundary(
-        &source,
-        &test_block(2),
-        vec![super::super::protocol::EventDraft {
-            event_kind: "ResolverChanged".to_owned(),
-            logical_name_id: Some(format!("ens:{namehash}")),
-            resource_id: Some(Uuid::from_u128(6_141)),
-            identity_suffix: format!("ResolverChanged:{namehash}:{RESOLVER_A}"),
-            explicit_before: Some(json!({"resolver":serde_json::Value::Null})),
-            after_state: json!({
-                "source_event":"AuthorityEpochChanged",
-                "resolver":RESOLVER_A,
-                "namehash":namehash,
-            }),
-            state_scope: format!("boundary:{namehash}:resolver"),
-        }],
-        &mut live_state,
-        &mut live,
-    );
-    let restored_state = super::super::state::State::new(
-        std::iter::once(selected)
-            .chain(live.normalized_events.iter().map(prior_event))
-            .collect(),
-        Vec::new(),
-    );
-    assert_eq!(
-        live_state.v1_resolver_linked_resources("ens", &namehash),
-        restored_state.v1_resolver_linked_resources("ens", &namehash),
-        "release-boundary linked resources differ between live and restored state"
-    );
-    Ok(())
-}
-
 fn assert_original_unchanged(prefix: &BatchOutput, complete: &BatchOutput) {
     let original = prefix
         .normalized_events
