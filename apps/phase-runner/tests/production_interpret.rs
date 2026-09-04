@@ -1556,21 +1556,30 @@ async fn pre_surface_resolver_materialization_matches_fresh_resume_and_redo() ->
     assert_eq!(fresh_snapshot["pointer_count"], 1);
     assert_eq!(fresh_snapshot["binding_count"], 1);
     run_project(redone.pool(), "ethereum-mainnet", 2, 0, 2).await?;
-    let projected_control: (Option<String>, Option<String>, bool) = sqlx::query_as(
-        "SELECT declared_summary #>> '{control,registry_owner}',
+    let projected_control: (Option<String>, Option<String>, Option<String>, bool, bool) =
+        sqlx::query_as(
+            "SELECT declared_summary #>> '{control,registry_owner}',
                 declared_summary #>> '{control,status}',
+                declared_summary #>> '{registration,authority_kind}',
+                declared_summary #>> '{registration,authority_key}' IS NOT NULL,
                 EXISTS (SELECT 1 FROM address_names_current address
                         WHERE address.logical_name_id = name_current.logical_name_id
                           AND address.relation = 'effective_controller'
                           AND address.address = $1)
          FROM name_current WHERE raw_name = 'pointer.eth'",
-    )
-    .bind(REGISTRANT)
-    .fetch_one(redone.pool())
-    .await?;
+        )
+        .bind(REGISTRANT)
+        .fetch_one(redone.pool())
+        .await?;
     assert_eq!(
         projected_control,
-        (Some(REGISTRANT.to_owned()), None, true),
+        (
+            Some(REGISTRANT.to_owned()),
+            None,
+            Some("registry_only".to_owned()),
+            true,
+            true
+        ),
         "owned surface materialization must match release-rebound control fields"
     );
     fresh.cleanup().await?;

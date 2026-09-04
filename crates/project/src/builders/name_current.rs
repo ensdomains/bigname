@@ -265,9 +265,9 @@ pub(super) async fn build(
                    event.after_state ->> 'authority_key' AS authority_key
             FROM project_authority_events event
             WHERE event.logical_name_id = surface.logical_name_id
-              AND event.event_kind IN (
-                  'RegistrationGranted', 'AuthorityEpochChanged'
-              )
+              AND (
+                    event.event_kind IN ('RegistrationGranted', 'AuthorityEpochChanged')
+                 OR (event.event_kind = 'SurfaceBound' AND event.after_state @> '{"state_derived":true,"authority_kind":"registry_only"}'))
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
