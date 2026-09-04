@@ -243,12 +243,14 @@ to the applicable entries below.
 > normalization and does not escape `%`, `_`, or backslash. The legacy `DomainFilter` retains its existing normalization
 > and escaped-pattern behavior.
 > **Upstream**: Graph Node constructs contains patterns this way and passes them to `LIKE`/`ILIKE`
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173).
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1432-L1476 @ graph_node@aefe173)
+> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L1532-L1545 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Since**: `2026-09-03`
 
 > **Generated GraphQL text uses expression-local C collation** — Graph Node rejects a store database whose collation or
 > character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
+> graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L164 @
 > graph_node@aefe173). Bigname applies `COLLATE "C"` to each generated Domain text comparison and order expression but does
 > not add a database-locale startup gate in this API-only slice.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
@@ -266,6 +268,9 @@ to the applicable entries below.
 > **Generated `_change_block` is absent** — bigname's current Domain projection has no entity last-change block, so
 > `BlockChangedFilter` and the Domain, Account, and Resolver `_change_block` inputs remain exact upstream-only instead of
 > substituting publication provenance or the selected [served head](glossary.md#served-head).
+> **Upstream**: Graph Node adds `_change_block: BlockChangedFilter` to generated filters (upstream:
+> .refs/graph_node/graph/src/schema/api.rs:L1202-L1209 @ graph_node@aefe173) and defines its `number_gte` member
+> (upstream: .refs/graph_node/graph/src/schema/meta.graphql:L55-L57 @ graph_node@aefe173).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility. The existing `block: Block_height` argument only
 > validates an eligible current snapshot.
 > **Since**: `2026-09-03`

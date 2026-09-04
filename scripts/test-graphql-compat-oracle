@@ -26,7 +26,12 @@ resolver_filter_members=sorted(path.removeprefix("input:Resolver_filter.") for p
 domain_order_values=sorted(path.removeprefix("enum:Domain_orderBy.") for path in captured_surface if path.startswith("enum:Domain_orderBy."))
 account_order_values=sorted(path.removeprefix("enum:Account_orderBy.") for path in captured_surface if path.startswith("enum:Account_orderBy."))
 resolver_order_values=sorted(path.removeprefix("enum:Resolver_orderBy.") for path in captured_surface if path.startswith("enum:Resolver_orderBy."))
-domain_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID"))),"owner":S("String"),"owner_in":lst(nn(S("String"))),"name":S("String"),"name_contains":S("String")}
+domain_filter_types={
+    "id":S("ID"), "id_not":S("ID"), "id_gt":S("ID"), "id_gte":S("ID"),
+    "id_lt":S("ID"), "id_lte":S("ID"),
+    "id_in":lst(nn(S("ID"))), "id_not_in":lst(nn(S("ID"))),
+    "owner":S("String"), "owner_in":lst(nn(S("String"))),
+    "name":S("String"), "name_contains":S("String")}
 account_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID")))}
 resolver_filter_types={"id":S("ID"),"id_in":lst(nn(S("ID"))),"address":S("Bytes"),"address_in":lst(nn(S("Bytes"))),"domain":S("String"),"domain_in":lst(nn(S("String")))}
 types = [{"kind":"SCALAR","name":name,"fields":None,"inputFields":None,"enumValues":None,"possibleTypes":None} for name in ("String","Boolean","Int","Float","ID","BigInt","Bytes")]

@@ -174,13 +174,15 @@ async fn graphql_generated_resolver_filters_match_served_values() -> Result<()> 
     for filter in [
         json!({"address": mixed_address}),
         json!({"domain": mixed_domain}),
+        json!({"id": mixed_id.clone()}),
     ] {
         let rows = generated_resolver_rows(&database, filter).await?;
         assert!(rows.iter().any(|row| row["id"] == id));
     }
     assert!(generated_resolver_rows(&database, json!({"id": id, "domain": GRAPHQL_BOB_NAMEHASH})).await?.is_empty());
-    for noncanonical in [mixed_id, id.replacen("0x", "0X", 1)] {
-        assert!(generated_resolver_rows(&database, json!({"id": noncanonical})).await?.is_empty());
+    let uppercase_prefix = id.replacen("0x", "0X", 1);
+    assert!(generated_resolver_rows(&database, json!({"id": uppercase_prefix})).await?.is_empty());
+    for noncanonical in [mixed_id, uppercase_prefix] {
         let point = post_graphql(database.app_state(), "query Resolver($id: ID!) { resolver(id: $id) { id address } }", json!({"id": noncanonical})).await?;
         assert!(point["data"]["resolver"].is_null());
     }

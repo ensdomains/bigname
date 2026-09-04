@@ -656,6 +656,10 @@ Non-positive `first` returns an empty page, positive `first` is capped at
 `1_000_000`.
 
 `BlockChangedFilter` and each `_change_block` input remain exact upstream-only.
+Graph Node adds that input and member to generated filters (upstream:
+.refs/graph_node/graph/src/schema/api.rs:L1202-L1209 @ graph_node@aefe173)
+(upstream: .refs/graph_node/graph/src/schema/meta.graphql:L55-L57 @
+graph_node@aefe173).
 The current projection has no entity last-change block, so the API does not
 substitute a block from `chain_positions`, the selected served head,
 `manifest_version`, `last_recomputed_at`, or a resolver inventory boundary.

@@ -123,7 +123,7 @@ pub fn resolver_entity_filter_to_storage(
 ) -> Option<GeneratedResolverFilter> {
     let filter = filter.unwrap_or_default();
     let id = match filter.id {
-        Some(id) => Some(parse_resolver_id(id.as_str())?),
+        Some(id) => Some(parse_resolver_filter_id(id.as_str())?),
         None => None,
     };
     Some(GeneratedResolverFilter {
@@ -133,6 +133,23 @@ pub fn resolver_entity_filter_to_storage(
             .domain
             .map(|domain| bigname_storage::normalize_evm_b256(&domain)),
     })
+}
+
+fn parse_resolver_filter_id(value: &str) -> Option<ParsedResolverId> {
+    let (address, namehash) = value.split_once('-')?;
+    if namehash.contains('-') || !filter_hex(address, 40) || !filter_hex(namehash, 64) {
+        return None;
+    }
+    Some(ParsedResolverId {
+        address: address.to_ascii_lowercase(),
+        namehash: namehash.to_ascii_lowercase(),
+    })
+}
+
+fn filter_hex(value: &str, digits: usize) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == digits && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 pub fn parse_resolver_id(value: &str) -> Option<ParsedResolverId> {
