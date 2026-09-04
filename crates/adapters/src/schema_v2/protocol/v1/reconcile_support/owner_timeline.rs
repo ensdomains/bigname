@@ -59,8 +59,20 @@ impl OwnerTimeline {
             .iter()
             .filter(|(position, _)| divergence_start.is_none_or(|start| *position < start))
             .filter(|(position, owner)| {
-                registry_owner_before(&registry_owners, *position) == Some(owner)
-                    || registry_owner_after(&registry_owners, *position) == Some(owner)
+                let matches_prior_setup = registry_owner_before(&registry_owners, *position)
+                    .filter(|(_, registry_owner)| registry_owner == owner)
+                    .is_some_and(|(registry_position, _)| {
+                        !registrar_transfers.iter().any(
+                            |(intervening_position, intervening_owner)| {
+                                registry_position < intervening_position
+                                    && intervening_position < position
+                                    && intervening_owner != owner
+                            },
+                        )
+                    });
+                matches_prior_setup
+                    || registry_owner_after(&registry_owners, *position)
+                        .is_some_and(|(_, registry_owner)| registry_owner == owner)
             })
             .map(|(position, _)| *position)
             .collect();
@@ -91,6 +103,10 @@ impl OwnerTimeline {
         &self.reconciled_transfer_positions
     }
 }
+// The current controller registers to itself, writes the requested registry owner, transfers the
+// token to that owner, and then emits NameRegistered.
+// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L294-L317 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f)
 #[rustfmt::skip]
 fn confirmed_registry_positions(events: &EventIndex, targets: &[usize], transfers: &[(Position, String)], owners: &[(Position, String)]) -> BTreeSet<Position> {
     owners.iter().filter_map(|(registry_position, owner)| {
@@ -99,12 +115,12 @@ fn confirmed_registry_positions(events: &EventIndex, targets: &[usize], transfer
     }).collect()
 }
 #[rustfmt::skip]
-fn registry_owner_before(owners: &[(Position, String)], position: Position) -> Option<&String> {
-    owners.iter().filter(|(owner_position, _)| *owner_position < position).max_by_key(|(owner_position, _)| *owner_position).map(|(_, owner)| owner)
+fn registry_owner_before(owners: &[(Position, String)], position: Position) -> Option<&(Position, String)> {
+    owners.iter().filter(|(owner_position, _)| *owner_position < position).max_by_key(|(owner_position, _)| *owner_position)
 }
 #[rustfmt::skip]
-fn registry_owner_after(owners: &[(Position, String)], position: Position) -> Option<&String> {
-    owners.iter().filter(|(owner_position, _)| *owner_position > position).min_by_key(|(owner_position, _)| *owner_position).map(|(_, owner)| owner)
+fn registry_owner_after(owners: &[(Position, String)], position: Position) -> Option<&(Position, String)> {
+    owners.iter().filter(|(owner_position, _)| *owner_position > position).min_by_key(|(owner_position, _)| *owner_position)
 }
 
 pub(super) fn remove_reconciled_transfer_structure(
