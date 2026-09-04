@@ -82,7 +82,7 @@ async fn fresh_activation_and_candidate_state_redo_retain_identical_interpret_en
     // The reduced corpus omits the registry reclaim, Graveyard transfer, and
     // resolver clear from the production unwrapped sequence. This test proves
     // fresh-versus-redo Interpret equivalence only; publication is blocked on
-    // the faithful path by #<interpret-unwrapped-predecessor-issue>.
+    // the faithful path by #822.
 
     let fresh_state = semantic_end_state(fresh.pool()).await?;
     let redo_state = semantic_end_state(redo.pool()).await?;

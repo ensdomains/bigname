@@ -202,14 +202,14 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     // registry `NewOwner` reclaim, registry `Transfer` to the Graveyard, and
     // resolver-clear logs. It proves exactly-one predecessor materialization,
     // not a production publication path. The faithful path remains ignored
-    // below until #<interpret-unwrapped-predecessor-issue> is resolved.
+    // below until #822 is resolved.
 
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "#<interpret-unwrapped-predecessor-issue>: activated migration boundary has 0 active ENSv1 predecessors matching its resource selector; expected exactly one"]
+#[ignore = "#822: activated migration boundary has 0 active ENSv1 predecessors matching its resource selector; expected exactly one"]
 async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResult {
     let database = database("interpret_faithful_unwrapped_predecessor").await?;
     let pool = database.pool();
