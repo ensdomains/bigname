@@ -201,7 +201,12 @@ async fn graphql_legacy_count_plan_keeps_flat_eligibility_join() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     pad_generated_domain_plans(&database).await?;
-    let explain = crate::graphql::explain_phase_graphql_name_count(&database.lookup_pool, &["ethereum-mainnet".into()]).await?;
+    let filter = bigname_storage::NameCurrentListFilter { namespace: Some("ens".into()), ..Default::default() };
+    let chains = vec!["ethereum-mainnet".into()];
+    let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ");
+    crate::graphql::push_filtered_names(&mut builder, &filter, None, None, Some(&chains));
+    builder.push(" SELECT COUNT(*) FROM filtered_names");
+    let explain: Value = builder.build().fetch_one(&database.lookup_pool).await?.try_get(0)?;
     let surface = plan_nodes(&explain).into_iter().find(|node| node["Relation Name"] == "name_surfaces").context("name_surfaces plan")?;
     assert_eq!(surface["Actual Loops"], 1, "count eligibility must remain flat: {surface}");
     assert!(explain[0].get("JIT").is_none(), "count plan must not trigger JIT: {explain}");
