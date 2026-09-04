@@ -808,7 +808,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
   A V1 ownerless row linked only to the registry resource retained for reads is
   visible through name history with `registration_id=null` when it carries the
-  name's `logical_name_id`. Name history returns a pre-surface owner row on a
+  name's `logical_name_id`. Name history returns a
+  [pre-surface](glossary.md#pre-surface) owner row on a
   registry resource that was ever bound to the name under `scope=both` or
   `scope=registration`, even when the row was stored before the
   [name surface](glossary.md#surface-name-surface) existed and carries no name

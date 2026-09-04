@@ -1578,6 +1578,11 @@ may serve as a name — see [non-name form](#non-name-form) for what serves when
 it may not. A preimage improves display only; it never
 creates ownership, resolver, record, or primary-name truth.
 
+## Pre-surface
+
+a name whose registry events were observed before any plaintext [name
+surface](#surface-name-surface) bound those facts to its logical name identity.
+
 ## Projection
 
 a disposable read-model table whose event-derived serving fields are rebuilt
