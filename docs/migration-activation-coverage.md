@@ -23,8 +23,9 @@ The dispositions are:
   Interpret defect prevents the activated boundary from being committed and
   reaching Project.
 
-Every registrar-token-path `unwrapped` row, U-01 through U-09, is deferred by the
-same blocker named below. No row requires
+Every registrar-token-path `unwrapped` row whose migration transaction carries
+the controller's registry cleanup—including U-01 through U-09, R-02, P-06,
+P-07, P-08, and P-11—is deferred by the same blocker named below. No row requires
 new schema, manifest, event, selector, or public vocabulary. Each scenario links its exact
 immutable catalog result rather than inferring it from another scenario. The
 final column separately names the exact checked-in test when the repository
@@ -41,13 +42,13 @@ controller, while a plain `BaseRegistrar.register` predecessor is a separate ope
 question. The reduced
 `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
 fixture omits the registry reclaim and cleanup logs and therefore tests only
-transition materialization. In every U-01 through U-09 catalog transaction, the
+transition materialization. In every affected catalog transaction, the
 controller's `setRecord` emits `ENSRegistry.Transfer(node, Graveyard)` before the
 registrar cleanup. That exact log makes Interpret replace the registrar-backed
 predecessor before the writer can commit the transition, so end-to-end publication
-for all nine rows remains deferred to `#822`
+for all affected rows remains deferred to `#822`
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33-L44 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33-L41 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f).
 
 | ID | Production disposition | Pinned exact catalog result | Checked-in rule anchor |
@@ -104,7 +105,7 @@ for all nine rows remains deferred to `#822`
 | G-04 | non-boundary — wrapper cleanup history only | [validation/G-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/G-04.json) | `cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes` |
 | G-05 | non-boundary — prehashed cleanup has the same historical class | non-executed [catalog.md entry](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/catalog.md); pinned upstream unit evidence | `cross_family_registrar_cleanup_and_historical_renewal_reject_lookalikes` |
 | R-01 | non-boundary — complete synchronized-renewal effects activate | [validation/R-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-01.json) | `bulk_renewals_with_a_shared_expiry_correlate_per_name_envelopes` |
-| R-02 | activated authority group after a distinct renewal group | [validation/R-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-02.json) | `later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope`; authority matrix |
+| R-02 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/R-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-02.json) | `later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope`; authority matrix |
 | R-03 | refused — renewal transaction reverts | [validation/R-03.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-03.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
 | R-04 | refused — migrated-name renewal reverts | [validation/R-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-04.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
 | R-05 | non-boundary — historical synchronization effects only | [validation/R-05.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/R-05.json) | `aligned_v1_expiry_keeps_base_renewal_out_of_v2_evidence`; `later_idempotent_expiry_update_does_not_collapse_the_renewal_envelope` |
@@ -112,11 +113,11 @@ for all nine rows remains deferred to `#822`
 | P-03 | refused — post-boundary ENSv1 operator write reverts | [validation/P-03.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-03.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
 | P-04 | refused — post-boundary wrapper write reverts | [validation/P-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-04.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
 | P-05 | non-boundary — unmigrated sibling remains on ENSv1 | [validation/P-05.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-05.json) | `unmigrated_child_proves_no_boundary` |
-| P-06 | activated boundary followed by ordinary ENSv2 renewal | [validation/P-06.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-06.json) | authority matrix; ordinary renewal remains independently admitted |
-| P-07 | activated boundary followed by ordinary token regeneration | [validation/P-07.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-07.json) | `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` retains correlated token regeneration |
-| P-08 | activated boundary followed by ordinary ENSv2 transfer | [validation/P-08.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-08.json) | authority matrix; ordinary transfer remains independently admitted |
+| P-06 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/P-06.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-06.json) | authority matrix; ordinary renewal remains independently admitted |
+| P-07 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/P-07.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-07.json) | `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` retains correlated token regeneration |
+| P-08 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/P-08.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-08.json) | authority matrix; ordinary transfer remains independently admitted |
 | P-09 | non-boundary — fresh ENSv2 registration after reservation lapse | [validation/P-09.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-09.json) | `reservation_without_claim_boundary`; reservation flood fixture |
-| P-11 | activated boundary followed by ordinary ENSv2 release | [validation/P-11.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-11.json) | authority matrix; Project released-v2-authority tests |
+| P-11 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal (`#822`); post-boundary effect stays independently admitted | [validation/P-11.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/P-11.json) | authority matrix; Project released-v2-authority tests |
 
 The exact catalog outcomes above are pinned task evidence; the following
 checked-in upstream sources pin the contract mechanisms behind each family.
