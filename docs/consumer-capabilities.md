@@ -578,7 +578,7 @@ canonical predicates and their order/tie-break expressions deliberately omit
 `COLLATE "C"` so PostgreSQL can use `name_current_lookup_idx`; this follows the
 existing indexed Resolver-order precedent above and the hexadecimal-collation
 [deployment contract](storage.md). A noncanonical ID range keeps
-expression-local C comparison and is table-linear. Otherwise, `COLLATE "C"` is
+expression-local C comparison and requires a linear scan. Otherwise, `COLLATE "C"` is
 used only where collation changes semantics: generated `raw_name` comparisons
 and the name order key. Generated name equality, range, membership, and pattern operators
 compare the supplied text directly with the nullable served `Domain.name`; they
@@ -662,8 +662,8 @@ graph_node@aefe173). The local
 `registrationDate` extension remains; every other upstream order value is
 assigned an exact upstream-only disposition and is absent from the local enum.
 The default and explicit `id` order use `name_current_lookup_idx` without a
-sort. ID equality, membership, and canonical ranges are index-bounded; ID
-negations and noncanonical ranges,
+sort. ID equality, membership, and canonical ranges use a B-tree scan whose
+returned rows stay near the requested page size; ID negations and noncanonical ranges,
 every name operator, and the other served order values have cost linear in the
 eligible names table, although filtering and sorting still occur below `LIMIT`.
 Graph Node creates an attribute index for every eligible entity column and uses
@@ -674,7 +674,7 @@ graph_node@aefe173) (upstream:
 graph_node@aefe173). Bigname lacks equivalent indexes for raw-name
 equality/range/prefix and name ordering and for the date, owner, and Resolver
 sort expressions. Adding them is a separate schema-migration slice; substring,
-suffix, nocase, and negated patterns remain table-linear under the upstream
+suffix, nocase, and negated patterns still require scans under the upstream
 operator/index combination as well.
 `createdAt` still serves epoch zero when no projected timestamp exists; its SQL
 `COALESCE(..., TO_TIMESTAMP(0))` makes those rows sort as numeric value `0`,

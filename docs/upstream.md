@@ -260,7 +260,7 @@ to the applicable entries below.
 > generated expression's semantics.
 > **Since**: `2026-09-03`
 
-> **Most generated Domain name filters and non-ID orders are table-linear** — the default and explicit ID order and
+> **Most generated Domain name filters and non-ID orders require linear scans** — the default and explicit ID order and
 > selective positive ID predicates with canonical operands use `name_current_lookup_idx`. Noncanonical ID ranges, ID negations, every name operator, and the name, date,
 > owner, Resolver, and local registration-date orders have cost linear in bigname's eligible names table. Graph Node
 > creates indexes for eligible entity attributes and uses B-trees for ordinary scalar attributes (upstream:
