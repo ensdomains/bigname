@@ -1,5 +1,10 @@
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
 use alloy_primitives::Address;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use super::support;
@@ -27,6 +32,291 @@ async fn compact_records(run: &support::PipelineRun, name: &str, query: &str) ->
         .await?;
     assert_eq!(status, 200, "records lookup for {name} failed: {body}");
     Ok(body)
+}
+
+pub(super) struct V2Api {
+    child: Child,
+    pub(super) base_url: String,
+    pub(super) client: reqwest::Client,
+}
+
+impl Drop for V2Api {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+pub(super) async fn start_v2_api(
+    run: &support::PipelineRun,
+    chain_rpc_urls: &[(&str, &str)],
+) -> Result<V2Api> {
+    let root = repo_root();
+    let cargo = std::env::var_os("BIGNAME_E2E_REAL_CARGO")
+        .or_else(|| std::env::var_os("CARGO"))
+        .unwrap_or_else(|| "cargo".into());
+    let status = tokio::process::Command::new(cargo)
+        .current_dir(&root)
+        .args([
+            "build",
+            "--locked",
+            "-p",
+            "bigname-api",
+            "--bin",
+            "bigname-api",
+        ])
+        .status()
+        .await?;
+    ensure!(status.success(), "build real API binary for e2e");
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
+        .unwrap_or_else(|| root.join("target"));
+    let binary = target.join("debug/bigname-api");
+    ensure!(binary.is_file(), "API binary missing at {binary:?}");
+    let bind_addr = free_addr()?;
+    let metrics_addr = free_addr()?;
+    let mut command = Command::new(binary);
+    command
+        .current_dir(&root)
+        .args([
+            "serve",
+            "--bind-addr",
+            &bind_addr,
+            "--metrics-bind-addr",
+            &metrics_addr,
+        ])
+        .args(["--database-url", &run.db.url, "--max-connections", "4"])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    for (chain, url) in chain_rpc_urls {
+        command.args(["--chain-rpc-url", &format!("{chain}={url}")]);
+    }
+    let child = command.spawn()?;
+    let api = V2Api {
+        child,
+        base_url: format!("http://{bind_addr}"),
+        client: reqwest::Client::new(),
+    };
+    for _ in 0..100 {
+        if api
+            .client
+            .get(format!("{}/healthz", api.base_url))
+            .send()
+            .await
+            .is_ok()
+        {
+            return Ok(api);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!("real API did not become ready at {}", api.base_url)
+}
+
+fn free_addr() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.to_string())
+}
+
+async fn v2_records(api: &V2Api, name: &str, source: &str) -> Result<Value> {
+    let response = api
+        .client
+        .get(format!(
+            "{}/v2/names/{name}/records?namespace=ens&source={source}&keys=addr:60",
+            api.base_url
+        ))
+        .send()
+        .await?;
+    let status = response.status();
+    let body: Value = response.json().await?;
+    assert_eq!(status, 200, "v2 records lookup failed: {body}");
+    Ok(body)
+}
+
+fn assert_addr60_not_found(body: &Value) {
+    assert_eq!(
+        pointer(body, "/data/records/addr:60/status"),
+        "not_found",
+        "addr:60 should be absent: {body}"
+    );
+    assert!(body.pointer("/data/records/addr:60/value").is_none());
+    assert!(body.pointer("/data/addresses/60").is_none());
+    assert!(body.pointer("/data/primary_address").is_none());
+}
+
+fn addr60_observation(body: &Value) -> Value {
+    json!({
+        "record": {
+            "status": body.pointer("/data/records/addr:60/status"),
+            "value": body.pointer("/data/records/addr:60/value"),
+        },
+        "address": body.pointer("/data/addresses/60"),
+        "primary_address": body.pointer("/data/primary_address"),
+    })
+}
+
+async fn enable_ens_verified_route(
+    run: &support::PipelineRun,
+    logical_name_id: &str,
+    universal: Address,
+) -> Result<()> {
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions \
+             (manifest_version, namespace, source_family, chain_id, deployment_label, \
+              rollout_status, normalizer_version, file_path, manifest_payload) \
+         VALUES (1, 'ens', 'ens_execution', 'ethereum-mainnet', 'ens_v1', \
+                 'shadow', 'e2e', 'e2e/ens_execution/v1.toml', \
+                 jsonb_build_object('capability_flags', jsonb_build_object( \
+                     'verified_resolution', jsonb_build_object('status', 'shadow')))) \
+         RETURNING manifest_id",
+    )
+    .fetch_one(&run.db.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instances \
+             (contract_instance_id, chain_id, contract_kind) \
+         VALUES ('68200000-0000-0000-0000-000000000001', \
+                 'ethereum-mainnet', 'contract')",
+    )
+    .execute(&run.db.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances \
+             (manifest_id, chain_id, declaration_kind, declaration_name, \
+              contract_instance_id, declared_address, role, proxy_kind, \
+              start_block_number) \
+         VALUES ($1, 'ethereum-mainnet', 'contract', 'universal_resolver', \
+                 '68200000-0000-0000-0000-000000000001', $2, \
+                 'universal_resolver', 'none', 0)",
+    )
+    .bind(manifest_id)
+    .bind(format!("{universal:#x}"))
+    .execute(&run.db.pool)
+    .await?;
+    let topology = sqlx::query(
+        r#"
+        UPDATE name_current name
+        SET declared_summary = jsonb_set(
+            name.declared_summary,
+            '{topology}',
+            jsonb_build_object(
+                'registry_path', jsonb_build_array(jsonb_build_object(
+                    'logical_name_id', name.logical_name_id,
+                    'namespace', name.namespace,
+                    'normalized_name', name.raw_name,
+                    'canonical_display_name', name.raw_name,
+                    'namehash', name.namehash,
+                    'resource_id', name.resource_id,
+                    'binding_kind', name.binding_kind
+                )),
+                'subregistry_path', '[]'::jsonb,
+                'resolver_path', jsonb_build_array(jsonb_build_object(
+                    'logical_name_id', name.logical_name_id,
+                    'namespace', name.namespace,
+                    'normalized_name', name.raw_name,
+                    'canonical_display_name', name.raw_name,
+                    'resource_id', name.resource_id,
+                    'chain_id', name.declared_summary #>> '{resolver,chain_id}',
+                    'address', name.declared_summary #>> '{resolver,address}',
+                    'latest_event_kind',
+                        name.declared_summary #>> '{resolver,latest_event_kind}'
+                )),
+                'wildcard', jsonb_build_object(
+                    'source', NULL, 'matched_labels', '[]'::jsonb
+                ),
+                'alias', jsonb_build_object(
+                    'final_target', NULL, 'hops', '[]'::jsonb
+                ),
+                'version_boundaries', jsonb_build_object(
+                    'topology_version_boundary', inventory.record_version_boundary,
+                    'record_version_boundary', inventory.record_version_boundary
+                ),
+                'transport', jsonb_build_object(
+                    'source_chain_id', NULL, 'target_chain_id', NULL,
+                    'contract_address', NULL, 'latest_event_kind', NULL
+                )
+            ),
+            true
+        )
+        FROM record_inventory_current inventory
+        WHERE name.logical_name_id = $1
+          AND inventory.resource_id = name.resource_id
+        "#,
+    )
+    .bind(logical_name_id)
+    .execute(&run.db.pool)
+    .await?;
+    ensure!(
+        topology.rows_affected() == 1,
+        "install ENS verified topology for {logical_name_id}"
+    );
+    Ok(())
+}
+
+fn universal_zero_runtime(resolver: Address) -> Vec<u8> {
+    let mut runtime = vec![0x60, 0x40, 0x60, 0x00, 0x52, 0x73];
+    runtime.extend_from_slice(resolver.as_slice());
+    runtime.extend_from_slice(&[
+        0x60, 0x20, 0x52, 0x60, 0x20, 0x60, 0x40, 0x52, 0x60, 0x00, 0x60, 0x60, 0x52, 0x60, 0x80,
+        0x60, 0x00, 0xf3,
+    ]);
+    runtime
+}
+
+async fn divergence_counts(
+    run: &support::PipelineRun,
+    logical_name_id: &str,
+) -> Result<(i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE cleared_at IS NULL) \
+         FROM resolution_divergences \
+         WHERE logical_name_id = $1 AND request_kind = 'addr:60'",
+    )
+    .bind(logical_name_id)
+    .fetch_one(&run.db.pool)
+    .await?)
+}
+
+pub(super) async fn normalize_v2_snapshot_timestamp(
+    run: &support::PipelineRun,
+    logical_name_id: &str,
+) -> Result<()> {
+    if logical_name_id.starts_with("basenames:") {
+        sqlx::query(
+            "UPDATE name_current SET chain_positions = chain_positions || jsonb_build_object( \
+                 'ethereum', (SELECT jsonb_build_object( \
+                     'chain_id', lineage.chain_id, 'block_number', lineage.block_number, \
+                     'block_hash', lineage.block_hash, 'timestamp', \
+                     to_char(lineage.block_timestamp AT TIME ZONE 'UTC', \
+                             'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) \
+                 FROM chain_lineage lineage \
+                 WHERE lineage.chain_id = 'ethereum-mainnet' \
+                   AND lineage.block_timestamp <= \
+                       (name_current.chain_positions #>> '{base,timestamp}')::timestamptz \
+                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized') \
+                 ORDER BY lineage.block_timestamp DESC, lineage.block_number DESC, \
+                          lineage.block_hash DESC LIMIT 1)) \
+             WHERE logical_name_id = $1",
+        )
+        .bind(logical_name_id)
+        .execute(&run.db.pool)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE name_current SET chain_positions = \
+         replace(chain_positions::text, '+00:00\"', 'Z\"')::jsonb \
+         WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .execute(&run.db.pool)
+    .await?;
+    Ok(())
 }
 
 fn assert_resolver(body: &Value, resolver: Address) {
@@ -879,6 +1169,112 @@ async fn shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsu
         "not_asserted"
     );
 
+    run.db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_zero_addr60_agrees_between_indexed_and_verified() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let accounts = rpc.accounts().await?;
+    let (alice, nonzero) = (accounts[1], accounts[2]);
+    let name = "zero-address-682.eth";
+    let node = format!("{:#x}", ens_v1::namehash(name));
+    let logical_name_id = format!("ens:{node}");
+
+    ens_v1::register_eth_name(
+        &rpc,
+        &deployment,
+        "zero-address-682",
+        alice,
+        YEAR,
+        deployment.public_resolver.address,
+    )
+    .await?;
+    ens_v1::set_addr_record(
+        &rpc,
+        deployment.public_resolver.address,
+        alice,
+        name,
+        nonzero,
+    )
+    .await?;
+    let universal = Address::from_slice(
+        &alloy_primitives::keccak256("bigname-e2e-placeholder:universal_resolver".as_bytes())[12..],
+    );
+    rpc.set_code(
+        universal,
+        &universal_zero_runtime(deployment.public_resolver.address),
+    )
+    .await?;
+    ens_v1::set_addr_record(
+        &rpc,
+        deployment.public_resolver.address,
+        alice,
+        name,
+        Address::ZERO,
+    )
+    .await?;
+
+    let ready_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE after_state->>'node' = '{node}' \
+         AND event_kind = 'RecordChanged' AND after_state->>'record_key' = 'addr:60' \
+         AND after_state->>'value' = '{ZERO_ADDRESS}' AND canonicality_state = 'canonical')",
+        ZERO_ADDRESS = Address::ZERO
+    );
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
+    enable_ens_verified_route(&run, &logical_name_id, universal).await?;
+    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT after_state->>'source_event', transaction_hash, log_index, after_state->>'value' \
+         FROM normalized_events WHERE after_state->>'node' = $1 AND event_kind = 'RecordChanged' \
+         AND after_state->>'record_key' = 'addr:60' AND after_state->>'value' = $2 \
+         AND canonicality_state = 'canonical' ORDER BY log_index",
+    )
+    .bind(&node)
+    .bind(format!("{:#x}", Address::ZERO))
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(rows.len(), 2, "zero transaction rows: {rows:?}");
+    assert_eq!(rows[0].0, "AddressChanged");
+    assert_eq!(rows[1].0, "AddrChanged");
+    assert_eq!(rows[0].1, rows[1].1);
+    assert_eq!(rows[1].2, rows[0].2 + 1);
+    assert!(
+        rows.iter()
+            .all(|row| row.3 == format!("{:#x}", Address::ZERO))
+    );
+
+    normalize_v2_snapshot_timestamp(&run, &logical_name_id).await?;
+    let api = start_v2_api(&run, &[("ethereum-mainnet", anvil.url.as_str())]).await?;
+    let indexed = v2_records(&api, name, "indexed").await?;
+    let before = divergence_counts(&run, &logical_name_id).await?;
+    let verified = v2_records(&api, name, "verified").await?;
+    let verified_repeat = v2_records(&api, name, "verified").await?;
+    let auto = v2_records(&api, name, "auto").await?;
+    let after = divergence_counts(&run, &logical_name_id).await?;
+    assert_eq!(
+        json!({
+            "indexed": addr60_observation(&indexed),
+            "verified": addr60_observation(&verified),
+            "verified_repeat": addr60_observation(&verified_repeat),
+            "auto": addr60_observation(&auto),
+            "divergence_before": before, "divergence_after": after
+        }),
+        json!({
+            "indexed":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "verified":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "verified_repeat":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "auto":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "divergence_before":[0,0], "divergence_after":[0,0]
+        })
+    );
+    for body in [&indexed, &verified, &verified_repeat, &auto] {
+        assert_addr60_not_found(body);
+    }
+
+    drop(api);
     run.db.cleanup().await?;
     Ok(())
 }
