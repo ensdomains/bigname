@@ -198,7 +198,7 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     .await?;
     assert_eq!(successor_count, 1);
 
-    // This reduced transition-writer fixture omits the migration transaction's
+    // This reduced transition-writer fixture omits the ENSv1→ENSv2 migration transaction's
     // user-to-controller registrar `Transfer`, registry `NewOwner` reclaim,
     // registry `Transfer` to the Graveyard, conditional `NewResolver`, ENSv2
     // `TransferSingle`, `EACRolesChanged`, and `ResolverUpdated` logs, while it
@@ -248,12 +248,13 @@ async fn faithful_unwrapped_migration_reaches_predecessor_refusal() -> TestResul
     .await?;
     assert_eq!(predecessor_count, 1);
 
-    // The migration block has the same ordered ten-event shape as U-01 logs
-    // 0-9, using the checked-in Sepolia deployment and fixture values. The
-    // pre-state is a controller-owned wrapped-then-unwrapped name, unlike
-    // U-01's user-owned name with a resolver, so plain-registration predecessor
-    // materialization remains a separate open question. This test flips to an
-    // activation and publication assertion when #822 lands.
+    // The ENSv1→ENSv2 migration block has the same ordered ten-event shape as
+    // U-01 logs 0-9, using the checked-in Sepolia deployment and fixture values.
+    // The pre-state is a wrapped-then-unwrapped name held by the eventual
+    // migration sender; U-01 instead uses a plain registration with resolver
+    // state, so plain-registration predecessor materialization remains a
+    // separate open question. This test flips to an activation and publication
+    // assertion when #822 lands.
     stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
     seed_faithful_unwrapped_migration(pool, label, labelhash, namehash).await?;
     let error = Engine::new(pool.clone())
