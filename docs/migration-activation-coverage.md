@@ -23,7 +23,8 @@ The dispositions are:
   Interpret defect prevents the activated boundary from being committed and
   reaching Project.
 
-U-01, U-04, and U-07 are deferred by the same blocker named below. No row requires
+Every registrar-token-path `unwrapped` row, U-01 through U-09, is deferred by the
+same blocker named below. No row requires
 new schema, manifest, event, selector, or public vocabulary. Each scenario links its exact
 immutable catalog result rather than inferring it from another scenario. The
 final column separately names the exact checked-in test when the repository
@@ -31,25 +32,35 @@ imports that scenario shape or pins the production rule it exercises; `exact
 catalog result only` states plainly that the external artifact is not itself a
 checked-in test.
 
-U-01 has no passing checked-in end-to-end database path. Its faithful ten-log transaction is retained by the ignored
+U-01 has no passing checked-in end-to-end database path. Its faithful ten-log migration
+transaction is retained by the ignored
 `faithful_unwrapped_migration_reaches_predecessor_refusal` test, which reaches
-Interpret's `0 active ENSv1 predecessors` refusal. The reduced
+Interpret's `0 active ENSv1 predecessors` refusal. The fixture is faithful for the
+migration block only: its predecessor comes from a wrapped name unwrapped to the
+controller, while a plain `BaseRegistrar.register` predecessor is a separate open
+question. The reduced
 `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
 fixture omits the registry reclaim and cleanup logs and therefore tests only
-transition materialization. End-to-end publication for U-01, U-04, and U-07
-remains deferred to `#822`.
+transition materialization. In every U-01 through U-09 catalog transaction, the
+controller's `setRecord` emits `ENSRegistry.Transfer(node, Graveyard)` before the
+registrar cleanup. That exact log makes Interpret replace the registrar-backed
+predecessor before the writer can commit the transition, so end-to-end publication
+for all nine rows remains deferred to `#822`
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33-L44 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f).
 
 | ID | Production disposition | Pinned exact catalog result | Checked-in rule anchor |
 | --- | --- | --- | --- |
-| U-01 | blocked — valid `unwrapped` path reaches the zero-predecessor refusal | [validation/U-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-01.json) | `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary`; reduced transition-only fixture `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`; ignored faithful-path refusal `faithful_unwrapped_migration_reaches_predecessor_refusal` (`#822`) |
-| U-02 | activated — `unwrapped` | [validation/U-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-02.json) | exact catalog result only; `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` pins production `unwrapped` activation |
-| U-03 | activated — `unwrapped` | [validation/U-03.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-03.json) | exact catalog result only; `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` pins production `unwrapped` activation |
-| U-04 | blocked — U-01 forward-name sequence with a resolver override | [validation/U-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-04.json) | adapter-only `resolver_and_ttl_clears_are_optional_boundary_evidence`; no production-writer path (`#822`) |
-| U-05 | activated — `unwrapped` | [validation/U-05.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-05.json) | `assert_activated_transition` matrix; ordinary subregistry output stays independent |
-| U-06 | activated — `unwrapped`; later ENSv1 residue stays historical | [validation/U-06.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-06.json) | `assert_activated_transition` matrix; ordinary post-boundary facts remain byte-for-byte independent |
-| U-07 | blocked — U-01 forward-name sequence; reverse claim is independent | [validation/U-07.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-07.json) | adapter-only transition matrix; no production-writer path (`#822`) |
-| U-08 | activated — `unwrapped`; emitted [migration expiry jump](glossary.md#migration-expiry-jump) | [validation/U-08.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-08.json) | `cross_family_registrar_transfer_emits_one_unwrapped_activated_boundary` |
-| U-09 | activated — `unwrapped`; contract owner is retained | [validation/U-09.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-09.json) | `assert_activated_transition` matrix |
+| U-01 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-01.json) | reduced transition-only fixture `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`; ignored faithful migration-block refusal `faithful_unwrapped_migration_reaches_predecessor_refusal` (`#822`) |
+| U-02 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-02.json) | exact catalog result only; adapter-level activation does not prove the production writer path (`#822`) |
+| U-03 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-03.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-03.json) | exact catalog result only; adapter-level activation does not prove the production writer path (`#822`) |
+| U-04 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-04.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-04.json) | resolver override does not change the blocking owner-transfer log; no production-writer path (`#822`) |
+| U-05 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-05.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-05.json) | exact catalog result only; adapter-level activation does not prove the production writer path (`#822`) |
+| U-06 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-06.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-06.json) | later ENSv1 residue does not change the blocking owner-transfer log (`#822`) |
+| U-07 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-07.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-07.json) | reverse claim is independent of the blocking owner-transfer log; no production-writer path (`#822`) |
+| U-08 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-08.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-08.json) | emitted [migration expiry jump](glossary.md#migration-expiry-jump) does not change the blocking owner-transfer log (`#822`) |
+| U-09 | blocked — registry `Transfer(node, Graveyard)` reaches the zero-predecessor refusal | [validation/U-09.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/U-09.json) | retained contract owner does not change the blocking owner-transfer log (`#822`) |
 | X-U-01 | refused — reverted transaction | [validation/X-U-01.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/X-U-01.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
 | X-U-02 | refused — reverted transaction | [validation/X-U-02.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/X-U-02.json) | exact catalog result only; a reverted transaction supplies no production raw facts |
 | X-U-03 | refused — name/resource mismatch | [validation/X-U-03.json](https://github.com/ensdomains/bigname/blob/d110108f2f098d1b43804c64c80d0b4588286326/validation/X-U-03.json) | exact catalog result only; no exact checked-in scenario execution |
