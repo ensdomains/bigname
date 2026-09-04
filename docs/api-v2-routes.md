@@ -374,8 +374,9 @@ Field ownership:
   For every name registered through the ENSv1 registrar and wrapped in a later
   transaction, `registration_id` now identifies the registrar lifecycle resource;
   it previously identified the wrapper resource. A name born wrapped in the
-  registration transaction keeps the wrapper resource across exact-name detail,
-  batch lookup, and registration-scoped history; consumers keyed by the previous
+  registration transaction keeps its first wrapper resource across exact-name
+  detail, batch lookup, registration-scoped history, and later unwrap and re-wrap
+  operations in that registrar lifecycle; consumers keyed by the previous
   later-wrapped value must re-read the name.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)

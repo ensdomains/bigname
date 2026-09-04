@@ -141,7 +141,7 @@ ENSv1 authority moves (wrap, unwrap, re-registration) carry the identity change 
 
 For born-wrapped registrations, registrar authority state tracks the final registry owner separately from the controller event's registrant. On unwrap, NameWrapper transfers the registrar token from itself to the requested registrant, so that registrar transfer closes NameWrapper's grant on the registration resource (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L391 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L394 @ ens_v1@91c966f).
 
-The event-time comparison has one explicit same-transaction proof: a transfer to the observed registry owner followed by a controller `NameRegistered` for that owner identifies one forwarded registration. Without that confirmation, a later registrar-token transfer does not erase the earlier registry-authority interval.
+The event-time comparison has one explicit same-transaction proof: a transfer to the observed registry owner followed by a controller `NameRegistered` for that owner identifies one forwarded registration. The current controller registers the token to itself, writes the final registry owner, transfers the token to that owner, and only then emits `NameRegistered` (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L294-L317 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f). Without that confirmation, a later registrar-token transfer does not erase the earlier registry-authority interval.
 
 | Case | Anchor | `resource_id` | `token_lineage_id` |
 | --- | --- | --- | --- |

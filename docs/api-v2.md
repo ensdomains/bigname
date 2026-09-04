@@ -136,9 +136,10 @@ link back to the registrar rows. Name-filtered permissions remain keyed to the c
 permission rows do not merge predecessor and successor authority resources.
 For every name registered through the ENSv1 registrar and wrapped in a later transaction,
 `registration_id` now identifies the registrar lifecycle resource; it previously identified the
-wrapper resource. A name born wrapped in the registration transaction keeps the wrapper resource
-across exact-name detail, batch lookup, and registration-scoped history, and consumers keyed by the
-previous later-wrapped value must re-read the name.
+wrapper resource. A name born wrapped in the registration transaction keeps its first wrapper
+resource across exact-name detail, batch lookup, registration-scoped history, and later unwrap and
+re-wrap operations in that registrar lifecycle; consumers keyed by the previous later-wrapped value
+must re-read the name.
 Upstream mints the wrapped token to the requested wrapper owner during `wrapETH2LD` and emits both
 `TransferSingle` and `NameWrapped`. For a name wrapped in a later transaction, bigname deliberately
 keeps the pre-wrap registrar holder as the served registration registrant until a subsequent

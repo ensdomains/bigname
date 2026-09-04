@@ -100,6 +100,22 @@ table](api-v2-routes.md#public-record-field-completeness) gives the
 consumer-facing status of standard registry and resolver fields and links back
 to the applicable entries below.
 
+> **Born-wrapped registration identity follows its first wrapper resource** —
+> bigname uses the first wrapper resource created in the registrar registration
+> transaction as the registration identity for that lifecycle. Registrar rows
+> and rows from later unwrap and re-wrap operations keep that one followable
+> handle; a name wrapped only after registration instead uses its registrar
+> resource. **Upstream**: the ENS subgraph keys `Registration` by the registrar
+> labelhash (upstream: .refs/ens_subgraph/src/ethRegistrar.ts:L47-L51 @ ens_subgraph@723f1b6),
+> while its wrapper handler stores wrapper ownership separately and keys
+> `WrappedDomain` by the namehash (upstream: .refs/ens_subgraph/src/nameWrapper.ts:L93-L100 @ ens_subgraph@723f1b6).
+> **Our rule**: `docs/api-v2.md` § Field Budgets and `docs/api-v2-routes.md`
+> exact-name detail, batch lookup, and history routes.
+> **Why**: one public handle follows the registrar lifecycle through wrapper
+> custody changes instead of splitting that history between registrar and
+> wrapper identifiers.
+> **Since**: `2026-09-04`
+
 > **Ownerless ENSv2 reservation resolver serving narrowing** — bigname retains
 > reservation resolver facts for diagnostics, but product name, record, batch
 > lookup, and resolver-listing routes classify an ownerless reservation as no
