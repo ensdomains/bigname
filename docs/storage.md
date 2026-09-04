@@ -369,9 +369,10 @@ activated parent transition, Project may use the readable canonical association
 and active ordinary announcement to classify a positive child-registration
 emitter or prove the current parent subregistry is the migration-created
 `WrapperRegistry`. Candidate or activated, the association establishes neither
-result by itself and activates no correlation-dependent effect. Project requires
-its evidence-reference array to be non-empty and contained in the activated
-boundary; an empty diagnostic association cannot authorize publication.
+result by itself and activates no correlation-dependent effect. Parent
+reachability additionally requires the association's evidence-reference array
+to be non-empty and contained in the activated boundary; an empty diagnostic
+association cannot authorize an ENSv1 child relation under a locked parent.
 Correlation-dependent parent, topology, identity,
 role, registration, renewal, and normalized-event rows from the watched registry
 activate only when every group they reference is complete. Refused and incomplete
