@@ -979,14 +979,16 @@ known direct-registry fallback so a later registrar release can bind that
 existing registry resource in fresh, restored, resumed, and redo execution.
 
 The retained ENSv1 resolver pointer records whether its selecting `NewResolver`
-came from the old or current registry. A current-registry `NewOwner` ends an
-old-registry pointer because the fallback getter delegates only while the
-current registry has no record, but later current-registry owner assignments
-preserve a current-registry pointer: `setSubnodeOwner` updates ownership without
-changing the node's resolver slot. This provenance rule, rather than replay
-insertion order, applies identically after normalized-event compaction.
+came from the old or current registry. A current-registry `NewOwner` or
+`Transfer` ends an old-registry pointer because either ownership write creates
+a current-registry record and the fallback getter delegates only while that
+record does not exist. Later current-registry owner assignments preserve a
+current-registry pointer, and an old-registry `Transfer` cannot clear it. This
+provenance rule, rather than replay insertion order, applies identically after
+normalized-event compaction.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L95 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)
 
 For the explicitly ownerless first-surface case, a label-bearing registrar
 renewal does not create registrar control when the getter-visible registry owner

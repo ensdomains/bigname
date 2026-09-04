@@ -466,6 +466,13 @@ before the retained registry-only authority can be materialized, the same
 observation still marks that retained authority's surface known. A later
 registrar release can therefore restore the existing registry resource and its
 direct-registry owner instead of losing the known name.
+An old-registry resolver selection stops being eligible when either a
+current-registry `NewOwner` or `Transfer` creates that node's current-registry
+record. An old-registry `Transfer` cannot clear a resolver selected from the
+current registry.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)
 A resource-less record event cannot create a binding, and name and record reads
 expose the inventory only when the name's current readable control resource or
 `serving_resource_id` selects it. Resolver-local events are accepted only under the manifest and

@@ -20,6 +20,10 @@ use crate::schema_v2::{
     state_key::interpreter_state_key,
 };
 
+fn is_registry_ownership_event(name: &str) -> bool {
+    matches!(name, "NewOwner" | "Transfer")
+}
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,

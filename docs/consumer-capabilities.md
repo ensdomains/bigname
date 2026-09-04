@@ -207,6 +207,14 @@ clear. The GraphQL compatibility surface uses the same serving resource for its
 resolver record fields; it does not infer registration or control from that
 read path.
 
+For the fallback registry, a current-registry `NewOwner` or `Transfer` creates
+the current record and ends any resolver pointer inherited from the old
+registry. An old-registry `Transfer` does not affect a resolver selected from
+the current registry.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L172 @ ens_v1@91c966f)
+
 Each slice includes its behavior tests and fixture provenance. Counts are
 estimated hand-written production files; test fixtures, test-only harness
 files, and docs are not included. Rows before “Final activation” describe the

@@ -8,7 +8,7 @@ use super::super::{
     permissions::{v1_grant_states, v1_revoke_states},
 };
 pub(super) use super::authority_transition::{append_authority_transition, authority_kind};
-use super::{support::events, unmasked_word};
+use super::{is_registry_ownership_event, support::events, unmasked_word};
 use crate::evm_abi::{
     address_hex, decode_event_log_tolerant_address_word, decode_event_log_tolerant_uint64_word,
     hex_string,
@@ -149,7 +149,7 @@ pub(super) fn interpret(
     {
         return Ok(Interpreted::new());
     }
-    if selected.event.name == "NewOwner" && emitter_role == Some("registry") {
+    if emitter_role == Some("registry") && is_registry_ownership_event(&selected.event.name) {
         state.mark_v1_migrated(&selected.source.namespace, &affected_node);
     }
     if let Some(role) = emitter_role {

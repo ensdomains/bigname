@@ -245,8 +245,15 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             }
         }
     }
-    if source_event == Some("NewOwner") {
-        let node = event.after_state.get("child_node").and_then(Value::as_str);
+    if matches!(source_event, Some("NewOwner" | "Transfer")) {
+        let node = event
+            .after_state
+            .get(if source_event == Some("NewOwner") {
+                "child_node"
+            } else {
+                "node"
+            })
+            .and_then(Value::as_str);
         if event
             .after_state
             .get("emitter_role")

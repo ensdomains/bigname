@@ -24,7 +24,7 @@ fn fixture() -> (Vec<ManifestInput>, Vec<AddressAdmissionInput>, B256) {
             (
                 "Transfer",
                 "event Transfer(bytes32 indexed node, address owner)",
-                &["registry"],
+                &["registry", "registry_old"],
                 &["AuthorityTransferred", "PermissionChanged"],
             ),
             (
@@ -172,6 +172,37 @@ fn current_transfer(node: B256, owner: &str, block: i64) -> anyhow::Result<RawLo
     ))
 }
 
+fn resolver_selection(
+    registry: &str,
+    node: B256,
+    resolver: &str,
+    block: i64,
+) -> anyhow::Result<RawLogInput> {
+    Ok(raw_at(
+        v1_registry::NewResolver {
+            node,
+            resolver: resolver.parse()?,
+        }
+        .encode_log_data(),
+        block,
+        0,
+        registry,
+    ))
+}
+
+fn old_transfer(node: B256, owner: &str, block: i64) -> anyhow::Result<RawLogInput> {
+    Ok(raw_at(
+        v1_registry::Transfer {
+            node,
+            owner: owner.parse()?,
+        }
+        .encode_log_data(),
+        block,
+        0,
+        OLD_REGISTRY,
+    ))
+}
+
 fn input(
     manifests: Vec<ManifestInput>,
     admissions: Vec<AddressAdmissionInput>,
@@ -306,6 +337,70 @@ fn run_batches(
         session = Some(next);
     }
     Ok(events)
+}
+
+fn assert_four_way_and_restore_parity(
+    history: &[RawLogInput],
+    prefix_len: usize,
+) -> anyhow::Result<(Vec<NormalizedEvent>, BatchOutput)> {
+    let (manifests, admissions, _) = fixture();
+    let single = run_batches(&manifests, &admissions, vec![history.to_vec()])?;
+    let per_block = run_batches(
+        &manifests,
+        &admissions,
+        history.iter().cloned().map(|event| vec![event]).collect(),
+    )?;
+    let split_at_prefix = run_batches(
+        &manifests,
+        &admissions,
+        vec![
+            history[..prefix_len].to_vec(),
+            history[prefix_len..].to_vec(),
+        ],
+    )?;
+    let alternate_split = run_batches(
+        &manifests,
+        &admissions,
+        vec![history[..1].to_vec(), history[1..].to_vec()],
+    )?;
+    assert_eq!(single, per_block, "per-block replay drift");
+    assert_eq!(single, split_at_prefix, "prefix/suffix replay drift");
+    assert_eq!(single, alternate_split, "alternate split replay drift");
+
+    let (prefix_output, session) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            history[..prefix_len].to_vec(),
+        ),
+        None,
+    )?;
+    let suffix = history[prefix_len..].to_vec();
+    let (live, _) = interpret_test_batch_incremental(
+        input(
+            manifests.clone(),
+            admissions.clone(),
+            Vec::new(),
+            suffix.clone(),
+        ),
+        Some(session),
+    )?;
+    for prior in [
+        prefix_output
+            .normalized_events
+            .iter()
+            .map(prior_event)
+            .collect(),
+        compact_prior(&prefix_output.normalized_events),
+    ] {
+        let (restored, _) = interpret_test_batch_incremental(
+            input(manifests.clone(), admissions.clone(), prior, suffix.clone()),
+            None,
+        )?;
+        assert_eq!(live, restored, "cold restore drift");
+    }
+    Ok((single, live))
 }
 
 fn assert_current_registry_reassignment_replays(
@@ -626,6 +721,39 @@ fn old_registry_resolver_is_not_materialized_after_current_registry_migration() 
         "the old fallback registry resolver must not surface after current-registry migration"
     );
     assert_eq!(live, restored);
+    Ok(())
+}
+
+#[test]
+fn current_registry_transfer_invalidates_only_old_registry_resolver_links_in_every_replay_shape()
+-> anyhow::Result<()> {
+    let (_, _, node) = fixture();
+    let migrated_history = vec![
+        resolver_selection(OLD_REGISTRY, node, RESOLVER_A, 1)?,
+        current_transfer(node, OWNER, 2)?,
+        renewal(3),
+    ];
+    let (single, live) = assert_four_way_and_restore_parity(&migrated_history, 2)?;
+    assert!(single.iter().any(|event| {
+        event.block_number == Some(1)
+            && event.event_kind == "ResolverChanged"
+            && event.after_state["resolver"] == RESOLVER_A
+    }));
+    assert!(
+        state_derived_pointer(&live).is_none(),
+        "a current-registry Transfer must end an old-registry fallback pointer"
+    );
+
+    let current_pointer_history = vec![
+        current_new_owner(OWNER, 1)?,
+        resolver_selection(REGISTRY, node, RESOLVER_A, 2)?,
+        old_transfer(node, OWNER_2, 3)?,
+        renewal(4),
+    ];
+    let (_, mirror_live) = assert_four_way_and_restore_parity(&current_pointer_history, 3)?;
+    let pointer = state_derived_pointer(&mirror_live)
+        .expect("an old-registry Transfer must not clear a current-registry resolver pointer");
+    assert_eq!(pointer.after_state["resolver"], RESOLVER_A);
     Ok(())
 }
 
