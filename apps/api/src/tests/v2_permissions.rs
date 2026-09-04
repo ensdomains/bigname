@@ -835,7 +835,7 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     assert_eq!(by_address["meta"]["completeness"], json!("partial"));
     assert_eq!(
         by_address["meta"]["unsupported_reason"],
-        json!(V2_RESOURCE_PERMISSION_REASON)
+        json!(V2_ACCOUNT_PERMISSION_REASON)
     );
 
     let by_missing_name =
