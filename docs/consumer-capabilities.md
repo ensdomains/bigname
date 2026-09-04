@@ -576,7 +576,8 @@ Generated ID operators compare the supplied text directly with the served
 namehash text. Because namehashes are fixed-width lowercase hexadecimal text,
 canonical predicates and their order/tie-break expressions deliberately omit
 `COLLATE "C"` so PostgreSQL can use `name_current_lookup_idx`; this follows the
-existing indexed Resolver-order precedent above. A noncanonical ID range keeps
+existing indexed Resolver-order precedent above and the hexadecimal-collation
+[deployment contract](storage.md). A noncanonical ID range keeps
 expression-local C comparison and is table-linear. Otherwise, `COLLATE "C"` is
 used only where collation changes semantics: generated `raw_name` comparisons
 and the name order key. Generated name equality, range, membership, and pattern operators

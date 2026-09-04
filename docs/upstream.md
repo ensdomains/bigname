@@ -253,7 +253,8 @@ to the applicable entries below.
 > character classification is not `C` (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L152-L158 @
 > graph_node@aefe173) (upstream: .refs/graph_node/store/postgres/src/catalog.rs:L159-L163 @ graph_node@aefe173). Bigname applies `COLLATE "C"` to generated raw-name comparisons, name ordering, and noncanonical ID ranges, but deliberately
 > leaves fixed-width lowercase hexadecimal namehash predicates and order/tie-break expressions unwrapped so
-> `name_current_lookup_idx` remains usable. It does not add a database-locale startup gate in this API-only slice.
+> `name_current_lookup_idx` remains usable. The deployment contract requires a collation that orders those canonical
+> hexadecimal keys byte-lexically like C; this API-only slice does not add a database-locale startup gate.
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Divergence**: Graph Node enforces the locale for the database; bigname enforces it only where collation can change the
 > generated expression's semantics.

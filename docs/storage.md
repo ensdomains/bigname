@@ -4,9 +4,12 @@ PostgreSQL is the durable indexing and serving store. Current runtime objects
 live in `bigname_phase`; the append-only SQLx history in `migrations/` records
 the retired `public` schema, its schema-qualified deletion, and reviewed
 in-place schema-migrations for initialized `bigname_phase` databases.
-Deployments do not assume or validate a particular database collation; API
-queries that need C ordering apply it locally, while indexed fixed-width
-hexadecimal keys remain usable under the deployed database's own collation.
+Deployments do not require the database itself to use C collation, but the
+deployed collation must order fixed-width lowercase hexadecimal text
+byte-lexically as C does; the API relies on that property to retain the existing
+B-tree service for identity keys. Other comparisons that need C ordering apply
+it locally. Numeric or otherwise hex-incompatible collations are unsupported
+until a schema-migration index or startup locale gate explicitly admits them.
 
 ## Invariants
 
