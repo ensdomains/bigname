@@ -459,7 +459,7 @@ async fn locked_parent_publishes_migratable_v1_child() -> Result<()> {
 }
 
 #[tokio::test]
-async fn empty_or_vacuous_migration_association_evidence_fails_closed() -> Result<()> {
+async fn empty_or_empty_object_migration_association_evidence_fails_closed() -> Result<()> {
     let (_db, pool) = database("issue503_empty_association_evidence").await?;
     seed_identity(&pool, &["ens_v1"]).await?;
     seed_v1_relation(&pool, OWNER, 10).await?;
@@ -659,15 +659,9 @@ macro_rules! wrapper_disqualifier_retraction_test {
 }
 
 #[rustfmt::skip]
-wrapper_disqualifier_retraction_test!(
-    retracted_wrapper_fuse_disqualifier_restores_hash_only_child,
-    "PermissionScopeChanged"
-);
+wrapper_disqualifier_retraction_test!(retracted_wrapper_fuse_disqualifier_restores_hash_only_child, "PermissionScopeChanged");
 #[rustfmt::skip]
-wrapper_disqualifier_retraction_test!(
-    retracted_wrapper_expiry_disqualifier_restores_hash_only_child,
-    "ExpiryChanged"
-);
+wrapper_disqualifier_retraction_test!(retracted_wrapper_expiry_disqualifier_restores_hash_only_child, "ExpiryChanged");
 
 #[tokio::test]
 #[rustfmt::skip]

@@ -164,7 +164,6 @@ for migration_file in \
     "$ROOT/migrations/20260814130000_surface_binding_authority_arm.sql" \
     "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
-    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
     "$ROOT/migrations/20260820140200_raw_block_preimage_derivation_swap.sql" \
@@ -177,7 +176,8 @@ for migration_file in \
     "$ROOT/migrations/20260902150000_project_redo_expiry_resources.sql" \
     "$ROOT/migrations/20260902160000_registry_operator_account_permissions.sql" \
     "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
-    "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql"
+    "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -312,8 +312,6 @@ for migration_file in \
     "$ROOT/migrations/20260814131000_project_generation_failure_audit.sql" \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
     "$ROOT/migrations/20260814132000_project_generation_failure_child_authority.sql" \
-    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
-    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140000_raw_block_preimage_derivation.sql" \
     "$ROOT/migrations/20260820140100_raw_block_preimage_derivation_validate.sql" \
@@ -337,7 +335,9 @@ for migration_file in \
     "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
     "$ROOT/migrations/20260902160100_registry_operator_account_permissions_validate.sql" \
     "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
-    "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql"
+    "$ROOT/migrations/20260902160200_registry_operator_account_permissions_swap.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql" \
+    "$ROOT/migrations/20260904120000_project_redo_child_registration_history.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
