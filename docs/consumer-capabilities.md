@@ -190,18 +190,13 @@ parent reachability and fails a
 `dual_current_child_authority` only when a surviving Mainnet child with an
 activated `migration_authority_transition` has an ENSv1 parent-child relation
 asserted after that child's authority epoch started. A positive ENSv2 child
-registration is permanent entry history in a locked parent's migration
-registry, so parent reachability filters that ENSv1 relation before the
+registration is permanent entry history in a locked parent's migration registry
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64), so parent reachability filters that ENSv1 relation before the
 assertion even though the defensive integrity query recognizes that proof kind.
 Relations filtered by an
 unwrapped, unlocked-wrapped, or emancipated-child parent cannot trigger the
 assertion. Sepolia selects the same way and never blocks publication on it. The
 Sepolia distinction above is unchanged.
-
-Because neither ENSv1→ENSv2 migration branch
-retracts the ENSv1 registry entry, both arms stating a relation for one pair is
-historical residue even when parent reachability prevents it from entering the
-child-authority assertion.
 
 ## ENSv1→ENSv2 delivery slices
 
