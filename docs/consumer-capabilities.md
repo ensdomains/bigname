@@ -672,12 +672,15 @@ generator defines the upstream ordering vocabulary (upstream:
 by `Domain.resolver`, not by address alone. Raw-name and other semantic text
 keys use `COLLATE "C"`; the fixed-width namehash tie-breaker does not. That
 same-direction namehash tie-break is a local deterministic refinement,
-including for `owner__id`: Graph Node's child-ID path orders by the child ID
-without a parent-ID tie-break (upstream:
-.refs/graph_node/store/postgres/src/relational_queries.rs:L3650-L3665 @
-graph_node@aefe173) (upstream:
-.refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4055 @
-graph_node@aefe173). The local
+including for `owner__id`: Graph Node's child-ID path adds no parent-ID
+tie-break. For a mutable entity such as `Domain`, its default configuration
+instead appends the internal block-range column after the child ID (upstream:
+.refs/ens_subgraph/schema.graphql:L1 @ ens_subgraph@723f1b6) (upstream:
+.refs/graph_node/store/postgres/src/relational_queries.rs:L3838-L3842 @
+graph_node@aefe1737) (upstream:
+.refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4052 @
+graph_node@aefe1737) (upstream:
+.refs/graph_node/graph/src/env/store.rs:L299-L300 @ graph_node@aefe1737). The local
 `registrationDate` extension remains; every other upstream order value is
 assigned an exact upstream-only disposition and is absent from the local enum.
 The default and explicit `id` order use `name_current_lookup_idx` without a

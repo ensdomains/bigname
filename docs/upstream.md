@@ -275,9 +275,12 @@ to the applicable entries below.
 > .refs/graph_node/store/postgres/src/relational/ddl.rs:L251-L275 @ graph_node@aefe173) (upstream:
 > .refs/graph_node/store/postgres/src/relational/ddl.rs:L277-L342 @ graph_node@aefe173); its substring, suffix, nocase, and
 > negated patterns are nevertheless scan-shaped under that ordinary-index design.
-> Bigname also adds a same-direction namehash tie-break to `owner__id`; Graph Node's child-ID path orders only by the
-> child ID (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L3650-L3665 @ graph_node@aefe173)
-> (upstream: .refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4055 @ graph_node@aefe173).
+> Bigname also adds a same-direction namehash tie-break to `owner__id`; Graph Node's child-ID path adds no parent-ID
+> tie-break. For a mutable entity such as `Domain`, the default setting appends the internal block-range column after
+> that child ID (upstream: .refs/ens_subgraph/schema.graphql:L1 @ ens_subgraph@723f1b6) (upstream:
+> .refs/graph_node/store/postgres/src/relational_queries.rs:L3838-L3842 @ graph_node@aefe1737) (upstream:
+> .refs/graph_node/store/postgres/src/relational_queries.rs:L4046-L4052 @ graph_node@aefe1737) (upstream:
+> .refs/graph_node/graph/src/env/store.rs:L299-L300 @ graph_node@aefe1737).
 > **Our rule**: `docs/consumer-capabilities.md` § GraphQL compatibility.
 > **Divergence**: bigname lacks equivalent raw-name and expression indexes for name equality/range/prefix and the non-ID
 > order keys. Issue `#831` owns those names-projection indexes. They require a separate schema-migration slice and are not

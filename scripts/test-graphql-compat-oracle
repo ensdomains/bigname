@@ -213,6 +213,6 @@ with tempfile.TemporaryDirectory() as temporary:
   os.environ["BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE"]="1"; module.verify(first)
  finally:
   os.environ.pop("BIGNAME_ALLOW_PROVISIONAL_GRAPHQL_ORACLE",None); socket.socket=original
- print("graphql compatibility oracle tool tests: 56 passed (oracle request headers; null-repeatability capture; 113-type coverage census; captured-upstream coverage validation; coverage digest validation; claimed-path validation; logging surface disposition)")
+ print("graphql compatibility oracle tool tests: 57 passed (oracle request headers; null-repeatability capture; 113-type coverage census; captured-upstream coverage validation; coverage digest validation; claimed-path validation; logging surface disposition)")
 server.shutdown()
 PY
